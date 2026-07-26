@@ -15,6 +15,7 @@ extern "C" {
 
 typedef struct tp_session tp_session;
 typedef struct tp_session_observation tp_session_observation;
+typedef struct tp_session_job_result tp_session_job_result;
 typedef struct tp_txn_request tp_txn_request;
 typedef struct tp_txn_result tp_txn_result;
 typedef struct tp_project tp_project;
@@ -105,9 +106,80 @@ typedef struct tp_session_event {
     char author[TP_SESSION_HISTORY_AUTHOR_MAX];
 } tp_session_event;
 
-/* One linearizable session cut. Event/model/source/recovery components land in
- * R1a; the typed job/result slots are reserved at zero until their R1b owner
- * lands. A NULL `after` requests an initial complete resync. */
+typedef enum tp_session_job_kind {
+    TP_SESSION_JOB_NONE = 0,
+    TP_SESSION_JOB_PACK,
+    TP_SESSION_JOB_EXPORT
+} tp_session_job_kind;
+
+typedef enum tp_session_job_state {
+    TP_SESSION_JOB_RUNNING = 1,
+    TP_SESSION_JOB_SUCCEEDED,
+    TP_SESSION_JOB_FAILED,
+    TP_SESSION_JOB_CANCELLED
+} tp_session_job_state;
+
+typedef enum tp_session_job_rejection {
+    TP_SESSION_JOB_REJECTION_NONE = 0,
+    TP_SESSION_JOB_REJECTION_SUPERSEDED,
+    TP_SESSION_JOB_REJECTION_CANCELLED,
+    TP_SESSION_JOB_REJECTION_TARGET_DELETED,
+    TP_SESSION_JOB_REJECTION_OLD_INSTANCE,
+    TP_SESSION_JOB_REJECTION_DUPLICATE,
+    TP_SESSION_JOB_REJECTION_SESSION_CLOSED
+} tp_session_job_rejection;
+
+typedef enum tp_session_job_target_kind {
+    TP_SESSION_JOB_TARGET_ATLAS = 1,
+    TP_SESSION_JOB_TARGET_EXPORT_TARGET
+} tp_session_job_target_kind;
+
+typedef struct tp_session_job_target {
+    tp_session_job_target_kind kind;
+    tp_id128 atlas_id;
+    tp_id128 id;
+} tp_session_job_target;
+
+/* Immutable latest-value projection. `target_ids` is borrowed from the owning
+ * observation and remains valid for that observation lifetime. Running elapsed
+ * time is presentation-derived; it does not create a per-frame generation. */
+typedef struct tp_session_job_observed_state {
+    bool present;
+    uint64_t session_instance_generation;
+    uint64_t request_id;
+    tp_session_job_kind kind;
+    tp_session_job_state state;
+    int current;
+    int total;
+    bool cancellation_requested;
+    bool terminal;
+    bool result_accepted;
+    tp_session_job_rejection rejection;
+    tp_session_input_token base_input_token;
+    const tp_session_job_target *targets;
+    size_t target_count;
+    tp_status terminal_status;
+    tp_error terminal_error;
+} tp_session_job_observed_state;
+
+/* Immutable accepted-result slot. Its envelope identity is independent from
+ * the currently running job, so an observer can always match a retained
+ * payload to the request that produced it. `targets` and `result` are borrowed
+ * from the owning observation and remain valid for that observation lifetime. */
+typedef struct tp_session_job_observed_result {
+    bool present;
+    uint64_t session_instance_generation;
+    uint64_t request_id;
+    tp_session_job_kind kind;
+    tp_session_input_token base_input_token;
+    const tp_session_job_target *targets;
+    size_t target_count;
+    const tp_session_job_result *result;
+} tp_session_job_observed_result;
+
+/* One linearizable session cut across event/model/source/recovery and the
+ * coalesced job/result owners. A NULL `after` requests an initial complete
+ * resync. */
 typedef struct tp_session_observation_token {
     uint64_t event_sequence;
     uint64_t source_runtime_generation;
@@ -137,6 +209,11 @@ size_t tp_session_observation_event_count(
 const tp_session_event *tp_session_observation_event_at(
     const tp_session_observation *observation, size_t index);
 tp_session_recovery_health tp_session_observation_recovery_health(
+    const tp_session_observation *observation);
+tp_session_job_observed_state tp_session_observation_job_state(
+    const tp_session_observation *observation);
+/* Borrowed accepted-result envelope; valid only while `observation` is alive. */
+const tp_session_job_observed_result *tp_session_observation_job_result(
     const tp_session_observation *observation);
 /* Borrowed and possibly NULL for a source/runtime/recovery-only delta. */
 const tp_session_snapshot *tp_session_observation_snapshot(

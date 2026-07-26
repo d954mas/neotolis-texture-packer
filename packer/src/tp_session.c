@@ -484,6 +484,8 @@ void tp_session_destroy(tp_session *session) {
         job->cancel(job);
         tp_session_job_release_internal(job);
     }
+    tp_session_job_release_internal(session->observed_job_owner);
+    tp_session_job_release_internal(session->observed_result_owner);
     if (session->recovery_live) {
         const bool preserve = tp_model__recovery_degraded(session->model) ||
                               !tp_recovery_live_healthy(session->recovery_live) ||
@@ -510,6 +512,18 @@ void tp_session_owned_job_init(tp_session_owned_job *job,
     atomic_init(&job->refs, 1U);
     job->cancel = cancel;
     job->destroy = destroy;
+    memset(&job->observation_descriptor, 0,
+           sizeof job->observation_descriptor);
+    job->observe = NULL;
+}
+
+void tp_session_job_retain_internal(tp_session_owned_job *job) {
+    if (!job) {
+        return;
+    }
+    const unsigned previous = atomic_fetch_add_explicit(
+        &job->refs, 1U, memory_order_relaxed);
+    NT_ASSERT(previous > 0U);
 }
 
 void tp_session_job_release_internal(tp_session_owned_job *job) {
@@ -520,6 +534,58 @@ void tp_session_job_release_internal(tp_session_owned_job *job) {
         1U) {
         job->destroy(job);
     }
+}
+
+tp_status tp_session_job_start_internal(
+    tp_session *session, tp_session_owned_job *job,
+    tp_session_job_start_fn start, void *start_context,
+    tp_error *err) {
+    if (!session || !job || !start) {
+        return tp_error_set(
+            err, TP_STATUS_INVALID_ARGUMENT,
+            "job start requires session, owner, and start callback");
+    }
+    gate_lock(session);
+    if (session->discarded) {
+        gate_unlock(session);
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "session was discarded");
+    }
+    if (session->active_job) {
+        gate_unlock(session);
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "a Pack or Export job is already active");
+    }
+    const tp_status validation_status =
+        tp_session_job_observation__validate_begin_locked(
+            session, job, err);
+    if (validation_status != TP_STATUS_OK) {
+        gate_unlock(session);
+        return validation_status;
+    }
+    /* The worker may start running here, but any session call it makes blocks
+     * on this gate. Nothing observable changes unless creation succeeds. */
+    if (!start(start_context)) {
+        gate_unlock(session);
+        return tp_error_set(
+            err, TP_STATUS_OOM,
+            "could not create Pack/Export worker thread");
+    }
+    tp_session_owned_job *retired = NULL;
+    const tp_status observation_status =
+        tp_session_job_observation__begin_locked(
+            session, job, &retired, err);
+    NT_ASSERT(observation_status == TP_STATUS_OK);
+    if (observation_status != TP_STATUS_OK) {
+        gate_unlock(session);
+        job->cancel(job);
+        tp_session_job_release_internal(retired);
+        return observation_status;
+    }
+    session->active_job = job;
+    gate_unlock(session);
+    tp_session_job_release_internal(retired);
+    return TP_STATUS_OK;
 }
 
 tp_status tp_session_job_attach_internal(tp_session *session,
@@ -540,8 +606,19 @@ tp_status tp_session_job_attach_internal(tp_session *session,
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
                             "a Pack or Export job is already active");
     }
+    tp_session_owned_job *retired = NULL;
+    if (job->observe) {
+        const tp_status observation_status =
+            tp_session_job_observation__begin_locked(
+                session, job, &retired, err);
+        if (observation_status != TP_STATUS_OK) {
+            gate_unlock(session);
+            return observation_status;
+        }
+    }
     session->active_job = job;
     gate_unlock(session);
+    tp_session_job_release_internal(retired);
     return TP_STATUS_OK;
 }
 
@@ -553,8 +630,7 @@ tp_session_owned_job *tp_session_job_acquire_internal(
     gate_lock(session);
     tp_session_owned_job *job = session->active_job;
     if (job) {
-        (void)atomic_fetch_add_explicit(&job->refs, 1U,
-                                        memory_order_relaxed);
+        tp_session_job_retain_internal(job);
     }
     gate_unlock(session);
     return job;
@@ -574,7 +650,10 @@ tp_status tp_session_job_detach_internal(tp_session *session,
                             "session no longer owns that job handle");
     }
     session->active_job = NULL;
+    tp_session_owned_job *retired =
+        tp_session_job_observation__detach_locked(session, expected);
     gate_unlock(session);
+    tp_session_job_release_internal(retired);
     return TP_STATUS_OK;
 }
 // #endregion

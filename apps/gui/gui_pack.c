@@ -24,6 +24,7 @@ typedef struct pack_ref_entry {
 typedef struct {
     tp_arena *arena;
     tp_result *result;
+    tp_session_job_result_handle *result_owner;
     pack_ref_entry *ref_index;
     size_t ref_index_cap;
     tp_id128 atlas_id;
@@ -113,7 +114,11 @@ static bool pack_ref_index_build(const tp_result *result,
 
 static void pack_slot_clear(pack_slot *slot) {
     pack_ref_index_free(slot);
-    if (slot->arena) {
+    if (slot->result_owner) {
+        tp_session_job_result owned = {0};
+        owned._owner = slot->result_owner;
+        tp_session_job_result_destroy(&owned);
+    } else if (slot->arena) {
         tp_arena_destroy(slot->arena);
     }
     memset(slot, 0, sizeof *slot);
@@ -185,9 +190,10 @@ static pack_slot *pack_slot_for_publish(int atlas_index, tp_id128 atlas_id) {
     return &s_slots[atlas_index];
 }
 
-bool gui_pack_publish_native(tp_session_pack_job_result *pack,
+bool gui_pack_publish_native(tp_session_job_result *job_result,
                              int atlas_index, double elapsed_ms,
                              gui_pack_result_info *out) {
+    tp_session_pack_job_result *pack = &job_result->pack;
     pack_ref_entry *ref_index = NULL;
     size_t ref_index_cap = 0U;
     if (!pack_ref_index_build(pack->result, &ref_index, &ref_index_cap)) {
@@ -201,12 +207,15 @@ bool gui_pack_publish_native(tp_session_pack_job_result *pack,
     pack_slot_clear(slot);
     slot->arena = pack->arena;
     slot->result = pack->result;
+    slot->result_owner = job_result->_owner;
     slot->ref_index = ref_index;
     slot->ref_index_cap = ref_index_cap;
     slot->atlas_id = pack->atlas_id;
     slot->version = next_result_version();
     slot->valid = true;
+    job_result->_owner = NULL;
     pack->arena = NULL;
+    pack->result = NULL;
     nt_log_info("gui_pack(async): atlas '%s' packed %d sprite(s), %d page(s) in %.1f ms",
                 slot->result->atlas_name, slot->result->sprite_count,
                 slot->result->page_count, elapsed_ms);

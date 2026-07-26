@@ -303,8 +303,18 @@ deadline. Process exit, protocol failure, and forced termination become
 structured terminal results; they never mutate the project model directly.
 
 The dependency direction remains `tp_build -> tp_core`. Job code publishes a
-retained immutable job/result projection into a narrow core-owned session slot;
-session observation never includes or inspects `tp_build` private job state.
+retained immutable job/result projection into a narrow core-owned session slot.
+Publication is a host-thread pull from a constant-time projection callback on
+the opaque refcounted job owner; workers never push into the session. The slot,
+atomic observations, owned result receipts, and presentation caches
+share the type-erased result owner, so the final release destroys the heavy
+Pack arena exactly once. Session observation never includes or inspects
+`tp_build` private job state.
+
+The accepted-result slot retains its own immutable completion envelope. A later
+job start changes the current job projection without relabelling the prior
+accepted result. Thread creation is part of admission: failure publishes no
+job-state or result-token change and preserves the prior owners.
 
 A candidate for the same canonical saved identity must not acquire a second
 writer lease or destroy the old session merely to retry. Until a dedicated

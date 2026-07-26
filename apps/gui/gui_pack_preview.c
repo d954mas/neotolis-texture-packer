@@ -12,6 +12,7 @@
 typedef struct {
     tp_arena *arena;
     tp_result *result;
+    tp_session_job_result_handle *result_owner;
     tp_id128 atlas_id;
     tp_session_input_token input_token;
     bool valid;
@@ -46,20 +47,28 @@ uint64_t gui_pack_preview_diff_rebuilds(void) {
 }
 #endif
 
-void gui_pack_preview_publish(tp_session_pack_job_result *pack,
+void gui_pack_preview_publish(tp_session_job_result *job_result,
                               int atlas_index, double elapsed_ms) {
-    if (s_preview.arena) {
+    tp_session_pack_job_result *pack = &job_result->pack;
+    if (s_preview.result_owner) {
+        tp_session_job_result owned = {0};
+        owned._owner = s_preview.result_owner;
+        tp_session_job_result_destroy(&owned);
+    } else if (s_preview.arena) {
         tp_arena_destroy(s_preview.arena);
     }
     s_preview.arena = pack->arena;
     s_preview.result = pack->result;
+    s_preview.result_owner = job_result->_owner;
     s_preview.atlas_id = pack->atlas_id;
     s_preview.input_token = pack->input_token_at_start;
     s_preview.valid = true;
     s_preview.atlas_index = atlas_index;
     (void)snprintf(s_preview.exporter_id, sizeof s_preview.exporter_id, "%s",
                    pack->preview_exporter_id);
+    job_result->_owner = NULL;
     pack->arena = NULL;
+    pack->result = NULL;
     nt_log_info("gui_pack(async): preview '%s' via %s packed %d sprite(s), %d page(s) in %.1f ms",
                 s_preview.result->atlas_name, s_preview.exporter_id,
                 s_preview.result->sprite_count, s_preview.result->page_count,
@@ -84,11 +93,16 @@ const tp_result *gui_pack_preview_result(int atlas_index) {
 }
 
 void gui_pack_preview_clear(void) {
-    if (s_preview.arena) {
+    if (s_preview.result_owner) {
+        tp_session_job_result owned = {0};
+        owned._owner = s_preview.result_owner;
+        tp_session_job_result_destroy(&owned);
+    } else if (s_preview.arena) {
         tp_arena_destroy(s_preview.arena);
     }
     s_preview.arena = NULL;
     s_preview.result = NULL;
+    s_preview.result_owner = NULL;
     s_preview.atlas_id = tp_id128_nil();
     s_preview.input_token = (tp_session_input_token){0};
     s_preview.valid = false;

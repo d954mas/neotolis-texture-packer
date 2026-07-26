@@ -365,8 +365,22 @@ bundle or independently immutable with explicit generation-matching rules.
 Borrowed mutable pointers are forbidden.
 
 `tp_core` owns the observable slot and token generations. `tp_build` job code
-publishes retained immutable projections through that narrow port; observation
-must not depend on, include, or inspect `tp_build` private state.
+exposes a constant-time, allocation-free projection callback through its
+refcounted opaque job owner. The host-thread observation path pulls that
+projection under the session gate, validates/adopts it, and retains the
+type-erased owner as the result handle. Workers update only their private
+atomics and immutable terminal payload; they never push into the session.
+Observation must not depend on, include, or inspect `tp_build` private state.
+The result receipt and GUI presentation slots share the same retained owner;
+the final release destroys the Pack arena exactly once.
+
+The accepted-result slot retains its own immutable completion envelope. Starting
+request B changes the current job projection but does not relabel a retained
+result from request A; an atomic observation can therefore contain B's progress
+and A's explicitly tagged result without ambiguity. Worker-thread creation is
+inside the session admission gate, and the job projection becomes visible only
+after creation succeeds, so a failed start preserves the prior state, result,
+token, and owners exactly.
 
 ### 8.3 Event impact
 

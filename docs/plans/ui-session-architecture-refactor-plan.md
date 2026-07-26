@@ -222,6 +222,9 @@ future Track B/C prerequisite and survives R5 without becoming a Track A task.
 
 **Owned production files:**
 
+- `docs/ntpacker-master-spec.md`
+- `docs/design/ui-session-architecture-spec.md`
+- `docs/plans/ui-session-architecture-refactor-plan.md`
 - `packer/include/tp_core/tp_session.h`
 - `packer/include/tp_core/tp_session_snapshot_query.h`
 - new `packer/src/tp_session_observation.c`
@@ -235,9 +238,6 @@ future Track B/C prerequisite and survives R5 without becoming a Track A task.
 - `packer/CMakeLists.txt`
 - new `packer/tests/test_session_observation.c`
 - `packer/tests/CMakeLists.txt`
-- `docs/ntpacker-master-spec.md`
-- `docs/design/ui-session-architecture-spec.md`
-- `docs/plans/ui-session-architecture-refactor-plan.md`
 
 **Tasks:**
 
@@ -287,17 +287,28 @@ without flooding the model-event ring.
 
 **Owned production files:**
 
+- `docs/ntpacker-master-spec.md`
+- `docs/design/ui-session-architecture-spec.md`
+- `docs/plans/ui-session-architecture-refactor-plan.md`
 - `packer/include/tp_core/tp_session.h`
 - `packer/include/tp_core/tp_job.h`
 - `packer/src/tp_session_observation.c`
 - new `packer/src/tp_session_job_observation.c`
 - new `packer/src/tp_session_job_observation_internal.h`
+- `packer/src/tp_session.c`
 - `packer/src/tp_session_internal.h`
 - `packer/src/tp_session_layout.h`
 - `packer/src/tp_job.c`
 - `packer/src/tp_job_owner_internal.h`
+- `packer/src/tp_test_seams.h`
 - `packer/CMakeLists.txt`
+- `scripts/check_boundaries.sh`
+- `apps/gui/gui_pack.c`
+- `apps/gui/gui_pack_internal.h`
+- `apps/gui/gui_pack_jobs.c`
+- `apps/gui/gui_pack_preview.c`
 - new `packer/tests/test_session_job_observation.c`
+- `packer/tests/test_job_input_token.c`
 - `packer/tests/CMakeLists.txt`
 
 **Tasks:**
@@ -308,14 +319,24 @@ without flooding the model-event ring.
 2. Define coalesced latest progress/job state with a generation.
 3. Include that generation in the composite observation token and return its
    latest immutable state even when event sequence is unchanged.
-4. Publish terminal/meaningful state changes without one event per progress
+4. Extend the refcounted opaque job owner with a constant-time,
+   allocation-free projection callback. The host-thread observation path pulls
+   and admits it under the session gate; workers never push into the session.
+   Publish terminal/meaningful state changes without one event per progress
    tick.
-5. Retain/pin result handles for an observation lifetime.
+5. Retain/pin the type-erased owner for the session result slot, every
+   observation lifetime, owned result receipts, and GUI presentation
+   slots. The final release destroys the heavy Pack arena exactly once.
 6. Reject superseded, cancelled, deleted-target, old-generation, duplicate, and
-   post-close completions.
+   post-close completions in the pure admission owner. R1b proves these reducer
+   rules with injected host tags; queue-level replacement/post-destroy safety
+   remains owned by R2b/R2d.
 7. Keep protocol serialization outside the session gate.
 8. Publish retained immutable job/result projections from `tp_build` into a
    narrow core-owned slot; never add a `tp_core -> tp_build` dependency.
+9. Keep the accepted-result envelope independent from the current job
+   projection, and commit a new observable job only after worker-thread creation
+   succeeds. A failed start preserves prior state/result tokens and owners.
 
 **Tests:**
 
@@ -325,12 +346,23 @@ without flooding the model-event ring.
 - duplicate completion;
 - completion after session replacement/close;
 - progress burst does not overflow model event retention;
-- progress changes with no event are visible on the next observation.
+- progress changes with no event are visible on the next observation;
+- accept A, begin B, then resync exposes B state plus an explicitly A-tagged
+  retained result;
+- deterministic thread-create failure leaves the prior observable token, job
+  state, result envelope, and owners unchanged.
 
-**Deletion manifest:** none; this additive packet extends the canonical
-observation owner.
+**Deletion manifest:**
 
-**Gate:** `USA-06`, `USA-07`, and `USA-30`.
+- remove the R1a reserved-zero wording and hard-coded zero job/result token
+  components;
+- remove unique raw arena transfer from `tp_session_job_take_result()` and
+  direct GUI arena destruction after ownership transfer;
+- replace GUI native/preview result ownership with the shared retained job
+  owner. Direct job polling/submission remains R2b-owned deletion.
+
+**Gate:** `USA-30`; reducer-level evidence for `USA-06`/`USA-07`. Full
+queue/lifecycle `USA-06`/`USA-07` gates remain R2b/R2d.
 
 ### R1c — Killable job-process isolation
 

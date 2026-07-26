@@ -4,7 +4,9 @@
 
 #include "core/nt_assert.h"
 #include "tp_model_seam.h"
+#include "tp_job_owner_internal.h"
 #include "tp_session_internal.h"
+#include "tp_session_job_observation_internal.h"
 #include "tp_session_layout.h"
 #include "tp_session_snapshot_internal.h"
 
@@ -14,6 +16,10 @@ struct tp_session_observation {
     size_t event_count;
     tp_session_event events[TP_SESSION_OBSERVATION_EVENT_CAPACITY];
     tp_session_recovery_health recovery_health;
+    tp_session_job_observed_state job_state;
+    tp_session_job_observed_result job_result;
+    tp_session_owned_job *job_pin;
+    tp_session_owned_job *result_pin;
     tp_session_snapshot *snapshot;
 };
 
@@ -50,8 +56,8 @@ static tp_session_observation_token current_token_locked(
             tp_model__recovery_health_generation(session->model),
         .recovery_owner_generation =
             session->recovery_owner_generation,
-        .job_state_generation = 0U,
-        .result_generation = 0U,
+        .job_state_generation = session->job_state_generation,
+        .result_generation = session->result_generation,
     };
     return token;
 }
@@ -86,10 +92,14 @@ tp_status tp_session_observe(
     *out = NULL;
 
     gate_lock(session);
+    tp_session_owned_job *retired_result =
+        tp_session_job_observation__refresh_locked(
+            (tp_session *)session);
     const tp_session_observation_token current =
         current_token_locked(session);
     if (after && tp_session_observation_token_equal(*after, current)) {
         gate_unlock(session);
+        tp_session_job_release_internal(retired_result);
         return TP_STATUS_OK;
     }
 
@@ -97,12 +107,17 @@ tp_status tp_session_observe(
         (tp_session_observation *)calloc(1U, sizeof *observation);
     if (!observation) {
         gate_unlock(session);
+        tp_session_job_release_internal(retired_result);
         return tp_error_set(
             err, TP_STATUS_OOM, "session observation allocation failed");
     }
     observation->token = current;
     observation->recovery_health =
         tp_session__recovery_health_locked(session);
+    tp_session_job_observation__copy_locked(
+        (tp_session *)session, &observation->job_state,
+        &observation->job_result, &observation->job_pin,
+        &observation->result_pin);
     observation->resync_required =
         !after || token_is_future(after ? *after : current, current);
 
@@ -142,7 +157,10 @@ tp_status tp_session_observe(
             session, &observation->snapshot, err);
     }
     gate_unlock(session);
+    tp_session_job_release_internal(retired_result);
     if (status != TP_STATUS_OK) {
+        tp_session_job_release_internal(observation->job_pin);
+        tp_session_job_release_internal(observation->result_pin);
         free(observation);
         return status;
     }
@@ -160,6 +178,8 @@ tp_status tp_session_observe(
             observation->snapshot, err);
         if (status != TP_STATUS_OK) {
             observation->snapshot = NULL;
+            tp_session_job_release_internal(observation->job_pin);
+            tp_session_job_release_internal(observation->result_pin);
             free(observation);
             return status;
         }
@@ -181,6 +201,8 @@ void tp_session_observation_destroy(
         return;
     }
     tp_session_snapshot_destroy(observation->snapshot);
+    tp_session_job_release_internal(observation->job_pin);
+    tp_session_job_release_internal(observation->result_pin);
     free(observation);
 }
 
@@ -212,6 +234,19 @@ tp_session_recovery_health tp_session_observation_recovery_health(
     const tp_session_observation *observation) {
     return observation ? observation->recovery_health
                        : (tp_session_recovery_health){0};
+}
+
+tp_session_job_observed_state tp_session_observation_job_state(
+    const tp_session_observation *observation) {
+    return observation ? observation->job_state
+                       : (tp_session_job_observed_state){0};
+}
+
+const tp_session_job_observed_result *tp_session_observation_job_result(
+    const tp_session_observation *observation) {
+    return observation && observation->job_result.present
+               ? &observation->job_result
+               : NULL;
 }
 
 const tp_session_snapshot *tp_session_observation_snapshot(

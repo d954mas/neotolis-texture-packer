@@ -205,8 +205,8 @@ _session_deps='#include[[:space:]]*[<"][^>"]*(apps/|gui|cli|protocol|cJSON)'
 _session_impl='(^|[^A-Za-z0-9_])(fopen|fwrite|open|CreateFile|LockFile|tp_journal_(encode|decode)[A-Za-z0-9_]*|tp_pack|tp_export_run)[[:space:]]*\('
 # All session TUs plus the shared private header. R10c's
 # mutable-project-ownership scan runs over the .c TUs only.
-_session_gate_srcs="packer/src/tp_session.c packer/src/tp_session_observation.c packer/src/tp_session_snapshot.c packer/src/tp_session_snapshot_query.c packer/src/tp_session_internal.h"
-_session_gate_owner_srcs="packer/src/tp_session.c packer/src/tp_session_observation.c packer/src/tp_session_snapshot.c packer/src/tp_session_snapshot_query.c"
+_session_gate_srcs="packer/src/tp_session.c packer/src/tp_session_observation.c packer/src/tp_session_job_observation.c packer/src/tp_session_snapshot.c packer/src/tp_session_snapshot_query.c packer/src/tp_session_internal.h packer/src/tp_session_job_observation_internal.h"
+_session_gate_owner_srcs="packer/src/tp_session.c packer/src/tp_session_observation.c packer/src/tp_session_job_observation.c packer/src/tp_session_snapshot.c packer/src/tp_session_snapshot_query.c"
 r10a=$(grep -nE "$_session_deps" $_session_gate_srcs 2>/dev/null |
     grep -v 'boundary-ok:')
 [ -n "$r10a" ] && hit "R10a frontend/protocol dependency in tp_session" "$r10a"
@@ -508,15 +508,16 @@ tp_project_identity_internal tp_project_identity|tp_project_parse|tp_project_wri
 tp_project_generation_internal tp_model|tp_project_generation|tp_session_snapshot|tp_session_observation
 tp_project_mutation_internal tp_project|tp_project_parse|tp_diff_entity|tp_diff_apply|tp_diff_capture|tp_export_run|tp_input|tp_op_apply|tp_op_validate|tp_op_validate_animation|tp_op_validate_target|tp_session|tp_session_snapshot|tp_session_snapshot_query
 tp_txn_internal         tp_model|tp_model_journal|tp_txn_apply|tp_txn_parse|tp_txn_encode|tp_txn_idset|tp_txn_lower|tp_txn_result|tp_project_clone|tp_history
-tp_model_seam           tp_session|tp_session_snapshot|tp_session_observation|tp_recovery_claim|tp_recovery_store|tp_txn_internal|tp_txn_apply|tp_txn_parse|tp_txn_encode|tp_txn_idset|tp_txn_lower|tp_project_clone|tp_history
+tp_model_seam           tp_session|tp_session_snapshot|tp_session_observation|tp_session_job_observation|tp_recovery_claim|tp_recovery_store|tp_txn_internal|tp_txn_apply|tp_txn_parse|tp_txn_encode|tp_txn_idset|tp_txn_lower|tp_project_clone|tp_history
 tp_recovery_live_seam   tp_session|tp_recovery|tp_recovery_internal
-tp_session_internal     tp_session|tp_session_observation|tp_session_snapshot|tp_session_layout|tp_recovery|tp_recovery_claim|tp_validate|tp_validate_target_settings|tp_export|tp_export_run|tp_input|tp_sprite_index
-tp_session_layout       tp_session|tp_session_observation|tp_session_snapshot
+tp_session_internal     tp_session|tp_session_observation|tp_session_job_observation|tp_session_snapshot|tp_session_layout|tp_recovery|tp_recovery_claim|tp_validate|tp_validate_target_settings|tp_export|tp_export_run|tp_input|tp_sprite_index
+tp_session_job_observation_internal tp_session|tp_session_observation|tp_session_job_observation|tp_job|tp_job_owner_internal
+tp_session_layout       tp_session|tp_session_observation|tp_session_job_observation|tp_session_snapshot
 tp_session_snapshot_internal tp_session_observation|tp_session_snapshot|tp_session_snapshot_query
 tp_recovery_backend_types_internal tp_recovery_backend_posix|tp_recovery_backend_win32|tp_recovery_state_internal
 tp_recovery_internal    tp_recovery|tp_recovery_state_internal|tp_recovery_claim|tp_recovery_scan|tp_recovery_store
 tp_recovery_state_internal tp_recovery|tp_recovery_claim|tp_recovery_scan|tp_recovery_store
-tp_job_owner_internal   tp_session|tp_job
+tp_job_owner_internal   tp_session|tp_session_observation|tp_session_job_observation|tp_job
 tp_source_plan_internal tp_source_plan|tp_op_validate|tp_op_validate_source_sprite
 tp_source_path_text_internal tp_source_path_text|tp_op_validate|tp_project|tp_project_identity|tp_project_parse|tp_source_plan
 tp_srckey_internal      tp_srckey|tp_project_identity|tp_op_validate_animation|tp_validate_source|tp_validate_sprite

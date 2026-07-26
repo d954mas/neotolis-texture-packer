@@ -57,6 +57,10 @@ struct tp_session {
     tp_recovery_live *recovery_live;
     tp_project_lease *project_lease;
     tp_session_owned_job *active_job;
+    tp_session_owned_job *observed_job_owner;
+    tp_session_owned_job *observed_result_owner;
+    tp_session_job_observed_state observed_job_state;
+    tp_session_job_observed_result observed_job_result;
     tp_session_identity identity;
     tp_id128 saved_file_fingerprint;
     tp_id128 recovery_token;
@@ -70,6 +74,9 @@ struct tp_session {
     uint64_t model_generation;
     uint64_t source_generation;
     uint64_t recovery_owner_generation;
+    uint64_t job_state_generation;
+    uint64_t result_generation;
+    uint64_t next_job_request_id;
     uint64_t event_sequence;
     tp_session_event events[TP_SESSION_EVENT_CAPACITY];
     size_t event_count;

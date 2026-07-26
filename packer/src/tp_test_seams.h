@@ -30,6 +30,8 @@ void tp_job__test_release_after_cancel_observation_gate(void);
 void tp_job__test_arm_after_cancel_claim_gate(void);
 bool tp_job__test_after_cancel_claim_gate_entered(void);
 void tp_job__test_release_after_cancel_claim_gate(void);
+void tp_job__test_fail_next_observation_target_allocation(void);
+void tp_job__test_fail_next_thread_create(void);
 void tp_job__test_reset_all(void);
 
 void tp_export_run__test_set_report_alloc_fail(int nth);

@@ -413,6 +413,190 @@ static tp_session_job_result wait_for_job_result(tp_session *session) {
     return result;
 }
 
+void test_atomic_observation_pins_real_pack_result_across_take_and_close(void) {
+    tp_session *session = make_session();
+    char work_dir[1024];
+    job_scratch_dir(work_dir, sizeof work_dir);
+    tp_mkdirs(work_dir);
+    const tp_id128 atlas_id = default_atlas_id(session);
+    add_file_source(session, atlas_id, work_dir);
+
+    tp_error err = {{0}};
+    tp_session_observation *initial = NULL;
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_session_observe(session, NULL, &initial, &err), err.msg);
+    TEST_ASSERT_NOT_NULL(initial);
+    tp_session_observation_token token =
+        tp_session_observation_token_query(initial);
+    tp_session_observation_destroy(initial);
+
+    const tp_pack_job_request request = {
+        .atlas_id = atlas_id,
+        .work_dir = work_dir,
+        .session_instance_generation = 77U,
+        .request_id = 88U,
+    };
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_session_pack_job_start(session, &request, &err), err.msg);
+
+    tp_session_observation *terminal = NULL;
+    for (long spins = 0; spins < 10000000L && !terminal; ++spins) {
+        tp_session_observation *next = NULL;
+        TEST_ASSERT_EQUAL_INT_MESSAGE(
+            TP_STATUS_OK,
+            tp_session_observe(session, &token, &next, &err), err.msg);
+        if (next) {
+            token = tp_session_observation_token_query(next);
+            const tp_session_job_observed_state state =
+                tp_session_observation_job_state(next);
+            TEST_ASSERT_EQUAL_UINT64(0U,
+                                     tp_session_observation_event_count(next));
+            TEST_ASSERT_NULL(tp_session_observation_snapshot(next));
+            if (state.terminal) {
+                terminal = next;
+            } else {
+                tp_session_observation_destroy(next);
+            }
+        }
+        thrd_yield();
+    }
+    TEST_ASSERT_NOT_NULL(terminal);
+    const tp_session_job_observed_state observed_state =
+        tp_session_observation_job_state(terminal);
+    TEST_ASSERT_EQUAL_UINT64(77U,
+                             observed_state.session_instance_generation);
+    TEST_ASSERT_EQUAL_UINT64(88U, observed_state.request_id);
+    TEST_ASSERT_TRUE(observed_state.result_accepted);
+    TEST_ASSERT_EQUAL_size_t(1U, observed_state.target_count);
+    const tp_session_job_observed_result *observed =
+        tp_session_observation_job_result(terminal);
+    TEST_ASSERT_NOT_NULL(observed);
+    TEST_ASSERT_EQUAL_UINT64(77U,
+                             observed->session_instance_generation);
+    TEST_ASSERT_EQUAL_UINT64(88U, observed->request_id);
+    const tp_session_job_result *observed_result = observed->result;
+    TEST_ASSERT_NOT_NULL(observed_result);
+    TEST_ASSERT_EQUAL_INT(TP_SESSION_JOB_SUCCEEDED,
+                          observed_result->state);
+    TEST_ASSERT_NOT_NULL(observed_result->pack.arena);
+    TEST_ASSERT_NOT_NULL(observed_result->pack.result);
+
+    tp_session_job_result taken = {0};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_session_job_take_result(session, &taken, &err), err.msg);
+    TEST_ASSERT_EQUAL_PTR(observed_result->pack.arena, taken.pack.arena);
+    TEST_ASSERT_EQUAL_PTR(observed_result->pack.result, taken.pack.result);
+
+    tp_session_destroy(session);
+    TEST_ASSERT_NOT_NULL(observed_result->pack.result);
+    TEST_ASSERT_GREATER_THAN_INT(
+        0, observed_result->pack.result->sprite_count);
+    tp_session_job_result_destroy(&taken);
+    TEST_ASSERT_NOT_NULL(observed_result->pack.result);
+    tp_session_observation_destroy(terminal);
+    remove_scratch_tree(work_dir);
+}
+
+void test_export_observation_target_oom_is_fail_atomic(void) {
+    tp_session *session = make_default_project_session();
+    tp_error err = {{0}};
+    tp_session_observation *initial = NULL;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_session_observe(session, NULL, &initial, &err));
+    const tp_session_observation_token token =
+        tp_session_observation_token_query(initial);
+    tp_session_observation_destroy(initial);
+
+    tp_job__test_fail_next_observation_target_allocation();
+    const tp_export_command_request request = {
+        .work_dir = ".",
+        .atlas_id = default_atlas_id(session),
+        .session_instance_generation = 90U,
+        .request_id = 91U,
+    };
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OOM,
+        tp_session_export_start(session, &request, &err));
+    TEST_ASSERT_NOT_EQUAL('\0', err.msg[0]);
+    TEST_ASSERT_FALSE(tp_session_job_active(session));
+
+    tp_session_observation *unchanged =
+        (tp_session_observation *)(uintptr_t)1U;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_session_observe(session, &token, &unchanged, &err));
+    TEST_ASSERT_NULL(unchanged);
+    tp_session_destroy(session);
+}
+
+void test_thread_create_failure_preserves_observed_terminal_slot(void) {
+    tp_session *session = make_default_project_session();
+    tp_error err = {{0}};
+    const tp_id128 atlas_id = default_atlas_id(session);
+    char work_dir[1024];
+    job_scratch_dir(work_dir, sizeof work_dir);
+    tp_mkdirs(work_dir);
+    const tp_pack_job_request first_request = {
+        .atlas_id = atlas_id,
+        .work_dir = work_dir,
+        .session_instance_generation = 92U,
+        .request_id = 93U,
+    };
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_session_pack_job_start(session, &first_request, &err), err.msg);
+    tp_session_job_result first_result = wait_for_job_result(session);
+
+    tp_session_observation *before = NULL;
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_session_observe(session, NULL, &before, &err), err.msg);
+    TEST_ASSERT_NOT_NULL(before);
+    const tp_session_observation_token token =
+        tp_session_observation_token_query(before);
+    const tp_session_job_observed_state before_state =
+        tp_session_observation_job_state(before);
+    const tp_session_job_observed_result *before_result =
+        tp_session_observation_job_result(before);
+    TEST_ASSERT_TRUE(before_state.terminal);
+    TEST_ASSERT_NOT_NULL(before_result);
+    TEST_ASSERT_EQUAL_UINT64(93U, before_result->request_id);
+
+    tp_job__test_fail_next_thread_create();
+    const tp_pack_job_request failed_request = {
+        .atlas_id = atlas_id,
+        .work_dir = work_dir,
+        .session_instance_generation = 92U,
+        .request_id = 94U,
+    };
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OOM,
+        tp_session_pack_job_start(session, &failed_request, &err));
+    TEST_ASSERT_FALSE(tp_session_job_active(session));
+    TEST_ASSERT_NOT_EQUAL('\0', err.msg[0]);
+
+    tp_session_observation *unchanged =
+        (tp_session_observation *)(uintptr_t)1U;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_session_observe(session, &token, &unchanged, &err));
+    TEST_ASSERT_NULL(unchanged);
+    TEST_ASSERT_EQUAL_UINT64(
+        93U, tp_session_observation_job_result(before)->request_id);
+    TEST_ASSERT_EQUAL_PTR(
+        before_result->result,
+        tp_session_observation_job_result(before)->result);
+
+    tp_session_job_result_destroy(&first_result);
+    tp_session_observation_destroy(before);
+    tp_session_destroy(session);
+    remove_scratch_tree(work_dir);
+}
+
 static tp_status partial_failure_write(
     const tp_export_prepared *prepared, const tp_export_caps *caps,
     const char *out_path_base, tp_export_notices *notices, tp_error *err) {
@@ -1959,6 +2143,11 @@ int main(int argc, char **argv) {
     RUN_TEST(test_source_runtime_change_invalidates_without_model_mutation);
     RUN_TEST(test_pack_input_hash_present_and_stable_for_same_snapshot);
     RUN_TEST(test_pack_job_decodes_each_source_once);
+    RUN_TEST(
+        test_atomic_observation_pins_real_pack_result_across_take_and_close);
+    RUN_TEST(test_export_observation_target_oom_is_fail_atomic);
+    RUN_TEST(
+        test_thread_create_failure_preserves_observed_terminal_slot);
     RUN_TEST(test_pack_input_hash_changes_on_semantic_mutation);
     RUN_TEST(test_source_less_export_succeeds_as_skipped);
     RUN_TEST(test_empty_folder_export_succeeds_as_skipped);

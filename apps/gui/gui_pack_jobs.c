@@ -273,12 +273,12 @@ gui_pack_done gui_pack_poll(gui_pack_result_info *out) {
                     out->input_changed = input_changed;
                 }
                 if (!input_changed) {
-                    gui_pack_preview_publish(&result.pack, atlas_index,
+                    gui_pack_preview_publish(&result, atlas_index,
                                              result.elapsed_ms);
                 }
                 done = GUI_PACK_DONE_PREVIEW_OK;
             } else if (!gui_pack_publish_native(
-                           &result.pack, atlas_index, result.elapsed_ms, out)) {
+                           &result, atlas_index, result.elapsed_ms, out)) {
                 done = GUI_PACK_DONE_PACK_FAIL;
             } else {
                 if (out) {

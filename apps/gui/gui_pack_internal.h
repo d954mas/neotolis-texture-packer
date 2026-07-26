@@ -6,10 +6,10 @@
 #include "tp_core/tp_job.h"
 
 /* Direct handoff from the session-job adapter to the preview result owner. */
-bool gui_pack_publish_native(tp_session_pack_job_result *pack,
+bool gui_pack_publish_native(tp_session_job_result *job_result,
                              int atlas_index, double elapsed_ms,
                              gui_pack_result_info *out);
-void gui_pack_preview_publish(tp_session_pack_job_result *pack,
+void gui_pack_preview_publish(tp_session_job_result *job_result,
                               int atlas_index, double elapsed_ms);
 bool gui_pack_preview_belongs_to(int atlas_index);
 
