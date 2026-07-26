@@ -386,12 +386,12 @@ static void handle_shortcuts(void) {
     }
     if (s_edit_kind == EDIT_NONE && s_sel_anim >= 0 && s_sel_anim_frame >= 0 &&
         nt_input_key_is_pressed(NT_KEY_DELETE)) {
-        /* Clear the frame selection only after a real removal. On rejection the
-         * frame remains, so its selection must remain too. */
         gui_animation_ref animation;
-        if (gui_project_animation_ref_at(s_sel_atlas, s_sel_anim, &animation) &&
-            gui_project_anim_remove_frame(&animation, s_sel_anim_frame)) {
-            s_sel_anim_frame = -1;
+        if (gui_project_animation_ref_at(
+                s_sel_atlas, s_sel_anim,
+                &animation)) {
+            gui_edit_anim_frame_remove(
+                &animation, s_sel_anim_frame);
         }
     }
     if (nt_input_key_is_pressed(NT_KEY_F5)) {
@@ -505,21 +505,10 @@ static void frame(void) {
      * the immutable observation has been pinned for declaration. */
     gui_bench_tick();
 
-    const gui_project_host_lifecycle host_lifecycle =
-        gui_project_host_lifecycle_query();
-    if (host_lifecycle == GUI_PROJECT_HOST_OPEN ||
-        host_lifecycle == GUI_PROJECT_HOST_DRAINING) {
-        tp_error host_error = {{0}};
-        const tp_status host_status =
-            gui_project_host_drain(&host_error);
-        if (host_status != TP_STATUS_OK) {
-            set_statusf_ex(
-                STATUS_ERROR,
-                "Session host admission failed: %s",
-                host_error.msg[0]
-                    ? host_error.msg
-                    : tp_status_str(host_status));
-        }
+    gui_actions_pump_lifecycle();
+    if (gui_project_lifecycle_state_query() ==
+        GUI_PROJECT_LIFECYCLE_CLOSED) {
+        return;
     }
 
     /* Fallback commit for a buffered gesture that never got a release/blur/discrete boundary
@@ -575,7 +564,7 @@ static void frame(void) {
             s_recovery_open = false; /* Esc = "Later": leave every orphan on disk, no data loss */
         } else if (s_confirm_open) {
             s_confirm_open = false;
-            s_after_confirm = AFTER_NONE;
+            s_after_confirm = GUI_LIFECYCLE_REQUEST_NONE;
         } else if (s_filter_active || gui_rows_filter_active()) {
             gui_rows_set_filter(""); /* Esc clears the sprite-tree speed-search. */
             s_filter_active = false;
@@ -1081,7 +1070,22 @@ static int gui_main_utf8(int argc, char *argv[]) {
             }
             break;
         case GUI_STARTUP_OPEN:
-            if (gui_project_open(proj_arg, err, sizeof err) == TP_STATUS_OK) {
+            tp_error open_error = {{0}};
+            gui_project_lifecycle_kind
+                open_completed =
+                    GUI_PROJECT_LIFECYCLE_NONE;
+            tp_status open_status =
+                gui_project_lifecycle_begin_open(
+                    proj_arg, &open_error);
+            if (open_status == TP_STATUS_OK) {
+                open_status =
+                    gui_project_lifecycle_pump(
+                        &open_completed,
+                        &open_error);
+            }
+            if (open_status == TP_STATUS_OK &&
+                open_completed ==
+                    GUI_PROJECT_LIFECYCLE_OPEN) {
                 if (!recovery_warn_shown) { /* routine confirmation must not clobber the recovery warning */
                     set_statusf("Opened %s", gui_project_display_name());
                 }
@@ -1090,6 +1094,12 @@ static int gui_main_utf8(int argc, char *argv[]) {
                  * user-initiated failure the user is actively waiting on (they asked to open THIS file), it
                  * is higher severity (STATUS_ERROR > STATUS_WARNING), and it is rare. Present actionable
                  * failure wins over the latent recovery warning. */
+                (void)snprintf(
+                    err, sizeof err, "%s",
+                    open_error.msg[0]
+                        ? open_error.msg
+                        : tp_status_str(
+                              open_status));
                 set_statusf_ex(STATUS_ERROR, "Open '%s' failed: %s", proj_arg, err);
             }
             break;
@@ -1111,48 +1121,56 @@ static int gui_main_utf8(int argc, char *argv[]) {
 
     nt_app_run(frame);
 
-    /* Stop ingress, request cancellation through the single host owner, and
-     * keep only the non-blocking OS/process pumps alive until cutover is safe. */
-    if (gui_project_host_lifecycle_query() ==
-        GUI_PROJECT_HOST_OPEN) {
-        tp_error drain_error = {{0}};
-        const tp_status drain_status =
-            gui_project_host_begin_drain(
-                &drain_error);
-        if (drain_status != TP_STATUS_OK) {
-            nt_log_error(
-                "GUI host drain failed: %s",
-                drain_error.msg[0]
-                    ? drain_error.msg
-                    : tp_status_str(drain_status));
+    /* Finish any accepted replacement first, then close the session through
+     * the same non-blocking lifecycle owner. */
+    while (gui_project_lifecycle_state_query() !=
+           GUI_PROJECT_LIFECYCLE_CLOSED) {
+        tp_error shutdown_error = {{0}};
+        if (gui_project_lifecycle_state_query() ==
+            GUI_PROJECT_LIFECYCLE_OPEN_IDLE) {
+            const tp_status begin_status =
+                gui_project_lifecycle_begin_shutdown(
+                    false, &shutdown_error);
+            if (begin_status != TP_STATUS_OK) {
+                nt_log_error(
+                    "GUI host shutdown request failed: %s",
+                    shutdown_error.msg[0]
+                        ? shutdown_error.msg
+                        : tp_status_str(
+                              begin_status));
+            }
+            continue;
         }
-    }
-    while (gui_project_host_lifecycle_query() ==
-           GUI_PROJECT_HOST_DRAINING) {
+
         nt_window_poll();
-        tp_error drain_error = {{0}};
-        const tp_status drain_status =
-            gui_project_host_drain(
-                &drain_error);
-        if (drain_status != TP_STATUS_OK) {
+        const tp_status pump_status =
+            gui_project_lifecycle_pump(
+                NULL, &shutdown_error);
+        if (pump_status != TP_STATUS_OK) {
             nt_log_error(
                 "GUI host shutdown pump failed: %s",
-                drain_error.msg[0]
-                    ? drain_error.msg
-                    : tp_status_str(drain_status));
-        }
-        tp_error observation_error = {{0}};
-        const tp_status observation_status =
-            gui_project_frame_begin(
-                &observation_error);
-        gui_project_frame_end();
-        if (observation_status != TP_STATUS_OK) {
-            nt_log_error(
-                "GUI host shutdown observation failed: %s",
-                observation_error.msg[0]
-                    ? observation_error.msg
+                shutdown_error.msg[0]
+                    ? shutdown_error.msg
                     : tp_status_str(
-                          observation_status));
+                          pump_status));
+            continue;
+        }
+        if (gui_project_lifecycle_state_query() ==
+            GUI_PROJECT_LIFECYCLE_DRAINING) {
+            const tp_status observe_status =
+                gui_project_frame_begin(
+                    &shutdown_error);
+            if (observe_status == TP_STATUS_OK) {
+                gui_actions_poll_host_completion();
+                gui_project_frame_end();
+            } else {
+                nt_log_error(
+                    "GUI shutdown observation failed: %s",
+                    shutdown_error.msg[0]
+                        ? shutdown_error.msg
+                        : tp_status_str(
+                              observe_status));
+            }
         }
     }
 

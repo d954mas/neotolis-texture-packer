@@ -94,6 +94,7 @@ typedef struct animation_edit_intent {
 } animation_edit_intent;
 
 typedef struct gui_actions_state {
+    gui_lifecycle_request pending_lifecycle_request;
     bool pending_add_anim;
     tp_id128 pending_add_anim_atlas_id;
     int64_t pending_add_anim_revision;
@@ -148,6 +149,7 @@ void gui_actions__frame_refs_dispose(tp_op_sprite_ref *frames, int count);
 tp_op_sprite_ref *gui_actions__frame_refs_copy(const tp_op_sprite_ref *frames,
                                                int count);
 void gui_actions__drain_edits(void);
+void gui_actions__discard_edits(void);
 void gui_actions__pending_create_animation_dispose(
     pending_create_animation *request);
 bool gui_actions__resolve_animation_ref(const gui_animation_ref *animation,
@@ -157,10 +159,10 @@ bool gui_actions__resolve_animation_ref(const gui_animation_ref *animation,
  * re-resolve the viewed atlas after an undo/redo shifts atlas ordering, and by the preview player. */
 int gui_actions__snapshot_atlas_index_by_id(const tp_session_snapshot *snapshot,
                                             tp_id128 atlas_id);
-bool gui_actions__busy_block(void);
 bool gui_actions__flush_failed(void);
 void gui_actions__apply_confirm(void);
-void gui_actions__apply_file_dialogs(void);
+bool gui_actions__apply_file_dialogs(void);
+bool gui_actions__apply_lifecycle_request(void);
 void gui_actions__browse_target(const gui_target_ref *target);
 void gui_actions__poll_pack(void);
 void gui_actions__apply_pack_requests(void);

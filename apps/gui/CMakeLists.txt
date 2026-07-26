@@ -24,7 +24,7 @@ if(WIN32)
     target_link_libraries(tinyfiledialogs PUBLIC comdlg32 ole32 shell32 user32)
 endif()
 
-add_executable(ntpacker-gui main.c gui_state.c gui_widgets.c gui_actions.c gui_actions_dialogs.c gui_actions_edits.c gui_actions_pack.c gui_actions_preview.c gui_actions_recovery.c gui_rows.c gui_selftest.c gui_shot.c gui_bench.c gui_startup.c gui_paths.c gui_log_file.c gui_crash.c gui_bootstrap.c gui_project.c gui_project_file.c gui_project_mutations.c gui_project_pending.c gui_project_recovery.c gui_session_adapter.c gui_session_client.c gui_host_queue.c gui_scan.c gui_canvas.c gui_canvas_resources.c gui_pack.c gui_pack_jobs.c gui_pack_preview.c gui_view_settings.c gui_view_lists.c gui_view_canvas.c gui_view_chrome.c
+add_executable(ntpacker-gui main.c gui_state.c gui_widgets.c gui_actions.c gui_actions_dialogs.c gui_actions_edits.c gui_actions_pack.c gui_actions_preview.c gui_actions_recovery.c gui_rows.c gui_selftest.c gui_shot.c gui_bench.c gui_startup.c gui_paths.c gui_log_file.c gui_crash.c gui_bootstrap.c gui_project.c gui_project_file.c gui_project_mutations.c gui_project_pending.c gui_project_recovery.c gui_session_adapter.c gui_session_client.c gui_host_queue.c gui_host_binding.c gui_scan.c gui_canvas.c gui_canvas_resources.c gui_pack.c gui_pack_jobs.c gui_pack_preview.c gui_view_settings.c gui_view_lists.c gui_view_canvas.c gui_view_chrome.c
     "${CMAKE_SOURCE_DIR}/apps/common/nt_utf8_fs.c")
 if(WIN32)
     target_sources(ntpacker-gui PRIVATE "${CMAKE_SOURCE_DIR}/apps/common/nt_utf8_argv.c")
@@ -168,6 +168,21 @@ nt_set_warning_flags(tp_test_gui_host_queue)
 nt_set_sanitizer_flags(tp_test_gui_host_queue)
 add_test(NAME tp_gui_host_queue COMMAND tp_test_gui_host_queue)
 
+add_executable(tp_test_gui_host_binding
+    test_gui_host_binding.c
+    gui_host_binding.c
+    gui_host_queue.c
+    gui_session_client.c)
+target_link_libraries(tp_test_gui_host_binding PRIVATE
+    tp_build tp_core unity)
+target_compile_options(tp_test_gui_host_binding PRIVATE -U_DLL)
+target_compile_definitions(tp_test_gui_host_binding PRIVATE
+    TP_ENABLE_TEST_SEAMS=1
+    TP_GUI_HOST_BINDING_TEST_DIR="${CMAKE_CURRENT_BINARY_DIR}")
+nt_set_warning_flags(tp_test_gui_host_binding)
+nt_set_sanitizer_flags(tp_test_gui_host_binding)
+add_test(NAME tp_gui_host_binding COMMAND tp_test_gui_host_binding)
+
 add_executable(tp_test_gui_paths test_gui_paths.c gui_paths.c)
 target_link_libraries(tp_test_gui_paths PRIVATE tp_core unity)
 target_compile_options(tp_test_gui_paths PRIVATE -U_DLL)
@@ -194,12 +209,7 @@ nt_set_warning_flags(tp_test_gui_shell_quote)
 nt_set_sanitizer_flags(tp_test_gui_shell_quote)
 add_test(NAME tp_gui_shell_quote COMMAND tp_test_gui_shell_quote)
 
-# Canonical GUI identity regression: two distinct sources may expose the same
-# source-local key.  The headless target exercises the production row,
-# selection/action and project/session adapters without creating a window.
-add_executable(tp_test_gui_canonical_identity
-    test_gui_canonical_identity.c
-    "${CMAKE_SOURCE_DIR}/packer/src/tp_job.c"
+set(_tp_gui_headless_sources
     gui_state.c
     gui_actions.c
     gui_actions_dialogs.c
@@ -216,6 +226,7 @@ add_executable(tp_test_gui_canonical_identity
     gui_session_adapter.c
     gui_session_client.c
     gui_host_queue.c
+    gui_host_binding.c
     gui_scan.c
     gui_canvas.c
     gui_canvas_resources.c
@@ -225,9 +236,18 @@ add_executable(tp_test_gui_canonical_identity
     gui_paths.c
 )
 if(WIN32)
-    target_sources(tp_test_gui_canonical_identity PRIVATE
+    list(APPEND _tp_gui_headless_sources
         "${CMAKE_SOURCE_DIR}/apps/common/nt_utf8_argv.c")
 endif()
+
+# Canonical GUI identity regression: two distinct sources may expose the same
+# source-local key.  The headless target exercises the production row,
+# selection/action and project/session adapters without creating a window.
+add_executable(tp_test_gui_canonical_identity
+    test_gui_canonical_identity.c
+    "${CMAKE_SOURCE_DIR}/packer/src/tp_job.c"
+    ${_tp_gui_headless_sources}
+)
 target_link_libraries(tp_test_gui_canonical_identity PRIVATE
     nt_core nt_app nt_window nt_input nt_math nt_log nt_time nt_resource
     nt_material nt_shared nt_atlas
@@ -259,34 +279,8 @@ add_test(NAME tp_gui_canonical_identity COMMAND tp_test_gui_canonical_identity)
 add_executable(tp_test_gui_view
     test_gui_view.c
     "${CMAKE_SOURCE_DIR}/packer/src/tp_scan.c"
-    gui_state.c
-    gui_actions.c
-    gui_actions_dialogs.c
-    gui_actions_edits.c
-    gui_actions_pack.c
-    gui_actions_preview.c
-    gui_actions_recovery.c
-    gui_rows.c
-    gui_project.c
-    gui_project_file.c
-    gui_project_mutations.c
-    gui_project_pending.c
-    gui_project_recovery.c
-    gui_session_adapter.c
-    gui_session_client.c
-    gui_host_queue.c
-    gui_scan.c
-    gui_canvas.c
-    gui_canvas_resources.c
-    gui_pack.c
-    gui_pack_jobs.c
-    gui_pack_preview.c
-    gui_paths.c
+    ${_tp_gui_headless_sources}
 )
-if(WIN32)
-    target_sources(tp_test_gui_view PRIVATE
-        "${CMAKE_SOURCE_DIR}/apps/common/nt_utf8_argv.c")
-endif()
 target_link_libraries(tp_test_gui_view PRIVATE
     nt_core nt_app nt_window nt_input nt_math nt_log nt_time nt_resource
     nt_material nt_shared nt_atlas
@@ -319,34 +313,8 @@ add_executable(tp_test_gui_action_trace
     test_gui_action_trace.c
     "${CMAKE_SOURCE_DIR}/packer/src/tp_scan.c"
     "${CMAKE_SOURCE_DIR}/packer/src/tp_job.c"
-    gui_state.c
-    gui_actions.c
-    gui_actions_dialogs.c
-    gui_actions_edits.c
-    gui_actions_pack.c
-    gui_actions_preview.c
-    gui_actions_recovery.c
-    gui_rows.c
-    gui_project.c
-    gui_project_file.c
-    gui_project_mutations.c
-    gui_project_pending.c
-    gui_project_recovery.c
-    gui_session_adapter.c
-    gui_session_client.c
-    gui_host_queue.c
-    gui_scan.c
-    gui_canvas.c
-    gui_canvas_resources.c
-    gui_pack.c
-    gui_pack_jobs.c
-    gui_pack_preview.c
-    gui_paths.c
+    ${_tp_gui_headless_sources}
 )
-if(WIN32)
-    target_sources(tp_test_gui_action_trace PRIVATE
-        "${CMAKE_SOURCE_DIR}/apps/common/nt_utf8_argv.c")
-endif()
 target_link_libraries(tp_test_gui_action_trace PRIVATE
     nt_core nt_app nt_window nt_input nt_math nt_log nt_time nt_resource
     nt_material nt_shared nt_atlas

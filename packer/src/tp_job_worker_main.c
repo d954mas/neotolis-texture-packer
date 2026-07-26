@@ -232,7 +232,7 @@ static tp_status run_pack(const tp_job_worker_proto_request *request,
     settings.sprite_count = input.count;
 
     tp_job_worker_proto_name *names = calloc(
-        (size_t)input.count, sizeof *names);
+        (size_t)input.count + 1U, sizeof *names);
     tp_id128 *image_hashes = calloc(
         (size_t)input.count, sizeof *image_hashes);
     if (!names || !image_hashes) {
@@ -242,7 +242,25 @@ static tp_status run_pack(const tp_job_worker_proto_request *request,
         return tp_error_set(err, TP_STATUS_OOM,
                             "job worker Pack metadata allocation failed");
     }
-    uint32_t owned_name_count = 0U;
+    const size_t atlas_name_length =
+        strlen(settings.atlas_name);
+    char *atlas_name =
+        malloc(atlas_name_length + 1U);
+    if (!atlas_name) {
+        free(names);
+        free(image_hashes);
+        tp_pack_input_free(&input);
+        return tp_error_set(
+            err, TP_STATUS_OOM,
+            "job worker Pack atlas-name allocation failed");
+    }
+    memcpy(
+        atlas_name, settings.atlas_name,
+        atlas_name_length + 1U);
+    names[0].name = atlas_name;
+    names[0].hash =
+        nt_hash64_str(settings.atlas_name).value;
+    uint32_t owned_name_count = 1U;
     for (int i = 0; i < input.count; ++i) {
         const size_t name_length = strlen(input.descs[i].name);
         char *name = malloc(name_length + 1U);
@@ -255,8 +273,9 @@ static tp_status run_pack(const tp_job_worker_proto_request *request,
                 "job worker Pack name allocation failed");
         }
         memcpy(name, input.descs[i].name, name_length + 1U);
-        names[i].name = name;
-        names[i].hash = nt_hash64_str(input.descs[i].name).value;
+        names[i + 1].name = name;
+        names[i + 1].hash =
+            nt_hash64_str(input.descs[i].name).value;
         owned_name_count++;
     }
     pack_hash_collect collect = {image_hashes, input.count};
@@ -357,7 +376,7 @@ static tp_status run_pack(const tp_job_worker_proto_request *request,
                 ? request->preview_exporter_id
                 : "");
         response->pack.names = names;
-        response->pack.name_count = (uint32_t)input.count;
+        response->pack.name_count = owned_name_count;
         response->pack.artifact = artifact;
         response->pack.artifact_size = artifact_size;
     } else {

@@ -103,7 +103,6 @@ void test_lifecycle_rejects_ingress_outside_open(void) {
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
         gui_host_queue_open(&queue, 7U, &error));
-    TEST_ASSERT_TRUE(gui_host_queue_can_replace(&queue));
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
         gui_host_queue_begin_drain(&queue, &error));
@@ -115,14 +114,14 @@ void test_lifecycle_rejects_ingress_outside_open(void) {
         gui_host_queue_enqueue_export(
             &queue, tp_id128_nil(), ".", &error));
     TEST_ASSERT_EQUAL_INT(
-        TP_STATUS_OK,
-        gui_host_queue_open(&queue, 8U, &error));
+        GUI_HOST_READY_TO_CUTOVER,
+        gui_host_queue_lifecycle(&queue));
+    gui_host_queue_commit_cutover(
+        &queue, 8U);
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
         gui_host_queue_begin_drain(&queue, &error));
-    TEST_ASSERT_EQUAL_INT(
-        TP_STATUS_OK,
-        gui_host_queue_close(&queue, &error));
+    gui_host_queue_commit_close(&queue);
     TEST_ASSERT_EQUAL_INT(
         GUI_HOST_CLOSED,
         gui_host_queue_lifecycle(&queue));
@@ -156,7 +155,7 @@ void test_begin_drain_rejects_queued_start_without_admitting_it(void) {
         TP_STATUS_OK,
         gui_host_queue_begin_drain(&queue, &error));
     TEST_ASSERT_EQUAL_INT(
-        GUI_HOST_READY_TO_CUTOVER,
+        GUI_HOST_DRAINING,
         gui_host_queue_lifecycle(&queue));
     gui_host_completion completion = {0};
     TEST_ASSERT_TRUE(
@@ -169,6 +168,9 @@ void test_begin_drain_rejects_queued_start_without_admitting_it(void) {
     TEST_ASSERT_EQUAL_UINT64(
         1U, completion.envelope.request_id);
     gui_host_completion_destroy(&completion);
+    TEST_ASSERT_EQUAL_INT(
+        GUI_HOST_READY_TO_CUTOVER,
+        gui_host_queue_lifecycle(&queue));
 }
 
 void test_duplicate_queued_cancel_is_rejected(void) {
@@ -342,6 +344,14 @@ void test_draining_waits_for_terminal_observation_classification(void) {
     gui_host_queue_reduce_observation(
         &queue, observation, 37U);
     TEST_ASSERT_EQUAL_INT(
+        GUI_HOST_DRAINING,
+        gui_host_queue_lifecycle(&queue));
+    gui_host_completion completion = {0};
+    TEST_ASSERT_TRUE(
+        gui_host_queue_take_completion(
+            &queue, &completion));
+    gui_host_completion_destroy(&completion);
+    TEST_ASSERT_EQUAL_INT(
         GUI_HOST_READY_TO_CUTOVER,
         gui_host_queue_lifecycle(&queue));
     tp_session_observation_destroy(observation);
@@ -376,9 +386,6 @@ void test_begin_drain_does_not_repeat_an_admitted_cancel(void) {
         TP_STATUS_OOM,
         gui_host_queue_drain(
             &queue, session, &error));
-    TEST_ASSERT_TRUE(
-        gui_host_queue_cancelling(&queue));
-
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
         gui_host_queue_begin_drain(
@@ -468,7 +475,7 @@ void test_poll_failure_keeps_active_owner_and_draining_cancel_wins(void) {
     reduce_current_observation(
         &queue, session, 43U);
     TEST_ASSERT_EQUAL_INT(
-        GUI_HOST_READY_TO_CUTOVER,
+        GUI_HOST_DRAINING,
         gui_host_queue_lifecycle(&queue));
 
     gui_host_completion completion = {0};
@@ -484,6 +491,9 @@ void test_poll_failure_keeps_active_owner_and_draining_cancel_wins(void) {
         TP_SESSION_JOB_REJECTION_CANCELLED,
         completion.rejection);
     gui_host_completion_destroy(&completion);
+    TEST_ASSERT_EQUAL_INT(
+        GUI_HOST_READY_TO_CUTOVER,
+        gui_host_queue_lifecycle(&queue));
     tp_session_destroy(session);
 }
 
@@ -544,6 +554,66 @@ void test_take_failure_keeps_active_owner_until_retry_detaches(void) {
     tp_session_destroy(session);
 }
 
+void test_nonfallible_cutover_reopens_with_only_new_generation(void) {
+    gui_host_queue queue;
+    tp_error error = {{0}};
+    gui_host_queue_init(&queue);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_host_queue_open(
+            &queue, 51U, &error));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_host_queue_begin_drain(
+            &queue, &error));
+    TEST_ASSERT_EQUAL_INT(
+        GUI_HOST_READY_TO_CUTOVER,
+        gui_host_queue_lifecycle(&queue));
+
+    gui_host_queue_commit_cutover(
+        &queue, 52U);
+    TEST_ASSERT_EQUAL_INT(
+        GUI_HOST_OPEN,
+        gui_host_queue_lifecycle(&queue));
+    TEST_ASSERT_EQUAL_UINT64(
+        52U,
+        queue.session_instance_generation);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_host_queue_enqueue_export(
+            &queue, tp_id128_nil(), ".",
+            &error));
+    gui_host_command command = {0};
+    TEST_ASSERT_TRUE(
+        gui_host_queue__test_peek_start(
+            &queue, &command));
+    TEST_ASSERT_EQUAL_UINT64(
+        52U,
+        command.envelope
+            .session_instance_generation);
+}
+
+void test_nonfallible_close_clears_ready_owner(void) {
+    gui_host_queue queue;
+    tp_error error = {{0}};
+    gui_host_queue_init(&queue);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_host_queue_open(
+            &queue, 61U, &error));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_host_queue_begin_drain(
+            &queue, &error));
+    gui_host_queue_commit_close(&queue);
+    TEST_ASSERT_EQUAL_INT(
+        GUI_HOST_CLOSED,
+        gui_host_queue_lifecycle(&queue));
+    TEST_ASSERT_EQUAL_UINT64(
+        0U,
+        queue.session_instance_generation);
+}
+
 int main(int argc, char **argv) {
     if (tp_build_is_worker_invocation(
             argc, argv)) {
@@ -570,5 +640,9 @@ int main(int argc, char **argv) {
         test_poll_failure_keeps_active_owner_and_draining_cancel_wins);
     RUN_TEST(
         test_take_failure_keeps_active_owner_until_retry_detaches);
+    RUN_TEST(
+        test_nonfallible_cutover_reopens_with_only_new_generation);
+    RUN_TEST(
+        test_nonfallible_close_clears_ready_owner);
     return UNITY_END();
 }

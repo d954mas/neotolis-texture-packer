@@ -73,6 +73,13 @@ typedef struct gui_session_client_reducer {
     void *context;
 } gui_session_client_reducer;
 
+typedef struct gui_session_client_prepared {
+    tp_session *session;
+    tp_session_observation *initial;
+    uint64_t next_instance_generation;
+    bool ready;
+} gui_session_client_prepared;
+
 typedef struct gui_session_client {
     tp_session *session;
     tp_session_observation *latest;
@@ -90,6 +97,7 @@ typedef struct gui_session_client {
     size_t reducer_count;
     bool frame_pinned;
     bool observe_requested;
+    bool admission_open;
 } gui_session_client;
 
 void gui_session_client_init(gui_session_client *client);
@@ -101,6 +109,16 @@ tp_status gui_session_client_register_reducer(
  * failure the client, token, generation, and frame observation are unchanged. */
 tp_status gui_session_client_attach(
     gui_session_client *client, tp_session *session, tp_error *err);
+tp_status gui_session_client_prepare(
+    gui_session_client *client, tp_session *session,
+    gui_session_client_prepared *prepared, tp_error *err);
+void gui_session_client_cancel_prepared(
+    gui_session_client_prepared *prepared);
+tp_session *gui_session_client_commit_prepared(
+    gui_session_client *client,
+    gui_session_client_prepared *prepared);
+void gui_session_client_close_admission(
+    gui_session_client *client);
 tp_status gui_session_client_observe(
     gui_session_client *client, tp_error *err);
 tp_status gui_session_client_resync(
@@ -149,10 +167,13 @@ tp_session_job_observed_state gui_session_client_job_state(
     const gui_session_client *client);
 bool gui_session_client_frame_is_pinned(
     const gui_session_client *client);
+tp_session *gui_session_client_attached_session(
+    const gui_session_client *client);
 
 #ifdef TP_ENABLE_TEST_SEAMS
 void gui_session_client__test_fail_next_observe(void);
 void gui_session_client__test_fail_observes(unsigned int count);
+void gui_session_client__test_fail_next_result_copy(void);
 void gui_session_client__test_set_transaction_rng(
     gui_session_client *client, tp_rng rng);
 #endif

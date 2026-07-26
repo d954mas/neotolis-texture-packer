@@ -15,27 +15,29 @@
 
 #include "app/nt_app.h"
 // #region file dialogs (tinyfiledialogs)
-static void do_open(void) {
+static bool do_open(void) {
     static const char *filt[] = {"*.ntpacker_project"};
     const char *path = tinyfd_openFileDialog("Open Project", "", 1, filt, "ntpacker project", 0);
     if (!path) {
-        return;
+        return false;
     }
     if (!gui_scan_exists(path)) {
         set_statusf_ex(STATUS_WARNING, "project not found: %s", path); /* never fatal (F6b) */
-        return;
+        return false;
     }
-    char err[256];
-    if (gui_project_open(path, err, sizeof err) == TP_STATUS_OK) {
-        gui_pack_clear(-1);
-        gui_shell_reset_shown_result();
-        cancel_edit();
-        clamp_selection();
-        reset_selection();
-        set_statusf("Opened %s", gui_project_display_name());
-    } else {
-        set_statusf_ex(STATUS_ERROR, "Open failed: %s", err);
+    tp_error error = {{0}};
+    const tp_status status =
+        gui_project_lifecycle_begin_open(
+            path, &error);
+    if (status != TP_STATUS_OK) {
+        set_statusf_ex(
+            STATUS_ERROR, "Open failed: %s",
+            error.msg[0]
+                ? error.msg
+                : tp_status_str(status));
+        return false;
     }
+    return true;
 }
 
 static bool do_save_as(void) {
@@ -319,75 +321,98 @@ bool gui_actions__flush_failed(void) {
 }
 
 void request_new(void) {
-    if (gui_actions__busy_block()) {
-        return;
-    }
-    if (gui_actions__flush_failed()) {
-        return; /* A rejected buffered edit must not be silently discarded. */
-    }
-    if (gui_project_is_dirty()) {
-        s_after_confirm = AFTER_NEW;
-        s_confirm_open = true;
-    } else if (gui_project_new()) {
-        gui_pack_clear(-1);
-        gui_shell_reset_shown_result();
-        cancel_edit();
-        clamp_selection();
-        reset_selection();
-        set_status("New project.");
-    } else {
-        set_status_ex(STATUS_ERROR, "Out of memory: could not create a new project (current project kept)."); /* F3 */
-    }
+    s_actions.pending_lifecycle_request =
+        GUI_LIFECYCLE_REQUEST_NEW;
 }
 void request_exit(void) {
-    if (gui_actions__busy_block()) {
-        return;
-    }
-    if (gui_actions__flush_failed()) {
-        return; /* A rejected buffered edit must not be silently discarded. */
-    }
-    if (gui_project_is_dirty()) {
-        s_after_confirm = AFTER_EXIT;
-        s_confirm_open = true;
-    } else {
-        nt_app_quit();
-    }
+    s_actions.pending_lifecycle_request =
+        GUI_LIFECYCLE_REQUEST_EXIT;
 }
 /* Open routes through the same unsaved-changes confirm as New/Exit (no silent discard). The actual
  * OS open dialog runs via s_pending_open, either now (clean) or after the modal resolves. */
 void request_open(void) {
-    if (gui_actions__busy_block()) {
-        return;
+    s_actions.pending_lifecycle_request =
+        GUI_LIFECYCLE_REQUEST_OPEN;
+}
+
+static bool begin_new(void) {
+    tp_error error = {{0}};
+    const tp_status status =
+        gui_project_lifecycle_begin_new(
+            &error);
+    if (status == TP_STATUS_OK) {
+        return true;
+    }
+    set_statusf_ex(
+        STATUS_ERROR,
+        "New project failed: %s",
+        error.msg[0]
+            ? error.msg
+            : tp_status_str(status));
+    return false;
+}
+
+static bool begin_exit(void) {
+    tp_error error = {{0}};
+    const tp_status status =
+        gui_project_lifecycle_begin_shutdown(
+            true, &error);
+    if (status == TP_STATUS_OK) {
+        return true;
+    }
+    set_statusf_ex(
+        STATUS_ERROR,
+        "Exit failed: %s",
+        error.msg[0]
+            ? error.msg
+            : tp_status_str(status));
+    return false;
+}
+
+bool gui_actions__apply_lifecycle_request(void) {
+    const gui_lifecycle_request request =
+        s_actions.pending_lifecycle_request;
+    s_actions.pending_lifecycle_request =
+        GUI_LIFECYCLE_REQUEST_NONE;
+    if (request ==
+        GUI_LIFECYCLE_REQUEST_NONE) {
+        return false;
+    }
+    if (gui_project_lifecycle_state_query() !=
+        GUI_PROJECT_LIFECYCLE_OPEN_IDLE) {
+        set_status_ex(
+            STATUS_WARNING,
+            "A project lifecycle transition is already in progress.");
+        return false;
     }
     if (gui_actions__flush_failed()) {
-        return; /* A rejected buffered edit must not be silently discarded. */
+        return false;
     }
     if (gui_project_is_dirty()) {
-        s_after_confirm = AFTER_OPEN;
+        s_after_confirm = request;
         s_confirm_open = true;
-    } else {
-        s_pending_open = true;
+        return false;
     }
+    if (request ==
+        GUI_LIFECYCLE_REQUEST_NEW) {
+        return begin_new();
+    }
+    if (request ==
+        GUI_LIFECYCLE_REQUEST_EXIT) {
+        return begin_exit();
+    }
+    s_pending_open = true;
+    return false;
 }
 static void confirm_perform(void) {
-    if (s_after_confirm == AFTER_NEW) {
-        if (gui_project_new()) {
-            gui_pack_clear(-1);
-            gui_shell_reset_shown_result();
-            cancel_edit();
-            clamp_selection();
-            reset_selection();
-            set_status("New project.");
-        } else {
-            set_status_ex(STATUS_ERROR, "Out of memory: could not create a new project (current project kept)."); /* F3 */
-        }
-    } else if (s_after_confirm == AFTER_EXIT) {
-        gui_project_discard_recovery_on_shutdown();
-        nt_app_quit();
-    } else if (s_after_confirm == AFTER_OPEN) {
+    if (s_after_confirm == GUI_LIFECYCLE_REQUEST_NEW) {
+        (void)begin_new();
+    } else if (s_after_confirm == GUI_LIFECYCLE_REQUEST_EXIT) {
+        (void)begin_exit();
+    } else if (s_after_confirm == GUI_LIFECYCLE_REQUEST_OPEN) {
         s_pending_open = true; /* runs the open dialog next frame */
     }
-    s_after_confirm = AFTER_NONE;
+    s_after_confirm = GUI_LIFECYCLE_REQUEST_NONE;
 }
 // #endregion
 
@@ -399,21 +424,22 @@ void gui_actions__apply_confirm(void) {
         if (saved) {
             confirm_perform();
         } else {
-            s_after_confirm = AFTER_NONE;
+            s_after_confirm = GUI_LIFECYCLE_REQUEST_NONE;
         }
     } else if (s_modal_action == MODAL_DISCARD) {
         s_confirm_open = false;
         confirm_perform();
     } else if (s_modal_action == MODAL_CANCEL) {
         s_confirm_open = false;
-        s_after_confirm = AFTER_NONE;
+        s_after_confirm = GUI_LIFECYCLE_REQUEST_NONE;
     }
     s_modal_action = MODAL_NONE;
 }
 
-void gui_actions__apply_file_dialogs(void) {
+bool gui_actions__apply_file_dialogs(void) {
+    bool lifecycle_started = false;
     if (s_pending_open) {
-        do_open();
+        lifecycle_started = do_open();
     }
     if (s_pending_save) {
         (void)do_save();
@@ -426,5 +452,49 @@ void gui_actions__apply_file_dialogs(void) {
     }
     if (s_pending_add_folder) {
         do_add_folder();
+    }
+    return lifecycle_started;
+}
+
+void gui_actions_pump_lifecycle(void) {
+    tp_error error = {{0}};
+    gui_project_lifecycle_kind completed =
+        GUI_PROJECT_LIFECYCLE_NONE;
+    const tp_status status =
+        gui_project_lifecycle_pump(
+            &completed, &error);
+    if (status != TP_STATUS_OK) {
+        set_statusf_ex(
+            STATUS_ERROR,
+            "Session lifecycle failed: %s",
+            error.msg[0]
+                ? error.msg
+                : tp_status_str(status));
+        return;
+    }
+    if (completed ==
+        GUI_PROJECT_LIFECYCLE_NONE) {
+        return;
+    }
+    gui_actions__discard_edits();
+    gui_actions__clear_pending();
+    gui_actions_refresh_fingerprint_reset();
+    if (completed ==
+        GUI_PROJECT_LIFECYCLE_SHUTDOWN) {
+        nt_app_quit();
+        return;
+    }
+    gui_pack_clear(-1);
+    gui_shell_reset_shown_result();
+    cancel_edit();
+    clamp_selection();
+    reset_selection();
+    if (completed ==
+        GUI_PROJECT_LIFECYCLE_NEW) {
+        set_status("New project.");
+    } else {
+        set_statusf(
+            "Opened %s",
+            gui_project_display_name());
     }
 }

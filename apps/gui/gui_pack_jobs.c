@@ -124,20 +124,25 @@ static bool require_work_dir(char *err, size_t err_cap) {
     return false;
 }
 
+static bool current_observed_input_token(
+    tp_session_input_token *out) {
+    NT_ASSERT(out != NULL);
+    return gui_project_observed_input_token(out);
+}
+
 static bool input_changed_since(tp_session_input_token token) {
-    const tp_session_snapshot *snapshot = gui_project_snapshot();
-    return !snapshot || !tp_session_input_token_equal(
-                            tp_session_snapshot_input_token(snapshot), token);
+    tp_session_input_token current = {0};
+    return !current_observed_input_token(&current) ||
+           !tp_session_input_token_equal(current, token);
 }
 
 static bool native_pack_input_changed_since(
     const tp_session_pack_job_result *pack) {
-    const tp_session_snapshot *snapshot = gui_project_snapshot();
-    if (!pack || !snapshot) {
+    tp_session_input_token live_token = {0};
+    if (!pack ||
+        !current_observed_input_token(&live_token)) {
         return true;
     }
-    const tp_session_input_token live_token =
-        tp_session_snapshot_input_token(snapshot);
     return tp_session_pack_result_freshness(pack, live_token, NULL) !=
            TP_PACK_FRESHNESS_CURRENT;
 }
@@ -396,7 +401,8 @@ static gui_pack_done drive_host_to_completion(
     for (;;) {
         tp_error error = {{0}};
         const tp_status drain_status =
-            gui_project_host_drain(&error);
+            gui_project_lifecycle_pump(
+                NULL, &error);
         if (drain_status != TP_STATUS_OK) {
             if (out) {
                 (void)snprintf(
@@ -571,10 +577,6 @@ bool gui_pack_preview_async_start(int atlas_index, const char *exporter_id,
 }
 
 void gui_pack_shutdown(void) {
-    if (gui_project_host_lifecycle_query() ==
-        GUI_PROJECT_HOST_OPEN) {
-        (void)gui_project_host_begin_drain(NULL);
-    }
     gui_pack_clear(-1);
     gui_pack_preview_clear();
 }

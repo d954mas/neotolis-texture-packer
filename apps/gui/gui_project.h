@@ -42,15 +42,28 @@ extern "C" {
 /* Result of an add-source attempt (the GUI surfaces "already added" distinctly). */
 typedef enum { GUI_ADD_FAILED = 0, GUI_ADD_ADDED, GUI_ADD_DUPLICATE } gui_add_status;
 
-typedef enum gui_project_host_lifecycle {
-    GUI_PROJECT_HOST_CLOSED = 0,
-    GUI_PROJECT_HOST_OPEN,
-    GUI_PROJECT_HOST_DRAINING,
-    GUI_PROJECT_HOST_READY_TO_CUTOVER
-} gui_project_host_lifecycle;
+typedef enum gui_project_lifecycle_kind {
+    GUI_PROJECT_LIFECYCLE_NONE = 0,
+    GUI_PROJECT_LIFECYCLE_NEW,
+    GUI_PROJECT_LIFECYCLE_OPEN,
+    GUI_PROJECT_LIFECYCLE_SHUTDOWN
+} gui_project_lifecycle_kind;
+
+typedef enum gui_project_lifecycle_state {
+    GUI_PROJECT_LIFECYCLE_CLOSED = 0,
+    GUI_PROJECT_LIFECYCLE_OPEN_IDLE,
+    GUI_PROJECT_LIFECYCLE_DRAINING
+} gui_project_lifecycle_state;
+
+typedef bool (*gui_project_controller_attached_fn)(
+    void *context);
+
+typedef struct gui_project_controller_status_port {
+    gui_project_controller_attached_fn attached;
+    void *context;
+} gui_project_controller_status_port;
 
 typedef struct gui_project_job_completion {
-    bool present;
     bool publish_result;
     uint64_t session_instance_generation;
     uint64_t request_id;
@@ -68,9 +81,6 @@ void gui_project_init(void);
 /* Tears the model down and, when recovery is enabled, deletes the recovery slot (clean-exit reset:
  * a cleanly-exited session leaves NO journal to recover). */
 void gui_project_shutdown(void);
-/* Called only after the user explicitly confirms Exit -> Discard. Without it, shutdown preserves a
- * dirty recovery journal so a raw window close remains recoverable. */
-void gui_project_discard_recovery_on_shutdown(void);
 
 /* Require recovery admission for every subsequently created GUI session. The
  * interactive host calls this once before gui_project_init; tests may leave
@@ -114,6 +124,11 @@ uint64_t gui_project_snapshot_lifetime_generation(void);
 /* Coalesced source-runtime observation component. Runtime-only changes do not
  * replace or synthesize a model snapshot. */
 uint64_t gui_project_source_runtime_generation(void);
+/* Current composite input identity from the same client observation cut:
+ * model state is read from the immutable snapshot and runtime state from the
+ * typed source-runtime token. */
+bool gui_project_observed_input_token(
+    tp_session_input_token *out);
 /* Host-frame observation seam. begin atomically observes/reduces and pins the
  * immutable snapshot; end releases the pin after render/present. */
 tp_status gui_project_frame_begin(tp_error *err);
@@ -127,17 +142,23 @@ tp_status gui_project_job_enqueue_pack(
 tp_status gui_project_job_enqueue_export(
     tp_id128 atlas_id, const char *work_dir, tp_error *err);
 tp_status gui_project_job_enqueue_cancel(tp_error *err);
-tp_status gui_project_host_drain(tp_error *err);
-tp_status gui_project_host_begin_drain(tp_error *err);
+tp_status gui_project_lifecycle_begin_new(tp_error *err);
+tp_status gui_project_lifecycle_begin_open(
+    const char *path, tp_error *err);
+tp_status gui_project_lifecycle_begin_shutdown(
+    bool discard_recovery, tp_error *err);
+tp_status gui_project_lifecycle_pump(
+    gui_project_lifecycle_kind *completed,
+    tp_error *err);
+gui_project_lifecycle_state
+gui_project_lifecycle_state_query(void);
 bool gui_project_host_take_completion(
     gui_project_job_completion *out);
 void gui_project_job_completion_destroy(
     gui_project_job_completion *completion);
 bool gui_project_job_busy(void);
-bool gui_project_job_cancelling(void);
 tp_session_job_kind gui_project_job_active_kind(void);
 tp_session_job_observed_state gui_project_job_observed_state(void);
-gui_project_host_lifecycle gui_project_host_lifecycle_query(void);
 uint64_t gui_project_session_instance_generation(void);
 uint64_t gui_project_snapshot_model_generation(void);
 tp_status gui_project_snapshot_serialize(char **out, size_t *out_len,
@@ -295,18 +316,14 @@ bool gui_project_undo(void);
 bool gui_project_redo(void);
 
 /* --- file operations (paths explicit; dialogs live in the UI layer) --- */
-/* Fresh empty project: replaces the current one, clears path + both bits. Returns false
- * (KEEPING the current project intact) only when creating/wrapping the fresh project OOMs
- * (never lose the open project on an allocation failure). */
-bool gui_project_new(void);
-/* Loads `path`; on failure fills err_out (from tp_error) and leaves the current project
- * intact. On success replaces it, sets path, clears dirty, marks preview stale. */
-tp_status gui_project_open(const char *path, char *err_out, size_t err_cap);
 /* Saves to the current path (must exist). Clears project_dirty. */
 tp_status gui_project_save(char *err_out, size_t err_cap);
 /* Saves to `path`, remembers it, clears project_dirty. Promotes structural ids FIRST
  * and, on RNG failure, returns the error WITHOUT writing (never persists a nil-id file). */
 tp_status gui_project_save_as(const char *path, char *err_out, size_t err_cap);
+
+void gui_project_set_controller_status_port(
+    gui_project_controller_status_port port);
 
 /* Drains a pending transaction REJECT recorded by a mutator whose op(s) core rejected
  * (out-of-range value / bad reference / OOM). The model is left byte-unchanged on a
@@ -327,6 +344,7 @@ tp_session *gui_project__test_session(void);
 void gui_project__test_fail_next_observe(void);
 void gui_project__test_fail_observes(unsigned int count);
 bool gui_project__test_host_has_staged_completion(void);
+uint64_t gui_project__test_open_call_count(void);
 #endif
 
 #ifdef __cplusplus

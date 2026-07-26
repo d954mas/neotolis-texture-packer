@@ -13,21 +13,12 @@
 extern "C" {
 #endif
 
-#define GUI_HOST_COMMAND_CAPACITY 8U
-
 typedef enum gui_host_lifecycle_state {
     GUI_HOST_CLOSED = 0,
     GUI_HOST_OPEN,
     GUI_HOST_DRAINING,
     GUI_HOST_READY_TO_CUTOVER
 } gui_host_lifecycle_state;
-
-typedef enum gui_host_command_kind {
-    GUI_HOST_COMMAND_NONE = 0,
-    GUI_HOST_COMMAND_PACK,
-    GUI_HOST_COMMAND_EXPORT,
-    GUI_HOST_COMMAND_CANCEL
-} gui_host_command_kind;
 
 typedef enum gui_host_staged_classification {
     GUI_HOST_STAGED_NONE = 0,
@@ -42,7 +33,6 @@ typedef struct gui_host_job_envelope {
 } gui_host_job_envelope;
 
 typedef struct gui_host_completion {
-    bool present;
     bool publish_result;
     gui_host_job_envelope envelope;
     tp_session_job_state state;
@@ -53,7 +43,6 @@ typedef struct gui_host_completion {
 } gui_host_completion;
 
 typedef struct gui_host_command {
-    gui_host_command_kind kind;
     gui_host_job_envelope envelope;
     tp_id128 atlas_id;
     char work_dir[TP_IDENTITY_PATH_MAX];
@@ -64,13 +53,10 @@ typedef struct gui_host_queue {
     gui_host_lifecycle_state lifecycle;
     uint64_t session_instance_generation;
     uint64_t next_request_id;
-    gui_host_command commands[GUI_HOST_COMMAND_CAPACITY];
-    size_t command_count;
-    bool active;
+    gui_host_command pending_start;
     gui_host_job_envelope active_envelope;
     bool cancellation_requested;
     bool cancel_queued;
-    bool drain_cancel_pending;
     gui_host_staged_classification staged_classification;
     gui_host_completion staged;
 } gui_host_queue;
@@ -79,11 +65,13 @@ void gui_host_queue_init(gui_host_queue *queue);
 tp_status gui_host_queue_open(
     gui_host_queue *queue, uint64_t session_instance_generation,
     tp_error *err);
-bool gui_host_queue_can_replace(const gui_host_queue *queue);
 tp_status gui_host_queue_begin_drain(
     gui_host_queue *queue, tp_error *err);
-tp_status gui_host_queue_close(
-    gui_host_queue *queue, tp_error *err);
+void gui_host_queue_commit_cutover(
+    gui_host_queue *queue,
+    uint64_t session_instance_generation);
+void gui_host_queue_commit_close(
+    gui_host_queue *queue);
 
 tp_status gui_host_queue_enqueue_pack(
     gui_host_queue *queue, tp_id128 atlas_id,
@@ -112,7 +100,6 @@ void gui_host_completion_destroy(
     gui_host_completion *completion);
 
 bool gui_host_queue_busy(const gui_host_queue *queue);
-bool gui_host_queue_cancelling(const gui_host_queue *queue);
 tp_session_job_kind gui_host_queue_active_kind(
     const gui_host_queue *queue);
 gui_host_lifecycle_state gui_host_queue_lifecycle(
@@ -127,6 +114,8 @@ void gui_host_queue__test_retag_staged_request(
     gui_host_queue *queue, uint64_t request_id);
 void gui_host_queue__test_fail_next_poll(void);
 void gui_host_queue__test_fail_next_take(void);
+void gui_host_queue__test_hold_active_polls(
+    unsigned int count);
 bool gui_host_queue__test_active(
     const gui_host_queue *queue);
 #endif

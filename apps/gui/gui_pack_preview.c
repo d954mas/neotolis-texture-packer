@@ -83,10 +83,12 @@ const tp_result *gui_pack_preview_result(int atlas_index) {
     const tp_session_snapshot *snapshot = gui_project_snapshot();
     const tp_snapshot_atlas *atlas =
         snapshot ? tp_session_snapshot_atlas_at(snapshot, atlas_index) : NULL;
+    tp_session_input_token current_input = {0};
     if (!s_preview.valid || !atlas ||
         !tp_id128_eq(s_preview.atlas_id, atlas->id) ||
-        !tp_session_input_token_equal(tp_session_snapshot_input_token(snapshot),
-                                      s_preview.input_token)) {
+        !gui_project_observed_input_token(&current_input) ||
+        !tp_session_input_token_equal(
+            current_input, s_preview.input_token)) {
         return NULL;
     }
     return s_preview.result;

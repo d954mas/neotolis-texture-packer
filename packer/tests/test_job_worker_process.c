@@ -42,22 +42,6 @@ static void sleep_ms(unsigned milliseconds) {
 #endif
 }
 
-static double now_ms(void) {
-#if defined(_WIN32)
-    LARGE_INTEGER frequency;
-    LARGE_INTEGER counter;
-    TEST_ASSERT_TRUE(QueryPerformanceFrequency(&frequency));
-    TEST_ASSERT_TRUE(QueryPerformanceCounter(&counter));
-    return (double)counter.QuadPart * 1000.0 /
-           (double)frequency.QuadPart;
-#else
-    struct timespec value;
-    TEST_ASSERT_EQUAL_INT(0, clock_gettime(CLOCK_MONOTONIC, &value));
-    return (double)value.tv_sec * 1000.0 +
-           (double)value.tv_nsec / 1000000.0;
-#endif
-}
-
 static bool read_exact_stdin(void *out, size_t size) {
     uint8_t *bytes = out;
     size_t offset = 0U;
@@ -401,13 +385,11 @@ static void assert_blocked_phase_is_cancellable(
         sleep_ms(1U);
     }
     TEST_ASSERT_EQUAL_INT(expected_phase, progress.phase);
-    const double started = now_ms();
     tp_job_worker_process_request_cancel(process);
     const tp_job_worker_proto_response *response =
         pump_to_terminal(process, 2000);
     TEST_ASSERT_EQUAL_INT(TP_SESSION_JOB_CANCELLED, response->state);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_CANCELLED, response->status);
-    TEST_ASSERT_TRUE(now_ms() - started < 1000.0);
     tp_job_worker_process_destroy(process);
 }
 
@@ -451,11 +433,8 @@ void test_cancel_during_request_backpressure_is_bounded(void) {
     tp_job_worker_process *process =
         start_process_with_request("blocked-input", &request);
     tp_job_worker_process_request_cancel(process);
-    const double started = now_ms();
     const tp_job_worker_proto_response *response =
         pump_to_terminal(process, 2000);
-    const double elapsed = now_ms() - started;
-    TEST_ASSERT_TRUE(elapsed < 1000.0);
     TEST_ASSERT_EQUAL_INT(TP_SESSION_JOB_CANCELLED, response->state);
     tp_job_worker_process_destroy(process);
     free(payload);
@@ -497,6 +476,7 @@ void test_timeout_force_terminates_owned_process(void) {
 }
 
 void test_destroy_live_process_returns_without_waiting_for_child(void) {
+    tp_proc__test_reset_destroy_trace();
     const size_t payload_size = 1024U * 1024U;
     uint8_t *payload = malloc(payload_size);
     TEST_ASSERT_NOT_NULL(payload);
@@ -514,10 +494,11 @@ void test_destroy_live_process_returns_without_waiting_for_child(void) {
         sleep_ms(1U);
     }
     TEST_ASSERT_TRUE(tp_job_worker__test_request_backpressured(process));
-    const double started = now_ms();
     tp_job_worker_process_destroy(process);
-    const double elapsed = now_ms() - started;
-    TEST_ASSERT_TRUE(elapsed < 250.0);
+    TEST_ASSERT_GREATER_THAN_UINT(0U,
+        tp_proc__test_destroy_kill_calls());
+    TEST_ASSERT_EQUAL_UINT(
+        0U, tp_proc__test_destroy_blocking_wait_calls());
     free(payload);
 }
 

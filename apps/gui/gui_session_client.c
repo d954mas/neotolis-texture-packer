@@ -9,6 +9,7 @@
 
 #ifdef TP_ENABLE_TEST_SEAMS
 static unsigned int s_test_observe_failures;
+static unsigned int s_test_result_copy_failures;
 #endif
 
 static void destroy_observation_pair(
@@ -54,6 +55,14 @@ static void reduce_observation(
 static tp_status transaction_result_copy(
     const tp_txn_result *source,
     tp_txn_result *destination, tp_error *err) {
+#ifdef TP_ENABLE_TEST_SEAMS
+    if (s_test_result_copy_failures > 0U) {
+        s_test_result_copy_failures--;
+        return tp_error_set(
+            err, TP_STATUS_OOM,
+            "injected GUI transaction-result copy failure");
+    }
+#endif
     if (!source || !destination) {
         return tp_error_set(
             err, TP_STATUS_INVALID_ARGUMENT,
@@ -491,10 +500,50 @@ tp_status gui_session_client_attach(
             err, TP_STATUS_INVALID_ARGUMENT,
             "GUI session attach requires client and session");
     }
+    if (client->session) {
+        return tp_error_set(
+            err, TP_STATUS_INVALID_ARGUMENT,
+            "GUI session attach is initial-empty only");
+    }
+    gui_session_client_prepared prepared = {0};
+    const tp_status status =
+        gui_session_client_prepare(
+            client, session, &prepared, err);
+    if (status != TP_STATUS_OK) {
+        return status;
+    }
+    tp_session *retired =
+        gui_session_client_commit_prepared(
+            client, &prepared);
+    NT_ASSERT(retired == NULL);
+    return TP_STATUS_OK;
+}
+
+tp_status gui_session_client_prepare(
+    gui_session_client *client, tp_session *session,
+    gui_session_client_prepared *prepared,
+    tp_error *err) {
+    if (!client || !session || !prepared) {
+        return tp_error_set(
+            err, TP_STATUS_INVALID_ARGUMENT,
+            "GUI session prepare requires client, session, and output");
+    }
+    if (prepared->ready ||
+        prepared->session ||
+        prepared->initial) {
+        return tp_error_set(
+            err, TP_STATUS_INVALID_ARGUMENT,
+            "GUI session prepare output is already occupied");
+    }
+    if (session == client->session) {
+        return tp_error_set(
+            err, TP_STATUS_INVALID_ARGUMENT,
+            "GUI session prepare candidate aliases the active session");
+    }
     if (client->frame_pinned) {
         return tp_error_set(
             err, TP_STATUS_INVALID_ARGUMENT,
-            "GUI session attach is forbidden during a pinned frame");
+            "GUI session prepare is forbidden during a pinned frame");
     }
 
     tp_session_observation *initial = NULL;
@@ -510,22 +559,61 @@ tp_status gui_session_client_attach(
             err, TP_STATUS_INVALID_ARGUMENT,
             "GUI session attach did not produce a complete observation");
     }
-
-    uint64_t next_generation =
+    prepared->session = session;
+    prepared->initial = initial;
+    prepared->next_instance_generation =
         client->session_instance_generation + 1U;
-    if (next_generation == 0U) {
-        next_generation = 1U;
+    if (prepared->next_instance_generation ==
+        0U) {
+        prepared->next_instance_generation = 1U;
     }
+    prepared->ready = true;
+    return TP_STATUS_OK;
+}
+
+void gui_session_client_cancel_prepared(
+    gui_session_client_prepared *prepared) {
+    if (!prepared) {
+        return;
+    }
+    tp_session_observation_destroy(
+        prepared->initial);
+    memset(prepared, 0, sizeof *prepared);
+}
+
+tp_session *gui_session_client_commit_prepared(
+    gui_session_client *client,
+    gui_session_client_prepared *prepared) {
+    NT_ASSERT(client != NULL);
+    NT_ASSERT(prepared != NULL);
+    NT_ASSERT(prepared->ready);
+    NT_ASSERT(prepared->session != NULL);
+    NT_ASSERT(prepared->initial != NULL);
+    NT_ASSERT(!client->frame_pinned);
+    tp_session *retired = client->session;
+    const uint64_t next_generation =
+        prepared->next_instance_generation;
+    NT_ASSERT(next_generation != 0U);
     /* A successful attachment starts a distinct session-instance receipt
      * scope. Clear only after candidate observation preparation succeeded,
      * and before reducers see the new generation. */
     submit_state_clear(client);
+    client->session = prepared->session;
     publish_observation(
-        client, initial, next_generation);
-    client->session = session;
+        client, prepared->initial,
+        next_generation);
     client->session_instance_generation =
         next_generation;
-    return TP_STATUS_OK;
+    client->admission_open = true;
+    memset(prepared, 0, sizeof *prepared);
+    return retired;
+}
+
+void gui_session_client_close_admission(
+    gui_session_client *client) {
+    NT_ASSERT(client != NULL);
+    NT_ASSERT(client->session != NULL);
+    client->admission_open = false;
 }
 
 tp_status gui_session_client_observe(
@@ -607,6 +695,11 @@ tp_status gui_session_client_submit(
             err, TP_STATUS_INVALID_ARGUMENT,
             "GUI submit requires an attached client, operations, semantic label, and output");
     }
+    if (!client->admission_open) {
+        return tp_error_set(
+            err, TP_STATUS_INVALID_ARGUMENT,
+            "GUI session mutation admission is closed while lifecycle work drains");
+    }
     if (client->frame_pinned) {
         return tp_error_set(
             err, TP_STATUS_INVALID_ARGUMENT,
@@ -653,12 +746,8 @@ tp_status gui_session_client_submit(
     if (status != TP_STATUS_OK) {
         return status;
     }
-    if (existing && pending->terminal_ready) {
-        if (!pending->result_available) {
-            return tp_error_set(
-                err, TP_STATUS_OOM,
-                "GUI retained transaction result is unavailable");
-        }
+    if (existing && pending->terminal_ready &&
+        pending->result_available) {
         status = transaction_result_copy(
             &pending->result, &out->transaction,
             err);
@@ -678,6 +767,12 @@ tp_status gui_session_client_submit(
                        pending->terminal.no_change
                    ? TP_STATUS_OK
                    : pending->terminal.status;
+    }
+    if (existing && pending->terminal_ready) {
+        /* Core owns the authoritative retained result. A failed local copy
+         * must not permanently block an exact-ID retry. */
+        pending->terminal_ready = false;
+        existing = false;
     }
     if (existing) {
         return tp_error_set(
@@ -704,8 +799,19 @@ tp_status gui_session_client_submit(
         client->session, &transaction_request,
         &out->transaction, err);
     out->terminal_status = status;
-    pending_finish(
-        client, pending, status, &out->transaction);
+    if (status == TP_STATUS_DUPLICATE_ID) {
+        /*
+         * Core reports duplicate IDs with its current revision. Do not retain
+         * that transient answer: a later retry must ask core again rather than
+         * replaying a stale revision from this client.
+         */
+        pending->terminal_ready = true;
+        pending->result_available = false;
+    } else {
+        pending_finish(
+            client, pending, status,
+            &out->transaction);
+    }
 
     if (!out->transaction.committed) {
         return status;
@@ -834,6 +940,7 @@ void gui_session_client_detach(
     destroy_observation_pair(
         client->latest, client->snapshot_owner);
     client->session = NULL;
+    client->admission_open = false;
     client->latest = NULL;
     client->snapshot_owner = NULL;
     client->observed =
@@ -903,6 +1010,11 @@ bool gui_session_client_frame_is_pinned(
     return client && client->frame_pinned;
 }
 
+tp_session *gui_session_client_attached_session(
+    const gui_session_client *client) {
+    return client ? client->session : NULL;
+}
+
 #ifdef TP_ENABLE_TEST_SEAMS
 void gui_session_client__test_fail_next_observe(void) {
     s_test_observe_failures = 1U;
@@ -911,6 +1023,10 @@ void gui_session_client__test_fail_next_observe(void) {
 void gui_session_client__test_fail_observes(
     unsigned int count) {
     s_test_observe_failures = count;
+}
+
+void gui_session_client__test_fail_next_result_copy(void) {
+    s_test_result_copy_failures = 1U;
 }
 
 void gui_session_client__test_set_transaction_rng(

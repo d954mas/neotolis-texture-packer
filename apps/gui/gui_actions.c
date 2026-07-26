@@ -53,7 +53,7 @@ tp_id128 s_pending_remove_source_atlas_id;
 tp_id128 s_pending_remove_source_id;
 int64_t s_pending_remove_source_revision;
 int s_pending_preview_target = -1; /* boundary-ok: exporter option, not a target entity index */
-int s_after_confirm;
+gui_lifecycle_request s_after_confirm;
 bool s_confirm_open;
 int s_modal_action;
 /* R6b: startup crash-recovery modal glue. The orphan list lives here; the modal reads it via the
@@ -70,15 +70,6 @@ gui_actions_state s_actions = {.recovery_pending_row = -1};
 
 _Static_assert(sizeof s_actions.edit_sprite_source_key == TP_SRCKEY_MAX,
                "editor source-key buffer must match the canonical bound");
-
-/* True (and raises a status) when an async job blocks a destructive action. */
-bool gui_actions__busy_block(void) {
-    if (gui_pack_async_busy()) {
-        set_status_ex(STATUS_WARNING, "Wait for the pack/export to finish (or Cancel) first.");
-        return true;
-    }
-    return false;
-}
 
 // #region undo/redo + refresh actions
 static tp_id128 selected_animation_id(void) {
@@ -851,6 +842,10 @@ static void commit_active_edit(bool force) {
 
 // #region deferred side-effects (run at the top of the frame, between frames)
 void apply_pending(void) {
+    if (gui_project_lifecycle_state_query() ==
+        GUI_PROJECT_LIFECYCLE_DRAINING) {
+        return;
+    }
     /* A press landed outside the active inline editor last frame -> commit it (desktop rename UX).
      * Also fires before any pending model change (remove/refresh/open/new) so no orphaned editor
      * survives a mutation. */
@@ -884,13 +879,26 @@ void apply_pending(void) {
         s_actions.gesture_commit = false;
     }
 
+    if (gui_actions__apply_lifecycle_request() &&
+        gui_project_lifecycle_state_query() ==
+            GUI_PROJECT_LIFECYCLE_DRAINING) {
+        return;
+    }
+
     apply_pending_history_action();
 
     gui_actions__apply_confirm();
+    if (gui_project_lifecycle_state_query() ==
+        GUI_PROJECT_LIFECYCLE_DRAINING) {
+        return;
+    }
 
     gui_actions__apply_recovery();
 
-    gui_actions__apply_file_dialogs();
+    if (gui_actions__apply_file_dialogs()) {
+        gui_actions__clear_pending();
+        return;
+    }
     gui_actions__apply_structural_edits();
     if (s_pending_refresh) {
         do_refresh();

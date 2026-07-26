@@ -2,8 +2,7 @@
 #define NTPACKER_GUI_PROJECT_INTERNAL_H
 
 #include "gui_project.h"
-#include "gui_host_queue.h"
-#include "gui_session_client.h"
+#include "gui_host_binding.h"
 #include "tp_core/tp_srckey.h"
 
 /* Private storage shared only by the physical gui_project implementation files.
@@ -28,16 +27,16 @@ typedef struct gui_coalesce_key {
 } gui_coalesce_key;
 
 typedef struct gui_project_state {
-    tp_session *session;
-    gui_session_client client;
-    gui_host_queue host_queue;
+    gui_host_binding binding;
+    gui_project_lifecycle_kind lifecycle_kind;
     uint64_t observed_instance_generation;
     int64_t observed_revision;
-    bool client_initialized;
+    bool binding_initialized;
+    gui_project_controller_status_port
+        controller_status;
     bool preview_stale;
     char name[256];
     double now;
-    bool discard_recovery_on_shutdown;
     bool op_error;
     tp_status op_error_status;
     char op_error_msg[256];
@@ -61,10 +60,14 @@ extern gui_project_state s_project;
 
 void gui_project__snapshot_drop(void);
 tp_status gui_project__client_init(tp_error *err);
+tp_session *gui_project__borrow_active_session(void);
 void gui_project__note_session_reject(tp_status status, const tp_error *err);
 void gui_project__note_recovery_degraded(tp_status status);
 void gui_project__sync_recovery_notice(void);
 void gui_project__attach_recovery_live(tp_session *session);
+tp_status gui_project__prepare_candidate_recovery(
+    tp_session *session, tp_error *err);
+bool gui_project__ingress_is_open(void);
 
 void gui_project_pending_discard(void);
 void gui_project_pending_route(const gui_coalesce_key *key);

@@ -8,11 +8,30 @@
 #ifdef TP_ENABLE_TEST_SEAMS
 static bool s_test_fail_next_poll;
 static bool s_test_fail_next_take;
+static unsigned int s_test_hold_active_polls;
 #endif
+
+static bool has_pending_start(
+    const gui_host_queue *queue) {
+    return queue->pending_start.envelope.kind !=
+           TP_SESSION_JOB_NONE;
+}
+
+static bool has_active_job(
+    const gui_host_queue *queue) {
+    return queue->active_envelope.kind !=
+           TP_SESSION_JOB_NONE;
+}
+
+static bool has_staged_completion(
+    const gui_host_queue *queue) {
+    return queue->staged_classification !=
+           GUI_HOST_STAGED_NONE;
+}
 
 static void clear_staged(gui_host_queue *queue) {
     NT_ASSERT(queue != NULL);
-    if (queue->staged.present) {
+    if (has_staged_completion(queue)) {
         tp_session_job_result_destroy(
             &queue->staged.result);
     }
@@ -24,8 +43,8 @@ static void clear_staged(gui_host_queue *queue) {
 static void advance_ready_after_staged_clear(
     gui_host_queue *queue) {
     NT_ASSERT(queue != NULL);
-    if (!queue->active &&
-        !queue->staged.present &&
+    if (!has_active_job(queue) &&
+        !has_staged_completion(queue) &&
         queue->lifecycle ==
             GUI_HOST_DRAINING) {
         queue->lifecycle =
@@ -72,24 +91,8 @@ static bool observed_result_matches(
            result->result != NULL;
 }
 
-static void pop_command(gui_host_queue *queue) {
-    NT_ASSERT(queue != NULL);
-    NT_ASSERT(queue->command_count > 0U);
-    if (queue->command_count > 1U) {
-        memmove(
-            &queue->commands[0], &queue->commands[1],
-            (queue->command_count - 1U) *
-                sizeof queue->commands[0]);
-    }
-    queue->command_count--;
-    memset(
-        &queue->commands[queue->command_count], 0,
-        sizeof queue->commands[0]);
-}
-
 static tp_status reserve_start(
     gui_host_queue *queue,
-    gui_host_command_kind command_kind,
     tp_session_job_kind job_kind,
     gui_host_command **out, tp_error *err) {
     if (!queue || !out) {
@@ -108,21 +111,14 @@ static tp_status reserve_start(
             err, TP_STATUS_INVALID_ARGUMENT,
             "host already owns a pending or active job");
     }
-    if (queue->command_count >=
-        GUI_HOST_COMMAND_CAPACITY) {
-        return tp_error_set(
-            err, TP_STATUS_OUT_OF_BOUNDS,
-            "host command queue is full");
-    }
     if (queue->next_request_id == UINT64_MAX) {
         return tp_error_set(
             err, TP_STATUS_INVALID_ARGUMENT,
             "host job request id space is exhausted");
     }
     gui_host_command *command =
-        &queue->commands[queue->command_count];
+        &queue->pending_start;
     memset(command, 0, sizeof *command);
-    command->kind = command_kind;
     command->envelope =
         (gui_host_job_envelope){
             .session_instance_generation =
@@ -137,10 +133,8 @@ static tp_status reserve_start(
 
 static void commit_start(gui_host_queue *queue) {
     NT_ASSERT(queue != NULL);
-    NT_ASSERT(queue->command_count <
-              GUI_HOST_COMMAND_CAPACITY);
+    NT_ASSERT(has_pending_start(queue));
     queue->next_request_id++;
-    queue->command_count++;
 }
 
 static void stage_host_failure(
@@ -148,10 +142,9 @@ static void stage_host_failure(
     gui_host_job_envelope envelope,
     tp_status status, const tp_error *error) {
     NT_ASSERT(queue != NULL);
-    NT_ASSERT(!queue->staged.present);
+    NT_ASSERT(!has_staged_completion(queue));
     queue->staged =
         (gui_host_completion){
-            .present = true,
             .publish_result = false,
             .envelope = envelope,
             .state = TP_SESSION_JOB_FAILED,
@@ -167,10 +160,9 @@ static void stage_terminal(
     tp_session_job_result *result) {
     NT_ASSERT(queue != NULL);
     NT_ASSERT(result != NULL);
-    NT_ASSERT(!queue->staged.present);
+    NT_ASSERT(!has_staged_completion(queue));
     queue->staged =
         (gui_host_completion){
-            .present = true,
             .publish_result = false,
             .envelope = queue->active_envelope,
             .state = result->state,
@@ -199,19 +191,18 @@ tp_status gui_host_queue_open(
             err, TP_STATUS_INVALID_ARGUMENT,
             "host open requires queue");
     }
-    if (queue->lifecycle != GUI_HOST_CLOSED &&
-        queue->lifecycle !=
-            GUI_HOST_READY_TO_CUTOVER) {
+    if (queue->lifecycle != GUI_HOST_CLOSED) {
         return tp_error_set(
             err, TP_STATUS_INVALID_ARGUMENT,
-            "host may open only from closed or ready-to-cutover");
+            "host initial open requires a closed queue");
     }
     if (session_instance_generation == 0U) {
         return tp_error_set(
             err, TP_STATUS_INVALID_ARGUMENT,
             "host session instance generation must be non-zero");
     }
-    if (queue->active || queue->command_count > 0U) {
+    if (has_active_job(queue) ||
+        has_pending_start(queue)) {
         return tp_error_set(
             err, TP_STATUS_INVALID_ARGUMENT,
             "host cannot open while old work remains");
@@ -221,17 +212,8 @@ tp_status gui_host_queue_open(
         session_instance_generation;
     queue->cancellation_requested = false;
     queue->cancel_queued = false;
-    queue->drain_cancel_pending = false;
     queue->lifecycle = GUI_HOST_OPEN;
     return TP_STATUS_OK;
-}
-
-bool gui_host_queue_can_replace(
-    const gui_host_queue *queue) {
-    return queue &&
-           (queue->lifecycle == GUI_HOST_CLOSED ||
-            (queue->lifecycle == GUI_HOST_OPEN &&
-             !gui_host_queue_busy(queue)));
 }
 
 tp_status gui_host_queue_begin_drain(
@@ -243,29 +225,19 @@ tp_status gui_host_queue_begin_drain(
             "host drain requires an open host");
     }
     queue->lifecycle = GUI_HOST_DRAINING;
-    queue->drain_cancel_pending =
-        queue->active &&
+    const bool cancel_active =
+        has_active_job(queue) &&
         !queue->cancellation_requested;
-    if (queue->command_count > 0U) {
-        gui_host_job_envelope rejected = {0};
-        bool have_rejected_start = false;
-        for (size_t index = 0U;
-             index < queue->command_count; ++index) {
-            if (queue->commands[index].kind !=
-                GUI_HOST_COMMAND_CANCEL) {
-                rejected =
-                    queue->commands[index].envelope;
-                have_rejected_start = true;
-                break;
-            }
-        }
-        memset(
-            queue->commands, 0,
-            sizeof queue->commands);
-        queue->command_count = 0U;
-        queue->cancel_queued = false;
+    if (has_pending_start(queue) ||
+        queue->cancel_queued) {
+        const gui_host_job_envelope rejected =
+            queue->pending_start.envelope;
+        const bool have_rejected_start =
+            has_pending_start(queue);
+        queue->pending_start =
+            (gui_host_command){0};
         if (have_rejected_start &&
-            !queue->staged.present) {
+            !has_staged_completion(queue)) {
             tp_error rejection = {{0}};
             const tp_status status = tp_error_set(
                 &rejection,
@@ -276,36 +248,55 @@ tp_status gui_host_queue_begin_drain(
                 &rejection);
         }
     }
-    if (!queue->active &&
-        queue->staged_classification !=
-            GUI_HOST_STAGED_PENDING_OBSERVATION) {
+    queue->cancel_queued = cancel_active;
+    if (!has_active_job(queue) &&
+        !has_staged_completion(queue)) {
         queue->lifecycle =
             GUI_HOST_READY_TO_CUTOVER;
     }
     return TP_STATUS_OK;
 }
 
-tp_status gui_host_queue_close(
-    gui_host_queue *queue, tp_error *err) {
-    if (!queue ||
-        (queue->lifecycle !=
-             GUI_HOST_READY_TO_CUTOVER &&
-         queue->lifecycle != GUI_HOST_CLOSED)) {
-        return tp_error_set(
-            err, TP_STATUS_INVALID_ARGUMENT,
-            "host close requires ready-to-cutover");
-    }
-    if (queue->active ||
-        queue->command_count > 0U) {
-        return tp_error_set(
-            err, TP_STATUS_INVALID_ARGUMENT,
-            "host close requires all admitted work to be detached");
-    }
+void gui_host_queue_commit_cutover(
+    gui_host_queue *queue,
+    uint64_t session_instance_generation) {
+    NT_ASSERT(queue != NULL);
+    NT_ASSERT(
+        queue->lifecycle ==
+        GUI_HOST_READY_TO_CUTOVER);
+    NT_ASSERT(!has_active_job(queue));
+    NT_ASSERT(!has_staged_completion(queue));
+    NT_ASSERT(session_instance_generation != 0U);
     clear_staged(queue);
+    queue->pending_start =
+        (gui_host_command){0};
+    queue->active_envelope =
+        (gui_host_job_envelope){0};
+    queue->session_instance_generation =
+        session_instance_generation;
+    queue->cancellation_requested = false;
+    queue->cancel_queued = false;
+    queue->lifecycle = GUI_HOST_OPEN;
+}
+
+void gui_host_queue_commit_close(
+    gui_host_queue *queue) {
+    NT_ASSERT(queue != NULL);
+    NT_ASSERT(
+        queue->lifecycle ==
+            GUI_HOST_READY_TO_CUTOVER ||
+        queue->lifecycle == GUI_HOST_CLOSED);
+    NT_ASSERT(!has_active_job(queue));
+    NT_ASSERT(!has_staged_completion(queue));
+    clear_staged(queue);
+    queue->pending_start =
+        (gui_host_command){0};
+    queue->active_envelope =
+        (gui_host_job_envelope){0};
     queue->session_instance_generation = 0U;
+    queue->cancellation_requested = false;
     queue->cancel_queued = false;
     queue->lifecycle = GUI_HOST_CLOSED;
-    return TP_STATUS_OK;
 }
 
 tp_status gui_host_queue_enqueue_pack(
@@ -315,8 +306,8 @@ tp_status gui_host_queue_enqueue_pack(
     tp_error *err) {
     gui_host_command *command = NULL;
     tp_status status = reserve_start(
-        queue, GUI_HOST_COMMAND_PACK,
-        TP_SESSION_JOB_PACK, &command, err);
+        queue, TP_SESSION_JOB_PACK,
+        &command, err);
     if (status != TP_STATUS_OK) {
         return status;
     }
@@ -349,8 +340,8 @@ tp_status gui_host_queue_enqueue_export(
     const char *work_dir, tp_error *err) {
     gui_host_command *command = NULL;
     tp_status status = reserve_start(
-        queue, GUI_HOST_COMMAND_EXPORT,
-        TP_SESSION_JOB_EXPORT, &command, err);
+        queue, TP_SESSION_JOB_EXPORT,
+        &command, err);
     if (status != TP_STATUS_OK) {
         return status;
     }
@@ -386,26 +377,12 @@ tp_status gui_host_queue_enqueue_cancel(
             err, TP_STATUS_INVALID_ARGUMENT,
             "host cancellation is already queued");
     }
-    if (!queue->active &&
-        queue->command_count == 0U) {
+    if (!has_active_job(queue) &&
+        !has_pending_start(queue)) {
         return tp_error_set(
             err, TP_STATUS_NOT_FOUND,
             "host has no pending or active job");
     }
-    if (queue->command_count >=
-        GUI_HOST_COMMAND_CAPACITY) {
-        return tp_error_set(
-            err, TP_STATUS_OUT_OF_BOUNDS,
-            "host command queue is full");
-    }
-    gui_host_command *command =
-        &queue->commands[queue->command_count++];
-    memset(command, 0, sizeof *command);
-    command->kind = GUI_HOST_COMMAND_CANCEL;
-    command->envelope =
-        queue->active
-            ? queue->active_envelope
-            : queue->commands[0].envelope;
     queue->cancel_queued = true;
     return TP_STATUS_OK;
 }
@@ -416,8 +393,8 @@ static tp_status admit_start(
     tp_error *err) {
     tp_error error = {{0}};
     tp_status status = TP_STATUS_INVALID_ARGUMENT;
-    switch (command->kind) {
-    case GUI_HOST_COMMAND_PACK: {
+    switch (command->envelope.kind) {
+    case TP_SESSION_JOB_PACK: {
         const tp_pack_job_request request = {
             .atlas_id = command->atlas_id,
             .work_dir = command->work_dir,
@@ -435,7 +412,7 @@ static tp_status admit_start(
             session, &request, &error);
         break;
     }
-    case GUI_HOST_COMMAND_EXPORT: {
+    case TP_SESSION_JOB_EXPORT: {
         const tp_export_command_request request = {
             .work_dir = command->work_dir,
             .session_instance_generation =
@@ -449,8 +426,7 @@ static tp_status admit_start(
             session, &request, &error);
         break;
     }
-    case GUI_HOST_COMMAND_NONE:
-    case GUI_HOST_COMMAND_CANCEL:
+    case TP_SESSION_JOB_NONE:
     default:
         return tp_error_set(
             err, TP_STATUS_INVALID_ARGUMENT,
@@ -462,7 +438,6 @@ static tp_status admit_start(
             status, &error);
         return TP_STATUS_OK;
     }
-    queue->active = true;
     queue->active_envelope =
         command->envelope;
     queue->cancellation_requested = false;
@@ -472,7 +447,7 @@ static tp_status admit_start(
 static tp_status admit_cancel(
     gui_host_queue *queue, tp_session *session,
     tp_error *err) {
-    if (!queue->active) {
+    if (!has_active_job(queue)) {
         return tp_error_set(
             err, TP_STATUS_NOT_FOUND,
             "host has no admitted job to cancel");
@@ -501,39 +476,24 @@ tp_status gui_host_queue_drain(
             "host drain requires open or draining host");
     }
 
-    if (queue->drain_cancel_pending) {
-        const tp_status cancel_status =
-            admit_cancel(queue, session, err);
-        queue->drain_cancel_pending = false;
-        if (cancel_status != TP_STATUS_OK) {
-            return cancel_status;
-        }
-    }
-    while (queue->command_count > 0U) {
+    if (has_pending_start(queue)) {
         const gui_host_command command =
-            queue->commands[0];
-        pop_command(queue);
-        if (command.kind ==
-            GUI_HOST_COMMAND_CANCEL) {
-            queue->cancel_queued = false;
-            const tp_status cancel_status =
-                admit_cancel(queue, session, err);
-            if (cancel_status != TP_STATUS_OK) {
-                return cancel_status;
-            }
-        } else if (queue->lifecycle !=
-                       GUI_HOST_OPEN ||
-                   queue->active ||
-                   queue->staged.present ||
-                   command.envelope
-                           .session_instance_generation !=
-                       queue->session_instance_generation) {
+            queue->pending_start;
+        queue->pending_start =
+            (gui_host_command){0};
+        if (queue->lifecycle !=
+                GUI_HOST_OPEN ||
+            has_active_job(queue) ||
+            has_staged_completion(queue) ||
+            command.envelope
+                    .session_instance_generation !=
+                queue->session_instance_generation) {
             tp_error rejection = {{0}};
             const tp_status status = tp_error_set(
                 &rejection,
                 TP_STATUS_INVALID_ARGUMENT,
                 "host rejected stale or ineligible job start");
-            if (!queue->staged.present) {
+            if (!has_staged_completion(queue)) {
                 stage_host_failure(
                     queue, command.envelope,
                     status, &rejection);
@@ -548,12 +508,19 @@ tp_status gui_host_queue_drain(
             }
         }
     }
+    if (queue->cancel_queued) {
+        queue->cancel_queued = false;
+        const tp_status cancel_status =
+            admit_cancel(queue, session, err);
+        if (cancel_status != TP_STATUS_OK) {
+            return cancel_status;
+        }
+    }
 
-    if (!queue->active) {
+    if (!has_active_job(queue)) {
         if (queue->lifecycle ==
                 GUI_HOST_DRAINING &&
-            queue->staged_classification !=
-                GUI_HOST_STAGED_PENDING_OBSERVATION) {
+            !has_staged_completion(queue)) {
             queue->lifecycle =
                 GUI_HOST_READY_TO_CUTOVER;
         }
@@ -563,6 +530,10 @@ tp_status gui_host_queue_drain(
     tp_session_job_progress progress = {0};
     tp_error poll_error = {{0}};
 #ifdef TP_ENABLE_TEST_SEAMS
+    if (s_test_hold_active_polls > 0U) {
+        --s_test_hold_active_polls;
+        return TP_STATUS_OK;
+    }
     if (s_test_fail_next_poll) {
         s_test_fail_next_poll = false;
         return tp_error_set(
@@ -594,8 +565,9 @@ tp_status gui_host_queue_drain(
             tp_session_job_take_result(
                 session, &result, &take_error);
         if (take_status == TP_STATUS_OK) {
-            queue->active = false;
             stage_terminal(queue, &result);
+            queue->active_envelope =
+                (gui_host_job_envelope){0};
         } else {
             if (err) {
                 *err = take_error;
@@ -604,11 +576,10 @@ tp_status gui_host_queue_drain(
         }
     }
 
-    if (!queue->active &&
+    if (!has_active_job(queue) &&
         queue->lifecycle ==
             GUI_HOST_DRAINING &&
-        queue->staged_classification !=
-            GUI_HOST_STAGED_PENDING_OBSERVATION) {
+        !has_staged_completion(queue)) {
         queue->lifecycle =
             GUI_HOST_READY_TO_CUTOVER;
     }
@@ -620,7 +591,7 @@ void gui_host_queue_reduce_observation(
     const tp_session_observation *observation,
     uint64_t session_instance_generation) {
     if (!queue || !observation ||
-        !queue->staged.present ||
+        !has_staged_completion(queue) ||
         queue->staged_classification !=
             GUI_HOST_STAGED_PENDING_OBSERVATION) {
         return;
@@ -673,19 +644,13 @@ void gui_host_queue_reduce_observation(
     }
     queue->staged_classification =
         GUI_HOST_STAGED_READY;
-    if (!queue->active &&
-        queue->lifecycle ==
-            GUI_HOST_DRAINING) {
-        queue->lifecycle =
-            GUI_HOST_READY_TO_CUTOVER;
-    }
 }
 
 bool gui_host_queue_take_completion(
     gui_host_queue *queue,
     gui_host_completion *out) {
     if (!queue || !out ||
-        !queue->staged.present ||
+        !has_staged_completion(queue) ||
         queue->staged_classification !=
             GUI_HOST_STAGED_READY) {
         return false;
@@ -696,6 +661,7 @@ bool gui_host_queue_take_completion(
     queue->staged_classification =
         GUI_HOST_STAGED_NONE;
     queue->cancellation_requested = false;
+    advance_ready_after_staged_clear(queue);
     return true;
 }
 
@@ -712,16 +678,9 @@ void gui_host_completion_destroy(
 bool gui_host_queue_busy(
     const gui_host_queue *queue) {
     return queue &&
-           (queue->command_count > 0U ||
-            queue->active ||
-            queue->staged.present);
-}
-
-bool gui_host_queue_cancelling(
-    const gui_host_queue *queue) {
-    return queue &&
-           queue->cancellation_requested &&
-           gui_host_queue_busy(queue);
+           (has_pending_start(queue) ||
+            has_active_job(queue) ||
+            has_staged_completion(queue));
 }
 
 tp_session_job_kind gui_host_queue_active_kind(
@@ -729,16 +688,14 @@ tp_session_job_kind gui_host_queue_active_kind(
     if (!queue) {
         return TP_SESSION_JOB_NONE;
     }
-    if (queue->active) {
+    if (has_active_job(queue)) {
         return queue->active_envelope.kind;
     }
-    if (queue->command_count > 0U &&
-        queue->commands[0].kind !=
-            GUI_HOST_COMMAND_CANCEL) {
-        return queue->commands[0]
+    if (has_pending_start(queue)) {
+        return queue->pending_start
             .envelope.kind;
     }
-    if (queue->staged.present) {
+    if (has_staged_completion(queue)) {
         return queue->staged.envelope.kind;
     }
     return TP_SESSION_JOB_NONE;
@@ -756,23 +713,23 @@ bool gui_host_queue__test_peek_start(
     const gui_host_queue *queue,
     gui_host_command *out) {
     if (!queue || !out ||
-        queue->command_count == 0U ||
-        queue->commands[0].kind ==
-            GUI_HOST_COMMAND_CANCEL) {
+        !has_pending_start(queue)) {
         return false;
     }
-    *out = queue->commands[0];
+    *out = queue->pending_start;
     return true;
 }
 
 bool gui_host_queue__test_has_staged(
     const gui_host_queue *queue) {
-    return queue && queue->staged.present;
+    return queue &&
+           has_staged_completion(queue);
 }
 
 void gui_host_queue__test_retag_staged_request(
     gui_host_queue *queue, uint64_t request_id) {
-    if (queue && queue->staged.present) {
+    if (queue &&
+        has_staged_completion(queue)) {
         queue->staged.envelope.request_id =
             request_id;
     }
@@ -786,8 +743,13 @@ void gui_host_queue__test_fail_next_take(void) {
     s_test_fail_next_take = true;
 }
 
+void gui_host_queue__test_hold_active_polls(
+    unsigned int count) {
+    s_test_hold_active_polls = count;
+}
+
 bool gui_host_queue__test_active(
     const gui_host_queue *queue) {
-    return queue && queue->active;
+    return queue && has_active_job(queue);
 }
 #endif

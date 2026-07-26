@@ -360,8 +360,26 @@ void gui_actions__drain_edits(void) {
                                                 intent->flip_v);
                 break;
             case ANIMATION_INTENT_FRAME_REMOVE:
-                (void)gui_project_anim_remove_frame(&intent->animation,
-                                                    intent->first);
+                {
+                    gui_animation_ref selected = {0};
+                    const bool removes_selection =
+                        s_sel_anim_frame == intent->first &&
+                        gui_project_animation_ref_at(
+                            s_sel_atlas, s_sel_anim,
+                            &selected) &&
+                        tp_id128_eq(
+                            selected.atlas_id,
+                            intent->animation.atlas_id) &&
+                        tp_id128_eq(
+                            selected.animation_id,
+                            intent->animation.animation_id);
+                    if (gui_project_anim_remove_frame(
+                            &intent->animation,
+                            intent->first) &&
+                        removes_selection) {
+                        s_sel_anim_frame = -1;
+                    }
+                }
                 break;
             case ANIMATION_INTENT_FRAME_MOVE:
                 (void)gui_project_anim_move_frame(&intent->animation,
@@ -402,6 +420,39 @@ void gui_actions__drain_edits(void) {
         target_intent_dispose(e);
     }
     s_actions.target_intent_count = 0;
+}
+
+void gui_actions__discard_edits(void) {
+    s_actions.atlas_setting_intent_count = 0;
+    for (int i = 0;
+         i < s_actions.sprite_intent_count;
+         ++i) {
+        free(s_actions.sprite_intents[i]
+                 .source_key);
+        s_actions.sprite_intents[i]
+            .source_key = NULL;
+    }
+    s_actions.sprite_intent_count = 0;
+    for (int i = 0;
+         i < s_actions.animation_intent_count;
+         ++i) {
+        gui_actions__frame_refs_dispose(
+            s_actions.animation_intents[i]
+                .frames,
+            s_actions.animation_intents[i]
+                .frame_count);
+        s_actions.animation_intents[i].frames =
+            NULL;
+    }
+    s_actions.animation_intent_count = 0;
+    for (int i = 0;
+         i < s_actions.target_intent_count;
+         ++i) {
+        target_intent_dispose(
+            &s_actions.target_intents[i]);
+    }
+    s_actions.target_intent_count = 0;
+    s_actions.gesture_commit = false;
 }
 
 /* Set by a view widget the frame its edit GESTURE ENDS (slider release / field Enter+blur / a
@@ -566,6 +617,8 @@ void gui_actions__apply_structural_edits(void) {
 }
 
 void gui_actions__clear_pending(void) {
+    s_actions.pending_lifecycle_request =
+        GUI_LIFECYCLE_REQUEST_NONE;
     s_pending_open = s_pending_save = s_pending_save_as = false;
     s_pending_add_files = s_pending_add_folder = s_pending_add_atlas = false;
     s_pending_refresh = s_pending_pack = s_pending_export = false;
@@ -587,6 +640,8 @@ void gui_actions__clear_pending(void) {
     s_pending_remove_atlas_revision = 0;
     s_actions.pending_remove_target = false;
     s_actions.pending_remove_anim = false;
+    gui_actions__pending_create_animation_dispose(
+        &s_actions.pending_create_anim);
     s_actions.pending_browse_target = false;
     memset(&s_actions.pending_browse_target_ref, 0,
            sizeof s_actions.pending_browse_target_ref);

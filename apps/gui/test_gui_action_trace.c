@@ -12,10 +12,12 @@
 #endif
 
 #include "gui_actions.h"
+#include "gui_actions_internal.h"
 #include "gui_canvas.h"
 #include "gui_canvas_internal.h"
 #include "gui_pack.h"
 #include "gui_project.h"
+#include "gui_project_test_driver.h"
 #include "gui_rows.h"
 #include "gui_scan.h"
 #include "gui_state.h"
@@ -38,7 +40,7 @@ static void pump_action_frame(void) {
     tp_error error = {{0}};
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
-        gui_project_host_drain(&error));
+        gui_project_lifecycle_pump(NULL, &error));
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
         gui_project_frame_begin(&error));
@@ -83,6 +85,8 @@ static const tp_snapshot_atlas *atlas_at(int index) {
 }
 
 static void reset_public_action_state(void) {
+    s_actions.pending_lifecycle_request =
+        GUI_LIFECYCLE_REQUEST_NONE;
     s_pending_open = false;
     s_pending_save = false;
     s_pending_save_as = false;
@@ -97,7 +101,7 @@ static void reset_public_action_state(void) {
     s_pending_remove_atlas = false;
     s_pending_remove_source = false;
     s_pending_preview_target = -1;
-    s_after_confirm = AFTER_NONE;
+    s_after_confirm = GUI_LIFECYCLE_REQUEST_NONE;
     s_confirm_open = false;
     s_modal_action = MODAL_NONE;
 }
@@ -127,8 +131,7 @@ void tearDown(void) {
     gui_actions_refresh_fingerprint_reset();
     multi_sel_clear();
     gui_pack_shutdown();
-    gui_project_discard_recovery_on_shutdown();
-    gui_project_shutdown();
+    gui_project_test_shutdown(true);
     gui_scan_shutdown();
     (void)remove(s_save_path);
     (void)test_rmdir(TP_GUI_TRACE_TEST_DIR);
@@ -265,6 +268,72 @@ void test_undo_redo_preserves_selected_animation_by_stable_id(void) {
     TEST_ASSERT_TRUE(tp_id128_eq(selected_id, selected->id));
 }
 
+void test_deferred_frame_delete_clears_selection_only_after_commit(void) {
+    const tp_session_snapshot *snapshot =
+        gui_project_snapshot();
+    const tp_snapshot_atlas *atlas =
+        tp_session_snapshot_atlas_at(snapshot, 0);
+    TEST_ASSERT_NOT_NULL(atlas);
+    const tp_id128 atlas_id = atlas->id;
+    char source_path[1200];
+    TEST_ASSERT_TRUE(
+        snprintf(
+            source_path, sizeof source_path,
+            "%s/delete-frame.png",
+            TP_GUI_TRACE_TEST_DIR) > 0);
+    FILE *source = fopen(source_path, "wb");
+    TEST_ASSERT_NOT_NULL(source);
+    TEST_ASSERT_EQUAL_size_t(
+        1U, fwrite("x", 1U, 1U, source));
+    TEST_ASSERT_EQUAL_INT(0, fclose(source));
+    TEST_ASSERT_EQUAL_INT(
+        GUI_ADD_ADDED,
+        gui_project_add_source_kind(
+            atlas_id,
+            tp_session_snapshot_revision(snapshot),
+            source_path, TP_SOURCE_KIND_FILE));
+
+    snapshot = gui_project_snapshot();
+    const tp_snapshot_source *source_record =
+        tp_session_snapshot_source_at(
+            snapshot, atlas_id, 0);
+    TEST_ASSERT_NOT_NULL(source_record);
+    tp_op_sprite_ref frame = {
+        source_record->id,
+        "delete-frame.png",
+    };
+    const gui_project_create_result created =
+        gui_project_create_animation(
+            atlas_id,
+            tp_session_snapshot_revision(snapshot),
+            "delete-frame", &frame, 1);
+    TEST_ASSERT_TRUE(created.committed);
+    gui_animation_ref animation = {0};
+    TEST_ASSERT_TRUE(
+        gui_project_animation_ref_at(
+            0, created.visible_index,
+            &animation));
+    s_sel_anim = created.visible_index;
+    s_sel_anim_frame = 0;
+
+    gui_edit_anim_frame_remove(&animation, 0);
+    TEST_ASSERT_EQUAL_INT(0, s_sel_anim_frame);
+    apply_pending();
+    TEST_ASSERT_EQUAL_INT(-1, s_sel_anim_frame);
+    const tp_snapshot_animation *after =
+        tp_session_snapshot_animation_at(
+            gui_project_snapshot(), atlas_id,
+            created.visible_index);
+    TEST_ASSERT_NOT_NULL(after);
+    TEST_ASSERT_EQUAL_INT(0, after->frame_count);
+
+    s_sel_anim_frame = 0;
+    gui_edit_anim_frame_remove(&animation, 0);
+    apply_pending();
+    TEST_ASSERT_EQUAL_INT(0, s_sel_anim_frame);
+    TEST_ASSERT_EQUAL_INT(0, remove(source_path));
+}
+
 void test_deferred_action_mutates_before_publishing_success_status(void) {
     TEST_ASSERT_EQUAL_INT(1, tp_session_snapshot_atlas_count(
                                  gui_project_snapshot()));
@@ -346,25 +415,40 @@ void test_confirm_save_publishes_before_new_and_new_message_wins(void) {
                                  gui_project_snapshot()));
 
     request_new();
+    TEST_ASSERT_FALSE(s_confirm_open);
+    TEST_ASSERT_EQUAL_INT(
+        2, tp_session_snapshot_atlas_count(
+               gui_project_snapshot()));
+    apply_pending();
     TEST_ASSERT_TRUE(s_confirm_open);
-    TEST_ASSERT_EQUAL_INT(AFTER_NEW, s_after_confirm);
+    TEST_ASSERT_EQUAL_INT(GUI_LIFECYCLE_REQUEST_NEW, s_after_confirm);
     TEST_ASSERT_EQUAL_INT(2, tp_session_snapshot_atlas_count(
                                  gui_project_snapshot()));
 
     s_modal_action = MODAL_CANCEL;
     apply_pending();
     TEST_ASSERT_FALSE(s_confirm_open);
-    TEST_ASSERT_EQUAL_INT(AFTER_NONE, s_after_confirm);
+    TEST_ASSERT_EQUAL_INT(GUI_LIFECYCLE_REQUEST_NONE, s_after_confirm);
     TEST_ASSERT_TRUE(gui_project_is_dirty());
     TEST_ASSERT_EQUAL_INT(2, tp_session_snapshot_atlas_count(
                                  gui_project_snapshot()));
 
     request_new();
+    apply_pending();
+    TEST_ASSERT_TRUE(s_confirm_open);
     s_modal_action = MODAL_SAVE;
     apply_pending();
 
     TEST_ASSERT_FALSE(s_confirm_open);
-    TEST_ASSERT_EQUAL_INT(AFTER_NONE, s_after_confirm);
+    TEST_ASSERT_EQUAL_INT(GUI_LIFECYCLE_REQUEST_NONE, s_after_confirm);
+    TEST_ASSERT_EQUAL_INT(
+        GUI_PROJECT_LIFECYCLE_DRAINING,
+        gui_project_lifecycle_state_query());
+    TEST_ASSERT_TRUE(gui_project_has_path());
+    TEST_ASSERT_EQUAL_INT(
+        2, tp_session_snapshot_atlas_count(
+               gui_project_snapshot()));
+    gui_actions_pump_lifecycle();
     TEST_ASSERT_FALSE(gui_project_has_path());
     TEST_ASSERT_FALSE(gui_project_is_dirty());
     TEST_ASSERT_EQUAL_INT(1, tp_session_snapshot_atlas_count(
@@ -487,6 +571,166 @@ void test_first_refresh_stat_failure_invalidates_runtime_and_preview(void) {
     TEST_ASSERT_EQUAL_INT(0, remove(source_path));
 }
 
+typedef void (*lifecycle_request_fn)(void);
+
+static void assert_declaration_only_request(
+    lifecycle_request_fn request,
+    gui_lifecycle_request expected) {
+    const uint64_t generation =
+        gui_project_session_instance_generation();
+    const int64_t revision =
+        tp_session_revision(
+            gui_project__test_session());
+    const int undo_depth =
+        gui_project_undo_depth();
+    set_status("declaration sentinel");
+    request();
+    TEST_ASSERT_EQUAL_INT(
+        expected,
+        s_actions.pending_lifecycle_request);
+    TEST_ASSERT_FALSE(s_confirm_open);
+    TEST_ASSERT_FALSE(s_pending_open);
+    TEST_ASSERT_EQUAL_INT(
+        GUI_PROJECT_LIFECYCLE_OPEN_IDLE,
+        gui_project_lifecycle_state_query());
+    TEST_ASSERT_EQUAL_UINT64(
+        generation,
+        gui_project_session_instance_generation());
+    TEST_ASSERT_EQUAL_INT64(
+        revision,
+        tp_session_revision(
+            gui_project__test_session()));
+    TEST_ASSERT_EQUAL_INT(
+        undo_depth,
+        gui_project_undo_depth());
+    TEST_ASSERT_EQUAL_STRING(
+        "declaration sentinel", s_status);
+    s_actions.pending_lifecycle_request =
+        GUI_LIFECYCLE_REQUEST_NONE;
+}
+
+void test_lifecycle_requests_are_declaration_only(void) {
+    assert_declaration_only_request(
+        request_new,
+        GUI_LIFECYCLE_REQUEST_NEW);
+    assert_declaration_only_request(
+        request_open,
+        GUI_LIFECYCLE_REQUEST_OPEN);
+    assert_declaration_only_request(
+        request_exit,
+        GUI_LIFECYCLE_REQUEST_EXIT);
+}
+
+void test_prepare_failure_preserves_buffered_edit(void) {
+    const tp_session_snapshot *snapshot =
+        gui_project_snapshot();
+    const tp_snapshot_atlas *atlas =
+        tp_session_snapshot_atlas_at(
+            snapshot, 0);
+    TEST_ASSERT_NOT_NULL(atlas);
+    const tp_id128 atlas_id = atlas->id;
+    const int padding_before = atlas->padding;
+    const int64_t revision_before =
+        tp_session_snapshot_revision(snapshot);
+
+    gui_queue_atlas_setting(
+        atlas_id, revision_before,
+        GUI_ATLAS_PADDING,
+        padding_before + 3, 0.0F);
+    apply_pending();
+    TEST_ASSERT_EQUAL_INT64(
+        revision_before,
+        tp_session_snapshot_revision(
+            gui_project_snapshot()));
+
+    gui_project__test_fail_next_observe();
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OOM,
+        gui_project_lifecycle_begin_new(
+            &error));
+    TEST_ASSERT_EQUAL_INT(
+        GUI_PROJECT_LIFECYCLE_OPEN_IDLE,
+        gui_project_lifecycle_state_query());
+    TEST_ASSERT_EQUAL_INT64(
+        revision_before,
+        tp_session_snapshot_revision(
+            gui_project_snapshot()));
+
+    gui_request_gesture_commit();
+    apply_pending();
+    TEST_ASSERT_EQUAL_INT64(
+        revision_before + 1,
+        tp_session_snapshot_revision(
+            gui_project_snapshot()));
+    atlas = tp_session_snapshot_atlas_by_id(
+        gui_project_snapshot(), atlas_id);
+    TEST_ASSERT_NOT_NULL(atlas);
+    TEST_ASSERT_EQUAL_INT(
+        padding_before + 3,
+        atlas->padding);
+}
+
+void test_busy_new_enters_drain_and_resets_only_after_completion(void) {
+    TEST_ASSERT_TRUE(
+        gui_pack_init(
+            TP_GUI_TRACE_TEST_DIR));
+    char error[256] = {0};
+    TEST_ASSERT_TRUE(
+        gui_pack_export_async_start(
+            error, sizeof error));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_project_lifecycle_pump(NULL, NULL));
+    TEST_ASSERT_TRUE(
+        gui_project_job_busy());
+    const uint64_t old_generation =
+        gui_project_session_instance_generation();
+    set_status("old session remains visible");
+    request_new();
+    s_pending_refresh = true;
+    TEST_ASSERT_EQUAL_INT(
+        GUI_PROJECT_LIFECYCLE_OPEN_IDLE,
+        gui_project_lifecycle_state_query());
+    TEST_ASSERT_EQUAL_STRING(
+        "old session remains visible", s_status);
+    apply_pending();
+    TEST_ASSERT_EQUAL_INT(
+        GUI_PROJECT_LIFECYCLE_DRAINING,
+        gui_project_lifecycle_state_query());
+    TEST_ASSERT_EQUAL_UINT64(
+        old_generation,
+        gui_project_session_instance_generation());
+    TEST_ASSERT_EQUAL_STRING(
+        "old session remains visible", s_status);
+    TEST_ASSERT_TRUE(s_pending_refresh);
+    for (int attempt = 0;
+         attempt < 5000 &&
+         gui_project_lifecycle_state_query() ==
+             GUI_PROJECT_LIFECYCLE_DRAINING;
+         ++attempt) {
+        gui_actions_pump_lifecycle();
+        if (gui_project_lifecycle_state_query() ==
+            GUI_PROJECT_LIFECYCLE_DRAINING) {
+            TEST_ASSERT_EQUAL_INT(
+                TP_STATUS_OK,
+                gui_project_frame_begin(NULL));
+            gui_actions_poll_host_completion();
+            gui_project_frame_end();
+            nt_time_sleep(0.001);
+        }
+    }
+    TEST_ASSERT_EQUAL_INT(
+        GUI_PROJECT_LIFECYCLE_OPEN_IDLE,
+        gui_project_lifecycle_state_query());
+    TEST_ASSERT_EQUAL_UINT64(
+        old_generation + 1U,
+        gui_project_session_instance_generation());
+    TEST_ASSERT_EQUAL_STRING(
+        "New project.", s_status);
+    TEST_ASSERT_FALSE(s_pending_refresh);
+}
+
 void test_external_save_is_visible_through_the_observation_reducer(void) {
     tp_session_save_result result = {0};
     tp_error error = {{0}};
@@ -527,7 +771,7 @@ void test_open_propagates_non_oom_attach_rejection(void) {
     char open_error[256] = {0};
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_INVALID_ARGUMENT,
-        gui_project_open(
+        gui_project_test_open(
             s_save_path, open_error,
             sizeof open_error));
     TEST_ASSERT_NOT_NULL(
@@ -675,7 +919,7 @@ void test_refresh_fingerprint_resets_when_session_is_replaced(void) {
             TP_SOURCE_KIND_FILE));
     apply_pending();
 
-    TEST_ASSERT_TRUE(gui_project_new());
+    TEST_ASSERT_TRUE(gui_project_test_new());
     int added = -1;
     int removed = -1;
     int changed = -1;
@@ -1002,7 +1246,7 @@ void test_late_export_cancel_keeps_completed_success_outcome(void) {
     for (int i = 0; i < 5000; ++i) {
         TEST_ASSERT_EQUAL_INT(
             TP_STATUS_OK,
-            gui_project_host_drain(NULL));
+            gui_project_lifecycle_pump(NULL, NULL));
         TEST_ASSERT_EQUAL_INT(
             TP_STATUS_OK,
             gui_project_frame_begin(NULL));
@@ -1038,7 +1282,7 @@ void test_late_export_cancel_keeps_completed_success_outcome(void) {
     TEST_ASSERT_EQUAL_INT(1, info.atlases_skipped);
 }
 
-void test_observation_failure_leaves_terminal_receipt_retryable(void) {
+void test_terminal_job_completion_is_consumed_before_cutover(void) {
     TEST_ASSERT_TRUE(
         gui_pack_init(
             TP_GUI_TRACE_TEST_DIR));
@@ -1052,7 +1296,7 @@ void test_observation_failure_leaves_terminal_receipt_retryable(void) {
          ++attempt) {
         TEST_ASSERT_EQUAL_INT(
             TP_STATUS_OK,
-            gui_project_host_drain(NULL));
+            gui_project_lifecycle_pump(NULL, NULL));
         if (!gui_project__test_host_has_staged_completion()) {
             nt_time_sleep(0.001);
         }
@@ -1061,47 +1305,37 @@ void test_observation_failure_leaves_terminal_receipt_retryable(void) {
         gui_project__test_host_has_staged_completion());
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
-        gui_project_host_begin_drain(NULL));
+        gui_project_lifecycle_begin_new(NULL));
     TEST_ASSERT_EQUAL_INT(
-        GUI_PROJECT_HOST_DRAINING,
-        gui_project_host_lifecycle_query());
+        GUI_PROJECT_LIFECYCLE_DRAINING,
+        gui_project_lifecycle_state_query());
 
-    gui_project__test_fail_next_observe();
-    TEST_ASSERT_EQUAL_INT(
-        TP_STATUS_OOM,
-        gui_project_frame_begin(NULL));
-    gui_project_frame_end();
-    TEST_ASSERT_EQUAL_INT(
-        GUI_PACK_DONE_NONE,
-        gui_pack_poll(NULL));
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
-        gui_project_host_drain(NULL));
-    TEST_ASSERT_EQUAL_INT(
-        GUI_PROJECT_HOST_DRAINING,
-        gui_project_host_lifecycle_query());
-
-    gui_project__test_fail_next_observe();
-    TEST_ASSERT_EQUAL_INT(
-        TP_STATUS_OOM,
-        gui_project_frame_begin(NULL));
-    gui_project_frame_end();
-    TEST_ASSERT_EQUAL_INT(
-        TP_STATUS_OK,
-        gui_project_host_drain(NULL));
-    TEST_ASSERT_EQUAL_INT(
-        GUI_PROJECT_HOST_DRAINING,
-        gui_project_host_lifecycle_query());
-
+        gui_project_lifecycle_pump(NULL, NULL));
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
         gui_project_frame_begin(NULL));
     gui_pack_result_info info = {0};
-    const gui_pack_done done =
-        gui_pack_poll(&info);
-    gui_project_frame_end();
     TEST_ASSERT_EQUAL_INT(
-        GUI_PACK_DONE_EXPORT_OK, done);
+        GUI_PACK_DONE_EXPORT_OK,
+        gui_pack_poll(&info));
+    gui_project_frame_end();
+    gui_project_lifecycle_kind completed =
+        GUI_PROJECT_LIFECYCLE_NONE;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_project_lifecycle_pump(
+            &completed, NULL));
+    TEST_ASSERT_EQUAL_INT(
+        GUI_PROJECT_LIFECYCLE_OPEN_IDLE,
+        gui_project_lifecycle_state_query());
+    TEST_ASSERT_EQUAL_INT(
+        GUI_PROJECT_LIFECYCLE_NEW,
+        completed);
+    TEST_ASSERT_EQUAL_INT(
+        GUI_PACK_DONE_NONE,
+        gui_pack_poll(NULL));
 }
 
 void test_empty_export_surfaces_skipped_atlas_warning(void) {
@@ -1127,8 +1361,16 @@ int main(int argc, char **argv) {
     }
     UNITY_BEGIN();
     RUN_TEST(test_state_ownership_inventory_preserves_three_classes);
+    RUN_TEST(
+        test_lifecycle_requests_are_declaration_only);
+    RUN_TEST(
+        test_prepare_failure_preserves_buffered_edit);
+    RUN_TEST(
+        test_busy_new_enters_drain_and_resets_only_after_completion);
     RUN_TEST(test_deferred_edit_coalesces_then_undo_redo_trace_is_exact);
     RUN_TEST(test_undo_redo_preserves_selected_animation_by_stable_id);
+    RUN_TEST(
+        test_deferred_frame_delete_clears_selection_only_after_commit);
     RUN_TEST(test_deferred_action_mutates_before_publishing_success_status);
     RUN_TEST(test_preview_request_is_deferred_and_selection_reset_stops_it);
     RUN_TEST(test_confirm_save_publishes_before_new_and_new_message_wins);
@@ -1155,7 +1397,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_export_failure_formatter_warns_about_uncertain_publication);
     RUN_TEST(test_late_export_cancel_keeps_completed_success_outcome);
     RUN_TEST(
-        test_observation_failure_leaves_terminal_receipt_retryable);
+        test_terminal_job_completion_is_consumed_before_cutover);
     RUN_TEST(test_empty_export_surfaces_skipped_atlas_warning);
     return UNITY_END();
 }

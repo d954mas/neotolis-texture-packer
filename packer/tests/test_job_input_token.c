@@ -252,6 +252,9 @@ void test_process_pack_terminal_is_published_after_host_poll(void) {
             TEST_ASSERT_NOT_NULL(observed->result);
             TEST_ASSERT_NOT_NULL(observed->result->pack.arena);
             TEST_ASSERT_NOT_NULL(observed->result->pack.result);
+            TEST_ASSERT_EQUAL_STRING(
+                "atlas1",
+                observed->result->pack.result->atlas_name);
             terminal = true;
             break;
         }
@@ -270,6 +273,8 @@ void test_process_pack_terminal_is_published_after_host_poll(void) {
         result.pack.arena,
         tp_session_observation_job_result(observation)
             ->result->pack.arena);
+    TEST_ASSERT_EQUAL_STRING(
+        "atlas1", result.pack.result->atlas_name);
     tp_session_destroy(session);
     TEST_ASSERT_NOT_NULL(
         tp_session_observation_job_result(observation)

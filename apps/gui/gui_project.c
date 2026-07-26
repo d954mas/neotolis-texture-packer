@@ -109,14 +109,22 @@ static void reduce_project_observation(
     void *context, const tp_session_observation *observation,
     uint64_t instance_generation) {
     gui_project_state *project = context;
-    reduce_recovery_health(
-        project,
+    const tp_session_recovery_health recovery =
         tp_session_observation_recovery_health(
-            observation));
+            observation);
+    const bool new_instance =
+        project->observed_instance_generation !=
+        instance_generation;
+    if (new_instance &&
+        project->recovery_required &&
+        !recovery.available) {
+        gui_project_note_recovery_setup_failure(
+            "required recovery is unavailable for the active project");
+    }
+    reduce_recovery_health(project, recovery);
     const tp_session_snapshot *snapshot =
         tp_session_observation_snapshot(observation);
-    if (project->observed_instance_generation !=
-        instance_generation) {
+    if (new_instance) {
         reduce_project_display_name(
             project, snapshot);
         project->observed_instance_generation =
@@ -153,47 +161,42 @@ static void reduce_project_observation(
     }
 }
 
-static void reduce_host_observation(
-    void *context,
-    const tp_session_observation *observation,
-    uint64_t instance_generation) {
-    gui_project_state *project = context;
-    NT_ASSERT(project != NULL);
-    gui_host_queue_reduce_observation(
-        &project->host_queue, observation,
-        instance_generation);
-}
-
 tp_status gui_project__client_init(tp_error *err) {
-    if (s_project.client_initialized) {
+    if (s_project.binding_initialized) {
         return TP_STATUS_OK;
     }
-    gui_session_client_init(&s_project.client);
-    gui_host_queue_init(&s_project.host_queue);
+    gui_host_binding_init(&s_project.binding);
     tp_status status =
         gui_session_client_register_reducer(
-            &s_project.client,
+            &s_project.binding.client,
             reduce_project_observation, &s_project, err);
     if (status == TP_STATUS_OK) {
-        status = gui_session_client_register_reducer(
-            &s_project.client,
-            reduce_host_observation, &s_project, err);
-    }
-    if (status == TP_STATUS_OK) {
-        s_project.client_initialized = true;
+        s_project.binding_initialized = true;
     }
     return status;
 }
 
+tp_session *gui_project__borrow_active_session(void) {
+    return gui_session_client_attached_session(
+        &s_project.binding.client);
+}
+
+bool gui_project__ingress_is_open(void) {
+    return s_project.binding_initialized &&
+           gui_host_binding_lifecycle(
+               &s_project.binding) ==
+               GUI_HOST_OPEN;
+}
+
 void gui_project__snapshot_drop(void) {
-    if (!s_project.client_initialized ||
-        !s_project.session) {
+    if (!s_project.binding_initialized ||
+        !gui_project__borrow_active_session()) {
         return;
     }
     tp_error err = {{0}};
     const tp_status status =
         gui_session_client_request_observe(
-            &s_project.client, &err);
+            &s_project.binding.client, &err);
     if (status != TP_STATUS_OK) {
         gui_project__note_session_reject(status, &err);
     }
@@ -201,75 +204,82 @@ void gui_project__snapshot_drop(void) {
 
 const tp_session_snapshot *gui_project_snapshot(void) {
     return gui_session_client_snapshot(
-        &s_project.client);
+        &s_project.binding.client);
 }
 
 uint64_t gui_project_snapshot_lifetime_generation(void) {
     return gui_session_client_snapshot_lifetime_generation(
-        &s_project.client);
+        &s_project.binding.client);
 }
 
 uint64_t gui_project_source_runtime_generation(void) {
     return gui_session_client_source_runtime_generation(
-        &s_project.client);
+        &s_project.binding.client);
+}
+
+bool gui_project_observed_input_token(
+    tp_session_input_token *out) {
+    if (!out) {
+        return false;
+    }
+    const tp_session_snapshot *snapshot =
+        gui_project_snapshot();
+    if (!snapshot) {
+        *out = (tp_session_input_token){0};
+        return false;
+    }
+    *out =
+        tp_session_snapshot_input_token(snapshot);
+    out->source_generation =
+        gui_project_source_runtime_generation();
+    return true;
 }
 
 tp_status gui_project_frame_begin(tp_error *err) {
     return gui_session_client_frame_begin(
-        &s_project.client, err);
+        &s_project.binding.client, err);
 }
 
 void gui_project_frame_end(void) {
     gui_session_client_frame_end(
-        &s_project.client);
+        &s_project.binding.client);
 }
 
 bool gui_project_frame_is_pinned(void) {
     return gui_session_client_frame_is_pinned(
-        &s_project.client);
+        &s_project.binding.client);
 }
 
 tp_status gui_project_job_enqueue_pack(
     tp_id128 atlas_id, const char *work_dir,
     const char *preview_exporter_id, tp_error *err) {
+    if (!gui_project__ingress_is_open()) {
+        return tp_error_set(
+            err, TP_STATUS_INVALID_ARGUMENT,
+            "GUI session ingress is closed during lifecycle transition");
+    }
     return gui_host_queue_enqueue_pack(
-        &s_project.host_queue, atlas_id, work_dir,
+        &s_project.binding.queue, atlas_id, work_dir,
         preview_exporter_id, err);
 }
 
 tp_status gui_project_job_enqueue_export(
     tp_id128 atlas_id, const char *work_dir,
     tp_error *err) {
+    if (!gui_project__ingress_is_open()) {
+        return tp_error_set(
+            err, TP_STATUS_INVALID_ARGUMENT,
+            "GUI session ingress is closed during lifecycle transition");
+    }
     return gui_host_queue_enqueue_export(
-        &s_project.host_queue, atlas_id, work_dir,
+        &s_project.binding.queue, atlas_id, work_dir,
         err);
 }
 
 tp_status gui_project_job_enqueue_cancel(
     tp_error *err) {
     return gui_host_queue_enqueue_cancel(
-        &s_project.host_queue, err);
-}
-
-tp_status gui_project_host_drain(tp_error *err) {
-    if (!s_project.session) {
-        return tp_error_set(
-            err, TP_STATUS_NOT_FOUND,
-            "GUI host has no live session");
-    }
-    NT_ASSERT(
-        s_project.host_queue
-                .session_instance_generation ==
-        gui_session_client_instance_generation(
-            &s_project.client));
-    return gui_host_queue_drain(
-        &s_project.host_queue, s_project.session, err);
-}
-
-tp_status gui_project_host_begin_drain(
-    tp_error *err) {
-    return gui_host_queue_begin_drain(
-        &s_project.host_queue, err);
+        &s_project.binding.queue, err);
 }
 
 bool gui_project_host_take_completion(
@@ -279,11 +289,10 @@ bool gui_project_host_take_completion(
     }
     gui_host_completion completion = {0};
     if (!gui_host_queue_take_completion(
-            &s_project.host_queue, &completion)) {
+            &s_project.binding.queue, &completion)) {
         return false;
     }
     *out = (gui_project_job_completion){
-        .present = completion.present,
         .publish_result = completion.publish_result,
         .session_instance_generation =
             completion.envelope
@@ -315,59 +324,74 @@ void gui_project_job_completion_destroy(
 bool gui_project_job_busy(void) {
     const tp_session_job_observed_state state =
         gui_session_client_job_state(
-            &s_project.client);
+            &s_project.binding.client);
     if (state.present &&
         state.session_instance_generation ==
             gui_session_client_instance_generation(
-                &s_project.client) &&
+                &s_project.binding.client) &&
         !state.terminal) {
         return true;
     }
     /* Before the next atomic observation, ingress and staged receipts are
      * host lifecycle facts rather than a second runtime-state projection.
      * `active` also keeps admission fail-safe if observation refresh failed. */
-    return s_project.host_queue.command_count > 0U ||
-           s_project.host_queue.staged.present ||
-           s_project.host_queue.active;
-}
-
-bool gui_project_job_cancelling(void) {
-    return gui_host_queue_cancelling(
-        &s_project.host_queue);
+    return gui_host_queue_busy(
+        &s_project.binding.queue);
 }
 
 tp_session_job_kind
 gui_project_job_active_kind(void) {
     return gui_host_queue_active_kind(
-        &s_project.host_queue);
+        &s_project.binding.queue);
 }
 
 tp_session_job_observed_state
 gui_project_job_observed_state(void) {
     return gui_session_client_job_state(
-        &s_project.client);
+        &s_project.binding.client);
 }
 
-gui_project_host_lifecycle
-gui_project_host_lifecycle_query(void) {
-    return (gui_project_host_lifecycle)
-        gui_host_queue_lifecycle(
-            &s_project.host_queue);
+gui_project_lifecycle_state
+gui_project_lifecycle_state_query(void) {
+    switch (gui_host_binding_lifecycle(
+        &s_project.binding)) {
+    case GUI_HOST_CLOSED:
+        return GUI_PROJECT_LIFECYCLE_CLOSED;
+    case GUI_HOST_OPEN:
+        return GUI_PROJECT_LIFECYCLE_OPEN_IDLE;
+    case GUI_HOST_DRAINING:
+    case GUI_HOST_READY_TO_CUTOVER:
+        return GUI_PROJECT_LIFECYCLE_DRAINING;
+    default:
+        NT_ASSERT(false);
+        return GUI_PROJECT_LIFECYCLE_CLOSED;
+    }
+}
+
+void gui_project_set_controller_status_port(
+    gui_project_controller_status_port port) {
+    s_project.controller_status = port;
 }
 
 uint64_t
 gui_project_session_instance_generation(void) {
     return gui_session_client_instance_generation(
-        &s_project.client);
+        &s_project.binding.client);
 }
 
 void gui_project_invalidate_sources(void) {
     gui_scan_invalidate_all();
-    if (!s_project.session) {
+    if (!gui_project__ingress_is_open()) {
+        return;
+    }
+    tp_session *session =
+        gui_project__borrow_active_session();
+    if (!session) {
         return;
     }
     tp_error err = {0};
-    const tp_status status = tp_session_invalidate_sources(s_project.session, &err);
+    const tp_status status =
+        tp_session_invalidate_sources(session, &err);
     if (status != TP_STATUS_OK) {
         gui_project__note_session_reject(status, &err);
         return;
@@ -424,14 +448,14 @@ void gui_project__note_session_reject(tp_status status, const tp_error *err) {
 }
 
 void gui_project__sync_recovery_notice(void) {
-    if (!s_project.client_initialized ||
-        !s_project.session) {
+    if (!s_project.binding_initialized ||
+        !gui_project__borrow_active_session()) {
         return;
     }
     tp_error err = {{0}};
     const tp_status status =
         gui_session_client_request_observe(
-            &s_project.client, &err);
+            &s_project.binding.client, &err);
     if (status != TP_STATUS_OK) {
         gui_project__note_session_reject(
             status, &err);
@@ -442,7 +466,9 @@ void gui_project__sync_recovery_notice(void) {
 
 // #region lifecycle dev seams (selftest only)
 #if defined(NTPACKER_GUI_SELFTEST) || defined(TP_ENABLE_TEST_SEAMS)
-tp_session *gui_project__test_session(void) { return s_project.session; }
+tp_session *gui_project__test_session(void) {
+    return gui_project__borrow_active_session();
+}
 
 #endif
 #ifdef TP_ENABLE_TEST_SEAMS
@@ -458,7 +484,7 @@ void gui_project__test_fail_observes(
 bool
 gui_project__test_host_has_staged_completion(void) {
     return gui_host_queue__test_has_staged(
-        &s_project.host_queue);
+        &s_project.binding.queue);
 }
 #endif
 // #endregion

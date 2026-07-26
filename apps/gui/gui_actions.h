@@ -48,8 +48,13 @@ void gui_request_browse_target(int atlas_index, int target_index);
 extern int s_pending_preview_target; /* boundary-ok: exporter option, not a target entity index */
 
 /* --- new/open/exit unsaved-changes confirm flow --- */
-enum { AFTER_NONE = 0, AFTER_NEW, AFTER_EXIT, AFTER_OPEN };
-extern int s_after_confirm;
+typedef enum gui_lifecycle_request {
+    GUI_LIFECYCLE_REQUEST_NONE = 0,
+    GUI_LIFECYCLE_REQUEST_NEW,
+    GUI_LIFECYCLE_REQUEST_OPEN,
+    GUI_LIFECYCLE_REQUEST_EXIT
+} gui_lifecycle_request;
+extern gui_lifecycle_request s_after_confirm;
 extern bool s_confirm_open;
 enum { MODAL_NONE = 0, MODAL_SAVE, MODAL_DISCARD, MODAL_CANCEL };
 extern int s_modal_action;
@@ -110,6 +115,9 @@ void apply_pending(void);
 /* Consumes only host-classified Pack/Export completions after the frame's
  * atomic observation has reduced them. */
 void gui_actions_poll_host_completion(void);
+/* Drives the sole aggregate lifecycle owner between frames and consumes typed
+ * cutover/shutdown receipts before the next observation is pinned. */
+void gui_actions_pump_lifecycle(void);
 
 /* Raised by a view widget when an EDIT GESTURE ENDS (slider release / field Enter+blur / a discrete
  * dropdown/checkbox pick): apply_pending flushes gui_project's pending transaction AFTER the queue

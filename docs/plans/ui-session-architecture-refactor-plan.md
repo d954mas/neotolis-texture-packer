@@ -1,7 +1,7 @@
 # UI/Session Architecture Refactor Plan
 
-**Status:** Approved for implementation
-**Date:** 2026-07-26
+**Status:** Approved architecture; execution plan revised after R0-R2d simplicity review
+**Date:** 2026-07-27
 **Target:** `docs/design/ui-session-architecture-spec.md`
 **Normative source:** `docs/ntpacker-master-spec.md`
 
@@ -20,6 +20,14 @@ Create a correct session-observing GUI foundation before MCP transport lands:
 
 The plan does not rewrite `tp_session` as an actor, does not introduce a global
 GUI store, and does not require every panel to use a copied DTO.
+
+Simplicity is an acceptance criterion. A module must own one named
+responsibility, and the same lifecycle or presentation authority must not be
+mirrored in several independently stored state machines. Introduce an
+abstraction only for a required boundary or a second real production consumer;
+do not add generic callbacks, registries, adapters, or compatibility APIs for a
+hypothetical future use. Tests assert public outcomes and ownership invariants,
+not source layout, line counts, or incidental CMake topology.
 
 ## 2. Scope split
 
@@ -71,6 +79,15 @@ They may block an affected slice but do not enlarge Track A.
 7. No worker/transport thread calls or retains raw `tp_session *`.
 8. Project schema, operation schema, and export formats remain unchanged.
 9. Engine submodule remains read-only.
+10. One responsibility has one owner and one stored state; facades derive
+    status instead of mirroring another owner's state machine.
+11. A generic extension point requires at least two real production consumers
+    or an explicit normative transport boundary.
+12. Test-only drivers live in test support and exercise the production
+    asynchronous contract; production headers do not retain retired synchronous
+    compatibility APIs.
+13. Prefer one exhaustive contract table at the pure owner and a small number
+    of integration traces over repeating the same matrix through every layer.
 
 ## 4. Packet graph
 
@@ -139,14 +156,15 @@ This map is pinned to `d9ff3ff` and is the implementation baseline:
 job/result observation slot populated through a narrow port. Observation never
 depends on `tp_build` private state.
 
-### 4.2 Boundary-ratchet rule
+### 4.2 Boundary rule
 
 R0 does not pull deferred presentation/source-runtime work into Track A.
-Mechanical checks reject every new violation and pin each existing violation by
-exact rule, file, token/count, and owning removal packet. A count change in
-either direction fails until the owning packet updates the manifest in the same
-commit. Track A exceptions expire in R1c/R2b/R2c/R2d/R3/R4. Existing
-platform/policy/source-runtime presentation debt remains pinned to its named
+Mechanical checks reject forbidden dependency directions and retired symbols.
+Existing debt is named by owner/path and may only decrease; checks do not pin
+positive occurrence counts, formatting, number of test targets, or repeated
+CMake source registration. Completed cutovers use zero-symbol/zero-dependency
+checks. Track A exceptions expire in R1c/R2b/R2c/R2d/R3/R4. Existing
+platform/policy/source-runtime presentation debt remains assigned to its named
 future Track B/C prerequisite and survives R5 without becoming a Track A task.
 
 ## 5. Detailed packets
@@ -204,17 +222,20 @@ future Track B/C prerequisite and survives R5 without becoming a Track A task.
    - worker and transport modules cannot own raw session pointers.
 4. Permit direct read-only snapshot queries from views.
 5. Define which feature views require projections.
-6. Create exact symbol/deletion manifests for Track A R1c, R2b, R2c, R2d,
-   R3/R5, and R4. Future `PV-*` slices keep their own later measured manifests.
+6. Create deletion manifests and zero-symbol checks for completed Track A
+   cutovers R1c, R2b, R2c, R2d, R3/R5, and R4. Future `PV-*` slices keep their
+   own deletion manifests.
 7. Add negative fixtures that positively prove detection of view admission,
    view I/O, view platform, view model/policy, core-to-frontend, and async raw
    session violations.
-8. Pin current exceptions by exact token/count and removal packet; wildcard
-   allowlists and inline suppression comments are forbidden.
+8. Assign current exceptions to a narrow owner/path allowlist and removal
+   packet. Wildcard allowlists and inline suppression comments are forbidden,
+   but removing existing debt never fails a gate.
 
 **Deletion manifest:** none; this packet adds normative and mechanical guards.
 
-**Gate:** CI can reject the old dependency direction before production changes.
+**Gate:** CI rejects forbidden dependency directions and seeded negative
+fixtures without depending on source formatting or target-registration counts.
 
 ### R1a — Atomic session observation
 
@@ -320,10 +341,11 @@ without flooding the model-event ring.
 3. Include that generation in the composite observation token and return its
    latest immutable state even when event sequence is unchanged.
 4. Extend the refcounted opaque job owner with a constant-time,
-   allocation-free projection callback. The host-thread observation path pulls
-   and admits it under the session gate; workers never push into the session.
-   Publish terminal/meaningful state changes without one event per progress
-   tick.
+   allocation-free projection callback. The explicit host-thread job
+   poll/admission step pulls and admits it under the session gate; workers never
+   push into the session. `tp_session_observe()` remains read-only and does not
+   pump or admit job state. Publish terminal/meaningful state changes without
+   one event per progress tick.
 5. Retain/pin the type-erased owner for the session result slot, every
    observation lifetime, owned result receipts, and GUI presentation
    slots. The final release destroys the heavy Pack arena exactly once.
@@ -346,7 +368,8 @@ without flooding the model-event ring.
 - duplicate completion;
 - completion after session replacement/close;
 - progress burst does not overflow model event retention;
-- progress changes with no event are visible on the next observation;
+- admitted progress changes with no event are visible on the next observation;
+- observation alone never pumps transport or admits job progress;
 - accept A, begin B, then resync exposes B state plus an explicitly A-tagged
   retained result;
 - deterministic thread-create failure leaves the prior observable token, job
@@ -374,7 +397,6 @@ joining a potentially blocked in-process thread.
 - `docs/ntpacker-master-spec.md`
 - `docs/design/ui-session-architecture-spec.md`
 - `docs/plans/ui-session-architecture-refactor-plan.md`
-- new `packer/include/tp_core/tp_job_worker.h`
 - `packer/include/tp_core/tp_job.h`
 - `packer/include/tp_core/tp_build_worker.h`
 - new `packer/src/tp_job_worker.c`
@@ -709,55 +731,117 @@ Shutdown.
 
 - `apps/gui/gui_project_file.c`
 - `apps/gui/gui_project.c`
+- `apps/gui/gui_project.h`
+- `apps/gui/gui_project_internal.h`
+- `apps/gui/gui_project_mutations.c`
+- `apps/gui/gui_project_pending.c`
 - `apps/gui/main.c`
 - `apps/gui/gui_session_client.h`
 - `apps/gui/gui_session_client.c`
 - `apps/gui/gui_host_queue.h`
 - `apps/gui/gui_host_queue.c`
 - `apps/gui/gui_actions.c`
+- `apps/gui/gui_actions.h`
+- `apps/gui/gui_actions_edits.c`
+- `apps/gui/gui_actions_internal.h`
+- `apps/gui/gui_session_adapter.h`
+- `apps/gui/gui_session_adapter.c`
 - `apps/gui/gui_actions_dialogs.c`
+- `apps/gui/gui_pack_jobs.c`
+- `apps/gui/gui_pack_preview.c`
 - `apps/gui/gui_project_recovery.c`
+- `apps/gui/gui_selftest.c`
 - `cmake/check_architecture_boundaries.cmake`
 - new `apps/gui/gui_host_binding.h`
 - new `apps/gui/gui_host_binding.c`
+- new test-only `apps/gui/gui_project_test_driver.h`
 - `apps/gui/CMakeLists.txt`
-- lifecycle tests in `apps/gui/test_gui_session_client.c`
+- new `apps/gui/test_gui_host_binding.c`
+- lifecycle tests in `apps/gui/test_gui_session_client.c`,
+  `apps/gui/test_gui_host_queue.c`, `apps/gui/test_gui_action_trace.c`, and
+  `apps/gui/test_gui_canonical_identity.c`, `apps/gui/test_gui_view.c`
 
 **Tasks:**
 
-1. Add `attach`, `detach`, and fail-atomic `replace_session`.
-2. Prepare a detached candidate session, initial atomic observation, and all
-   fallible attachment resources while the old session remains live.
-3. On prepare failure, destroy only the candidate and preserve old ingress,
+1. Make `gui_host_binding` the aggregate lifecycle owner. It contains the
+   `gui_session_client` and `gui_host_queue`; the current session pointer is
+   stored exactly once, inside the nested client. Delete `s_project.session`,
+   `s_project.client`, and `s_project.host_queue` rather than retaining aliases.
+2. Split client attachment into fallible prepare and non-fallible commit.
+   Initial-empty `attach` may compose those operations, but reattachment may not
+   publish immediately or bypass the host binding.
+3. Add a typed asynchronous lifecycle begin/status/completion contract. An
+   accepted New/Open/replace may remain `DRAINING`; view-state reset and success
+   UI are driven only by the terminal completion signal returned by the pump.
+   Store lifecycle state only in `gui_host_queue`; project/action facades derive
+   status. Do not add a stored completion mailbox or a one-field receipt
+   wrapper; the project maps the binding completion directly to
+   New/Open/Shutdown.
+4. Prepare a detached candidate session, recovery attachment, initial atomic
+   observation, and all fallible attachment resources while the old session
+   remains live. Recovery preflight may take one temporary immutable snapshot
+   directly from the candidate; it must never use `gui_project_snapshot()`
+   bound to the old session. Keep this cold path concrete instead of adding a
+   generic candidate-preparation callback or two-phase prepared-observation API
+   for one consumer. Candidate recovery warnings remain private until the
+   candidate is published at cutover.
+5. On prepare failure, destroy only the candidate and preserve old ingress,
    session, observation, views, and generation.
-4. After prepare succeeds, stop accepting new ingress by entering `DRAINING`;
+6. After prepare succeeds, stop accepting new ingress by entering `DRAINING`;
    do not invalidate the old generation yet, and keep its observation renderable.
-5. Request cancellation and continue pumping frames until terminal completion;
+7. Request cancellation and continue pumping frames until terminal completion;
    use bounded worker-process termination escalation when required.
-6. Join only after terminal confirmation, then enter `READY_TO_CUTOVER`.
-7. In one short non-fallible cutover, invalidate the old instance generation,
+8. Join only after terminal confirmation, then enter `READY_TO_CUTOVER`.
+9. In one short non-fallible cutover, invalidate the old instance generation,
    reject remaining old work, and atomically publish the prepared candidate/new
    generation.
-8. Release old observations and destroy the old session only after publication.
-9. Clear the old composite token and pending submit acknowledgement.
-10. Reconcile or invalidate per-view drafts/selection explicitly.
-11. Treat cross-identity Save As as explicit rebind; reject it while controller
-   attached until later rebind protocol exists.
-12. Provide a minimal injectable controller-attached status port for the
-    identity guard; do not implement transport, claim, or authorization.
-13. Reject/no-op Open of the current canonical identity without acquiring a
-    second lease or tearing down the live session.
+10. Release old observations and destroy the old session only after publication.
+11. Clear the old composite token and pending submit acknowledgement.
+12. Preserve legacy transient state throughout prepare/drain, then explicitly
+    invalidate it at successful cutover. Do not implement the R3 draft reducer
+    or R4 stable per-view identity in this packet.
+13. Treat first Save As and cross-identity Save As as explicit rebind; reject
+   them with `TP_STATUS_UNSUPPORTED_CAPABILITY` while a controller is attached,
+   before pending-edit flush or file publication. Same-identity Save remains
+   allowed.
+14. Provide a minimal injectable controller-attached status port for the
+   identity guard; do not implement transport, claim, or authorization.
+15. Reject Open of the current canonical identity with
+   `TP_STATUS_PROJECT_LIVE` and exact context before `tp_session_open()`,
+   without acquiring a second lease or tearing down the live session.
+16. Make view-facing New/Open/Close request functions enqueue-only. Remove their
+   lifecycle `busy_block`/flush execution from declaration; prepare, drain,
+   cutover, and completion handling run at the between-frame lifecycle pump.
+17. Obtain one atomic observation per normal frame.
+    `gui_host_binding_pump()` only drains commands and polls/adopts job state;
+    it never observes. The normal frame and the explicit shutdown/test drivers
+    call `gui_session_client_frame_begin()` after pumping when an observation
+    is needed.
 
 **Deletion manifest:**
 
 - direct production destruction/replacement of `s_project.session`;
+- the parallel `s_project.session`, `s_project.client`, and
+  `s_project.host_queue` storage;
 - `install_session` old-session discard/destroy/assignment;
 - lifecycle snapshot drops and `snapshot_lifetime_generation` binding;
 - pre-prepare pending discard in New/Open;
-- synchronous view-facing New/Open/Close execution during declaration.
+- synchronous view-facing New/Open/Close execution during declaration;
+- test-only synchronous `gui_project_new`/`gui_project_open` compatibility APIs
+  from production headers and translation units;
+- generic candidate-preparation callbacks and prepared-observation refresh APIs;
+- binding pass-through accessors that merely expose its client/queue fields;
+- stored lifecycle completion mailboxes and one-field receipt wrappers;
+- queue occupancy booleans that duplicate pending/active/staged discriminants;
+- the GUI-only start-command enum that duplicated `tp_session_job_kind`;
+- the unused host/project cancellation query pass-through; presentation reads
+  cancellation from the typed observed job state;
+- the second shutdown/drain owner in `main.c`/`gui_pack_shutdown`.
 
-**Gate:** `USA-06`, `USA-29`, `USA-32`, fail-atomic Open/New/replace tests, and
-same-identity already-open lease test.
+**Gate:** `USA-06`, `USA-29`, `USA-32`; client prepare/commit atomicity;
+host-binding lifecycle table tests; deferred action-trace coverage; fail-atomic
+Open/New/replace tests; controller-attached first/cross-identity Save As tests;
+and the same-identity already-open lease test.
 
 ### R3a — Pure draft reducer and the atlas-settings scalar family
 
@@ -817,9 +901,10 @@ broad pending operation.
 1. Convert inline rename, text fields, and target path.
 2. Preserve user buffer visually during conflict.
 3. Provide Apply Mine, Copy where meaningful, and Discard.
-4. Cover Enter, pointer release, blur, Escape, Save, Save As, Pack, Export,
-   Undo, Redo, Open, New, project Discard, Close, validation/OOM, and resync
-   exactly as the normative lifecycle table specifies.
+4. Reuse the exhaustive reducer table from R3a. Add one adapter-contract test
+   for the text/rename/path family and representative outer-action traces for
+   commit-first, choice-first, and preflight-first ordering; do not repeat the
+   trigger-by-field-family cross-product.
 5. Prove every dependent outer action aborts when its draft prerequisite fails.
 
 **Deletion manifest:** all converted text/rename/path callers of
@@ -833,10 +918,28 @@ unconverted grouped callers remain owned by R3c/R3d.
 **Owned production files:**
 
 - `apps/gui/gui_project_pending.c`
+- `apps/gui/gui_project_internal.h`
+- `apps/gui/gui_project.c`
+- `apps/gui/gui_project_file.c`
+- `apps/gui/gui_project.h`
 - `apps/gui/gui_project_mutations.c`
 - `apps/gui/gui_actions_edits.c`
+- `apps/gui/gui_actions.c`
+- `apps/gui/gui_actions.h`
+- `apps/gui/gui_actions_dialogs.c`
+- `apps/gui/gui_actions_internal.h`
+- `apps/gui/gui_actions_preview.c`
 - `apps/gui/gui_view_settings.c`
+- `apps/gui/gui_view_lists.c`
+- `apps/gui/gui_widgets.c`
+- `apps/gui/gui_state.h`
+- `apps/gui/gui_state.c`
 - `apps/gui/main.c`
+- `apps/gui/gui_selftest.c`
+- `cmake/check_architecture_boundaries.cmake`
+- `apps/gui/CMakeLists.txt`
+- `apps/gui/test_gui_action_trace.c`
+- `apps/gui/test_gui_canonical_identity.c`
 - `apps/gui/test_gui_edit_state.c`
 
 **Tasks:**
@@ -845,66 +948,54 @@ unconverted grouped callers remain owned by R3c/R3d.
 2. Rebuild untouched siblings from the newest snapshot on Apply Mine.
 3. Convert each grouped edit family.
 4. Test target deletion and sibling changes by another client.
-
-**Deletion manifest:** remaining grouped `gui_project_pending_offer` and
-`gui_project_peek_pending_*` callers; storage is deleted by R3d.
-
-**Gate:** `USA-15` through `USA-23` and `USA-31`, especially no stale sibling
-overwrite or continued outer action after failed submit.
-
-### R3d — Delete old pending architecture
-
-**Owned production files:**
-
-- `apps/gui/gui_project_pending.c`
-- `apps/gui/gui_project_internal.h`
-- `apps/gui/gui_project.c`
-- `apps/gui/gui_project_file.c`
-- `apps/gui/gui_actions.c`
-- `apps/gui/gui_actions.h`
-- `apps/gui/gui_actions_dialogs.c`
-- `apps/gui/gui_actions_edits.c`
-- `apps/gui/gui_actions_internal.h`
-- `apps/gui/gui_actions_preview.c`
-- `apps/gui/gui_project.h`
-- `apps/gui/gui_project_mutations.c`
-- `apps/gui/main.c`
-- `apps/gui/gui_selftest.c`
-- `apps/gui/gui_state.h`
-- `apps/gui/gui_state.c`
-- `apps/gui/gui_view_settings.c`
-- `apps/gui/gui_view_lists.c`
-- `apps/gui/gui_widgets.c`
-- `cmake/check_architecture_boundaries.cmake`
-- `apps/gui/test_gui_action_trace.c`
-- `apps/gui/test_gui_canonical_identity.c`
-- `apps/gui/CMakeLists.txt`
-
-**Tasks:**
-
-1. Map every old `gui_project_flush_pending`, `pending_valid`, `pending_op`, and
-   `peek_pending_*` use to an explicit reducer transition.
-2. Delete old pending storage and fallback timer semantics not retained by the
-   new contract.
-3. Retain one gesture → one transaction/Undo.
+5. Delete the broad pending storage, timer fallback, retired inline draft
+   globals, compatibility helpers, and `gui_project_pending.c` registration in
+   this same packet.
 
 **Deletion manifest:**
 
+- remaining `gui_project_pending_offer` and `gui_project_peek_pending_*`
+  callers;
 - `pending_valid`, `pending_key`, `pending_op`, `pending_time`,
-  `pending_expected_revision`, and `pending_preview_stale_before` from
-  `gui_project_state`;
+  `pending_expected_revision`, and `pending_preview_stale_before`;
 - `gui_project_flush_pending`, `gui_project_pending_route`,
   `gui_project_pending_offer`, `gui_project_peek_pending_slice9`,
   `gui_project_flush_elapsed`, and `gui_project_pending_discard`;
-- `gui_actions__flush_failed` fallback after every lifecycle trigger has an
-  explicit reducer transition;
-- `gui_project_pending.c` source registration from all four GUI/test target
-  source lists in `apps/gui/CMakeLists.txt`;
-- legacy inline draft globals in `gui_state.*`, `s_actions.edit_*` fields, and
-  superseded view field buffers;
-- obsolete timer-coalescing callers and tests.
+- `gui_actions__flush_failed` fallback, legacy inline draft globals, superseded
+  view field buffers, obsolete timer callers/tests, and
+  `gui_project_pending.c` source registration.
 
-**Gate:** forbidden-symbol scan finds no old pending architecture.
+**Gate:** `USA-15` through `USA-23` and `USA-31`; no stale sibling overwrite,
+no continued outer action after failed submit, and zero old pending
+architecture remains.
+
+### R3d — Draft integration acceptance
+
+R3d is a focused acceptance packet, not a delayed deletion or second draft
+architecture. R3c has already removed the old pending owner.
+
+**Owned files:**
+
+- `apps/gui/test_gui_edit_state.c`
+- `apps/gui/test_gui_action_trace.c`
+- `apps/gui/test_gui_canonical_identity.c`
+- `apps/gui/gui_selftest.c`
+
+**Tasks:**
+
+1. Prove one gesture maps to one transaction/Undo.
+2. Prove one representative flow for each outer-action ordering class.
+3. Prove validation, OOM, resync, target deletion, and two-view conflict through
+   the public reducer/client contract.
+4. Remove redundant integration scenarios already proven by the pure reducer
+   table; do not add production abstractions in this packet.
+
+**Deletion manifest:** redundant integration fixtures or compatibility drivers
+found while converting acceptance tests; no production legacy path may survive
+from R3c into this packet.
+
+**Gate:** focused draft acceptance passes with one pure owner, no compatibility
+path, and no duplicated trigger-by-field matrix.
 
 ### R4 — Stable per-view state
 
@@ -943,6 +1034,8 @@ shipping windows.
 4. Define one explicit parent fallback or clear behavior.
 5. Add a two-view test: View A commit conflicts View B draft.
 6. Do not make extra GUI windows a completion gate.
+7. `gui_view_state` owns both stable identity and the view's `gui_edit_state`;
+   do not retain a parallel global draft registry.
 
 **Deletion manifest:**
 
@@ -971,6 +1064,8 @@ architecture.
    draft, and stable-selection tests.
 3. Run native Debug build and focused tests; then native Release test suite.
 4. Update roadmap evidence only after gates pass.
+5. Add no new production abstraction or positive-count ratchet. Remove
+   redundant tests when the same outcome is already proven at the owning layer.
 
 **Owned files:**
 

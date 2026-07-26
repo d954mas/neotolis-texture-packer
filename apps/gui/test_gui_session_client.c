@@ -515,14 +515,23 @@ void test_attach_replaces_binding_only_after_initial_observation(void) {
         gui_session_client_attach(&client, first, &error));
     const tp_session_snapshot *first_snapshot =
         gui_session_client_snapshot(&client);
+    gui_session_client_prepared prepared = {0};
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
-        gui_session_client_attach(&client, second, &error));
+        gui_session_client_prepare(
+            &client, second, &prepared, &error));
+    TEST_ASSERT_EQUAL_PTR(
+        first_snapshot,
+        gui_session_client_snapshot(&client));
+    tp_session *retired =
+        gui_session_client_commit_prepared(
+            &client, &prepared);
+    TEST_ASSERT_EQUAL_PTR(first, retired);
     TEST_ASSERT_NOT_EQUAL(
         first_snapshot, gui_session_client_snapshot(&client));
     TEST_ASSERT_EQUAL_UINT64(
         2U, gui_session_client_instance_generation(&client));
-    tp_session_destroy(first);
+    tp_session_destroy(retired);
     TEST_ASSERT_NOT_NULL(gui_session_client_snapshot(&client));
     gui_session_client_detach(&client);
     tp_session_destroy(second);
@@ -541,10 +550,12 @@ void test_failed_reattach_keeps_old_binding_and_generation(void) {
         gui_session_client_snapshot(&client);
     const tp_session_observation_token first_token =
         gui_session_client_observed_token(&client);
+    gui_session_client_prepared prepared = {0};
     gui_session_client__test_fail_next_observe();
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OOM,
-        gui_session_client_attach(&client, second, &error));
+        gui_session_client_prepare(
+            &client, second, &prepared, &error));
     TEST_ASSERT_EQUAL_PTR(
         first_snapshot, gui_session_client_snapshot(&client));
     TEST_ASSERT_TRUE(tp_session_observation_token_equal(
@@ -775,6 +786,92 @@ void test_retained_id_retry_commits_once_and_returns_duplicate_result(void) {
     tp_session_destroy(session);
 }
 
+void test_retained_id_retry_recovers_after_local_result_copy_failure(void) {
+    tp_session *session = make_session();
+    gui_session_client client;
+    tp_error error = {{0}};
+    gui_session_client_init(&client);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_session_client_attach(&client, session, &error));
+    tp_operation operation =
+        make_rename_operation(session, "copy-retry");
+    const gui_session_submit_request request = {
+        .operations = &operation,
+        .operation_count = 1,
+        .expected_revision = 0,
+        .semantic_label = "atlas.rename",
+        .identity = {
+            .origin_view_id = {{9U}},
+            .draft_instance_id = {{10U}},
+        },
+        .retained_transaction_id =
+            "78787878787878787878787878787878",
+    };
+
+    gui_session_client__test_fail_next_result_copy();
+    gui_session_submit_result first = {0};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_session_client_submit(
+            &client, &request, &first, &error));
+    TEST_ASSERT_TRUE(first.transaction.committed);
+    TEST_ASSERT_EQUAL_INT64(1, tp_session_revision(session));
+    gui_session_submit_result_destroy(&first);
+
+    gui_session_submit_result retry = {0};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_DUPLICATE_ID,
+        gui_session_client_submit(
+            &client, &request, &retry, &error));
+    TEST_ASSERT_FALSE(retry.transaction.committed);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_DUPLICATE_ID,
+        retry.terminal_status);
+    TEST_ASSERT_EQUAL_INT64(1, retry.transaction.revision);
+    TEST_ASSERT_EQUAL_INT64(1, tp_session_revision(session));
+    TEST_ASSERT_EQUAL_INT(1, tp_session_history_count(session));
+
+    tp_operation later_operation =
+        make_rename_operation(session, "after-copy-retry");
+    const gui_session_submit_request later_request = {
+        .operations = &later_operation,
+        .operation_count = 1,
+        .expected_revision = 1,
+        .semantic_label = "atlas.rename",
+        .retained_transaction_id =
+            "79797979797979797979797979797979",
+    };
+    gui_session_submit_result later = {0};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_session_client_submit(
+            &client, &later_request, &later,
+            &error));
+    TEST_ASSERT_EQUAL_INT64(
+        2, tp_session_revision(session));
+
+    gui_session_submit_result retry_after_revision = {0};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_DUPLICATE_ID,
+        gui_session_client_submit(
+            &client, &request,
+            &retry_after_revision, &error));
+    TEST_ASSERT_EQUAL_INT64(
+        2, retry_after_revision.transaction.revision);
+    TEST_ASSERT_EQUAL_INT64(
+        2, tp_session_revision(session));
+
+    gui_session_submit_result_destroy(
+        &retry_after_revision);
+    gui_session_submit_result_destroy(&later);
+    tp_operation_free(&later_operation);
+    gui_session_submit_result_destroy(&retry);
+    tp_operation_free(&operation);
+    gui_session_client_detach(&client);
+    tp_session_destroy(session);
+}
+
 void test_retained_id_requires_exact_view_and_draft_identity(void) {
     tp_session *session = make_session();
     gui_session_client client;
@@ -875,17 +972,24 @@ void test_successful_reattach_clears_receipts_but_failed_reattach_preserves_them
         &client, request.retained_transaction_id,
         identity, &terminal));
 
+    gui_session_client_prepared prepared = {0};
     gui_session_client__test_fail_next_observe();
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OOM,
-        gui_session_client_attach(&client, second, &error));
+        gui_session_client_prepare(
+            &client, second, &prepared, &error));
     TEST_ASSERT_TRUE(gui_session_client_pending_submit_query(
         &client, request.retained_transaction_id,
         identity, &terminal));
 
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
-        gui_session_client_attach(&client, second, &error));
+        gui_session_client_prepare(
+            &client, second, &prepared, &error));
+    tp_session *retired =
+        gui_session_client_commit_prepared(
+            &client, &prepared);
+    TEST_ASSERT_EQUAL_PTR(first, retired);
     TEST_ASSERT_FALSE(gui_session_client_pending_submit_query(
         &client, request.retained_transaction_id,
         identity, &terminal));
@@ -895,7 +999,7 @@ void test_successful_reattach_clears_receipts_but_failed_reattach_preserves_them
     gui_session_submit_result_destroy(&result);
     tp_operation_free(&operation);
     gui_session_client_detach(&client);
-    tp_session_destroy(first);
+    tp_session_destroy(retired);
     tp_session_destroy(second);
 }
 
@@ -1273,6 +1377,166 @@ void test_committed_submit_survives_observation_failure_and_retries_echo(void) {
     tp_session_destroy(session);
 }
 
+void test_prepare_failure_preserves_attached_session_observation_and_generation(void) {
+    tp_session *old_session = make_session();
+    tp_session *candidate = make_session();
+    gui_session_client client;
+    gui_session_client_prepared prepared = {0};
+    tp_error error = {{0}};
+    gui_session_client_init(&client);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_session_client_attach(
+            &client, old_session, &error));
+    const tp_session_snapshot *old_snapshot =
+        gui_session_client_snapshot(&client);
+    const uint64_t old_generation =
+        gui_session_client_instance_generation(
+            &client);
+
+    gui_session_client__test_fail_next_observe();
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OOM,
+        gui_session_client_prepare(
+            &client, candidate, &prepared,
+            &error));
+    TEST_ASSERT_EQUAL_PTR(
+        old_session,
+        gui_session_client_attached_session(
+            &client));
+    TEST_ASSERT_EQUAL_PTR(
+        old_snapshot,
+        gui_session_client_snapshot(&client));
+    TEST_ASSERT_EQUAL_UINT64(
+        old_generation,
+        gui_session_client_instance_generation(
+            &client));
+    TEST_ASSERT_FALSE(prepared.ready);
+
+    gui_session_client_detach(&client);
+    tp_session_destroy(old_session);
+    tp_session_destroy(candidate);
+}
+
+void test_prepare_rejects_active_session_alias_without_state_change(void) {
+    tp_session *session = make_session();
+    gui_session_client client;
+    gui_session_client_prepared prepared =
+        {0};
+    tp_error error = {{0}};
+    gui_session_client_init(&client);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_session_client_attach(
+            &client, session, &error));
+    const tp_session_snapshot *snapshot =
+        gui_session_client_snapshot(&client);
+    const uint64_t generation =
+        gui_session_client_instance_generation(
+            &client);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_INVALID_ARGUMENT,
+        gui_session_client_prepare(
+            &client, session, &prepared,
+            &error));
+    TEST_ASSERT_FALSE(prepared.ready);
+    TEST_ASSERT_EQUAL_PTR(
+        session,
+        gui_session_client_attached_session(
+            &client));
+    TEST_ASSERT_EQUAL_PTR(
+        snapshot,
+        gui_session_client_snapshot(
+            &client));
+    TEST_ASSERT_EQUAL_UINT64(
+        generation,
+        gui_session_client_instance_generation(
+            &client));
+    gui_session_client_detach(&client);
+    tp_session_destroy(session);
+}
+
+void test_prepare_is_invisible_until_nonfallible_commit(void) {
+    tp_session *old_session = make_session();
+    tp_session *candidate = make_session();
+    gui_session_client client;
+    gui_session_client_prepared prepared = {0};
+    tp_error error = {{0}};
+    gui_session_client_init(&client);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_session_client_attach(
+            &client, old_session, &error));
+    const tp_session_snapshot *old_snapshot =
+        gui_session_client_snapshot(&client);
+    const uint64_t old_generation =
+        gui_session_client_instance_generation(
+            &client);
+
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_session_client_prepare(
+            &client, candidate, &prepared,
+            &error));
+    TEST_ASSERT_TRUE(prepared.ready);
+    TEST_ASSERT_EQUAL_PTR(
+        old_session,
+        gui_session_client_attached_session(
+            &client));
+    TEST_ASSERT_EQUAL_PTR(
+        old_snapshot,
+        gui_session_client_snapshot(&client));
+    TEST_ASSERT_EQUAL_UINT64(
+        old_generation,
+        gui_session_client_instance_generation(
+            &client));
+
+    tp_session *retired =
+        gui_session_client_commit_prepared(
+            &client, &prepared);
+    TEST_ASSERT_EQUAL_PTR(old_session, retired);
+    TEST_ASSERT_FALSE(prepared.ready);
+    TEST_ASSERT_EQUAL_PTR(
+        candidate,
+        gui_session_client_attached_session(
+            &client));
+    TEST_ASSERT_EQUAL_UINT64(
+        old_generation + 1U,
+        gui_session_client_instance_generation(
+            &client));
+    TEST_ASSERT_NOT_EQUAL(
+        old_snapshot,
+        gui_session_client_snapshot(&client));
+
+    gui_session_client_detach(&client);
+    tp_session_destroy(retired);
+    tp_session_destroy(candidate);
+}
+
+void test_attach_is_initial_empty_only(void) {
+    tp_session *old_session = make_session();
+    tp_session *candidate = make_session();
+    gui_session_client client;
+    tp_error error = {{0}};
+    gui_session_client_init(&client);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_session_client_attach(
+            &client, old_session, &error));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_INVALID_ARGUMENT,
+        gui_session_client_attach(
+            &client, candidate, &error));
+    TEST_ASSERT_EQUAL_PTR(
+        old_session,
+        gui_session_client_attached_session(
+            &client));
+
+    gui_session_client_detach(&client);
+    tp_session_destroy(old_session);
+    tp_session_destroy(candidate);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_attach_owns_initial_resync_and_fans_out);
@@ -1304,6 +1568,8 @@ int main(void) {
     RUN_TEST(
         test_retained_id_retry_commits_once_and_returns_duplicate_result);
     RUN_TEST(
+        test_retained_id_retry_recovers_after_local_result_copy_failure);
+    RUN_TEST(
         test_retained_id_requires_exact_view_and_draft_identity);
     RUN_TEST(
         test_successful_reattach_clears_receipts_but_failed_reattach_preserves_them);
@@ -1319,5 +1585,12 @@ int main(void) {
         test_submit_100_operations_is_one_revision_event_and_undo_step);
     RUN_TEST(
         test_committed_submit_survives_observation_failure_and_retries_echo);
+    RUN_TEST(
+        test_prepare_failure_preserves_attached_session_observation_and_generation);
+    RUN_TEST(
+        test_prepare_rejects_active_session_alias_without_state_change);
+    RUN_TEST(
+        test_prepare_is_invisible_until_nonfallible_commit);
+    RUN_TEST(test_attach_is_initial_empty_only);
     return UNITY_END();
 }

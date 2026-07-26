@@ -4,8 +4,10 @@
 
 #ifdef _WIN32
 #include <direct.h>
+#include <windows.h>
 #define test_rmdir _rmdir
 #else
+#include <dirent.h>
 #include <unistd.h>
 #define test_rmdir rmdir
 #endif
@@ -15,12 +17,14 @@
 #include "gui_pack.h"
 #include "gui_pack_internal.h"
 #include "gui_project.h"
+#include "gui_project_test_driver.h"
 #include "gui_recovery_indicator.h"
 #include "gui_rows.h"
 #include "gui_scan.h"
 #include "gui_state.h"
 
 #include "time/nt_time.h"
+#include "tp_core/tp_identity.h"
 #include "tp_core/tp_input.h"
 #include "tp_core/tp_scan.h"
 #include "tp_core/tp_journal.h"
@@ -37,6 +41,49 @@ static char s_left_dir[512];
 static char s_right_dir[512];
 static char s_left_file[512];
 static char s_right_file[512];
+
+static bool remove_flat_test_dir(const char *root) {
+#ifdef _WIN32
+    char pattern[TP_IDENTITY_PATH_MAX];
+    (void)snprintf(
+        pattern, sizeof pattern, "%s/*", root);
+    WIN32_FIND_DATAA item;
+    HANDLE find = FindFirstFileA(pattern, &item);
+    if (find != INVALID_HANDLE_VALUE) {
+        do {
+            if (strcmp(item.cFileName, ".") != 0 &&
+                strcmp(item.cFileName, "..") != 0) {
+                char path[TP_IDENTITY_PATH_MAX];
+                (void)snprintf(
+                    path, sizeof path, "%s/%s",
+                    root, item.cFileName);
+                (void)DeleteFileA(path);
+            }
+        } while (FindNextFileA(find, &item));
+        (void)FindClose(find);
+    }
+    return RemoveDirectoryA(root) != 0 ||
+           GetLastError() == ERROR_PATH_NOT_FOUND;
+#else
+    DIR *dir = opendir(root);
+    if (dir) {
+        struct dirent *item;
+        while ((item = readdir(dir)) != NULL) {
+            if (strcmp(item->d_name, ".") != 0 &&
+                strcmp(item->d_name, "..") != 0) {
+                char path[TP_IDENTITY_PATH_MAX];
+                (void)snprintf(
+                    path, sizeof path, "%s/%s",
+                    root, item->d_name);
+                (void)remove(path);
+            }
+        }
+        (void)closedir(dir);
+    }
+    return rmdir(root) == 0 ||
+           access(root, F_OK) != 0;
+#endif
+}
 
 static tp_journal_io attach_memory_recovery(void) {
     tp_journal_io io = tp_journal_io_memory();
@@ -63,7 +110,7 @@ static gui_pack_done pump_pack_frame(
     tp_error error = {{0}};
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
-        gui_project_host_drain(&error));
+        gui_project_lifecycle_pump(NULL, &error));
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
         gui_project_frame_begin(&error));
@@ -77,7 +124,7 @@ static void admit_queued_job(void) {
     tp_error error = {{0}};
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
-        gui_project_host_drain(&error));
+        gui_project_lifecycle_pump(NULL, &error));
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
         gui_project_frame_begin(&error));
@@ -248,6 +295,9 @@ void setUp(void) {
     tp_job__test_reset_all();
     TEST_ASSERT_TRUE(prepare_files());
     gui_project_init();
+    gui_project_set_controller_status_port(
+        (gui_project_controller_status_port){
+            0});
     s_sel_atlas = 0;
     multi_sel_clear();
 }
@@ -258,7 +308,7 @@ void tearDown(void) {
     tp_journal__test_set_file_limit(0U);
     multi_sel_clear();
     gui_pack_shutdown();
-    gui_project_shutdown();
+    gui_project_test_shutdown(true);
     gui_scan_shutdown();
     remove_fixture_files();
 }
@@ -345,6 +395,24 @@ void test_preview_result_rejects_source_refresh_after_job_capture(void) {
     TEST_ASSERT_EQUAL_INT(GUI_PACK_DONE_PREVIEW_OK, done);
     TEST_ASSERT_TRUE(info.input_changed);
     TEST_ASSERT_NULL(gui_pack_preview_result(0));
+}
+
+void test_preview_after_native_pack_uses_observed_runtime_generation(void) {
+    (void)add_coin_source();
+    TEST_ASSERT_TRUE(gui_pack_init(TP_GUI_IDENTITY_TEST_DIR));
+
+    double elapsed_ms = 0.0;
+    char error[256] = {0};
+    char notice[128] = {0};
+    TEST_ASSERT_TRUE(gui_pack_atlas(
+        0, &elapsed_ms, error, sizeof error,
+        notice, sizeof notice));
+    TEST_ASSERT_NOT_NULL(gui_pack_result(0));
+
+    error[0] = '\0';
+    TEST_ASSERT_TRUE(gui_pack_preview_blocking(
+        0, "defold", error, sizeof error));
+    TEST_ASSERT_NOT_NULL(gui_pack_preview_result(0));
 }
 
 void test_native_pack_marks_token_change_stale_without_host_side_probe(void) {
@@ -468,6 +536,189 @@ void test_gui_poll_does_not_decode_sources_on_gui_thread(void) {
         decodes_before_poll, tp_image__test_decode_count());
 }
 
+static bool controller_attached(
+    void *context) {
+    return context &&
+           *(const bool *)context;
+}
+
+void test_controller_guard_rejects_identity_change_before_flush_or_write(void) {
+    char first_path[TP_IDENTITY_PATH_MAX];
+    char cross_path[TP_IDENTITY_PATH_MAX];
+    (void)snprintf(
+        first_path, sizeof first_path,
+        "%s/controller-first.ntpacker_project",
+        TP_GUI_IDENTITY_TEST_DIR);
+    (void)snprintf(
+        cross_path, sizeof cross_path,
+        "%s/controller-cross.ntpacker_project",
+        TP_GUI_IDENTITY_TEST_DIR);
+    (void)remove(first_path);
+    (void)remove(cross_path);
+
+    const tp_session_snapshot *snapshot =
+        gui_project_snapshot();
+    const tp_snapshot_atlas *atlas =
+        tp_session_snapshot_atlas_at(
+            snapshot, 0);
+    TEST_ASSERT_NOT_NULL(atlas);
+    const int64_t revision =
+        tp_session_snapshot_revision(snapshot);
+    const int undo_depth =
+        gui_project_undo_depth();
+    TEST_ASSERT_TRUE(
+        gui_project_set_atlas_setting(
+            atlas->id, revision,
+            GUI_ATLAS_PADDING,
+            atlas->padding + 1, 0.0F));
+
+    bool attached = true;
+    gui_project_set_controller_status_port(
+        (gui_project_controller_status_port){
+            .attached =
+                controller_attached,
+            .context = &attached,
+        });
+    char error[256] = {0};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_UNSUPPORTED_CAPABILITY,
+        gui_project_save_as(
+            first_path, error,
+            sizeof error));
+    TEST_ASSERT_EQUAL_INT(
+        revision,
+        tp_session_revision(
+            gui_project__test_session()));
+    TEST_ASSERT_EQUAL_INT(
+        undo_depth,
+        gui_project_undo_depth());
+    TEST_ASSERT_FALSE(
+        gui_scan_exists(first_path));
+
+    attached = false;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_project_save_as(
+            first_path, error,
+            sizeof error));
+    TEST_ASSERT_EQUAL_INT(
+        revision + 1,
+        tp_session_revision(
+            gui_project__test_session()));
+    TEST_ASSERT_EQUAL_INT(
+        undo_depth + 1,
+        gui_project_undo_depth());
+    attached = true;
+    /* No intervening frame observation: the guard must refresh through the
+     * session client and recognize this as the same identity. */
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_project_save_as(
+            first_path, error,
+            sizeof error));
+    snapshot = gui_project_snapshot();
+    atlas = tp_session_snapshot_atlas_at(
+        snapshot, 0);
+    TEST_ASSERT_NOT_NULL(atlas);
+    const int64_t cross_revision =
+        tp_session_revision(
+            gui_project__test_session());
+    const int cross_undo_depth =
+        gui_project_undo_depth();
+    TEST_ASSERT_TRUE(
+        gui_project_set_atlas_setting(
+            atlas->id,
+            tp_session_snapshot_revision(
+                snapshot),
+            GUI_ATLAS_PADDING,
+            atlas->padding + 1, 0.0F));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_UNSUPPORTED_CAPABILITY,
+        gui_project_save_as(
+            cross_path, error,
+            sizeof error));
+    TEST_ASSERT_EQUAL_INT64(
+        cross_revision,
+        tp_session_revision(
+            gui_project__test_session()));
+    TEST_ASSERT_EQUAL_INT(
+        cross_undo_depth,
+        gui_project_undo_depth());
+    TEST_ASSERT_EQUAL_STRING(
+        first_path, gui_project_path());
+    TEST_ASSERT_FALSE(
+        gui_scan_exists(cross_path));
+
+    attached = false;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_project_save_as(
+            cross_path, error,
+            sizeof error));
+    TEST_ASSERT_EQUAL_INT64(
+        cross_revision + 1,
+        tp_session_revision(
+            gui_project__test_session()));
+    TEST_ASSERT_EQUAL_INT(
+        cross_undo_depth + 1,
+        gui_project_undo_depth());
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_project_frame_begin(NULL));
+    gui_project_frame_end();
+    TEST_ASSERT_EQUAL_STRING(
+        cross_path, gui_project_path());
+
+    gui_project_set_controller_status_port(
+        (gui_project_controller_status_port){
+            0});
+    TEST_ASSERT_TRUE(gui_project_test_new());
+    (void)remove(first_path);
+    (void)remove(cross_path);
+}
+
+void test_open_current_canonical_identity_rejects_before_replacement(void) {
+    char path[TP_IDENTITY_PATH_MAX];
+    (void)snprintf(
+        path, sizeof path,
+        "%s/already-open.ntpacker_project",
+        TP_GUI_IDENTITY_TEST_DIR);
+    (void)remove(path);
+    char error_text[256] = {0};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_project_save_as(
+            path, error_text,
+            sizeof error_text));
+    tp_session *active =
+        gui_project__test_session();
+    const uint64_t generation =
+        gui_project_session_instance_generation();
+    const uint64_t open_calls =
+        gui_project__test_open_call_count();
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_PROJECT_LIVE,
+        gui_project_lifecycle_begin_open(
+            path, &error));
+    TEST_ASSERT_NOT_NULL(
+        strstr(error.msg, path));
+    TEST_ASSERT_EQUAL_UINT64(
+        open_calls,
+        gui_project__test_open_call_count());
+    TEST_ASSERT_EQUAL_PTR(
+        active,
+        gui_project__test_session());
+    TEST_ASSERT_EQUAL_UINT64(
+        generation,
+        gui_project_session_instance_generation());
+    TEST_ASSERT_EQUAL_INT(
+        GUI_PROJECT_LIFECYCLE_OPEN_IDLE,
+        gui_project_lifecycle_state_query());
+    TEST_ASSERT_TRUE(gui_project_test_new());
+    (void)remove(path);
+}
+
 void test_deleted_pack_target_is_typed_failure_not_cancelled(void) {
     TEST_ASSERT_EQUAL_INT(
         1, gui_project_add_atlas().visible_index);
@@ -485,7 +736,7 @@ void test_deleted_pack_target_is_typed_failure_not_cancelled(void) {
      * observation classification intentionally happens after deletion. */
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
-        gui_project_host_drain(NULL));
+        gui_project_lifecycle_pump(NULL, NULL));
     const tp_session_snapshot *snapshot =
         gui_project_snapshot();
     TEST_ASSERT_TRUE(
@@ -910,8 +1161,20 @@ void test_delayed_animation_context_ref_never_retargets_after_index_shift(void) 
 
 void test_required_recovery_without_root_warns_but_allows_edit_undo_redo(void) {
     gui_project_require_recovery();
-    gui_project_shutdown();
-    gui_project_init();
+    tp_error lifecycle_error = {{0}};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_project_lifecycle_begin_new(
+            &lifecycle_error));
+    char warning[256] = {0};
+    TEST_ASSERT_FALSE(
+        gui_project_take_recovery_setup_notice(
+            warning, sizeof warning));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_project_test_finish(
+            GUI_PROJECT_LIFECYCLE_NEW,
+            &lifecycle_error));
 
     const tp_session_snapshot *snapshot = gui_project_snapshot();
     const tp_snapshot_atlas *atlas = snapshot
@@ -944,11 +1207,9 @@ void test_required_recovery_without_root_warns_but_allows_edit_undo_redo(void) {
     TEST_ASSERT_FALSE(
         tp_session_recovery_available(gui_project__test_session()));
 
-    char warning[256] = {0};
     TEST_ASSERT_TRUE(
         gui_project_take_recovery_setup_notice(warning, sizeof warning));
     TEST_ASSERT_NOT_NULL(strstr(warning, "Crash recovery is unavailable"));
-    gui_project_discard_recovery_on_shutdown();
 }
 
 void test_recovery_notice_is_sticky_exact_and_clears_after_save_heals(void) {
@@ -1016,6 +1277,144 @@ void test_recovery_notice_is_sticky_exact_and_clears_after_save_heals(void) {
     (void)remove(save_path);
 }
 
+void test_save_as_recovery_rebind_uses_post_save_identity(void) {
+    char recovery_root[512];
+    char save_path[512];
+    char canonical_path[TP_IDENTITY_PATH_MAX];
+    (void)snprintf(
+        recovery_root, sizeof recovery_root,
+        "%s/rebind-recovery",
+        TP_GUI_IDENTITY_TEST_DIR);
+    (void)snprintf(
+        save_path, sizeof save_path,
+        "%s/rebind.ntpacker_project",
+        TP_GUI_IDENTITY_TEST_DIR);
+    (void)remove(save_path);
+    (void)remove_flat_test_dir(recovery_root);
+    tp_mkdirs(recovery_root);
+
+    gui_project_test_shutdown(true);
+    gui_project_enable_recovery(recovery_root);
+    gui_project_init();
+
+    char error[256] = {0};
+    const tp_session_snapshot *before_save =
+        gui_project_snapshot();
+    const tp_snapshot_atlas *before_save_atlas =
+        tp_session_snapshot_atlas_at(
+            before_save, 0);
+    TEST_ASSERT_NOT_NULL(before_save_atlas);
+    tp_journal__test_set_record_limit(1U);
+    TEST_ASSERT_TRUE(
+        gui_project_set_atlas_name(
+            before_save_atlas->id,
+            tp_session_snapshot_revision(before_save),
+            "rebind-before-save"));
+    TEST_ASSERT_TRUE(
+        tp_session_recovery_health_query(
+            gui_project__test_session()).degraded);
+    tp_journal__test_set_record_limit(0U);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_project_save_as(
+            save_path, error, sizeof error));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_identity_project_path_canonical(
+            save_path, canonical_path,
+            sizeof canonical_path, NULL));
+    tp_id128 fingerprint = tp_id128_nil();
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_identity_file_fingerprint(
+            canonical_path, &fingerprint, NULL));
+
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_project_frame_begin(NULL));
+    gui_project_frame_end();
+    const tp_session_snapshot *snapshot =
+        gui_project_snapshot();
+    const tp_snapshot_atlas *atlas =
+        tp_session_snapshot_atlas_at(
+            snapshot, 0);
+    TEST_ASSERT_NOT_NULL(atlas);
+    TEST_ASSERT_TRUE(
+        gui_project_set_atlas_name(
+            atlas->id,
+            tp_session_snapshot_revision(snapshot),
+            "dirty-after-save"));
+    gui_project_test_shutdown(false);
+
+    gui_project_enable_recovery(recovery_root);
+    gui_project_init();
+    gui_recovery_list candidates = {0};
+    TEST_ASSERT_EQUAL_INT(
+        1, gui_recovery_collect(&candidates));
+    const gui_recovery_entry *entry =
+        &candidates.items[0];
+    TEST_ASSERT_EQUAL_STRING(
+        canonical_path, entry->original_path);
+    TEST_ASSERT_EQUAL_STRING(
+        "rebind.ntpacker_project",
+        entry->name);
+    TEST_ASSERT_TRUE(
+        entry->has_file_fingerprint);
+    TEST_ASSERT_TRUE(
+        tp_id128_eq(
+            fingerprint,
+            entry->file_fingerprint));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_recovery_resolve_entry(
+            entry, GUI_RECOVERY_DISCARD,
+            NULL, error, sizeof error));
+
+    gui_project_test_shutdown(true);
+    gui_project_enable_recovery(NULL);
+    TEST_ASSERT_TRUE(
+        remove_flat_test_dir(recovery_root));
+    TEST_ASSERT_EQUAL_INT(0, remove(save_path));
+    gui_project_init();
+}
+
+void test_raw_shutdown_commits_buffered_gesture_before_admission_closes(void) {
+    const tp_session_snapshot *snapshot =
+        gui_project_snapshot();
+    const tp_snapshot_atlas *atlas =
+        tp_session_snapshot_atlas_at(snapshot, 0);
+    TEST_ASSERT_NOT_NULL(atlas);
+    tp_session *session =
+        gui_project__test_session();
+    const int64_t revision =
+        tp_session_snapshot_revision(snapshot);
+    TEST_ASSERT_TRUE(
+        gui_project_set_atlas_setting(
+            atlas->id, revision,
+            GUI_ATLAS_PADDING,
+            atlas->padding + 1, 0.0F));
+    TEST_ASSERT_EQUAL_INT64(
+        revision,
+        tp_session_revision(session));
+
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_project_lifecycle_begin_shutdown(
+            false, &error));
+    TEST_ASSERT_EQUAL_INT64(
+        revision + 1,
+        tp_session_revision(session));
+    TEST_ASSERT_EQUAL_INT(
+        GUI_PROJECT_LIFECYCLE_DRAINING,
+        gui_project_lifecycle_state_query());
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_project_test_finish(
+            GUI_PROJECT_LIFECYCLE_SHUTDOWN,
+            &error));
+}
+
 void test_save_as_projects_clean_identity_only_at_common_frame_observation(void) {
     const tp_session_snapshot *snapshot =
         gui_project_snapshot();
@@ -1060,7 +1459,7 @@ void test_save_as_projects_clean_identity_only_at_common_frame_observation(void)
     TEST_ASSERT_FALSE(gui_project_is_dirty());
     TEST_ASSERT_TRUE(gui_project_has_path());
 
-    TEST_ASSERT_TRUE(gui_project_new());
+    TEST_ASSERT_TRUE(gui_project_test_new());
     TEST_ASSERT_EQUAL_INT(0, remove(save_path));
     TEST_ASSERT_EQUAL_INT(0, remove(lock_path));
 }
@@ -1110,10 +1509,10 @@ void test_save_as_roundtrip_releases_writer_before_open_and_keeps_external_guard
     /* Opening the current canonical identity would contend with this
      * session's own writer lease. A real round-trip releases that owner
      * before Open; in-place reload remains an explicit R2d concern. */
-    TEST_ASSERT_TRUE(gui_project_new());
+    TEST_ASSERT_TRUE(gui_project_test_new());
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
-        gui_project_open(
+        gui_project_test_open(
             save_path, error, sizeof error));
     snapshot = gui_project_snapshot();
     atlas = tp_session_snapshot_atlas_at(snapshot, 0);
@@ -1150,7 +1549,7 @@ void test_save_as_roundtrip_releases_writer_before_open_and_keeps_external_guard
         gui_project_save_as(
             rebound_path, error, sizeof error));
 
-    TEST_ASSERT_TRUE(gui_project_new());
+    TEST_ASSERT_TRUE(gui_project_test_new());
     TEST_ASSERT_EQUAL_INT(0, remove(save_path));
     TEST_ASSERT_EQUAL_INT(0, remove(rebound_path));
     TEST_ASSERT_EQUAL_INT(0, remove(save_lock_path));
@@ -1301,6 +1700,8 @@ int main(int argc, char **argv) {
     RUN_TEST(test_delayed_animation_context_ref_never_retargets_after_index_shift);
     RUN_TEST(test_preview_result_rejects_source_refresh_after_job_capture);
     RUN_TEST(
+        test_preview_after_native_pack_uses_observed_runtime_generation);
+    RUN_TEST(
         test_native_pack_marks_token_change_stale_without_host_side_probe);
     RUN_TEST(test_nil_completed_pack_input_hash_is_stale);
     RUN_TEST(test_failed_current_hash_probe_is_stale);
@@ -1315,9 +1716,17 @@ int main(int argc, char **argv) {
     RUN_TEST(test_pack_result_follows_stable_atlas_across_index_shift);
     RUN_TEST(test_recovery_notice_is_sticky_exact_and_clears_after_save_heals);
     RUN_TEST(
+        test_save_as_recovery_rebind_uses_post_save_identity);
+    RUN_TEST(
+        test_raw_shutdown_commits_buffered_gesture_before_admission_closes);
+    RUN_TEST(
         test_save_as_roundtrip_releases_writer_before_open_and_keeps_external_guard);
     RUN_TEST(
         test_save_as_projects_clean_identity_only_at_common_frame_observation);
+    RUN_TEST(
+        test_controller_guard_rejects_identity_change_before_flush_or_write);
+    RUN_TEST(
+        test_open_current_canonical_identity_rejects_before_replacement);
     RUN_TEST(test_required_recovery_without_root_warns_but_allows_edit_undo_redo);
     RUN_TEST(
         test_committed_atlas_create_stays_successful_until_echo_reconciles);

@@ -1,5 +1,10 @@
 #include "tp_proc_internal.h"
 
+#ifdef TP_ENABLE_TEST_SEAMS
+static unsigned int s_test_destroy_kill_calls;
+static unsigned int s_test_destroy_blocking_wait_calls;
+#endif
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -729,6 +734,9 @@ void tp_proc_kill(tp_proc *proc) {
     if (!proc) {
         return;
     }
+#ifdef TP_ENABLE_TEST_SEAMS
+    s_test_destroy_kill_calls++;
+#endif
     if (proc->job) {
         /* The direct child may already be waited while a nested worker remains. */
         (void)TerminateJobObject(proc->job, 1U); /* tree-kill the whole worker */
@@ -798,6 +806,9 @@ void tp_proc_destroy(tp_proc *proc) {
              * staging directory immediately after destroy. Wait for the
              * already-terminated direct child so Windows releases its CWD
              * handles first. Outer session workers never take this path. */
+#ifdef TP_ENABLE_TEST_SEAMS
+            s_test_destroy_blocking_wait_calls++;
+#endif
             (void)WaitForSingleObject(proc->process, 2000U);
         }
         (void)CloseHandle(proc->process);
@@ -810,3 +821,19 @@ void tp_proc_destroy(tp_proc *proc) {
     }
     free(proc);
 }
+
+#ifdef TP_ENABLE_TEST_SEAMS
+void tp_proc__test_reset_destroy_trace(void) {
+    s_test_destroy_kill_calls = 0U;
+    s_test_destroy_blocking_wait_calls = 0U;
+}
+
+unsigned int tp_proc__test_destroy_kill_calls(void) {
+    return s_test_destroy_kill_calls;
+}
+
+unsigned int
+tp_proc__test_destroy_blocking_wait_calls(void) {
+    return s_test_destroy_blocking_wait_calls;
+}
+#endif

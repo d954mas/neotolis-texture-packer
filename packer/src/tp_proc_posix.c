@@ -6,6 +6,11 @@
 
 #include "tp_proc_internal.h"
 
+#ifdef TP_ENABLE_TEST_SEAMS
+static unsigned int s_test_destroy_kill_calls;
+static unsigned int s_test_destroy_blocking_wait_calls;
+#endif
+
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
@@ -537,6 +542,9 @@ void tp_proc_kill(tp_proc *proc) {
     if (!proc) {
         return;
     }
+#ifdef TP_ENABLE_TEST_SEAMS
+    s_test_destroy_kill_calls++;
+#endif
     if (proc->pgid > 0) {
         (void)kill(-proc->pgid, SIGKILL);
     } else if (!proc->reaped) {
@@ -565,16 +573,18 @@ void tp_proc_destroy(tp_proc *proc) {
     if (proc->stdout_r >= 0) {
         (void)close(proc->stdout_r);
     }
-    if (proc->pgid > 0) {
-        /* The leader may already be reaped while one of its nested workers is
-         * still alive; owned-tree teardown must still kill the whole group. */
-        (void)kill(-proc->pgid, SIGKILL);
-    }
+    /*
+     * The leader may already be reaped while one of its nested workers is
+     * still alive; owned-tree teardown must still kill the whole group.
+     */
+    tp_proc_kill(proc);
     if (!proc->reaped) {
         if (proc->pgid <= 0) {
-            (void)kill(proc->pid, SIGKILL);
             int status = 0;
             pid_t result;
+#ifdef TP_ENABLE_TEST_SEAMS
+            s_test_destroy_blocking_wait_calls++;
+#endif
             do {
                 result = waitpid(proc->pid, &status, 0);
             } while (result < 0 && errno == EINTR);
@@ -604,3 +614,19 @@ void tp_proc_destroy(tp_proc *proc) {
     }
     free(proc);
 }
+
+#ifdef TP_ENABLE_TEST_SEAMS
+void tp_proc__test_reset_destroy_trace(void) {
+    s_test_destroy_kill_calls = 0U;
+    s_test_destroy_blocking_wait_calls = 0U;
+}
+
+unsigned int tp_proc__test_destroy_kill_calls(void) {
+    return s_test_destroy_kill_calls;
+}
+
+unsigned int
+tp_proc__test_destroy_blocking_wait_calls(void) {
+    return s_test_destroy_blocking_wait_calls;
+}
+#endif

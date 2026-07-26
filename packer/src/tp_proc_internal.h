@@ -139,6 +139,12 @@ void tp_proc_kill(tp_proc *proc);
  * NULL-safe. */
 void tp_proc_destroy(tp_proc *proc);
 
+#ifdef TP_ENABLE_TEST_SEAMS
+void tp_proc__test_reset_destroy_trace(void);
+unsigned int tp_proc__test_destroy_kill_calls(void);
+unsigned int tp_proc__test_destroy_blocking_wait_calls(void);
+#endif
+
 #ifdef __cplusplus
 }
 #endif

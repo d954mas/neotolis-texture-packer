@@ -28,6 +28,7 @@
 #include "gui_left_layout.h"
 #include "gui_pack.h"
 #include "gui_project.h"
+#include "gui_project_test_driver.h"
 #include "gui_rows.h"
 #include "gui_scan.h"
 #include "gui_state.h"
@@ -247,7 +248,7 @@ void tearDown(void) {
     tp_scan__test_reset_all();
     gui_pack_shutdown();
     gui_rows_shutdown();
-    gui_project_shutdown();
+    gui_project_test_shutdown(true);
     gui_scan_shutdown();
     remove_fixture_files();
 }
