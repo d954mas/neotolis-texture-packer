@@ -23,6 +23,9 @@ void test_shipping_atlas_rename_uses_session_admission_and_snapshot_read(void) {
     tp_error err = {{0}};
     tp_session *session = NULL;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_session_create(&rng, &session, &err));
+    gui_session_client client;
+    gui_session_client_init(&client);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, gui_session_client_attach(&client, session, &err));
 
     tp_session_snapshot *before = NULL;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_session_snapshot_create(session, &before, &err));
@@ -31,8 +34,8 @@ void test_shipping_atlas_rename_uses_session_admission_and_snapshot_read(void) {
     const tp_id128 atlas_id = initial->id;
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
-        gui_session_rename_atlas(session, atlas_id, tp_session_snapshot_revision(before),
-                                 "gui-session-name", "1234567890abcdef1234567890abcdef", &err));
+        gui_session_rename_atlas(&client, atlas_id, tp_session_snapshot_revision(before),
+                                 "gui-session-name", &err));
     tp_session_snapshot_destroy(before);
 
     tp_session_event event;
@@ -54,6 +57,7 @@ void test_shipping_atlas_rename_uses_session_admission_and_snapshot_read(void) {
     TEST_ASSERT_EQUAL_STRING("gui-session-name", name);
     tp_session_snapshot_destroy(after);
 
+    gui_session_client_detach(&client);
     tp_session_destroy(session);
 }
 
@@ -63,6 +67,9 @@ void test_atlas_structural_and_settings_use_stable_id_revision_contract(void) {
     tp_error err = {{0}};
     tp_session *session = NULL;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_session_create(&rng, &session, &err));
+    gui_session_client client;
+    gui_session_client_init(&client);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, gui_session_client_attach(&client, session, &err));
     const tp_id128 atlas_id = {{0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11,
                                 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22}};
     const tp_id128 target_id = {{0x33, 0x33, 0x33, 0x33, 0x33, 0x33, 0x33, 0x33,
@@ -70,9 +77,8 @@ void test_atlas_structural_and_settings_use_stable_id_revision_contract(void) {
 
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
-        gui_session_create_atlas(session, atlas_id, target_id, 0, "atlas2",
-                                 "json-neotolis", "out/atlas2", true,
-                                 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", &err));
+        gui_session_create_atlas(&client, atlas_id, target_id, 0, "atlas2",
+                                 "json-neotolis", "out/atlas2", true, &err));
 
     tp_op_atlas_settings settings;
     memset(&settings, 0, sizeof settings);
@@ -80,12 +86,10 @@ void test_atlas_structural_and_settings_use_stable_id_revision_contract(void) {
     settings.padding = 9;
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
-        gui_session_set_atlas_settings(session, atlas_id, 1, &settings,
-                                       "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", &err));
+        gui_session_set_atlas_settings(&client, atlas_id, 1, &settings, &err));
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_REVISION_CONFLICT,
-        gui_session_remove_atlas(session, atlas_id, 1,
-                                 "cccccccccccccccccccccccccccccccc", &err));
+        gui_session_remove_atlas(&client, atlas_id, 1, &err));
 
     tp_session_snapshot *snapshot = NULL;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_session_snapshot_create(session, &snapshot, &err));
@@ -97,9 +101,9 @@ void test_atlas_structural_and_settings_use_stable_id_revision_contract(void) {
 
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
-        gui_session_remove_atlas(session, atlas_id, 2,
-                                 "dddddddddddddddddddddddddddddddd", &err));
+        gui_session_remove_atlas(&client, atlas_id, 2, &err));
     TEST_ASSERT_EQUAL_INT64(3, tp_session_revision(session));
+    gui_session_client_detach(&client);
     tp_session_destroy(session);
 }
 
@@ -109,6 +113,9 @@ void test_source_family_uses_stable_ids_and_atomic_batch_admission(void) {
     tp_error err = {{0}};
     tp_session *session = NULL;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_session_create(&rng, &session, &err));
+    gui_session_client client;
+    gui_session_client_init(&client);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, gui_session_client_attach(&client, session, &err));
     tp_session_snapshot *before = NULL;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
                           tp_session_snapshot_create(session, &before, &err));
@@ -124,10 +131,9 @@ void test_source_family_uses_stable_ids_and_atomic_batch_admission(void) {
     const char *paths[2] = {"sprites/a.png", "sprites/b.png"};
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
-        gui_session_add_sources(session, atlas_id, ids, paths, 2,
+        gui_session_add_sources(&client, atlas_id, ids, paths, 2,
                                 TP_SNAPSHOT_SOURCE_FILE,
-                                tp_session_snapshot_revision(before),
-                                "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", &err));
+                                tp_session_snapshot_revision(before), &err));
     tp_session_snapshot_destroy(before);
 
     tp_session_snapshot *after = NULL;
@@ -148,13 +154,12 @@ void test_source_family_uses_stable_ids_and_atomic_batch_admission(void) {
     sprite_settings.origin_y = 0.75F;
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
-        gui_session_set_sprite_override(session, atlas_id, ids[0], "a.png", 1,
-                                        &sprite_settings,
-                                        "acacacacacacacacacacacacacacacac", &err));
+        gui_session_set_sprite_override(&client, atlas_id, ids[0], "a.png", 1,
+                                        &sprite_settings, &err));
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
-        gui_session_set_sprite_name(session, atlas_id, ids[0], "a.png", 2,
-                                    "hero", "adadadadadadadadadadadadadadadad", &err));
+        gui_session_set_sprite_name(&client, atlas_id, ids[0], "a.png", 2,
+                                    "hero", &err));
     tp_session_snapshot *sprite_snapshot = NULL;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
                           tp_session_snapshot_create(session, &sprite_snapshot, &err));
@@ -168,18 +173,16 @@ void test_source_family_uses_stable_ids_and_atomic_batch_admission(void) {
 
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_REVISION_CONFLICT,
-        gui_session_remove_source(session, atlas_id, ids[0], 0,
-                                  "ffffffffffffffffffffffffffffffff", &err));
+        gui_session_remove_source(&client, atlas_id, ids[0], 0, &err));
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_INVALID_ARGUMENT,
-        gui_session_remove_source(session, atlas_id, ids[0], 3,
-                                  "abababababababababababababababab", &err));
+        gui_session_remove_source(&client, atlas_id, ids[0], 3, &err));
     TEST_ASSERT_EQUAL_INT64(3, tp_session_revision(session));
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
-        gui_session_remove_source(session, atlas_id, ids[1], 3,
-                                  "a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0", &err));
+        gui_session_remove_source(&client, atlas_id, ids[1], 3, &err));
     TEST_ASSERT_EQUAL_INT64(4, tp_session_revision(session));
+    gui_session_client_detach(&client);
     tp_session_destroy(session);
 }
 
@@ -189,6 +192,9 @@ void test_animation_family_uses_stable_ids_revision_and_snapshot_read(void) {
     tp_error err = {{0}};
     tp_session *session = NULL;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_session_create(&rng, &session, &err));
+    gui_session_client client;
+    gui_session_client_init(&client);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, gui_session_client_attach(&client, session, &err));
     tp_session_snapshot *before = NULL;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
                           tp_session_snapshot_create(session, &before, &err));
@@ -204,17 +210,15 @@ void test_animation_family_uses_stable_ids_revision_and_snapshot_read(void) {
     const char *source_path[1] = {"sprites"};
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
-        gui_session_add_sources(session, atlas_id, &source_id, source_path, 1,
-                                TP_SNAPSHOT_SOURCE_FOLDER, 0,
-                                "80808080808080808080808080808080", &err));
+        gui_session_add_sources(&client, atlas_id, &source_id, source_path, 1,
+                                TP_SNAPSHOT_SOURCE_FOLDER, 0, &err));
     const tp_op_sprite_ref initial_frames[2] = {
         {source_id, "walk_1.png"}, {source_id, "walk_2.png"}};
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
         gui_session_create_animation(
-            session, atlas_id, animation_id,
-            1, "walk", initial_frames, 2,
-            "81818181818181818181818181818181", &err));
+            &client, atlas_id, animation_id,
+            1, "walk", initial_frames, 2, &err));
     tp_session_snapshot_destroy(before);
 
     tp_op_anim_settings settings;
@@ -224,19 +228,16 @@ void test_animation_family_uses_stable_ids_revision_and_snapshot_read(void) {
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
         gui_session_set_animation_settings(
-            session, atlas_id, animation_id, 2, &settings,
-            "82828282828282828282828282828282", &err));
+            &client, atlas_id, animation_id, 2, &settings, &err));
     const tp_op_sprite_ref extra[1] = {{source_id, "walk_3.png"}};
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
         gui_session_add_animation_frames(
-            session, atlas_id, animation_id, 3, extra, 1,
-            "83838383838383838383838383838383", &err));
+            &client, atlas_id, animation_id, 3, extra, 1, &err));
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_REVISION_CONFLICT,
         gui_session_remove_animation(
-            session, atlas_id, animation_id, 2,
-            "84848484848484848484848484848484", &err));
+            &client, atlas_id, animation_id, 2, &err));
 
     tp_session_snapshot *after = NULL;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
@@ -252,6 +253,7 @@ void test_animation_family_uses_stable_ids_revision_and_snapshot_read(void) {
     TEST_ASSERT_NOT_NULL(last);
     TEST_ASSERT_EQUAL_STRING("walk_3", last->name);
     tp_session_snapshot_destroy(after);
+    gui_session_client_detach(&client);
     tp_session_destroy(session);
 }
 
@@ -261,6 +263,9 @@ void test_target_family_uses_stable_ids_revision_and_snapshot_read(void) {
     tp_error err = {{0}};
     tp_session *session = NULL;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_session_create(&rng, &session, &err));
+    gui_session_client client;
+    gui_session_client_init(&client);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, gui_session_client_attach(&client, session, &err));
     tp_session_snapshot *before = NULL;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
                           tp_session_snapshot_create(session, &before, &err));
@@ -272,10 +277,9 @@ void test_target_family_uses_stable_ids_revision_and_snapshot_read(void) {
          0xb1, 0xb1, 0xb1, 0xb1, 0xb1, 0xb1, 0xb1, 0xb1}};
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
-        gui_session_create_target(session, atlas_id, target_id,
+        gui_session_create_target(&client, atlas_id, target_id,
                                   tp_session_snapshot_revision(before),
-                                  "json-neotolis", "out/atlas", true,
-                                  "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1", &err));
+                                  "json-neotolis", "out/atlas", true, &err));
     tp_session_snapshot_destroy(before);
 
     tp_op_target_set settings;
@@ -285,12 +289,10 @@ void test_target_family_uses_stable_ids_revision_and_snapshot_read(void) {
     settings.enabled = false;
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
-        gui_session_set_target(session, atlas_id, target_id, 1, &settings,
-                               "a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2", &err));
+        gui_session_set_target(&client, atlas_id, target_id, 1, &settings, &err));
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_REVISION_CONFLICT,
-        gui_session_remove_target(session, atlas_id, target_id, 1,
-                                  "a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3", &err));
+        gui_session_remove_target(&client, atlas_id, target_id, 1, &err));
 
     tp_session_snapshot *after = NULL;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
@@ -302,6 +304,7 @@ void test_target_family_uses_stable_ids_revision_and_snapshot_read(void) {
     TEST_ASSERT_EQUAL_STRING("out/final", target->out_path);
     TEST_ASSERT_FALSE(target->enabled);
     tp_session_snapshot_destroy(after);
+    gui_session_client_detach(&client);
     tp_session_destroy(session);
 }
 

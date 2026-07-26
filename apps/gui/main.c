@@ -414,12 +414,12 @@ static void handle_shortcuts(void) {
         }
     } else if (nt_input_key_is_pressed(NT_KEY_Z)) {
         if (shift) {
-            do_redo(); /* Ctrl+Shift+Z alias */
+            gui_request_redo(); /* Ctrl+Shift+Z alias */
         } else {
-            do_undo();
+            gui_request_undo();
         }
     } else if (nt_input_key_is_pressed(NT_KEY_Y)) {
-        do_redo();
+        gui_request_redo();
     } else if (nt_input_key_is_pressed(NT_KEY_P)) {
         s_pending_pack = true;
     } else if (nt_input_key_is_pressed(NT_KEY_E)) {
@@ -500,6 +500,10 @@ static void frame(void) {
 
     /* dialogs + model mutations queued last frame run here, cleanly between frames */
     apply_pending();
+    /* The benchmark model suite intentionally performs edit/Undo/Redo probes.
+     * Run it at the same between-frame semantic ingress boundary, never after
+     * the immutable observation has been pinned for declaration. */
+    gui_bench_tick();
 
     const gui_project_host_lifecycle host_lifecycle =
         gui_project_host_lifecycle_query();
@@ -555,7 +559,6 @@ static void frame(void) {
         }
     }
     auto_pack_tick(); /* dev (--auto-pack): drive a headless async pack for the heartbeat proof */
-    gui_bench_tick(); /* dev (--bench-perf): drive the perf-probe state machine; no-op unless active */
 
     if (nt_input_key_is_pressed(NT_KEY_ESCAPE)) {
         if (gui_view_chrome_consume_escape()) {

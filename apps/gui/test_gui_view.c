@@ -776,7 +776,8 @@ void test_view_collapse_survives_atlas_switch(void) {
     tp_id128 folder0 = {{0}};
     add_sources_and_build(&folder0, NULL); /* A0: folder @ src 0, solo @ src 1 */
 
-    TEST_ASSERT_EQUAL_INT(1, gui_project_add_atlas()); /* A1 at index 1 */
+    TEST_ASSERT_EQUAL_INT(
+        1, gui_project_add_atlas().visible_index); /* A1 at index 1 */
     const tp_session_snapshot *snap = gui_project_snapshot();
     const tp_snapshot_atlas *a1 = tp_session_snapshot_atlas_at(snap, 1);
     TEST_ASSERT_NOT_NULL(a1);
@@ -823,7 +824,8 @@ void test_undo_preserves_selected_atlas_by_stable_id(void) {
         gui_project_add_source_kind(a0_id, tp_session_snapshot_revision(snap),
                                     s_pack_dir, TP_SOURCE_KIND_FOLDER));
 
-    TEST_ASSERT_EQUAL_INT(1, gui_project_add_atlas()); /* A1 at index 1 */
+    TEST_ASSERT_EQUAL_INT(
+        1, gui_project_add_atlas().visible_index); /* A1 at index 1 */
     snap = gui_project_snapshot();
     const tp_snapshot_atlas *a1 = tp_session_snapshot_atlas_at(snap, 1);
     TEST_ASSERT_NOT_NULL(a1);
@@ -1490,7 +1492,8 @@ void test_view_collapse_prunes_sources_owned_by_deleted_atlas(void) {
     gui_rows_toggle_collapsed(deleted_folder_id);
     TEST_ASSERT_TRUE(gui_rows_is_collapsed(deleted_folder_id));
 
-    TEST_ASSERT_EQUAL_INT(1, gui_project_add_atlas());
+    TEST_ASSERT_EQUAL_INT(
+        1, gui_project_add_atlas().visible_index);
     const tp_session_snapshot *snapshot = gui_project_snapshot();
     const tp_snapshot_atlas *kept_atlas =
         tp_session_snapshot_atlas_at(snapshot, 1);

@@ -349,7 +349,8 @@ void test_preview_result_rejects_source_refresh_after_job_capture(void) {
 
 void test_native_pack_marks_token_change_stale_without_host_side_probe(void) {
     const tp_id128 packed_atlas_id = add_coin_source_to_atlas(0);
-    TEST_ASSERT_EQUAL_INT(1, gui_project_add_atlas());
+    TEST_ASSERT_EQUAL_INT(
+        1, gui_project_add_atlas().visible_index);
     const tp_session_snapshot *snapshot = gui_project_snapshot();
     const tp_snapshot_atlas *other =
         tp_session_snapshot_atlas_at(snapshot, 1);
@@ -469,7 +470,7 @@ void test_gui_poll_does_not_decode_sources_on_gui_thread(void) {
 
 void test_deleted_pack_target_is_typed_failure_not_cancelled(void) {
     TEST_ASSERT_EQUAL_INT(
-        1, gui_project_add_atlas());
+        1, gui_project_add_atlas().visible_index);
     const tp_id128 target_atlas_id =
         add_coin_source_to_atlas(1);
     TEST_ASSERT_TRUE(
@@ -568,9 +569,12 @@ void test_oversized_names_cannot_enter_a_truncating_editor(void) {
     start_atlas_edit_ref(atlas_id, tp_session_snapshot_revision(snapshot));
     TEST_ASSERT_EQUAL_INT(EDIT_NONE, s_edit_kind);
 
-    const int animation_index = gui_project_create_animation(
-        atlas_id, tp_session_snapshot_revision(snapshot), "long-name-fixture",
-        NULL, 0);
+    const int animation_index =
+        gui_project_create_animation(
+            atlas_id,
+            tp_session_snapshot_revision(snapshot),
+            "long-name-fixture", NULL, 0)
+            .visible_index;
     TEST_ASSERT_EQUAL_INT(0, animation_index);
     snapshot = gui_project_snapshot();
     const tp_snapshot_animation *animation =
@@ -675,7 +679,8 @@ void test_pack_result_follows_stable_atlas_across_index_shift(void) {
     const tp_snapshot_atlas *first = tp_session_snapshot_atlas_at(snapshot, 0);
     TEST_ASSERT_NOT_NULL(first);
     const tp_id128 first_id = first->id;
-    TEST_ASSERT_EQUAL_INT(1, gui_project_add_atlas());
+    TEST_ASSERT_EQUAL_INT(
+        1, gui_project_add_atlas().visible_index);
     const tp_id128 packed_atlas_id = add_coin_source_to_atlas(1);
 
     s_sel_atlas = 1;
@@ -716,7 +721,8 @@ void test_pack_result_follows_stable_atlas_across_index_shift(void) {
     TEST_ASSERT_NOT_NULL(packed);
     TEST_ASSERT_TRUE(packed->pixels_per_unit == 2.0F);
 
-    TEST_ASSERT_EQUAL_INT(1, gui_project_add_atlas());
+    TEST_ASSERT_EQUAL_INT(
+        1, gui_project_add_atlas().visible_index);
     (void)add_coin_source_to_atlas(1);
     s_sel_atlas = 1;
     do_pack_blocking();
@@ -782,8 +788,12 @@ void test_add_frames_preserves_both_canonical_selected_sprites(void) {
     TEST_ASSERT_NOT_NULL(right);
 
     const tp_session_snapshot *snapshot = gui_project_snapshot();
-    const int animation_index = gui_project_create_animation(
-        atlas_id, tp_session_snapshot_revision(snapshot), "picked", NULL, 0);
+    const int animation_index =
+        gui_project_create_animation(
+            atlas_id,
+            tp_session_snapshot_revision(snapshot),
+            "picked", NULL, 0)
+            .visible_index;
     TEST_ASSERT_GREATER_OR_EQUAL_INT(0, animation_index);
     multi_sel_add_ref(left->source_id, left->source_key);
     multi_sel_add_ref(right->source_id, right->source_key);
@@ -856,19 +866,19 @@ void test_delayed_animation_context_ref_never_retargets_after_index_shift(void) 
     TEST_ASSERT_NOT_NULL(atlas);
     const tp_id128 atlas_id = atlas->id;
     TEST_ASSERT_GREATER_OR_EQUAL_INT(
-        0, gui_project_create_animation(
+        0, (gui_project_create_animation(
                atlas_id, tp_session_snapshot_revision(snapshot), "a", NULL,
-               0));
+               0)).visible_index);
     snapshot = gui_project_snapshot();
     TEST_ASSERT_GREATER_OR_EQUAL_INT(
-        0, gui_project_create_animation(
+        0, (gui_project_create_animation(
                atlas_id, tp_session_snapshot_revision(snapshot), "b", NULL,
-               0));
+               0)).visible_index);
     snapshot = gui_project_snapshot();
     TEST_ASSERT_GREATER_OR_EQUAL_INT(
-        0, gui_project_create_animation(
+        0, (gui_project_create_animation(
                atlas_id, tp_session_snapshot_revision(snapshot), "c", NULL,
-               0));
+               0)).visible_index);
 
     gui_animation_ref first;
     gui_animation_ref captured_second;
@@ -1006,6 +1016,275 @@ void test_recovery_notice_is_sticky_exact_and_clears_after_save_heals(void) {
     (void)remove(save_path);
 }
 
+void test_save_as_projects_clean_identity_only_at_common_frame_observation(void) {
+    const tp_session_snapshot *snapshot =
+        gui_project_snapshot();
+    const tp_snapshot_atlas *atlas =
+        tp_session_snapshot_atlas_at(snapshot, 0);
+    TEST_ASSERT_NOT_NULL(atlas);
+    TEST_ASSERT_TRUE(
+        gui_project_set_atlas_name(
+            atlas->id,
+            tp_session_snapshot_revision(snapshot),
+            "save-observation-boundary"));
+    TEST_ASSERT_TRUE(gui_project_is_dirty());
+    TEST_ASSERT_FALSE(gui_project_has_path());
+
+    char save_path[512];
+    char lock_path[544];
+    (void)snprintf(
+        save_path, sizeof save_path,
+        "%s/save-observation.ntpacker_project",
+        TP_GUI_IDENTITY_TEST_DIR);
+    (void)snprintf(
+        lock_path, sizeof lock_path,
+        "%s.ntpacker.lock", save_path);
+    (void)remove(save_path);
+    (void)remove(lock_path);
+    char error[256] = {0};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_project_save_as(
+            save_path, error, sizeof error));
+
+    /* The Save receipt is exact and synchronous, while presentation state
+     * remains the prior immutable observation until the next frame cut. */
+    TEST_ASSERT_TRUE(gui_project_is_dirty());
+    TEST_ASSERT_FALSE(gui_project_has_path());
+    tp_error frame_error = {{0}};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_project_frame_begin(
+            &frame_error));
+    gui_project_frame_end();
+    TEST_ASSERT_FALSE(gui_project_is_dirty());
+    TEST_ASSERT_TRUE(gui_project_has_path());
+
+    TEST_ASSERT_TRUE(gui_project_new());
+    TEST_ASSERT_EQUAL_INT(0, remove(save_path));
+    TEST_ASSERT_EQUAL_INT(0, remove(lock_path));
+}
+
+void test_save_as_roundtrip_releases_writer_before_open_and_keeps_external_guard(void) {
+    char save_path[512];
+    char rebound_path[512];
+    char save_lock_path[544];
+    char rebound_lock_path[544];
+    (void)snprintf(
+        save_path, sizeof save_path,
+        "%s/roundtrip.ntpacker_project",
+        TP_GUI_IDENTITY_TEST_DIR);
+    (void)snprintf(
+        rebound_path, sizeof rebound_path,
+        "%s/roundtrip-rebound.ntpacker_project",
+        TP_GUI_IDENTITY_TEST_DIR);
+    (void)snprintf(
+        save_lock_path, sizeof save_lock_path,
+        "%s.ntpacker.lock", save_path);
+    (void)snprintf(
+        rebound_lock_path, sizeof rebound_lock_path,
+        "%s.ntpacker.lock", rebound_path);
+    (void)remove(save_path);
+    (void)remove(rebound_path);
+    (void)remove(save_lock_path);
+    (void)remove(rebound_lock_path);
+
+    const tp_session_snapshot *snapshot =
+        gui_project_snapshot();
+    const tp_snapshot_atlas *atlas =
+        tp_session_snapshot_atlas_at(snapshot, 0);
+    TEST_ASSERT_NOT_NULL(atlas);
+    TEST_ASSERT_EQUAL_INT(
+        GUI_ADD_ADDED,
+        gui_project_add_source_kind(
+            atlas->id,
+            tp_session_snapshot_revision(snapshot),
+            s_left_file, TP_SOURCE_KIND_FILE));
+
+    char error[256] = {0};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_project_save_as(
+            save_path, error, sizeof error));
+
+    /* Opening the current canonical identity would contend with this
+     * session's own writer lease. A real round-trip releases that owner
+     * before Open; in-place reload remains an explicit R2d concern. */
+    TEST_ASSERT_TRUE(gui_project_new());
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_project_open(
+            save_path, error, sizeof error));
+    snapshot = gui_project_snapshot();
+    atlas = tp_session_snapshot_atlas_at(snapshot, 0);
+    TEST_ASSERT_NOT_NULL(atlas);
+    TEST_ASSERT_EQUAL_INT(1, atlas->source_count);
+    TEST_ASSERT_FALSE(gui_project_is_dirty());
+
+    static const char external_sentinel[] =
+        "external-edit-sentinel";
+    FILE *file = fopen(save_path, "wb");
+    TEST_ASSERT_NOT_NULL(file);
+    TEST_ASSERT_EQUAL_size_t(
+        sizeof external_sentinel,
+        fwrite(
+            external_sentinel, 1U,
+            sizeof external_sentinel, file));
+    TEST_ASSERT_EQUAL_INT(0, fclose(file));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_FILE_CHANGED_EXTERNALLY,
+        gui_project_save(error, sizeof error));
+
+    char readback[sizeof external_sentinel] = {0};
+    file = fopen(save_path, "rb");
+    TEST_ASSERT_NOT_NULL(file);
+    TEST_ASSERT_EQUAL_size_t(
+        sizeof readback,
+        fread(readback, 1U, sizeof readback, file));
+    TEST_ASSERT_EQUAL_INT(0, fclose(file));
+    TEST_ASSERT_EQUAL_MEMORY(
+        external_sentinel, readback,
+        sizeof external_sentinel);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_project_save_as(
+            rebound_path, error, sizeof error));
+
+    TEST_ASSERT_TRUE(gui_project_new());
+    TEST_ASSERT_EQUAL_INT(0, remove(save_path));
+    TEST_ASSERT_EQUAL_INT(0, remove(rebound_path));
+    TEST_ASSERT_EQUAL_INT(0, remove(save_lock_path));
+    TEST_ASSERT_EQUAL_INT(0, remove(rebound_lock_path));
+}
+
+static void exhaust_two_observation_failures(void) {
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OOM,
+        gui_project_frame_begin(&error));
+    gui_project_frame_end();
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OOM,
+        gui_project_frame_begin(&error));
+    gui_project_frame_end();
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_project_frame_begin(&error));
+    gui_project_frame_end();
+}
+
+void test_committed_atlas_create_stays_successful_until_echo_reconciles(void) {
+    gui_project__test_fail_observes(3);
+    const gui_project_create_result created =
+        gui_project_add_atlas();
+    TEST_ASSERT_TRUE(created.committed);
+    TEST_ASSERT_TRUE(created.observation_pending);
+    TEST_ASSERT_EQUAL_INT(-1, created.visible_index);
+    TEST_ASSERT_FALSE(tp_id128_is_nil(created.created_id));
+    TEST_ASSERT_EQUAL_INT64(
+        1, tp_session_revision(
+               gui_project__test_session()));
+    TEST_ASSERT_EQUAL_INT(
+        1, tp_session_snapshot_atlas_count(
+               gui_project_snapshot()));
+
+    exhaust_two_observation_failures();
+    const tp_session_snapshot *snapshot =
+        gui_project_snapshot();
+    TEST_ASSERT_NOT_NULL(
+        tp_session_snapshot_atlas_by_id(
+            snapshot, created.created_id));
+}
+
+void test_committed_target_create_stays_successful_until_echo_reconciles(void) {
+    const tp_session_snapshot *before =
+        gui_project_snapshot();
+    const tp_snapshot_atlas *atlas =
+        tp_session_snapshot_atlas_at(before, 0);
+    TEST_ASSERT_NOT_NULL(atlas);
+    const tp_id128 atlas_id = atlas->id;
+    gui_project__test_fail_observes(3);
+    const gui_project_create_result created =
+        gui_project_add_target(
+            atlas_id,
+            tp_session_snapshot_revision(before));
+    TEST_ASSERT_TRUE(created.committed);
+    TEST_ASSERT_TRUE(created.observation_pending);
+    TEST_ASSERT_EQUAL_INT(-1, created.visible_index);
+    TEST_ASSERT_FALSE(tp_id128_is_nil(created.created_id));
+    TEST_ASSERT_EQUAL_INT64(
+        1, tp_session_revision(
+               gui_project__test_session()));
+    TEST_ASSERT_EQUAL_INT(
+        1, atlas->target_count);
+
+    exhaust_two_observation_failures();
+    const tp_session_snapshot *snapshot =
+        gui_project_snapshot();
+    const tp_snapshot_atlas *observed =
+        tp_session_snapshot_atlas_by_id(
+            snapshot, atlas_id);
+    bool found = false;
+    for (int index = 0;
+         observed && index < observed->target_count;
+         ++index) {
+        const tp_snapshot_target *target =
+            tp_session_snapshot_target_at(
+                snapshot, observed->id, index);
+        found = found ||
+                (target &&
+                 tp_id128_eq(
+                     target->id,
+                     created.created_id));
+    }
+    TEST_ASSERT_TRUE(found);
+}
+
+void test_committed_animation_create_stays_successful_until_echo_reconciles(void) {
+    const tp_session_snapshot *before =
+        gui_project_snapshot();
+    const tp_snapshot_atlas *atlas =
+        tp_session_snapshot_atlas_at(before, 0);
+    TEST_ASSERT_NOT_NULL(atlas);
+    const tp_id128 atlas_id = atlas->id;
+    gui_project__test_fail_observes(3);
+    const gui_project_create_result created =
+        gui_project_create_animation(
+            atlas_id,
+            tp_session_snapshot_revision(before),
+            "pending-echo", NULL, 0);
+    TEST_ASSERT_TRUE(created.committed);
+    TEST_ASSERT_TRUE(created.observation_pending);
+    TEST_ASSERT_EQUAL_INT(-1, created.visible_index);
+    TEST_ASSERT_FALSE(tp_id128_is_nil(created.created_id));
+    TEST_ASSERT_EQUAL_INT64(
+        1, tp_session_revision(
+               gui_project__test_session()));
+    TEST_ASSERT_EQUAL_INT(
+        0, atlas->animation_count);
+
+    exhaust_two_observation_failures();
+    const tp_session_snapshot *snapshot =
+        gui_project_snapshot();
+    const tp_snapshot_atlas *observed =
+        tp_session_snapshot_atlas_by_id(
+            snapshot, atlas_id);
+    bool found = false;
+    for (int index = 0;
+         observed && index < observed->animation_count;
+         ++index) {
+        const tp_snapshot_animation *animation =
+            tp_session_snapshot_animation_at(
+                snapshot, observed->id, index);
+        found = found ||
+                (animation &&
+                 tp_id128_eq(
+                     animation->id,
+                     created.created_id));
+    }
+    TEST_ASSERT_TRUE(found);
+}
+
 int main(int argc, char **argv) {
     (void)setvbuf(stdout, NULL, _IONBF, 0);
     if (tp_build_is_worker_invocation(argc, argv)) {
@@ -1035,6 +1314,16 @@ int main(int argc, char **argv) {
     RUN_TEST(test_undo_redo_keep_last_successful_pack_result);
     RUN_TEST(test_pack_result_follows_stable_atlas_across_index_shift);
     RUN_TEST(test_recovery_notice_is_sticky_exact_and_clears_after_save_heals);
+    RUN_TEST(
+        test_save_as_roundtrip_releases_writer_before_open_and_keeps_external_guard);
+    RUN_TEST(
+        test_save_as_projects_clean_identity_only_at_common_frame_observation);
     RUN_TEST(test_required_recovery_without_root_warns_but_allows_edit_undo_redo);
+    RUN_TEST(
+        test_committed_atlas_create_stays_successful_until_echo_reconciles);
+    RUN_TEST(
+        test_committed_target_create_stays_successful_until_echo_reconciles);
+    RUN_TEST(
+        test_committed_animation_create_stays_successful_until_echo_reconciles);
     return UNITY_END();
 }

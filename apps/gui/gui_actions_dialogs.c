@@ -38,18 +38,18 @@ static void do_open(void) {
     }
 }
 
-static void do_save_as(void) {
+static bool do_save_as(void) {
     static const char *filt[] = {"*.ntpacker_project"};
     const char *def = gui_project_has_path() ? gui_project_path() : "untitled.ntpacker_project";
     const char *path = tinyfd_saveFileDialog("Save Project As", def, 1, filt, "ntpacker project");
     if (!path) {
-        return;
+        return false;
     }
     char full[TP_IDENTITY_PATH_MAX];
     if (!gui_paths_project_file(path, full, sizeof full)) {
         set_status_ex(STATUS_ERROR,
                       "Save path is invalid or exceeds the supported path limit.");
-        return;
+        return false;
     }
     char err[256];
     if (gui_project_save_as(full, err, sizeof err) == TP_STATUS_OK) {
@@ -59,15 +59,16 @@ static void do_save_as(void) {
         } else {
             set_statusf("Saved %s", gui_project_display_name());
         }
+        return true;
     } else {
         set_statusf_ex(STATUS_ERROR, "Save failed: %s", err);
+        return false;
     }
 }
 
-static void do_save(void) {
+static bool do_save(void) {
     if (!gui_project_has_path()) {
-        do_save_as();
-        return;
+        return do_save_as();
     }
     char err[256];
     if (gui_project_save(err, sizeof err) == TP_STATUS_OK) {
@@ -77,8 +78,10 @@ static void do_save(void) {
         } else {
             set_statusf("Saved %s", gui_project_display_name());
         }
+        return true;
     } else {
         set_statusf_ex(STATUS_ERROR, "Save failed: %s", err);
+        return false;
     }
 }
 
@@ -391,9 +394,9 @@ static void confirm_perform(void) {
 
 void gui_actions__apply_confirm(void) {
     if (s_modal_action == MODAL_SAVE) {
-        do_save();
+        const bool saved = do_save();
         s_confirm_open = false;
-        if (!gui_project_is_dirty()) {
+        if (saved) {
             confirm_perform();
         } else {
             s_after_confirm = AFTER_NONE;
@@ -413,10 +416,10 @@ void gui_actions__apply_file_dialogs(void) {
         do_open();
     }
     if (s_pending_save) {
-        do_save();
+        (void)do_save();
     }
     if (s_pending_save_as) {
-        do_save_as();
+        (void)do_save_as();
     }
     if (s_pending_add_files) {
         do_add_files();

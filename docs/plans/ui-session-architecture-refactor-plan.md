@@ -619,12 +619,34 @@ delete mutation-specific model/Save invalidation.
 - `apps/gui/gui_project_pending.c`
 - `apps/gui/gui_project.c`
 - `apps/gui/gui_project_file.c`
+- `apps/gui/gui_project.h`
 - `apps/gui/gui_project_internal.h`
 - `apps/gui/gui_actions.c`
+- `apps/gui/gui_actions_dialogs.c`
+- `apps/gui/gui_actions_edits.c`
+- `apps/gui/gui_actions_preview.c`
 - `apps/gui/gui_actions.h`
+- `apps/gui/gui_selftest.c`
+- `apps/gui/gui_view_chrome.c`
+- `apps/gui/main.c`
+- `apps/gui/CMakeLists.txt`
 - `cmake/check_architecture_boundaries.cmake`
 - `apps/gui/test_gui_session_adapter.c`
+- `apps/gui/test_gui_session_client.c`
+- `apps/gui/test_gui_canonical_identity.c`
+- `apps/gui/test_gui_action_trace.c`
+- `apps/gui/test_gui_view.c`
 - `apps/gui/test_client_parity.c`
+- `apps/gui/client_parity_replay.c`
+
+The post-cutover R2c critical review expanded ownership only for the create
+result and benchmark ingress seams that the submit cutover made observable:
+`gui_project.h`, the two existing create-result consumers, and their focused
+GUI tests prove committed creates remain successful when event observation is
+temporarily unavailable; `main.c` moves the existing benchmark model probe
+before frame pinning because that probe performs shipping session mutations.
+These are corrections to the R2c submit/declaration boundary, not R3/R4
+presentation or draft work.
 
 **Tasks:**
 
@@ -637,6 +659,29 @@ delete mutation-specific model/Save invalidation.
 7. Remove model/Save mutation-specific snapshot drops and direct
    `tp_session_apply()` calls from GUI adapters.
 8. Keep source/runtime invalidation separate until `SR-BASE`.
+9. Route menu and keyboard Undo/Redo through deferred semantic ingress so view
+   declaration never performs a session mutation; the existing host-side
+   `apply_pending()` drain remains the single between-frame executor.
+10. Reduce recovery health through the common observation contract before
+    deleting the submit-specific refresh helper, while preserving synchronous
+    Save/Save-As warning receipts and recovery-rebind handling.
+11. Keep each retained submit receipt until an exact transaction event echo or
+    a resync snapshot at or beyond its terminal committed revision proves it
+    observed. Reject registry exhaustion before calling the session owner, and
+    retain the complete typed terminal result for idempotent replay.
+12. Treat a committed create as successful even when the immediate observation
+    is unavailable: return its stable generated ID plus explicit observation
+    state, and derive any visible index only from the common observed snapshot.
+13. Regenerate generated transaction IDs on a registry collision and fail with
+    a structured error after a bounded attempt count; never replay a different
+    transaction merely because production RNG collided.
+14. Run benchmark mutation ingress between frames, before frame pinning, so
+    benchmark probes obey the same submit/declaration boundary as UI actions.
+
+R2c exposes explicit submit identity fields in the client contract and tests
+them with synthetic view/draft IDs. Current production non-draft actions use
+the documented not-applicable identity; stable per-view wiring remains R4 and
+the draft reducer/state machine remains R3.
 
 **Deletion manifest:**
 
@@ -644,9 +689,14 @@ delete mutation-specific model/Save invalidation.
 - `gui_project__refresh_after_session_commit` and its pending/mutation callers;
 - Undo/Redo/Save/Save-As and mutation-only `gui_project__snapshot_drop` calls
   (source-runtime invalidation remains separate; lifecycle drops belong R2d);
+- Undo/Redo/Save/Save-As mutation-path calls to
+  `gui_project__sync_recovery_notice`; recovery-specific rebind and health
+  observation remain;
 - `gui_project_state.txn_seq`, `gui_project__next_transaction_id`, and all
   production callers;
-- synchronous view-facing Undo/Redo submission during declaration.
+- synchronous view-facing Undo/Redo submission during declaration, including
+  the menu and keyboard call sites in `gui_view_chrome.c` and `main.c`;
+- post-pin `gui_bench_tick()` mutation ingress.
 
 **Gate:** `USA-08` through `USA-14`.
 

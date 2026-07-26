@@ -223,11 +223,11 @@ static void file_items(nt_ui_menu_ctx_t *m) {
 static void edit_items(nt_ui_menu_ctx_t *m) {
     nt_ui_menu_item_opts_t u = {.shortcut = "Ctrl+Z", .disabled = !gui_project_can_undo()};
     if (nt_ui_menu_item_ex(m, MK_UNDO, "Undo", u)) {
-        do_undo();
+        gui_request_undo();
     }
     nt_ui_menu_item_opts_t r = {.shortcut = "Ctrl+Y", .disabled = !gui_project_can_redo()};
     if (nt_ui_menu_item_ex(m, MK_REDO, "Redo", r)) {
-        do_redo();
+        gui_request_redo();
     }
 }
 /* Atlas menu mirrors the canvas Pack action and its busy state. */

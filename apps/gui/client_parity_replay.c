@@ -83,6 +83,20 @@ static int64_t revision_of(tp_session *session, tp_error *err) {
     return revision;
 }
 
+static gui_session_client s_replay_client;
+
+static int replay_client_attach(tp_session *session, tp_error *err) {
+    gui_session_client_init(&s_replay_client);
+    const tp_status status =
+        gui_session_client_attach(&s_replay_client, session, err);
+    return status == TP_STATUS_OK ? 0
+                                  : fail("client attach", status, err);
+}
+
+static void replay_client_detach(void) {
+    gui_session_client_detach(&s_replay_client);
+}
+
 static const char *next_txn(void) {
     static unsigned int next = 1U;
     static char id[33];
@@ -289,10 +303,15 @@ static int outcome_error(const char *path) {
         tp_session_destroy(session);
         return 1;
     }
+    if (replay_client_attach(session, &err) != 0) {
+        tp_session_destroy(session);
+        return 1;
+    }
     int64_t revision_before = 0;
     uint64_t events_before = 0U;
     if (snapshot_counters(session, &revision_before, &events_before, &err) !=
         0) {
+        replay_client_detach();
         tp_session_destroy(session);
         return 1;
     }
@@ -301,7 +320,7 @@ static int outcome_error(const char *path) {
     settings.mask = TP_AF_PADDING;
     settings.padding = -1;
     const tp_status status = gui_session_set_atlas_settings(
-        session, atlas_id, revision_before, &settings, next_txn(), &err);
+        &s_replay_client, atlas_id, revision_before, &settings, &err);
     int64_t revision_after = 0;
     uint64_t events_after = 0U;
     const int snapshot_rc = snapshot_counters(
@@ -316,6 +335,7 @@ static int outcome_error(const char *path) {
                       (long long)revision_after,
                       (unsigned long long)events_before,
                       (unsigned long long)events_after);
+        replay_client_detach();
         tp_session_destroy(session);
         return 1;
     }
@@ -334,6 +354,7 @@ static int outcome_error(const char *path) {
     bool has_diag = false;
     const tp_status reapply =
         apply_capture(session, &op, revision_before, &diag, &has_diag, &err);
+    replay_client_detach();
     tp_session_destroy(session);
     if (reapply != TP_STATUS_OUT_OF_RANGE || !has_diag || diag.field[0] == '\0') {
         (void)fprintf(stderr,
@@ -357,19 +378,25 @@ static int outcome_no_op(const char *path) {
         tp_session_destroy(session);
         return 1;
     }
+    if (replay_client_attach(session, &err) != 0) {
+        tp_session_destroy(session);
+        return 1;
+    }
     int64_t revision_before = 0;
     uint64_t events_before = 0U;
     if (snapshot_counters(session, &revision_before, &events_before, &err) !=
         0) {
+        replay_client_detach();
         tp_session_destroy(session);
         return 1;
     }
     const tp_status status = gui_session_rename_atlas(
-        session, atlas_id, revision_before, "atlas1", next_txn(), &err);
+        &s_replay_client, atlas_id, revision_before, "atlas1", &err);
     int64_t revision_after = 0;
     uint64_t events_after = 0U;
     const int snapshot_rc = snapshot_counters(
         session, &revision_after, &events_after, &err);
+    replay_client_detach();
     tp_session_destroy(session);
     if (status != TP_STATUS_OK || snapshot_rc != 0 ||
         revision_after != revision_before || events_after != events_before) {
@@ -499,22 +526,23 @@ static int outcome(const char *name, const char *path) {
 static int replay_atlas(tp_session *session, const harvest_ids *ids,
                         tp_error *err) {
     tp_status status = gui_session_create_atlas(
-        session, ids->atlas_id, ids->target_id, revision_of(session, err),
+        &s_replay_client, ids->atlas_id, ids->target_id,
+        revision_of(session, err),
         "two", ids->target_exporter, ids->target_out_path,
-        ids->target_enabled, next_txn(), err);
+        ids->target_enabled, err);
     if (status != TP_STATUS_OK) return fail("atlas create", status, err);
-    status = gui_session_rename_atlas(session, ids->atlas_id,
+    status = gui_session_rename_atlas(&s_replay_client, ids->atlas_id,
                                       revision_of(session, err), "golden",
-                                      next_txn(), err);
+                                      err);
     if (status != TP_STATUS_OK) return fail("atlas rename", status, err);
     tp_op_atlas_settings settings;
     memset(&settings, 0, sizeof settings);
     settings.mask = TP_AF_PADDING | TP_AF_MARGIN;
     settings.padding = 4;
     settings.margin = 2;
-    status = gui_session_set_atlas_settings(session, ids->atlas_id,
+    status = gui_session_set_atlas_settings(&s_replay_client, ids->atlas_id,
                                             revision_of(session, err),
-                                            &settings, next_txn(), err);
+                                            &settings, err);
     return status == TP_STATUS_OK ? 0 : fail("atlas settings", status, err);
 }
 
@@ -524,8 +552,8 @@ static int replay_source(tp_session *session, const harvest_ids *ids,
     if (base_atlas(session, &atlas_id, err) != 0) return 1;
     const char *paths[1] = {ids->source_path};
     const tp_status status = gui_session_add_sources(
-        session, atlas_id, &ids->source_id, paths, 1, ids->source_kind,
-        revision_of(session, err), next_txn(), err);
+        &s_replay_client, atlas_id, &ids->source_id, paths, 1,
+        ids->source_kind, revision_of(session, err), err);
     return status == TP_STATUS_OK ? 0 : fail("source add", status, err);
 }
 
@@ -556,8 +584,8 @@ static int replay_sprite(tp_session *session, tp_error *err) {
         resolve_sprite(session, atlas_id, "hero", &source_id, source_key,
                        sizeof source_key, err) != 0) return 1;
     tp_status status = gui_session_set_sprite_name(
-        session, atlas_id, source_id, source_key, revision_of(session, err),
-        "hero_final", next_txn(), err);
+        &s_replay_client, atlas_id, source_id, source_key,
+        revision_of(session, err), "hero_final", err);
     if (status != TP_STATUS_OK) return fail("sprite name", status, err);
     tp_op_sprite_set settings;
     memset(&settings, 0, sizeof settings);
@@ -574,8 +602,8 @@ static int replay_sprite(tp_session *session, tp_error *err) {
     settings.ov_margin = 5;
     settings.ov_extrude = 2;
     status = gui_session_set_sprite_override(
-        session, atlas_id, source_id, source_key, revision_of(session, err),
-        &settings, next_txn(), err);
+        &s_replay_client, atlas_id, source_id, source_key,
+        revision_of(session, err), &settings, err);
     return status == TP_STATUS_OK ? 0 : fail("sprite settings", status, err);
 }
 
@@ -587,8 +615,8 @@ static int replay_sprite_clear(tp_session *session, tp_error *err) {
         resolve_sprite(session, atlas_id, "hero", &source_id, source_key,
                        sizeof source_key, err) != 0) return 1;
     tp_status status = gui_session_set_sprite_name(
-        session, atlas_id, source_id, source_key, revision_of(session, err),
-        NULL, next_txn(), err);
+        &s_replay_client, atlas_id, source_id, source_key,
+        revision_of(session, err), NULL, err);
     if (status != TP_STATUS_OK) return fail("sprite name clear", status, err);
     tp_op_sprite_set settings;
     memset(&settings, 0, sizeof settings);
@@ -601,8 +629,8 @@ static int replay_sprite_clear(tp_session *session, tp_error *err) {
     settings.ov_margin = TP_PROJECT_OV_INHERIT;
     settings.ov_extrude = TP_PROJECT_OV_INHERIT;
     status = gui_session_set_sprite_override(
-        session, atlas_id, source_id, source_key, revision_of(session, err),
-        &settings, next_txn(), err);
+        &s_replay_client, atlas_id, source_id, source_key,
+        revision_of(session, err), &settings, err);
     return status == TP_STATUS_OK ? 0 : fail("sprite clear", status, err);
 }
 
@@ -621,20 +649,20 @@ static int replay_animation(tp_session *session, const harvest_ids *ids,
     tp_op_sprite_ref frames[2] = {
         {hero_source, hero_key}, {coin_source, coin_key}};
     tp_status status = gui_session_create_animation(
-        session, atlas_id, ids->animation_id, revision_of(session, err),
-        "walk", frames, 2, next_txn(), err);
+        &s_replay_client, atlas_id, ids->animation_id,
+        revision_of(session, err), "walk", frames, 2, err);
     if (status != TP_STATUS_OK) return fail("animation create", status, err);
     status = gui_session_add_animation_frames(
-        session, atlas_id, ids->animation_id, revision_of(session, err),
-        frames, 1, next_txn(), err);
+        &s_replay_client, atlas_id, ids->animation_id,
+        revision_of(session, err), frames, 1, err);
     if (status != TP_STATUS_OK) return fail("animation frame add", status, err);
     status = gui_session_move_animation_frame(
-        session, atlas_id, ids->animation_id, revision_of(session, err), 0, 2,
-        next_txn(), err);
+        &s_replay_client, atlas_id, ids->animation_id,
+        revision_of(session, err), 0, 2, err);
     if (status != TP_STATUS_OK) return fail("animation frame move", status, err);
     status = gui_session_remove_animation_frame(
-        session, atlas_id, ids->animation_id, revision_of(session, err), 1,
-        next_txn(), err);
+        &s_replay_client, atlas_id, ids->animation_id,
+        revision_of(session, err), 1, err);
     if (status != TP_STATUS_OK) return fail("animation frame remove", status, err);
     tp_op_anim_settings settings;
     memset(&settings, 0, sizeof settings);
@@ -644,12 +672,12 @@ static int replay_animation(tp_session *session, const harvest_ids *ids,
     settings.flip_h = true;
     settings.flip_v = false;
     status = gui_session_set_animation_settings(
-        session, atlas_id, ids->animation_id, revision_of(session, err),
-        &settings, next_txn(), err);
+        &s_replay_client, atlas_id, ids->animation_id,
+        revision_of(session, err), &settings, err);
     if (status != TP_STATUS_OK) return fail("animation settings", status, err);
     status = gui_session_rename_animation(
-        session, atlas_id, ids->animation_id, revision_of(session, err),
-        "stroll", next_txn(), err);
+        &s_replay_client, atlas_id, ids->animation_id,
+        revision_of(session, err), "stroll", err);
     return status == TP_STATUS_OK ? 0 : fail("animation rename", status, err);
 }
 
@@ -658,17 +686,17 @@ static int replay_target(tp_session *session, const harvest_ids *ids,
     tp_id128 atlas_id;
     if (base_atlas(session, &atlas_id, err) != 0) return 1;
     tp_status status = gui_session_create_target(
-        session, atlas_id, ids->target_id, revision_of(session, err),
-        "defold", "out/d", true, next_txn(), err);
+        &s_replay_client, atlas_id, ids->target_id,
+        revision_of(session, err), "defold", "out/d", true, err);
     if (status != TP_STATUS_OK) return fail("target create", status, err);
     tp_op_target_set settings;
     memset(&settings, 0, sizeof settings);
     settings.mask = TP_TF_OUT_PATH | TP_TF_ENABLED;
     settings.out_path = "out/d2";
     settings.enabled = false;
-    status = gui_session_set_target(session, atlas_id, ids->target_id,
+    status = gui_session_set_target(&s_replay_client, atlas_id, ids->target_id,
                                     revision_of(session, err), &settings,
-                                    next_txn(), err);
+                                    err);
     return status == TP_STATUS_OK ? 0 : fail("target settings", status, err);
 }
 
@@ -684,17 +712,17 @@ static int replay_remove(tp_session *session, const char *family,
         if (!atlas) { tp_session_snapshot_destroy(snapshot); return 1; }
         const tp_id128 id = atlas->id;
         tp_session_snapshot_destroy(snapshot);
-        status = gui_session_remove_atlas(session, id, revision_of(session, err),
-                                          next_txn(), err);
+        status = gui_session_remove_atlas(
+            &s_replay_client, id, revision_of(session, err), err);
     } else if (strcmp(family, "source_remove") == 0) {
         const tp_snapshot_atlas *atlas = find_atlas(snapshot, "atlas1");
         const tp_snapshot_source *source = first_source(snapshot, atlas);
         if (!source) { tp_session_snapshot_destroy(snapshot); return 1; }
         const tp_id128 id = source->id;
         tp_session_snapshot_destroy(snapshot);
-        status = gui_session_remove_source(session, atlas_id, id,
+        status = gui_session_remove_source(&s_replay_client, atlas_id, id,
                                             revision_of(session, err),
-                                            next_txn(), err);
+                                            err);
     } else if (strcmp(family, "animation_remove") == 0) {
         const tp_snapshot_atlas *atlas = find_atlas(snapshot, "atlas1");
         const tp_snapshot_animation *animation =
@@ -702,18 +730,18 @@ static int replay_remove(tp_session *session, const char *family,
         if (!animation) { tp_session_snapshot_destroy(snapshot); return 1; }
         const tp_id128 id = animation->id;
         tp_session_snapshot_destroy(snapshot);
-        status = gui_session_remove_animation(session, atlas_id, id,
+        status = gui_session_remove_animation(&s_replay_client, atlas_id, id,
                                                revision_of(session, err),
-                                               next_txn(), err);
+                                               err);
     } else {
         const tp_snapshot_atlas *atlas = find_atlas(snapshot, "atlas1");
         const tp_snapshot_target *target = find_target(snapshot, atlas, "defold");
         if (!target) { tp_session_snapshot_destroy(snapshot); return 1; }
         const tp_id128 id = target->id;
         tp_session_snapshot_destroy(snapshot);
-        status = gui_session_remove_target(session, atlas_id, id,
+        status = gui_session_remove_target(&s_replay_client, atlas_id, id,
                                             revision_of(session, err),
-                                            next_txn(), err);
+                                            err);
     }
     return status == TP_STATUS_OK ? 0 : fail("remove", status, err);
 }
@@ -730,6 +758,10 @@ static int replay(const char *family, const char *base_path,
     tp_error err = {0};
     tp_session *session = NULL;
     if (open_base(base_path, &session, &err) != 0) return 1;
+    if (replay_client_attach(session, &err) != 0) {
+        tp_session_destroy(session);
+        return 1;
+    }
     int rc = 0;
     if (strcmp(family, "atlas") == 0) rc = replay_atlas(session, &ids, &err);
     else if (strcmp(family, "source") == 0) rc = replay_source(session, &ids, &err);
@@ -739,6 +771,7 @@ static int replay(const char *family, const char *base_path,
     else if (strcmp(family, "target") == 0) rc = replay_target(session, &ids, &err);
     else rc = replay_remove(session, family, &err);
     if (rc == 0) rc = save_replay(session, out_path, &err);
+    replay_client_detach();
     tp_session_destroy(session);
     return rc;
 }

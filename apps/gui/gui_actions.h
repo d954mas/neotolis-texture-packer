@@ -119,6 +119,13 @@ void gui_request_gesture_commit(void);
 /* --- pack / export / undo / redo / refresh --- */
 void do_pack(void);          /* interactive async pack of the selected atlas */
 void do_pack_blocking(void); /* deterministic blocking pack (selftest + --shot) */
+/* View-facing semantic ingress. The request is consumed by apply_pending()
+ * between frames; neither menu declaration nor keyboard handling mutates the
+ * session directly. */
+void gui_request_undo(void);
+void gui_request_redo(void);
+/* Host-side executors retained for focused action/self-tests. Shipping views
+ * must use gui_request_undo/gui_request_redo. */
 void do_undo(void);
 void do_redo(void);
 /* F15: the synchronous refresh cost (fp_collect x2 + source invalidate + diff) with NO UI/status/canvas

@@ -35,6 +35,14 @@ bool s_pending_pack, s_pending_export;
 bool s_pending_commit_edit; /* a press landed outside the active inline-edit field -> commit it */
 bool s_pending_commit_edit_enter; /* Enter in the inline editor -> commit it (deferred, non-force) */
 
+typedef enum gui_pending_history_action {
+    GUI_PENDING_HISTORY_NONE = 0,
+    GUI_PENDING_HISTORY_UNDO,
+    GUI_PENDING_HISTORY_REDO,
+} gui_pending_history_action;
+
+static gui_pending_history_action s_pending_history_action;
+
 /* Presentation-only mapping from the active stable animation to one Pack result. */
 
 bool s_pending_remove_atlas;
@@ -150,6 +158,25 @@ void do_redo(void) {
     } else {
         s_reselect_pending = false;
         set_status("Nothing to redo.");
+    }
+}
+
+void gui_request_undo(void) {
+    s_pending_history_action = GUI_PENDING_HISTORY_UNDO;
+}
+
+void gui_request_redo(void) {
+    s_pending_history_action = GUI_PENDING_HISTORY_REDO;
+}
+
+static void apply_pending_history_action(void) {
+    const gui_pending_history_action action =
+        s_pending_history_action;
+    s_pending_history_action = GUI_PENDING_HISTORY_NONE;
+    if (action == GUI_PENDING_HISTORY_UNDO) {
+        do_undo();
+    } else if (action == GUI_PENDING_HISTORY_REDO) {
+        do_redo();
     }
 }
 
@@ -856,6 +883,8 @@ void apply_pending(void) {
         (void)gui_project_flush_pending();
         s_actions.gesture_commit = false;
     }
+
+    apply_pending_history_action();
 
     gui_actions__apply_confirm();
 

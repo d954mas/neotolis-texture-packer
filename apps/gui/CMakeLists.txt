@@ -134,7 +134,10 @@ set_tests_properties(tp_gui_rows_complexity PROPERTIES
 # Contract probe: the production GUI atlas-rename adapter must admit the
 # canonical transaction through tp_session and read the result from one owned
 # snapshot. Headless: no window, renderer, dialogs, or GUI globals.
-add_executable(tp_test_gui_session_adapter test_gui_session_adapter.c gui_session_adapter.c)
+add_executable(tp_test_gui_session_adapter
+    test_gui_session_adapter.c
+    gui_session_adapter.c
+    gui_session_client.c)
 target_link_libraries(tp_test_gui_session_adapter PRIVATE tp_core unity)
 target_compile_options(tp_test_gui_session_adapter PRIVATE -U_DLL)
 nt_set_warning_flags(tp_test_gui_session_adapter)
@@ -374,7 +377,8 @@ add_test(NAME tp_gui_action_trace COMMAND tp_test_gui_action_trace)
 add_executable(tp_test_client_parity
     test_client_parity.c
     client_parity_manifest.c
-    gui_session_adapter.c)
+    gui_session_adapter.c
+    gui_session_client.c)
 target_link_libraries(tp_test_client_parity PRIVATE tp_build unity)
 target_compile_options(tp_test_client_parity PRIVATE -U_DLL)
 target_compile_definitions(tp_test_client_parity PRIVATE
@@ -386,7 +390,8 @@ add_test(NAME tp_client_parity COMMAND tp_test_client_parity)
 
 add_executable(tp_client_parity_replay
     client_parity_replay.c
-    gui_session_adapter.c)
+    gui_session_adapter.c
+    gui_session_client.c)
 target_link_libraries(tp_client_parity_replay PRIVATE tp_build)
 target_compile_options(tp_client_parity_replay PRIVATE -U_DLL)
 nt_set_warning_flags(tp_client_parity_replay)

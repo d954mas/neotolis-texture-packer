@@ -414,11 +414,19 @@ void gui_request_gesture_commit(void) { s_actions.gesture_commit = true; }
 
 void gui_actions__apply_structural_edits(void) {
     if (s_pending_add_atlas) {
-        int idx = gui_project_add_atlas();
-        if (idx >= 0) {
-            s_sel_atlas = idx;
-            reset_selection();
-            const tp_snapshot_atlas *added = tp_session_snapshot_atlas_at(gui_project_snapshot(), idx);
+        const gui_project_create_result created =
+            gui_project_add_atlas();
+        if (created.committed) {
+            if (created.visible_index >= 0) {
+                s_sel_atlas = created.visible_index;
+                reset_selection();
+            }
+            const tp_snapshot_atlas *added =
+                created.visible_index >= 0
+                    ? tp_session_snapshot_atlas_by_id(
+                          gui_project_snapshot(),
+                          created.created_id)
+                    : NULL;
             set_statusf("Added atlas '%s'", added ? added->name : "?");
         }
     }
@@ -440,9 +448,11 @@ void gui_actions__apply_structural_edits(void) {
         }
     }
     if (s_actions.pending_add_target) {
-        const int ti = gui_project_add_target(s_actions.pending_add_target_atlas_id,
-                                              s_actions.pending_add_target_revision);
-        if (ti >= 0) {
+        const gui_project_create_result created =
+            gui_project_add_target(
+                s_actions.pending_add_target_atlas_id,
+                s_actions.pending_add_target_revision);
+        if (created.committed) {
             set_status("Added export target (Ctrl+Z to undo).");
         }
     }
@@ -455,51 +465,65 @@ void gui_actions__apply_structural_edits(void) {
         gui_actions__browse_target(&s_actions.pending_browse_target_ref);
     }
     if (s_actions.pending_add_anim) {
-        const int idx = gui_project_create_animation(
+        const gui_project_create_result created =
+            gui_project_create_animation(
             s_actions.pending_add_anim_atlas_id, s_actions.pending_add_anim_revision,
             NULL, NULL, 0);
-        if (idx >= 0) {
+        if (created.committed) {
             const tp_session_snapshot *after_snapshot = gui_project_snapshot();
             const tp_snapshot_atlas *after_atlas = after_snapshot
                 ? tp_session_snapshot_atlas_by_id(
                       after_snapshot, s_actions.pending_add_anim_atlas_id)
                 : NULL;
-            const tp_snapshot_animation *animation = after_atlas
-                                                         ? tp_session_snapshot_animation_at(after_snapshot, after_atlas->id, idx)
-                                                         : NULL;
+            const tp_snapshot_animation *animation =
+                after_atlas &&
+                        created.visible_index >= 0
+                    ? tp_session_snapshot_animation_at(
+                          after_snapshot, after_atlas->id,
+                          created.visible_index)
+                    : NULL;
             const tp_snapshot_atlas *selected = after_snapshot
                 ? tp_session_snapshot_atlas_at(after_snapshot, s_sel_atlas)
                 : NULL;
-            if (selected && tp_id128_eq(selected->id, s_actions.pending_add_anim_atlas_id)) {
-                s_sel_anim = idx;
+            if (created.visible_index >= 0 &&
+                selected &&
+                tp_id128_eq(
+                    selected->id,
+                    s_actions.pending_add_anim_atlas_id)) {
+                s_sel_anim = created.visible_index;
                 s_sel_anim_frame = -1;
             }
             set_statusf("Added animation '%s' (Ctrl+Z to undo).", animation ? animation->name : "?");
         }
     }
     if (s_actions.pending_create_anim.active) {
-        const int idx = gui_project_create_animation(
+        const gui_project_create_result created =
+            gui_project_create_animation(
             s_actions.pending_create_anim.atlas_id,
             s_actions.pending_create_anim.expected_revision,
             s_actions.pending_create_anim.name[0] ? s_actions.pending_create_anim.name : NULL,
             s_actions.pending_create_anim.frames,
             s_actions.pending_create_anim.frame_count);
-        if (idx >= 0) {
+        if (created.committed) {
             const tp_session_snapshot *after_snapshot = gui_project_snapshot();
             const tp_snapshot_atlas *after_atlas = after_snapshot
                 ? tp_session_snapshot_atlas_by_id(
                       after_snapshot, s_actions.pending_create_anim.atlas_id)
                 : NULL;
-            const tp_snapshot_animation *animation = after_atlas
-                ? tp_session_snapshot_animation_at(after_snapshot,
-                                                   after_atlas->id, idx)
-                : NULL;
+            const tp_snapshot_animation *animation =
+                after_atlas &&
+                        created.visible_index >= 0
+                    ? tp_session_snapshot_animation_at(
+                          after_snapshot, after_atlas->id,
+                          created.visible_index)
+                    : NULL;
             const tp_snapshot_atlas *selected = after_snapshot
                 ? tp_session_snapshot_atlas_at(after_snapshot, s_sel_atlas)
                 : NULL;
-            if (selected &&
+            if (created.visible_index >= 0 &&
+                selected &&
                 tp_id128_eq(selected->id, s_actions.pending_create_anim.atlas_id)) {
-                s_sel_anim = idx;
+                s_sel_anim = created.visible_index;
                 s_sel_anim_frame = -1;
             }
             set_statusf("Created animation '%s' with %d frame(s) (Ctrl+Z to undo).",

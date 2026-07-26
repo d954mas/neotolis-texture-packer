@@ -2,6 +2,7 @@
 
 #include <string.h>
 
+#include "core/nt_assert.h"
 #include "gui_session_adapter.h"
 
 /* One buffered value edit. Same-target edits replace the value; a different
@@ -12,6 +13,19 @@ static bool key_eq(const gui_coalesce_key *a, const gui_coalesce_key *b) {
            tp_id128_eq(a->atlas_id, b->atlas_id) &&
            tp_id128_eq(a->source_id, b->source_id) &&
            strcmp(a->sprite, b->sprite) == 0;
+}
+
+static void settle_pending_success(
+    bool preview_stale_before) {
+    gui_session_submit_terminal terminal = {0};
+    const bool has_terminal =
+        gui_session_client_last_submit(
+            &s_project.client, &terminal);
+    NT_ASSERT(has_terminal);
+    if (has_terminal && terminal.no_change) {
+        s_project.preview_stale =
+            preview_stale_before;
+    }
 }
 
 /* Discard the buffered edit WITHOUT committing (new/open replace the whole project). */
@@ -35,17 +49,12 @@ bool gui_project_flush_pending(void) {
     memset(&s_project.pending_op, 0, sizeof s_project.pending_op);
     s_project.pending_valid = false;
     if (op.kind == TP_OP_ATLAS_SETTINGS_SET) {
-        char transaction_id[33];
-        gui_project__next_transaction_id(transaction_id);
         tp_error err = {0};
-        const tp_status status = gui_session_set_atlas_settings(
-            s_project.session, op.atlas_id, expected_revision, &op.u.atlas_settings,
-            transaction_id, &err);
+        const tp_status status = gui_session_set_atlas_settings(&s_project.client, op.atlas_id, expected_revision, &op.u.atlas_settings, &err);
         tp_operation_free(&op);
         if (status == TP_STATUS_OK) {
-            if (!gui_project__refresh_after_session_commit()) {
-                s_project.preview_stale = preview_stale_before;
-            }
+            settle_pending_success(
+                preview_stale_before);
             return true;
         }
         gui_project__note_session_reject(status, &err);
@@ -53,52 +62,40 @@ bool gui_project_flush_pending(void) {
     }
     if (op.kind == TP_OP_SPRITE_OVERRIDE_SET &&
         !tp_id128_is_nil(op.u.sprite_set.source_id)) {
-        char transaction_id[33];
-        gui_project__next_transaction_id(transaction_id);
         tp_error err = {0};
-        const tp_status status = gui_session_set_sprite_override(
-            s_project.session, op.atlas_id, op.u.sprite_set.source_id,
+        const tp_status status = gui_session_set_sprite_override(&s_project.client, op.atlas_id, op.u.sprite_set.source_id,
             op.u.sprite_set.src_key, expected_revision,
-            &op.u.sprite_set, transaction_id, &err);
+            &op.u.sprite_set, &err);
         tp_operation_free(&op);
         if (status == TP_STATUS_OK) {
-            if (!gui_project__refresh_after_session_commit()) {
-                s_project.preview_stale = preview_stale_before;
-            }
+            settle_pending_success(
+                preview_stale_before);
             return true;
         }
         gui_project__note_session_reject(status, &err);
         return false;
     }
     if (op.kind == TP_OP_ANIMATION_SETTINGS_SET) {
-        char transaction_id[33];
-        gui_project__next_transaction_id(transaction_id);
         tp_error err = {0};
-        const tp_status status = gui_session_set_animation_settings(
-            s_project.session, op.atlas_id, op.u.anim_settings.anim_id,
-            expected_revision, &op.u.anim_settings, transaction_id, &err);
+        const tp_status status = gui_session_set_animation_settings(&s_project.client, op.atlas_id, op.u.anim_settings.anim_id,
+            expected_revision, &op.u.anim_settings, &err);
         tp_operation_free(&op);
         if (status == TP_STATUS_OK) {
-            if (!gui_project__refresh_after_session_commit()) {
-                s_project.preview_stale = preview_stale_before;
-            }
+            settle_pending_success(
+                preview_stale_before);
             return true;
         }
         gui_project__note_session_reject(status, &err);
         return false;
     }
     if (op.kind == TP_OP_TARGET_SET) {
-        char transaction_id[33];
-        gui_project__next_transaction_id(transaction_id);
         tp_error err = {0};
-        const tp_status status = gui_session_set_target(
-            s_project.session, op.atlas_id, op.u.target_set.target_id,
-            expected_revision, &op.u.target_set, transaction_id, &err);
+        const tp_status status = gui_session_set_target(&s_project.client, op.atlas_id, op.u.target_set.target_id,
+            expected_revision, &op.u.target_set, &err);
         tp_operation_free(&op);
         if (status == TP_STATUS_OK) {
-            if (!gui_project__refresh_after_session_commit()) {
-                s_project.preview_stale = preview_stale_before;
-            }
+            settle_pending_success(
+                preview_stale_before);
             return true;
         }
         gui_project__note_session_reject(status, &err);

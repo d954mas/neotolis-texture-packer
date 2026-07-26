@@ -34,7 +34,6 @@ typedef struct gui_project_state {
     uint64_t observed_instance_generation;
     int64_t observed_revision;
     bool client_initialized;
-    uint64_t txn_seq;
     bool preview_stale;
     char name[256];
     double now;
@@ -62,11 +61,9 @@ extern gui_project_state s_project;
 
 void gui_project__snapshot_drop(void);
 tp_status gui_project__client_init(tp_error *err);
-void gui_project__next_transaction_id(char out[33]);
 void gui_project__note_session_reject(tp_status status, const tp_error *err);
 void gui_project__note_recovery_degraded(tp_status status);
 void gui_project__sync_recovery_notice(void);
-bool gui_project__refresh_after_session_commit(void);
 void gui_project__attach_recovery_live(tp_session *session);
 
 void gui_project_pending_discard(void);

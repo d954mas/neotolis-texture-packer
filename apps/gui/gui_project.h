@@ -184,10 +184,20 @@ bool gui_project_peek_pending_slice9(const gui_sprite_ref *sprite, int out_lrtb[
  * re-serializing every frame -- the export-target preview uses it to drop a stale preview on an edit. */
 
 /* --- mutation wrappers (all admit typed operations through tp_session) --- */
-/* The remove wrappers return TRUE iff the removal actually committed (fix3 [0]): false on a
+typedef struct gui_project_create_result {
+    bool committed;
+    bool observation_pending;
+    tp_id128 created_id;
+    /* Resolved only from the common observed snapshot; -1 while its exact
+     * committed echo is pending. */
+    int visible_index;
+} gui_project_create_result;
+/* Create wrappers return a stable created identity plus an observed index when
+ * the exact common echo is already available. The remove wrappers return TRUE
+ * iff the removal actually committed (fix3 [0]): false on a
  * failed pending flush, an invalid index, or a commit reject -- so a deferred handler shows
  * "Removed X (Ctrl+Z)" + resets selection ONLY on a real removal, never a false success. */
-int gui_project_add_atlas(void);                          /* returns new atlas index, or -1 */
+gui_project_create_result gui_project_add_atlas(void);
 bool gui_project_remove_atlas(tp_id128 atlas_id, int64_t expected_revision); /* true iff removed */
 gui_add_status gui_project_add_source(tp_id128 atlas_id, int64_t expected_revision,
                                       const char *path); /* kind=folder */
@@ -233,10 +243,11 @@ bool gui_project_set_sprite_override(const gui_sprite_ref *sprite, gui_sprite_ov
 /* --- animations (ux.md §3.7b: explicit manual assembly only) --- */
 /* Appends an animation and fills it with `frames` (in the given order) as ONE undo entry. The id is
  * the first free of {base, base"2", base"3", ...}; a NULL/empty base auto-names "anim1"/"anim2"/...
- * `frames` may be NULL/0 for an empty animation. Returns the new animation index, or -1. */
-int gui_project_create_animation(tp_id128 atlas_id, int64_t expected_revision,
-                                 const char *base, const tp_op_sprite_ref *frames,
-                                 int frame_count);
+ * `frames` may be NULL/0 for an empty animation. */
+gui_project_create_result gui_project_create_animation(
+    tp_id128 atlas_id, int64_t expected_revision,
+    const char *base, const tp_op_sprite_ref *frames,
+    int frame_count);
 /* Removes the animation with `id`. Returns true iff removed (false on flush-abort/not-found). */
 bool gui_project_remove_animation(const gui_animation_ref *animation);
 /* Renames animation `anim_index`; fails on empty or a name already used by another animation. */
@@ -252,8 +263,9 @@ bool gui_project_anim_move_frame(const gui_animation_ref *animation, int frame_i
                                  int delta);
 
 /* --- export targets (region G, audit I1) --- */
-/* Appends a default json-neotolis target "out/<atlas>.<ext>"; returns its index or -1. */
-int gui_project_add_target(tp_id128 atlas_id, int64_t expected_revision);
+/* Appends a default json-neotolis target "out/<atlas>.<ext>". */
+gui_project_create_result gui_project_add_target(
+    tp_id128 atlas_id, int64_t expected_revision);
 bool gui_project_remove_target(const gui_target_ref *target);
 bool gui_project_set_target(const gui_target_ref *target, const char *exporter_id,
                             const char *out_path, bool enabled);
@@ -313,6 +325,7 @@ tp_session *gui_project__test_session(void);
 #endif
 #ifdef TP_ENABLE_TEST_SEAMS
 void gui_project__test_fail_next_observe(void);
+void gui_project__test_fail_observes(unsigned int count);
 bool gui_project__test_host_has_staged_completion(void);
 #endif
 

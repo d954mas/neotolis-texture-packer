@@ -1,11 +1,14 @@
 #include "gui_session_client.h"
 
+#include <ctype.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "core/nt_assert.h"
 
 #ifdef TP_ENABLE_TEST_SEAMS
-static bool s_test_fail_next_observe;
+static unsigned int s_test_observe_failures;
 #endif
 
 static void destroy_observation_pair(
@@ -22,8 +25,8 @@ static tp_status observe_core(
     const tp_session_observation_token *after,
     tp_session_observation **out, tp_error *err) {
 #ifdef TP_ENABLE_TEST_SEAMS
-    if (s_test_fail_next_observe) {
-        s_test_fail_next_observe = false;
+    if (s_test_observe_failures > 0U) {
+        s_test_observe_failures--;
         if (out) {
             *out = NULL;
         }
@@ -48,6 +51,191 @@ static void reduce_observation(
     }
 }
 
+static tp_status transaction_result_copy(
+    const tp_txn_result *source,
+    tp_txn_result *destination, tp_error *err) {
+    if (!source || !destination) {
+        return tp_error_set(
+            err, TP_STATUS_INVALID_ARGUMENT,
+            "GUI transaction-result copy requires source and destination");
+    }
+    memset(destination, 0, sizeof *destination);
+    *destination = *source;
+    destination->ops = NULL;
+    destination->errors = NULL;
+    destination->string_storage = NULL;
+
+    size_t string_size = 0U;
+    for (int op_index = 0;
+         op_index < source->op_count; ++op_index) {
+        for (int address_index = 0;
+             address_index <
+             source->ops[op_index].addr_count;
+             ++address_index) {
+            const tp_txn_addr *address =
+                &source->ops[op_index]
+                     .addr[address_index];
+            if (address->idk == TP_ID_KIND_INVALID &&
+                address->str) {
+                string_size += strlen(address->str) + 1U;
+            }
+        }
+    }
+    if (source->op_count > 0) {
+        destination->ops = calloc(
+            (size_t)source->op_count,
+            sizeof *destination->ops);
+        if (!destination->ops) {
+            goto oom;
+        }
+        memcpy(
+            destination->ops, source->ops,
+            (size_t)source->op_count *
+                sizeof *destination->ops);
+    }
+    if (string_size > 0U) {
+        destination->string_storage =
+            malloc(string_size);
+        if (!destination->string_storage) {
+            goto oom;
+        }
+        char *cursor =
+            destination->string_storage;
+        for (int op_index = 0;
+             op_index < source->op_count; ++op_index) {
+            for (int address_index = 0;
+                 address_index <
+                 source->ops[op_index].addr_count;
+                 ++address_index) {
+                const tp_txn_addr *source_address =
+                    &source->ops[op_index]
+                         .addr[address_index];
+                tp_txn_addr *destination_address =
+                    &destination->ops[op_index]
+                         .addr[address_index];
+                if (source_address->idk ==
+                        TP_ID_KIND_INVALID &&
+                    source_address->str) {
+                    const size_t length =
+                        strlen(source_address->str) + 1U;
+                    memcpy(
+                        cursor, source_address->str,
+                        length);
+                    destination_address->str = cursor;
+                    cursor += length;
+                } else {
+                    destination_address->str = NULL;
+                }
+            }
+        }
+    }
+    if (source->error_count > 0) {
+        destination->errors = calloc(
+            (size_t)source->error_count,
+            sizeof *destination->errors);
+        if (!destination->errors) {
+            goto oom;
+        }
+        memcpy(
+            destination->errors, source->errors,
+            (size_t)source->error_count *
+                sizeof *destination->errors);
+    }
+    return TP_STATUS_OK;
+
+oom:
+    tp_txn_result_free(destination);
+    return tp_error_set(
+        err, TP_STATUS_OOM,
+        "GUI transaction-result receipt allocation failed");
+}
+
+static void pending_clear(
+    gui_session_pending_submit *pending) {
+    if (!pending) {
+        return;
+    }
+    tp_txn_result_free(&pending->result);
+    memset(pending, 0, sizeof *pending);
+}
+
+static void submit_state_clear(
+    gui_session_client *client) {
+    NT_ASSERT(client != NULL);
+    for (size_t index = 0U;
+         index < GUI_SESSION_CLIENT_MAX_PENDING_SUBMITS;
+         ++index) {
+        pending_clear(&client->pending[index]);
+    }
+    client->has_last_submit = false;
+    memset(
+        &client->last_submit, 0,
+        sizeof client->last_submit);
+}
+
+static void reconcile_submit_echoes(
+    gui_session_client *client,
+    const tp_session_observation *observation) {
+    NT_ASSERT(client != NULL);
+    NT_ASSERT(observation != NULL);
+    const tp_session_snapshot *snapshot =
+        tp_session_observation_snapshot(observation);
+    const bool resync =
+        tp_session_observation_resync_required(
+            observation);
+    const int64_t observed_revision =
+        snapshot
+            ? tp_session_snapshot_revision(snapshot)
+            : -1;
+    const size_t event_count =
+        tp_session_observation_event_count(observation);
+    for (size_t pending_index = 0U;
+         pending_index <
+         GUI_SESSION_CLIENT_MAX_PENDING_SUBMITS;
+         ++pending_index) {
+        gui_session_pending_submit *pending =
+            &client->pending[pending_index];
+        if (!pending->occupied ||
+            !pending->terminal_ready ||
+            pending->terminal.echo_state !=
+                GUI_SESSION_SUBMIT_ECHO_PENDING) {
+            continue;
+        }
+        bool observed =
+            resync &&
+            observed_revision >=
+                pending->terminal.revision;
+        for (size_t event_index = 0U;
+             !observed && event_index < event_count;
+             ++event_index) {
+            const tp_session_event *event =
+                tp_session_observation_event_at(
+                    observation, event_index);
+            observed =
+                event &&
+                event->kind ==
+                    TP_SESSION_EVENT_MODEL_COMMITTED &&
+                strcmp(
+                    event->transaction_id,
+                    pending->terminal.transaction_id) ==
+                    0;
+        }
+        if (!observed) {
+            continue;
+        }
+        pending->observation_status =
+            TP_STATUS_OK;
+        pending->terminal.echo_state =
+            GUI_SESSION_SUBMIT_ECHO_OBSERVED;
+        if (client->has_last_submit &&
+            strcmp(
+                client->last_submit.transaction_id,
+                pending->terminal.transaction_id) == 0) {
+            client->last_submit = pending->terminal;
+        }
+    }
+}
+
 static void publish_observation(
     gui_session_client *client,
     tp_session_observation *next,
@@ -62,6 +250,9 @@ static void publish_observation(
     tp_session_observation *old_snapshot_owner =
         client->snapshot_owner;
 
+    /* Exact own-submit acknowledgement is part of the same atomic reduction
+     * cut and is visible to draft reducers processing this batch. */
+    reconcile_submit_echoes(client, next);
     /* Reducers see the complete batch before the new frame state becomes
      * externally readable through the client. Reducers are deterministic
      * non-owning state machines; fallible materialization happened in core. */
@@ -85,11 +276,188 @@ static void publish_observation(
     client->observe_requested = false;
 }
 
+static bool submit_identity_equal(
+    gui_session_submit_identity left,
+    gui_session_submit_identity right) {
+    return tp_id128_eq(
+               left.origin_view_id,
+               right.origin_view_id) &&
+           tp_id128_eq(
+               left.draft_instance_id,
+               right.draft_instance_id);
+}
+
+static bool transaction_id_is_canonical(
+    const char *transaction_id) {
+    if (!transaction_id ||
+        strlen(transaction_id) != 32U) {
+        return false;
+    }
+    for (size_t index = 0U; index < 32U; ++index) {
+        const unsigned char byte =
+            (unsigned char)transaction_id[index];
+        if (!isdigit(byte) &&
+            !(byte >= (unsigned char)'a' &&
+              byte <= (unsigned char)'f')) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static void transaction_id_format(
+    tp_id128 id, char out[33]) {
+    static const char hex[] = "0123456789abcdef";
+    for (size_t index = 0U; index < 16U; ++index) {
+        out[index * 2U] =
+            hex[id.bytes[index] >> 4U];
+        out[index * 2U + 1U] =
+            hex[id.bytes[index] & 0x0fU];
+    }
+    out[32] = '\0';
+}
+
+static tp_status submit_transaction_id(
+    gui_session_client *client,
+    const char *retained,
+    char out[33], tp_error *err) {
+    if (retained) {
+        if (!transaction_id_is_canonical(retained)) {
+            return tp_error_set(
+                err, TP_STATUS_INVALID_ARGUMENT,
+                "GUI retained transaction ID must be 32 lowercase hex digits");
+        }
+        (void)snprintf(out, 33U, "%s", retained);
+        return TP_STATUS_OK;
+    }
+    tp_id128 generated = tp_id128_nil();
+    const tp_status status = tp_id128_generate(
+        &client->transaction_rng, &generated, err);
+    if (status != TP_STATUS_OK) {
+        return status;
+    }
+    transaction_id_format(generated, out);
+    return TP_STATUS_OK;
+}
+
+static gui_session_pending_submit *pending_find_id(
+    gui_session_client *client,
+    const char transaction_id[33]) {
+    for (size_t index = 0U;
+         index < GUI_SESSION_CLIENT_MAX_PENDING_SUBMITS;
+         ++index) {
+        gui_session_pending_submit *pending =
+            &client->pending[index];
+        if (pending->occupied &&
+            strcmp(
+                pending->terminal.transaction_id,
+                transaction_id) == 0) {
+            return pending;
+        }
+    }
+    return NULL;
+}
+
+static tp_status pending_register_before_admission(
+    gui_session_client *client,
+    const char transaction_id[33],
+    gui_session_submit_identity identity,
+    gui_session_pending_submit **out,
+    bool *out_existing,
+    tp_error *err) {
+    *out_existing = false;
+    gui_session_pending_submit *pending =
+        pending_find_id(client, transaction_id);
+    if (pending) {
+        if (!submit_identity_equal(
+                pending->terminal.identity,
+                identity)) {
+            return tp_error_set(
+                err, TP_STATUS_INVALID_ARGUMENT,
+                "GUI retained transaction identity does not match its original view and draft");
+        }
+        *out_existing = true;
+        *out = pending;
+        return TP_STATUS_OK;
+    }
+
+    for (size_t index = 0U;
+         index < GUI_SESSION_CLIENT_MAX_PENDING_SUBMITS;
+         ++index) {
+        if (!client->pending[index].occupied) {
+            pending = &client->pending[index];
+            break;
+        }
+    }
+    if (!pending) {
+        for (size_t index = 0U;
+             index <
+             GUI_SESSION_CLIENT_MAX_PENDING_SUBMITS;
+             ++index) {
+            gui_session_pending_submit *candidate =
+                &client->pending[index];
+            if (candidate->terminal_ready &&
+                candidate->terminal.echo_state !=
+                    GUI_SESSION_SUBMIT_ECHO_PENDING) {
+                pending = candidate;
+                break;
+            }
+        }
+    }
+    if (!pending) {
+        return tp_error_set(
+            err, TP_STATUS_OUT_OF_BOUNDS,
+            "GUI pending-submit receipt capacity is exhausted by unresolved submissions");
+    }
+    pending_clear(pending);
+    pending->occupied = true;
+    (void)snprintf(
+        pending->terminal.transaction_id,
+        sizeof pending->terminal.transaction_id,
+        "%s", transaction_id);
+    pending->terminal.identity = identity;
+    *out = pending;
+    return TP_STATUS_OK;
+}
+
+static void pending_finish(
+    gui_session_client *client,
+    gui_session_pending_submit *pending,
+    tp_status status,
+    const tp_txn_result *transaction) {
+    NT_ASSERT(client != NULL);
+    NT_ASSERT(pending != NULL);
+    NT_ASSERT(transaction != NULL);
+    pending->terminal.status = status;
+    pending->terminal.committed =
+        transaction->committed;
+    pending->terminal.no_change =
+        transaction->no_change;
+    pending->terminal.revision =
+        transaction->revision;
+    pending->terminal.echo_state =
+        transaction->committed &&
+                !transaction->no_change
+            ? GUI_SESSION_SUBMIT_ECHO_PENDING
+            : GUI_SESSION_SUBMIT_ECHO_NOT_APPLICABLE;
+    pending->observation_status =
+        TP_STATUS_OK;
+    pending->terminal_ready = true;
+    tp_error copy_error = {{0}};
+    pending->result_available =
+        transaction_result_copy(
+            transaction, &pending->result,
+            &copy_error) == TP_STATUS_OK;
+    client->last_submit = pending->terminal;
+    client->has_last_submit = true;
+}
+
 void gui_session_client_init(gui_session_client *client) {
     if (!client) {
         return;
     }
     memset(client, 0, sizeof *client);
+    client->transaction_rng = tp_rng_os();
 }
 
 tp_status gui_session_client_register_reducer(
@@ -148,6 +516,10 @@ tp_status gui_session_client_attach(
     if (next_generation == 0U) {
         next_generation = 1U;
     }
+    /* A successful attachment starts a distinct session-instance receipt
+     * scope. Clear only after candidate observation preparation succeeded,
+     * and before reducers see the new generation. */
+    submit_state_clear(client);
     publish_observation(
         client, initial, next_generation);
     client->session = session;
@@ -216,6 +588,197 @@ tp_status gui_session_client_resync(
     return TP_STATUS_OK;
 }
 
+tp_status gui_session_client_submit(
+    gui_session_client *client,
+    const gui_session_submit_request *request,
+    gui_session_submit_result *out,
+    tp_error *err) {
+    if (out) {
+        memset(out, 0, sizeof *out);
+        out->terminal_status = TP_STATUS_OK;
+        out->observation_status = TP_STATUS_OK;
+    }
+    if (!client || !client->session || !request || !out ||
+        !request->operations || request->operation_count <= 0 ||
+        request->operation_count > TP_TXN_MAX_OPS ||
+        !request->semantic_label ||
+        request->semantic_label[0] == '\0') {
+        return tp_error_set(
+            err, TP_STATUS_INVALID_ARGUMENT,
+            "GUI submit requires an attached client, operations, semantic label, and output");
+    }
+    if (client->frame_pinned) {
+        return tp_error_set(
+            err, TP_STATUS_INVALID_ARGUMENT,
+            "GUI submit is forbidden during a pinned frame");
+    }
+
+    char transaction_id[33] = {0};
+    tp_status status = TP_STATUS_OK;
+    if (request->retained_transaction_id) {
+        status = submit_transaction_id(
+            client, request->retained_transaction_id,
+            transaction_id, err);
+    } else {
+        bool unique = false;
+        for (size_t attempt = 0U;
+             attempt <
+             GUI_SESSION_CLIENT_MAX_ID_GENERATION_ATTEMPTS;
+             ++attempt) {
+            status = submit_transaction_id(
+                client, NULL, transaction_id, err);
+            if (status != TP_STATUS_OK) {
+                break;
+            }
+            if (!pending_find_id(
+                    client, transaction_id)) {
+                unique = true;
+                break;
+            }
+        }
+        if (status == TP_STATUS_OK && !unique) {
+            status = tp_error_set(
+                err, TP_STATUS_DUPLICATE_ID,
+                "GUI transaction ID generation collided with retained receipts");
+        }
+    }
+    if (status != TP_STATUS_OK) {
+        return status;
+    }
+    gui_session_pending_submit *pending = NULL;
+    bool existing = false;
+    status = pending_register_before_admission(
+        client, transaction_id, request->identity,
+        &pending, &existing, err);
+    if (status != TP_STATUS_OK) {
+        return status;
+    }
+    if (existing && pending->terminal_ready) {
+        if (!pending->result_available) {
+            return tp_error_set(
+                err, TP_STATUS_OOM,
+                "GUI retained transaction result is unavailable");
+        }
+        status = transaction_result_copy(
+            &pending->result, &out->transaction,
+            err);
+        if (status != TP_STATUS_OK) {
+            return status;
+        }
+        out->terminal_status =
+            pending->terminal.status;
+        out->observation_pending =
+            pending->terminal.echo_state ==
+            GUI_SESSION_SUBMIT_ECHO_PENDING;
+        out->observation_status =
+            pending->observation_status;
+        client->last_submit = pending->terminal;
+        client->has_last_submit = true;
+        return pending->terminal.committed ||
+                       pending->terminal.no_change
+                   ? TP_STATUS_OK
+                   : pending->terminal.status;
+    }
+    if (existing) {
+        return tp_error_set(
+            err, TP_STATUS_INVALID_ARGUMENT,
+            "GUI retained transaction is already being admitted");
+    }
+
+    tp_txn_request transaction_request = {0};
+    transaction_request.schema = TP_TXN_SCHEMA;
+    (void)snprintf(
+        transaction_request.id_hex,
+        sizeof transaction_request.id_hex,
+        "%s", transaction_id);
+    transaction_request.expected_revision =
+        request->expected_revision;
+    transaction_request.label =
+        (char *)request->semantic_label;
+    transaction_request.author = "human";
+    transaction_request.ops = request->operations;
+    transaction_request.op_count =
+        request->operation_count;
+
+    status = tp_session_apply(
+        client->session, &transaction_request,
+        &out->transaction, err);
+    out->terminal_status = status;
+    pending_finish(
+        client, pending, status, &out->transaction);
+
+    if (!out->transaction.committed) {
+        return status;
+    }
+
+    if (!out->transaction.no_change) {
+        tp_error observe_error = {{0}};
+        out->observation_status =
+            gui_session_client_observe(
+                client, &observe_error);
+        if (out->observation_status != TP_STATUS_OK) {
+            client->observe_requested = true;
+            out->observation_pending = true;
+            pending->observation_status =
+                out->observation_status;
+        }
+    }
+    /* Once core reports committed, a later recovery/observation failure is not
+     * a mutation rejection. The typed receipt preserves both statuses. */
+    return TP_STATUS_OK;
+}
+
+void gui_session_submit_result_destroy(
+    gui_session_submit_result *result) {
+    if (!result) {
+        return;
+    }
+    tp_txn_result_free(&result->transaction);
+    memset(result, 0, sizeof *result);
+}
+
+bool gui_session_client_pending_submit_query(
+    const gui_session_client *client,
+    const char transaction_id[33],
+    gui_session_submit_identity identity,
+    gui_session_submit_terminal *out) {
+    if (!client || !transaction_id ||
+        !transaction_id_is_canonical(transaction_id)) {
+        return false;
+    }
+    for (size_t index = 0U;
+         index < GUI_SESSION_CLIENT_MAX_PENDING_SUBMITS;
+         ++index) {
+        const gui_session_pending_submit *pending =
+            &client->pending[index];
+        if (pending->occupied &&
+            strcmp(
+                pending->terminal.transaction_id,
+                transaction_id) == 0 &&
+            submit_identity_equal(
+                pending->terminal.identity,
+                identity)) {
+            if (out) {
+                *out = pending->terminal;
+            }
+            return true;
+        }
+    }
+    return false;
+}
+
+bool gui_session_client_last_submit(
+    const gui_session_client *client,
+    gui_session_submit_terminal *out) {
+    if (!client || !client->has_last_submit) {
+        return false;
+    }
+    if (out) {
+        *out = client->last_submit;
+    }
+    return true;
+}
+
 tp_status gui_session_client_frame_begin(
     gui_session_client *client, tp_error *err) {
     if (!client || !client->session ||
@@ -276,6 +839,7 @@ void gui_session_client_detach(
     client->observed =
         (tp_session_observation_token){0};
     client->observe_requested = false;
+    submit_state_clear(client);
     if (had_snapshot) {
         client->snapshot_lifetime_generation++;
     }
@@ -341,6 +905,18 @@ bool gui_session_client_frame_is_pinned(
 
 #ifdef TP_ENABLE_TEST_SEAMS
 void gui_session_client__test_fail_next_observe(void) {
-    s_test_fail_next_observe = true;
+    s_test_observe_failures = 1U;
+}
+
+void gui_session_client__test_fail_observes(
+    unsigned int count) {
+    s_test_observe_failures = count;
+}
+
+void gui_session_client__test_set_transaction_rng(
+    gui_session_client *client, tp_rng rng) {
+    if (client) {
+        client->transaction_rng = rng;
+    }
 }
 #endif

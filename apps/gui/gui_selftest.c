@@ -109,6 +109,14 @@ static const tp_snapshot_atlas *selftest_atlas_at(int index,
     return snapshot ? tp_session_snapshot_atlas_at(snapshot, index) : NULL;
 }
 
+static void selftest_observe_session(void) {
+    tp_error error = {{0}};
+    NT_ASSERT(
+        gui_project_frame_begin(&error) ==
+        TP_STATUS_OK);
+    gui_project_frame_end();
+}
+
 static const tp_snapshot_animation *selftest_animation_at(int atlas_index,
                                                           int animation_index) {
     const tp_session_snapshot *snapshot = gui_project_snapshot();
@@ -372,9 +380,12 @@ static int selftest_create_animation_at(int atlas_index, const char *base,
         }
         refs[i].src_key = keys[i];
     }
-    const int result = gui_project_create_animation(
-        atlas->id, tp_session_snapshot_revision(snapshot), base, refs,
-        frame_count);
+    const int result =
+        gui_project_create_animation(
+            atlas->id,
+            tp_session_snapshot_revision(snapshot),
+            base, refs, frame_count)
+            .visible_index;
     free(refs);
     free(keys);
     return result;
@@ -874,11 +885,20 @@ void run_selftest(void) {
     (void)snprintf(save_path, sizeof save_path, "%s/selftest.ntpacker_project", s_exe_dir);
     tp_status st = gui_project_save_as(save_path, err, sizeof err);
     nt_log_info("SELFTEST: save '%s' -> %s (dirty=%d)", save_path, tp_status_str(st), gui_project_is_dirty());
+    NT_ASSERT(st == TP_STATUS_OK);
 
+    /* A saved session owns the canonical writer lease. The architecture
+     * deliberately rejects opening that same identity until R2d supplies an
+     * explicit in-place reload/lease-transfer contract. Exercise a real
+     * close/reopen round-trip by installing a fresh session first, which
+     * releases the saved identity through the existing owner boundary. */
+    NT_ASSERT(gui_project_new());
     st = gui_project_open(save_path, err, sizeof err);
     const tp_snapshot_atlas *reloaded_atlas = selftest_atlas_at(0, NULL);
     const int nsrc = reloaded_atlas ? reloaded_atlas->source_count : -1;
     nt_log_info("SELFTEST: reload -> %s, atlas0 sources=%d (dirty=%d)", tp_status_str(st), nsrc, gui_project_is_dirty());
+    NT_ASSERT(st == TP_STATUS_OK && nsrc == 2 &&
+              "Save As round-trip requires releasing the prior writer before Open");
 
     /* Master spec 14.2: live Save must not overwrite an external rewrite after Open. The exact
      * sentinel remains on disk; a deliberate Save As to another identity is still allowed. */
@@ -1166,7 +1186,8 @@ void run_selftest(void) {
         (void)snprintf(cfp, sizeof cfp, "%s/%s", sdir, cyr_source_key);
         write_tga_2x2(cfp);
 
-        const int sidx = gui_project_add_atlas();
+        const int sidx =
+            gui_project_add_atlas().visible_index;
         if (sidx >= 0) {
             (void)gui_project_add_source(sidx, sdir);
             gui_scan_invalidate_all();
@@ -1599,7 +1620,8 @@ void run_selftest(void) {
         NT_ASSERT(gui_canvas_anim_frame_at(0.45, 10.0F, 4, 3, &fin) == 0 && fin && "once_pingpong finishes at 0");
         NT_ASSERT(gui_canvas_anim_frame_at(0.55, 10.0F, 5, 3, &fin) == 1 && "loop_pingpong wraps");
 
-        const int aidx = gui_project_add_atlas();
+        const int aidx =
+            gui_project_add_atlas().visible_index;
         s_sel_atlas = aidx;
         char anim_source_dir[700];
         (void)snprintf(anim_source_dir, sizeof anim_source_dir,
@@ -2249,13 +2271,16 @@ void run_selftest(void) {
      *     and FAILED; the scan picks the freed "atlas1" and succeeds. --- */
     {
         gui_project_new(); /* fresh: exactly one atlas (atlas1) */
-        const int p14a2 = gui_project_add_atlas(); /* atlas2 */
-        const int p14a3 = gui_project_add_atlas(); /* atlas3 */
+        const int p14a2 =
+            gui_project_add_atlas().visible_index; /* atlas2 */
+        const int p14a3 =
+            gui_project_add_atlas().visible_index; /* atlas3 */
         NT_ASSERT(p14a2 >= 0 && p14a3 >= 0 &&
                   tp_session_snapshot_atlas_count(gui_project_snapshot()) == 3 &&
                   "P2-14: seeded atlas1..atlas3");
         NT_ASSERT(gui_project_remove_atlas(0) && "P2-14: removed atlas1 (count -> 2)");
-        const int p14add = gui_project_add_atlas(); /* count+1 == "atlas3" WOULD collide; the scan must avoid it */
+        const int p14add =
+            gui_project_add_atlas().visible_index; /* count+1 == "atlas3" WOULD collide; the scan must avoid it */
         const int p14count = tp_session_snapshot_atlas_count(gui_project_snapshot());
         const tp_snapshot_atlas *p14added = selftest_atlas_at(p14add, NULL);
         const char *p14nm = p14added ? p14added->name : "(wedged)";
@@ -2277,7 +2302,8 @@ void run_selftest(void) {
          * and pick "atlas2". */
         gui_project_new(); /* fresh atlas1 + default target out/atlas1 */
         NT_ASSERT(gui_project_set_atlas_name(0, "sprites") && "P2-14/B: rename atlas1 -> 'sprites' (target stays out/atlas1)");
-        const int p14b = gui_project_add_atlas();
+        const int p14b =
+            gui_project_add_atlas().visible_index;
         const tp_snapshot_atlas *p14ba = selftest_atlas_at(p14b, NULL);
         const tp_snapshot_target *p14bt = selftest_target_at(p14b, 0);
         const char *p14bn = p14ba ? p14ba->name : "(wedged)";
@@ -2393,6 +2419,9 @@ void run_selftest(void) {
         char s2err[256] = {0};
         const tp_status s2st = gui_project_save_as(s2path, s2err, sizeof s2err);
         const bool s2_written = selftest_file_exists(s2path);
+        /* Save completion is an exact synchronous receipt; dirty/recovery
+         * projections advance only through the common atomic observation. */
+        selftest_observe_session();
         nt_log_info("SELFTEST: J2 save-with-append-fail st=%s dirty=%d file_written=%d err='%s' (want OK,0,1)",
                     tp_status_str(s2st), (int)gui_project_is_dirty(), (int)s2_written, s2err);
         const tp_session_recovery_health j2health =
@@ -2471,6 +2500,7 @@ void run_selftest(void) {
         char j8serr[256] = {0};
         NT_ASSERT(gui_project_save_as(j8path, j8serr, sizeof j8serr) == TP_STATUS_OK &&
                   "J8: save to establish a path + a clean baseline");
+        selftest_observe_session();
         NT_ASSERT(gui_project_has_path() && !gui_project_is_dirty() && "J8: saved -> has a path + clean");
         (void)gui_project_take_op_error(NULL, 0);
         NT_ASSERT(gui_project__test_attach_memory_recovery() && "J8: memory journal attached");
@@ -2494,7 +2524,8 @@ void run_selftest(void) {
         gui_pack_clear(-1);
         s_sel_atlas = 0;
         (void)gui_project_take_op_error(NULL, 0);
-        const int j9added = gui_project_add_atlas(); /* a 2nd atlas to remove (index 1) */
+        const int j9added =
+            gui_project_add_atlas().visible_index; /* a 2nd atlas to remove (index 1) */
         NT_ASSERT(j9added >= 1 && "J9: added a 2nd atlas to remove");
         NT_ASSERT(gui_project__test_attach_memory_recovery() && "J9: memory journal attached");
         const int j9count0 = tp_session_snapshot_atlas_count(gui_project_snapshot());
@@ -3039,6 +3070,30 @@ void selftest_pre_frame(void) {
         /* OFF for the first frames (settled diff baseline captured at pf 5), then ON for the whole retry
          * window. The readback + retry logic lives in selftest_post_draw (see the mechanism note there). */
         s_canvas.show_outline = (s_st_pf > 5);
+    } else if (s_st_phase == 18) {
+        /* post_draw runs while the frame observation is pinned. Perform the
+         * fresh-session transition here at the next between-frame ingress
+         * boundary, then capture the reducer-owned initial observation. */
+        NT_ASSERT(gui_project_new());
+        s_sel_atlas = 0;
+        reset_selection();
+        s_about_open = false;
+        s_sec_atlas_open = true;
+        s_atlas_adv_open = true;
+        s_sec_region_open = true;
+        s_sec_anim_open = true;
+        s_sec_export_open = true;
+        free(s_st_baseline);
+        s_st_baseline = NULL;
+        s_st_baseline_n = 0;
+        tp_error error = {{0}};
+        NT_ASSERT(
+            gui_project_snapshot_serialize(
+                &s_st_baseline,
+                &s_st_baseline_n,
+                &error) == TP_STATUS_OK);
+        s_st_phase = 2;
+        s_st_pf = 0;
     } else if (s_st_phase == 2) {
         if (s_st_pf > 10) {
             const bool dirty = gui_project_is_dirty();
@@ -3452,7 +3507,8 @@ void selftest_pre_frame(void) {
         if (s_st_pf == 1) {
             gui_project_new();
             gui_pack_clear(-1);
-            const int survivor = gui_project_add_atlas();
+            const int survivor =
+                gui_project_add_atlas().visible_index;
             NT_ASSERT(survivor == 1 && "SELFTEST: stable-publication atlas must be index 1");
             (void)gui_project_set_atlas_name(1, "survivor");
             s_sel_atlas = 1;
@@ -3648,22 +3704,9 @@ void selftest_post_draw(void) {
                 c1 - s_st_cyan0, (int)s_st_pf, (int)(s_st_pf - 8));
     NT_ASSERT(s_st_cyan0 >= 0 && c1 >= 0);
     NT_ASSERT(ok && "hull outline must add cyan pixels (retry window expired -> outlines never rendered)");
-    /* Hand off to the touch-on-render guard: a truly fresh project, no input, all sections expanded. */
-    gui_project_new();
-    s_sel_atlas = 0;
-    reset_selection();
-    s_about_open = false;
-    s_sec_atlas_open = true;
-    s_atlas_adv_open = true;
-    s_sec_region_open = true;
-    s_sec_anim_open = true;
-    s_sec_export_open = true;
-    free(s_st_baseline);
-    s_st_baseline = NULL;
-    s_st_baseline_n = 0;
-    tp_error e = {0};
-    (void)gui_project_snapshot_serialize(&s_st_baseline, &s_st_baseline_n, &e);
-    s_st_phase = 2;
+    /* post_draw is inside a pinned frame. Defer the fresh-session mutation to
+     * the next pre-frame ingress boundary before starting the render guard. */
+    s_st_phase = 18;
     s_st_pf = 0;
 }
 

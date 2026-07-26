@@ -231,14 +231,14 @@ void test_undo_redo_preserves_selected_animation_by_stable_id(void) {
     const tp_id128 atlas_id = atlas->id;
 
     TEST_ASSERT_EQUAL_INT(
-        0, gui_project_create_animation(
+        0, (gui_project_create_animation(
                atlas_id, tp_session_snapshot_revision(snapshot), "idle", NULL,
-               0));
+               0)).visible_index);
     snapshot = gui_project_snapshot();
     TEST_ASSERT_EQUAL_INT(
-        1, gui_project_create_animation(
+        1, (gui_project_create_animation(
                atlas_id, tp_session_snapshot_revision(snapshot), "walk", NULL,
-               0));
+               0)).visible_index);
     snapshot = gui_project_snapshot();
     const tp_snapshot_animation *selected =
         tp_session_snapshot_animation_at(snapshot, atlas_id, 1);
@@ -288,8 +288,12 @@ void test_preview_request_is_deferred_and_selection_reset_stops_it(void) {
     const tp_session_snapshot *snapshot = gui_project_snapshot();
     const tp_snapshot_atlas *atlas = tp_session_snapshot_atlas_at(snapshot, 0);
     TEST_ASSERT_NOT_NULL(atlas);
-    const int animation_index = gui_project_create_animation(
-        atlas->id, tp_session_snapshot_revision(snapshot), "walk", NULL, 0);
+    const int animation_index =
+        gui_project_create_animation(
+            atlas->id,
+            tp_session_snapshot_revision(snapshot),
+            "walk", NULL, 0)
+            .visible_index;
     TEST_ASSERT_EQUAL_INT(0, animation_index);
 
     gui_animation_ref animation;
@@ -335,7 +339,8 @@ void test_confirm_save_publishes_before_new_and_new_message_wins(void) {
     TEST_ASSERT_EQUAL_INT(1, tp_session_snapshot_atlas_count(
                                  gui_project_snapshot()));
 
-    TEST_ASSERT_EQUAL_INT(1, gui_project_add_atlas());
+    TEST_ASSERT_EQUAL_INT(
+        1, gui_project_add_atlas().visible_index);
     TEST_ASSERT_TRUE(gui_project_is_dirty());
     TEST_ASSERT_EQUAL_INT(2, tp_session_snapshot_atlas_count(
                                  gui_project_snapshot()));
@@ -773,7 +778,8 @@ void test_refresh_same_path_memberships_do_not_double_count_change(void) {
         7U, fwrite("changed", 1U, 7U, source));
     TEST_ASSERT_EQUAL_INT(0, fclose(source));
 
-    TEST_ASSERT_EQUAL_INT(1, gui_project_add_atlas());
+    TEST_ASSERT_EQUAL_INT(
+        1, gui_project_add_atlas().visible_index);
     snapshot = gui_project_snapshot();
     const tp_snapshot_atlas *second_atlas =
         tp_session_snapshot_atlas_at(snapshot, 1);

@@ -439,29 +439,29 @@ endforeach()
 _arch_count_matches("${_arch_root}/apps/gui/CMakeLists.txt"
                     "(^|[ \t(])gui_session_client\\.c([ \t\r\n)]|$)"
                     _client_source_registrations)
-if(NOT _client_source_registrations EQUAL 5)
+if(NOT _client_source_registrations EQUAL 8)
     message(FATAL_ERROR
-        "R2a manifest gui_session_client.c registrations expected 5, got ${_client_source_registrations}")
+        "R2c manifest gui_session_client.c registrations expected 8, got ${_client_source_registrations}")
 endif()
 
-_arch_assert_symbol("apps/gui/gui_session_adapter.c" "tp_session_apply" 1 "R2c")
+_arch_assert_symbol("apps/gui/gui_session_adapter.c" "tp_session_apply" 0 "R2c complete")
+_arch_assert_symbol("apps/gui/gui_session_adapter.c" "\"project\\.edit\"" 0 "R2c complete")
+_arch_assert_symbol("apps/gui/gui_session_client.c" "tp_session_apply" 1 "R2c owner")
+_arch_assert_symbol("apps/gui/gui_session_adapter.h" "tp_session[ \t]*\\*" 0 "R2c complete")
 foreach(_entry IN ITEMS
-        "apps/gui/gui_project.c|gui_project__refresh_after_session_commit|1"
-        "apps/gui/gui_project_pending.c|gui_project__refresh_after_session_commit|4"
-        "apps/gui/gui_project_mutations.c|gui_project__refresh_after_session_commit|17"
-        "apps/gui/gui_project_internal.h|txn_seq|1"
-        "apps/gui/gui_project.c|gui_project__next_transaction_id|1"
-        "apps/gui/gui_project_pending.c|gui_project__next_transaction_id|4"
-        "apps/gui/gui_project_mutations.c|gui_project__next_transaction_id|17")
+        "apps/gui/gui_project.c|gui_project__refresh_after_session_commit|0"
+        "apps/gui/gui_project_pending.c|gui_project__refresh_after_session_commit|0"
+        "apps/gui/gui_project_mutations.c|gui_project__refresh_after_session_commit|0"
+        "apps/gui/gui_project_internal.h|txn_seq|0"
+        "apps/gui/gui_project.c|gui_project__next_transaction_id|0"
+        "apps/gui/gui_project_pending.c|gui_project__next_transaction_id|0"
+        "apps/gui/gui_project_mutations.c|gui_project__next_transaction_id|0")
     string(REPLACE "|" ";" _parts "${_entry}")
     list(GET _parts 0 _path)
     list(GET _parts 1 _symbol)
     list(GET _parts 2 _count)
-    _arch_assert_symbol("${_path}" "${_symbol}" "${_count}" "R2c")
+    _arch_assert_symbol("${_path}" "${_symbol}" "${_count}" "R2c complete")
 endforeach()
-_arch_assert_function_symbol(
-    "apps/gui/gui_project.c" "gui_project__refresh_after_session_commit"
-    "gui_project__snapshot_drop" 1 "R2c")
 _arch_assert_function_symbol(
     "apps/gui/gui_project.c" "gui_project__snapshot_drop"
     "gui_project__snapshot_drop" 1 "SR-BASE")
@@ -471,10 +471,23 @@ _arch_assert_function_symbol(
 foreach(_function IN ITEMS gui_project_undo gui_project_redo gui_project_save
                            gui_project_save_as)
     _arch_assert_function_symbol("apps/gui/gui_project_file.c" "${_function}"
-                                 "gui_project__snapshot_drop" 1 "R2c")
+                                 "gui_project__snapshot_drop" 0 "R2c complete")
+    _arch_assert_function_symbol("apps/gui/gui_project_file.c" "${_function}"
+                                 "gui_project__sync_recovery_notice" 0 "R2c complete")
 endforeach()
-_arch_assert_symbol("apps/gui/gui_view_chrome.c" "do_undo" 1 "R2c")
-_arch_assert_symbol("apps/gui/gui_view_chrome.c" "do_redo" 1 "R2c")
+foreach(_path IN ITEMS apps/gui/gui_view_chrome.c apps/gui/main.c)
+    _arch_assert_symbol("${_path}" "do_undo" 0 "R2c complete")
+    _arch_assert_symbol("${_path}" "do_redo" 0 "R2c complete")
+endforeach()
+
+file(READ "${_arch_root}/apps/gui/main.c" _main_source)
+string(FIND "${_main_source}" "gui_bench_tick();" _bench_tick_position)
+string(FIND "${_main_source}" "gui_project_frame_begin(" _frame_begin_position)
+if(_bench_tick_position LESS 0 OR _frame_begin_position LESS 0 OR
+   _bench_tick_position GREATER _frame_begin_position)
+    message(FATAL_ERROR
+        "R2c benchmark ingress must execute before the frame observation is pinned")
+endif()
 
 _arch_assert_symbol("apps/gui/gui_project_file.c" "install_session" 3 "R2d")
 foreach(_function IN ITEMS install_session fresh_init

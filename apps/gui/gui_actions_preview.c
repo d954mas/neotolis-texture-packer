@@ -403,20 +403,36 @@ int create_animation_from_selection(void) {
                                          ? tp_session_snapshot_atlas_at(snapshot,
                                                                         s_sel_atlas)
                                          : NULL;
-    const int idx = atlas ? gui_project_create_animation(
-                                atlas->id, tp_session_snapshot_revision(snapshot),
-                                base[0] ? base : NULL, s_sel_sort_refs, n)
-                          : -1;
-    if (idx >= 0) {
-        s_sel_anim = idx;
-        s_sel_anim_frame = -1;
+    const gui_project_create_result created =
+        atlas
+            ? gui_project_create_animation(
+                  atlas->id,
+                  tp_session_snapshot_revision(snapshot),
+                  base[0] ? base : NULL,
+                  s_sel_sort_refs, n)
+            : (gui_project_create_result){
+                  .visible_index = -1,
+              };
+    if (created.committed) {
+        if (created.visible_index >= 0) {
+            s_sel_anim = created.visible_index;
+            s_sel_anim_frame = -1;
+        }
         const tp_session_snapshot *after = gui_project_snapshot();
         const tp_snapshot_atlas *a = after ? tp_session_snapshot_atlas_at(after, s_sel_atlas) : NULL;
-        const tp_snapshot_animation *created = a ? tp_session_snapshot_animation_at(after, a->id, idx) : NULL;
+        const tp_snapshot_animation *created_animation =
+            a && created.visible_index >= 0
+                ? tp_session_snapshot_animation_at(
+                      after, a->id,
+                      created.visible_index)
+                : NULL;
         set_statusf("Created animation '%s' with %d frame(s) (Ctrl+Z to undo).",
-                    created ? created->name : "?", n);
+                    created_animation
+                        ? created_animation->name
+                        : "?",
+                    n);
     }
-    return idx;
+    return created.visible_index;
 }
 
 /* Appends the current multi-selection (natural-sorted) as frames of animation `anim_index`.

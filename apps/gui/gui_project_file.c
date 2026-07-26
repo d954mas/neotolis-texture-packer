@@ -197,8 +197,6 @@ bool gui_project_undo(void) {
         }
         return false;
     }
-    gui_project__sync_recovery_notice();
-    gui_project__snapshot_drop();
     s_project.preview_stale = true; /* restored model no longer matches the last pack */
     gui_project_invalidate_sources();
     return true;
@@ -216,8 +214,6 @@ bool gui_project_redo(void) {
         }
         return false;
     }
-    gui_project__sync_recovery_notice();
-    gui_project__snapshot_drop();
     s_project.preview_stale = true;
     gui_project_invalidate_sources();
     return true;
@@ -304,11 +300,9 @@ tp_status gui_project_save(char *err_out, size_t err_cap) {
         }
         return st;
     }
-    gui_project__snapshot_drop();
     if (result.recovery_degraded) {
         gui_project__note_recovery_degraded(result.recovery_status);
     }
-    gui_project__sync_recovery_notice();
     if (result.file_durability_degraded) {
         s_project.save_notice_pending = true;
         (void)snprintf(
@@ -357,14 +351,12 @@ tp_status gui_project_save_as(const char *path, char *err_out, size_t err_cap) {
         }
         return st;
     }
-    gui_project__snapshot_drop();
     if (result.recovery_degraded) {
         gui_project__note_recovery_degraded(result.recovery_status);
     }
     if (result.recovery_rebind_required) {
         gui_project__attach_recovery_live(s_project.session);
     }
-    gui_project__sync_recovery_notice();
     if (result.file_durability_degraded) {
         s_project.save_notice_pending = true;
         (void)snprintf(

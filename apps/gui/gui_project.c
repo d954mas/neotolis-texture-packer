@@ -49,10 +49,70 @@ static void reduce_project_display_name(
         "%s", base);
 }
 
+static void reduce_recovery_health(
+    gui_project_state *project,
+    tp_session_recovery_health health) {
+    NT_ASSERT(project != NULL);
+    if (!health.degraded) {
+        /* A failed cross-identity retire can temporarily leave no owner while
+         * Save As asks the frontend to rebind. Preserve the exact result notice
+         * until a healthy owner is actually available. */
+        if (!health.available &&
+            project->recovery_notice_active) {
+            return;
+        }
+        project->recovery_notice_active = false;
+        project->recovery_notice.notice_id =
+            health.notice_id;
+        project->recovery_notice.generation =
+            health.generation;
+        project->recovery_notice.status =
+            TP_STATUS_OK;
+        project->recovery_notice.message[0] =
+            '\0';
+        return;
+    }
+    if (project->recovery_notice_active &&
+        strcmp(
+            health.notice_id,
+            project->recovery_notice.notice_id) == 0 &&
+        health.generation ==
+            project->recovery_notice.generation &&
+        health.first_cause ==
+            project->recovery_notice.status) {
+        return;
+    }
+    project->recovery_notice_active = true;
+    project->recovery_notice.notice_id =
+        health.notice_id;
+    project->recovery_notice.generation =
+        health.generation;
+    project->recovery_notice.status =
+        health.first_cause == TP_STATUS_OK
+            ? TP_STATUS_JOURNAL_FAILED
+            : health.first_cause;
+    project->recovery_notice
+        .has_last_durable_revision =
+        health.has_last_durable_revision;
+    project->recovery_notice
+        .last_durable_revision =
+        health.last_durable_revision;
+    (void)snprintf(
+        project->recovery_notice.message,
+        sizeof project->recovery_notice.message,
+        "Crash recovery is degraded (%s). Editing and Undo remain available, but recent unsaved changes may not survive an app or system crash.",
+        tp_status_str(
+            project->recovery_notice.status));
+}
+
 static void reduce_project_observation(
     void *context, const tp_session_observation *observation,
     uint64_t instance_generation) {
     gui_project_state *project = context;
+    reduce_recovery_health(
+        project,
+        tp_session_observation_recovery_health(
+            observation));
     const tp_session_snapshot *snapshot =
         tp_session_observation_snapshot(observation);
     if (project->observed_instance_generation !=
@@ -356,10 +416,6 @@ void gui_project_flush_error(char *out, size_t cap) {
     (void)snprintf(out, cap, "%s", m);
 }
 
-void gui_project__next_transaction_id(char out[33]) {
-    (void)snprintf(out, 33U, "%032llx", (unsigned long long)(s_project.txn_seq++));
-}
-
 void gui_project__note_session_reject(tp_status status, const tp_error *err) {
     const char *message = (err && err->msg[0]) ? err->msg : tp_status_str(status);
     s_project.op_error = true;
@@ -368,48 +424,18 @@ void gui_project__note_session_reject(tp_status status, const tp_error *err) {
 }
 
 void gui_project__sync_recovery_notice(void) {
-    if (!s_project.session) {
+    if (!s_project.client_initialized ||
+        !s_project.session) {
         return;
     }
-    const tp_session_recovery_health health =
-        tp_session_recovery_health_query(s_project.session);
-    if (!health.degraded) {
-        /* A failed cross-identity retire can temporarily leave no owner while
-         * Save As asks the frontend to rebind. Preserve the exact result notice
-         * until a healthy owner is actually available. */
-        if (!health.available && s_project.recovery_notice_active) {
-            return;
-        }
-        s_project.recovery_notice_active = false;
-        s_project.recovery_notice.notice_id = health.notice_id;
-        s_project.recovery_notice.generation = health.generation;
-        s_project.recovery_notice.status = TP_STATUS_OK;
-        s_project.recovery_notice.message[0] = '\0';
-        return;
+    tp_error err = {{0}};
+    const tp_status status =
+        gui_session_client_request_observe(
+            &s_project.client, &err);
+    if (status != TP_STATUS_OK) {
+        gui_project__note_session_reject(
+            status, &err);
     }
-    if (s_project.recovery_notice_active &&
-        strcmp(health.notice_id, s_project.recovery_notice.notice_id) == 0 &&
-        health.generation == s_project.recovery_notice.generation &&
-        health.first_cause == s_project.recovery_notice.status) {
-        return;
-    }
-    gui_project__note_recovery_degraded(health.first_cause);
-}
-
-bool gui_project__refresh_after_session_commit(void) {
-    gui_project__sync_recovery_notice();
-    /* Core is the sole semantic no-op owner. A no-change admission leaves the
-     * revision unchanged, so keep the current projection and preview state. */
-    const tp_session_snapshot *snapshot =
-        gui_project_snapshot();
-    if (snapshot &&
-        tp_session_snapshot_revision(snapshot) ==
-            tp_session_revision(s_project.session)) {
-        return false;
-    }
-    s_project.preview_stale = true;
-    gui_project__snapshot_drop();
-    return true;
 }
 
 // #endregion
@@ -422,6 +448,11 @@ tp_session *gui_project__test_session(void) { return s_project.session; }
 #ifdef TP_ENABLE_TEST_SEAMS
 void gui_project__test_fail_next_observe(void) {
     gui_session_client__test_fail_next_observe();
+}
+
+void gui_project__test_fail_observes(
+    unsigned int count) {
+    gui_session_client__test_fail_observes(count);
 }
 
 bool
