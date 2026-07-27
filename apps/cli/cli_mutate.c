@@ -50,9 +50,70 @@
 #include "tp_core/tp_srckey.h"
 #include "tp_core/tp_transaction.h"
 
-const char *const k_atlas_knobs =
-    "max_size, padding, margin, extrude, alpha_threshold, max_vertices, shape, "
-    "allow_transform, power_of_two, pixels_per_unit";
+/* The "known: ..." hint is GENERATED from the core field registry in row order,
+ * so an added field cannot leave the CLI advertising a stale vocabulary. */
+const char *cli_field_key_list(tp_field_family family, char *buf, size_t cap) {
+    size_t count = 0U;
+    const tp_field_row *rows = tp_op_field_rows(family, &count);
+    size_t used = 0U;
+    buf[0] = '\0';
+    for (size_t i = 0U; i < count; i++) {
+        int n = snprintf(buf + used, cap - used, "%s%s", i == 0U ? "" : ", ", rows[i].key);
+        if (n < 0 || (size_t)n >= cap - used) {
+            break;
+        }
+        used += (size_t)n;
+    }
+    return buf;
+}
+
+/* Parses one key=value against a field-registry family straight INTO the typed op
+ * payload (the same rows core's encoder/lowering/apply walk), so a new field needs
+ * no CLI branch. Only the string->typed marshalling lives here; the numeric RANGE
+ * is core's. Returns 1 = matched and parsed, 0 = no row owns `key` (the caller
+ * emits its own unknown-key message), -1 = matched but unparseable (emitted). */
+int cli_fill_registry_field(tp_field_family family, void *payload, uint32_t *mask,
+                            const char *key, const char *val, bool json, bool quiet) {
+    size_t count = 0U;
+    const tp_field_row *rows = tp_op_field_rows(family, &count);
+    for (size_t i = 0U; i < count; i++) {
+        const tp_field_row *row = &rows[i];
+        if (strcmp(key, row->key) != 0) {
+            continue;
+        }
+        void *slot = (char *)payload + row->op_off;
+        bool ok = false;
+        const char *want = "";
+        switch (row->type) { /* to_* leave the slot untouched on a parse failure */
+            case TP_FIELD_INT:
+            case TP_FIELD_INT_I16:
+            case TP_FIELD_INT_U16:
+                ok = to_int(val, (int *)slot);
+                want = "an integer";
+                break;
+            case TP_FIELD_BOOL:
+                ok = to_bool(val, (bool *)slot);
+                want = "0/1/true/false";
+                break;
+            case TP_FIELD_FLOAT:
+                ok = to_float(val, (float *)slot);
+                want = "a number";
+                break;
+            case TP_FIELD_STR: /* an owned string field is built by its own verb */
+                return 0;
+        }
+        if (!ok) {
+            char m[192];
+            (void)snprintf(m, sizeof m, "%s = '%s' must be %s", row->key, val, want);
+            cli_emit_error(json, quiet, "usage", "%s", m);
+            return -1;
+        }
+        *mask |= row->bit;
+        return 1;
+    }
+    return 0;
+}
+
 const char *const k_sprite_fields =
     "origin, slice9, rename, shape, allow_rotate, max_vertices, margin, extrude";
 

@@ -131,82 +131,56 @@ static tp_status lower_clear_mask(const cJSON *oj, uint32_t *out,
         }                               \
     } while (0)
 
-static tp_status lower_atlas_settings(const cJSON *oj, tp_op_atlas_settings *s, tp_error *err) {
-    bool pr = false;
-    tp_status st;
-    if ((st = j_opt_int(oj, "max_size", &s->max_size, &pr, err)) != TP_STATUS_OK) return st;
-    if (pr) s->mask |= TP_AF_MAX_SIZE;
-    if ((st = j_opt_int(oj, "padding", &s->padding, &pr, err)) != TP_STATUS_OK) return st;
-    if (pr) s->mask |= TP_AF_PADDING;
-    if ((st = j_opt_int(oj, "margin", &s->margin, &pr, err)) != TP_STATUS_OK) return st;
-    if (pr) s->mask |= TP_AF_MARGIN;
-    if ((st = j_opt_int(oj, "extrude", &s->extrude, &pr, err)) != TP_STATUS_OK) return st;
-    if (pr) s->mask |= TP_AF_EXTRUDE;
-    if ((st = j_opt_int(oj, "alpha_threshold", &s->alpha_threshold, &pr, err)) != TP_STATUS_OK) return st;
-    if (pr) s->mask |= TP_AF_ALPHA_THRESHOLD;
-    if ((st = j_opt_int(oj, "max_vertices", &s->max_vertices, &pr, err)) != TP_STATUS_OK) return st;
-    if (pr) s->mask |= TP_AF_MAX_VERTICES;
-    if ((st = j_opt_int(oj, "shape", &s->shape, &pr, err)) != TP_STATUS_OK) return st;
-    if (pr) s->mask |= TP_AF_SHAPE;
-    if ((st = j_opt_bool(oj, "allow_transform", &s->allow_transform, &pr, err)) != TP_STATUS_OK) return st;
-    if (pr) s->mask |= TP_AF_ALLOW_TRANSFORM;
-    if ((st = j_opt_bool(oj, "power_of_two", &s->power_of_two, &pr, err)) != TP_STATUS_OK) return st;
-    if (pr) s->mask |= TP_AF_POWER_OF_TWO;
-    if ((st = j_opt_float(oj, "pixels_per_unit", &s->pixels_per_unit, &pr, err)) != TP_STATUS_OK) return st;
-    if (pr) s->mask |= TP_AF_PIXELS_PER_UNIT;
-    return TP_STATUS_OK;
-}
-
-static tp_status lower_sprite_set(const cJSON *oj, tp_op_sprite_set *s, tp_error *err) {
-    tp_status st;
-    bool pr = false;
-    bool ox = false, oy = false;
-    if ((st = j_opt_float(oj, "origin_x", &s->origin_x, &ox, err)) != TP_STATUS_OK) return st;
-    if ((st = j_opt_float(oj, "origin_y", &s->origin_y, &oy, err)) != TP_STATUS_OK) return st;
-    if (ox != oy) {
-        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
-                            "origin_x and origin_y must be provided together");
-    }
-    if (ox || oy) s->mask |= TP_SPF_ORIGIN;
-    int present9 = 0;
-    const char *k9[4] = {"slice9_l", "slice9_r", "slice9_t", "slice9_b"};
-    for (int i = 0; i < 4; i++) {
-        int v = 0;
-        if ((st = j_opt_int(oj, k9[i], &v, &pr, err)) != TP_STATUS_OK) return st;
-        if (pr) {
-            present9++;
+/* One registry walk lowers every field-presence SET family: read each row's key
+ * in ROW ORDER (which fixes precedence when several fields carry a value fault),
+ * derive the presence mask from what was actually present, and enforce the
+ * all-or-none arity of a grouped bit at the end of its run. */
+static tp_status lower_fields(const cJSON *oj, tp_field_family family,
+                              void *payload, uint32_t *mask, tp_error *err) {
+    size_t count = 0U;
+    const tp_field_row *rows = tp_op_field_rows(family, &count);
+    unsigned run_present = 0U;
+    unsigned run_total = 0U;
+    for (size_t i = 0U; i < count; i++) {
+        const tp_field_row *row = &rows[i];
+        void *slot = (char *)payload + row->op_off;
+        bool present = false;
+        tp_status st = TP_STATUS_OK;
+        switch (row->type) {
+            case TP_FIELD_INT:
+            case TP_FIELD_INT_I16:
+            case TP_FIELD_INT_U16:
+                st = j_opt_int(oj, row->key, (int *)slot, &present, err);
+                break;
+            case TP_FIELD_BOOL:
+                st = j_opt_bool(oj, row->key, (bool *)slot, &present, err);
+                break;
+            case TP_FIELD_FLOAT:
+                st = j_opt_float(oj, row->key, (float *)slot, &present, err);
+                break;
+            case TP_FIELD_STR:
+                st = j_opt_dup(oj, row->key, (char **)slot, err);
+                present = (*(char **)slot != NULL); /* a dup result IS the presence */
+                break;
         }
-        s->slice9[i] = v;
+        if (st != TP_STATUS_OK) {
+            return st;
+        }
+        run_total++;
+        if (present) {
+            run_present++;
+            *mask |= row->bit;
+        }
+        if (i + 1U < count && rows[i + 1U].bit == row->bit) {
+            continue; /* the run continues */
+        }
+        if (row->group && run_present != 0U && run_present != run_total) {
+            return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                                "%s must be provided together", row->group);
+        }
+        run_present = 0U;
+        run_total = 0U;
     }
-    if (present9 != 0 && present9 != 4) {
-        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
-                            "slice9_l/r/t/b must be provided together");
-    }
-    if (present9 == 4) s->mask |= TP_SPF_SLICE9;
-    if ((st = j_opt_int(oj, "ov_shape", &s->ov_shape, &pr, err)) != TP_STATUS_OK) return st;
-    if (pr) s->mask |= TP_SPF_SHAPE;
-    if ((st = j_opt_int(oj, "ov_allow_rotate", &s->ov_allow_rotate, &pr, err)) != TP_STATUS_OK) return st;
-    if (pr) s->mask |= TP_SPF_ALLOW_ROTATE;
-    if ((st = j_opt_int(oj, "ov_max_vertices", &s->ov_max_vertices, &pr, err)) != TP_STATUS_OK) return st;
-    if (pr) s->mask |= TP_SPF_MAX_VERTICES;
-    if ((st = j_opt_int(oj, "ov_margin", &s->ov_margin, &pr, err)) != TP_STATUS_OK) return st;
-    if (pr) s->mask |= TP_SPF_MARGIN;
-    if ((st = j_opt_int(oj, "ov_extrude", &s->ov_extrude, &pr, err)) != TP_STATUS_OK) return st;
-    if (pr) s->mask |= TP_SPF_EXTRUDE;
-    return TP_STATUS_OK;
-}
-
-static tp_status lower_anim_settings(const cJSON *oj, tp_op_anim_settings *s, tp_error *err) {
-    tp_status st;
-    bool pr = false;
-    if ((st = j_opt_float(oj, "fps", &s->fps, &pr, err)) != TP_STATUS_OK) return st;
-    if (pr) s->mask |= TP_ANF_FPS;
-    if ((st = j_opt_int(oj, "playback", &s->playback, &pr, err)) != TP_STATUS_OK) return st;
-    if (pr) s->mask |= TP_ANF_PLAYBACK;
-    if ((st = j_opt_bool(oj, "flip_h", &s->flip_h, &pr, err)) != TP_STATUS_OK) return st;
-    if (pr) s->mask |= TP_ANF_FLIP_H;
-    if ((st = j_opt_bool(oj, "flip_v", &s->flip_v, &pr, err)) != TP_STATUS_OK) return st;
-    if (pr) s->mask |= TP_ANF_FLIP_V;
     return TP_STATUS_OK;
 }
 
@@ -227,7 +201,10 @@ tp_status tp_txn__lower_op(const cJSON *oj, tp_operation *out, tp_error *err) {
         case TP_OP_ATLAS_CREATE: TRY(j_opt_dup(oj, "name", &out->u.atlas_create.name, err)); break;
         case TP_OP_ATLAS_REMOVE: break;
         case TP_OP_ATLAS_RENAME: TRY(j_opt_dup(oj, "name", &out->u.atlas_rename.name, err)); break;
-        case TP_OP_ATLAS_SETTINGS_SET: TRY(lower_atlas_settings(oj, &out->u.atlas_settings, err)); break;
+        case TP_OP_ATLAS_SETTINGS_SET:
+            TRY(lower_fields(oj, TP_FIELD_FAMILY_ATLAS, &out->u.atlas_settings,
+                             &out->u.atlas_settings.mask, err));
+            break;
 
         case TP_OP_SOURCE_ADD: {
             TRY(j_opt_shape_id(oj, "source_id", TP_ID_KIND_SOURCE, &out->u.source_add.source_id, err));
@@ -260,7 +237,8 @@ tp_status tp_txn__lower_op(const cJSON *oj, tp_operation *out, tp_error *err) {
         case TP_OP_SPRITE_OVERRIDE_SET:
             TRY(j_opt_shape_id(oj, "source_id", TP_ID_KIND_SOURCE, &out->u.sprite_set.source_id, err));
             TRY(j_opt_dup(oj, "src_key", &out->u.sprite_set.src_key, err));
-            TRY(lower_sprite_set(oj, &out->u.sprite_set, err));
+            TRY(lower_fields(oj, TP_FIELD_FAMILY_SPRITE, &out->u.sprite_set,
+                             &out->u.sprite_set.mask, err));
             break;
         case TP_OP_SPRITE_OVERRIDE_CLEAR:
             TRY(j_opt_shape_id(oj, "source_id", TP_ID_KIND_SOURCE, &out->u.sprite_clear.source_id, err));
@@ -296,7 +274,8 @@ tp_status tp_txn__lower_op(const cJSON *oj, tp_operation *out, tp_error *err) {
             break;
         case TP_OP_ANIMATION_SETTINGS_SET:
             TRY(j_opt_shape_id(oj, "anim_id", TP_ID_KIND_ANIM, &out->u.anim_settings.anim_id, err));
-            TRY(lower_anim_settings(oj, &out->u.anim_settings, err));
+            TRY(lower_fields(oj, TP_FIELD_FAMILY_ANIM, &out->u.anim_settings,
+                             &out->u.anim_settings.mask, err));
             break;
         case TP_OP_ANIMATION_FRAMES_SET:
             TRY(j_opt_shape_id(oj, "anim_id", TP_ID_KIND_ANIM, &out->u.anim_frames_set.anim_id, err));
@@ -347,14 +326,8 @@ tp_status tp_txn__lower_op(const cJSON *oj, tp_operation *out, tp_error *err) {
              * and a full object (all three fields) still yields TP_TF_ALL, so the pre-R2a contract is a
              * strict subset. `out` was memset at the top of this function, so mask starts at 0. */
             tp_op_target_set *s = &out->u.target_set;
-            bool pr = false;
             TRY(j_opt_shape_id(oj, "target_id", TP_ID_KIND_TARGET, &s->target_id, err));
-            TRY(j_opt_dup(oj, "exporter_id", &s->exporter_id, err));
-            if (s->exporter_id) s->mask |= TP_TF_EXPORTER; /* string presence == a non-NULL dup result */
-            TRY(j_opt_dup(oj, "out_path", &s->out_path, err));
-            if (s->out_path) s->mask |= TP_TF_OUT_PATH;
-            TRY(j_opt_bool(oj, "enabled", &s->enabled, &pr, err));
-            if (pr) s->mask |= TP_TF_ENABLED;
+            TRY(lower_fields(oj, TP_FIELD_FAMILY_TARGET, s, &s->mask, err));
             break;
         }
 

@@ -138,6 +138,52 @@ enum tp_target_field_mask {
     TP_TF_ALL = 0x7u /* all three (full replace) */
 };
 
+/* ---- machine-readable field registry (spec §6) --------------------------- *
+ * One row per canonical wire key of a field-presence SET family. This is the
+ * single enumeration every codec walks -- apply, the canonical encoder, the
+ * JSON lowering, the semantic-diff fast path, and the CLI key parser -- so a
+ * new field is one row here plus a widget, not ten parallel switch arms.
+ *
+ * Row ORDER is the family's declaration order. The canonical encoder sorts keys
+ * ascending, so order is not a wire contract there; it IS the order of the
+ * sprite clear-token array, of the CLI "known:" list, and of JSON lowering (which
+ * fixes which value fault is reported first).
+ *
+ * A GROUPED field spends one mask bit over consecutive rows (sprite origin =
+ * {origin_x, origin_y}; slice9 = {l,r,t,b}); `group` labels the run for the
+ * all-or-none arity rule. `clear_token` is the per-BIT clear vocabulary token
+ * (first row of the run owns it) and `reset` the value a clear writes. */
+typedef enum tp_field_type {
+    TP_FIELD_INT = 0, /* op int    -> record int      */
+    TP_FIELD_INT_I16, /* op int    -> record int16_t  */
+    TP_FIELD_INT_U16, /* op int    -> record uint16_t */
+    TP_FIELD_BOOL,    /* op bool   -> record bool     */
+    TP_FIELD_FLOAT,   /* op float  -> record float    */
+    TP_FIELD_STR      /* op char*  -> record char*    */
+} tp_field_type;
+
+typedef enum tp_field_family {
+    TP_FIELD_FAMILY_ATLAS = 0, /* atlas.settings.set     -> tp_project_atlas  */
+    TP_FIELD_FAMILY_SPRITE,    /* sprite.override.set    -> tp_project_sprite */
+    TP_FIELD_FAMILY_ANIM,      /* animation.settings.set -> tp_project_anim   */
+    TP_FIELD_FAMILY_TARGET     /* target.set             -> tp_project_target */
+} tp_field_family;
+
+typedef struct tp_field_row {
+    uint32_t bit;            /* presence-mask bit (shared across a group's rows) */
+    const char *key;         /* canonical wire/JSON key */
+    tp_field_type type;
+    uint16_t op_off;         /* offsetof inside the op payload struct */
+    uint16_t rec_off;        /* offsetof inside the project record */
+    const char *clear_token; /* per-bit clear token, or NULL (not clearable / not the run's first row) */
+    const char *group;       /* arity label of a multi-row bit, else NULL */
+    double reset;            /* value a clear writes (grouped bits share it) */
+} tp_field_row;
+
+/* The family's rows in declaration order. Writes *count (>=0); NULL for an
+ * out-of-range family. */
+const tp_field_row *tp_op_field_rows(tp_field_family family, size_t *count);
+
 /* ---- typed payload arms (tagged union) ----------------------------------- *
  * Canonical operations store IDs only (§5.4). A human selector resolves to one ID
  * at the request edge (tp_op_build_*), before validate/apply ever see the op.

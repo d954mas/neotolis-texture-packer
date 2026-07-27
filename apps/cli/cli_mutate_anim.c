@@ -127,16 +127,7 @@ static int fill_anim_settings(tp_op_anim_settings *s, const char *const *pos, in
             cli_emit_error(json, quiet, "usage", "%s", m);
             return CLI_EXIT_USAGE;
         }
-        if (strcmp(key, "fps") == 0) {
-            float fv = 0.0F;
-            if (!to_float(val, &fv)) {
-                (void)snprintf(m, sizeof m, "fps = '%s' must be a number", val);
-                cli_emit_error(json, quiet, "usage", "%s", m);
-                return CLI_EXIT_USAGE;
-            }
-            s->fps = fv;
-            s->mask |= TP_ANF_FPS;
-        } else if (strcmp(key, "playback") == 0) {
+        if (strcmp(key, "playback") == 0) { /* an enum parse (index OR mode name), not a plain int */
             int pb = 0;
             if (!parse_playback(val, &pb)) {
                 (void)snprintf(m, sizeof m, "playback = '%s' must be 0..6 or a mode name", val);
@@ -145,26 +136,17 @@ static int fill_anim_settings(tp_op_anim_settings *s, const char *const *pos, in
             }
             s->playback = pb;
             s->mask |= TP_ANF_PLAYBACK;
-        } else if (strcmp(key, "flip_h") == 0) {
-            bool bv = false;
-            if (!to_bool(val, &bv)) {
-                (void)snprintf(m, sizeof m, "flip_h = '%s' must be 0/1/true/false", val);
-                cli_emit_error(json, quiet, "usage", "%s", m);
-                return CLI_EXIT_USAGE;
-            }
-            s->flip_h = bv;
-            s->mask |= TP_ANF_FLIP_H;
-        } else if (strcmp(key, "flip_v") == 0) {
-            bool bv = false;
-            if (!to_bool(val, &bv)) {
-                (void)snprintf(m, sizeof m, "flip_v = '%s' must be 0/1/true/false", val);
-                cli_emit_error(json, quiet, "usage", "%s", m);
-                return CLI_EXIT_USAGE;
-            }
-            s->flip_v = bv;
-            s->mask |= TP_ANF_FLIP_V;
-        } else {
-            (void)snprintf(m, sizeof m, "unknown anim key '%s' (known: fps, playback, flip_h, flip_v)", key);
+            continue;
+        }
+        const int matched = cli_fill_registry_field(TP_FIELD_FAMILY_ANIM, s, &s->mask,
+                                                    key, val, json, quiet);
+        if (matched < 0) {
+            return CLI_EXIT_USAGE;
+        }
+        if (matched == 0) {
+            char known[128];
+            (void)snprintf(m, sizeof m, "unknown anim key '%s' (known: %s)", key,
+                           cli_field_key_list(TP_FIELD_FAMILY_ANIM, known, sizeof known));
             cli_emit_error(json, quiet, "usage", "%s", m);
             return CLI_EXIT_USAGE;
         }

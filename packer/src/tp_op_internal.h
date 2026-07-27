@@ -80,15 +80,27 @@ tp_status tp_op__apply_prevalidated(tp_project *project,
                                     const tp_operation *operation,
                                     tp_op_reject *reject);
 
-typedef struct tp_sprite_clear_field {
-    const char *token;
-    uint32_t bit;
-} tp_sprite_clear_field;
-
-/* One canonical token<->bit vocabulary shared by JSON validation/lowering and
- * encoding. This prevents a field from being accepted but silently dropped by
- * the durable transaction encoder. */
-const tp_sprite_clear_field *tp_op__sprite_clear_fields(size_t *count);
+/* One canonical token<->bit vocabulary (the registry's `clear_token` column)
+ * shared by JSON validation/lowering and encoding. This prevents a field from
+ * being accepted but silently dropped by the durable transaction encoder. */
 bool tp_op__sprite_clear_bit(const char *token, uint32_t *bit);
+
+/* ---- generic walkers over the tp_op_field_rows registry ------------------ *
+ * The masked-field codecs every SET family shares. `payload` is the op's arm
+ * (offsets are relative to it), `record` the matching tp_project_* record. */
+
+/* Copy every masked field into the record. Owned strings are skipped: their op
+ * stages the dup so an OOM leaves the record byte-unchanged. */
+void tp_op__fields_apply(tp_field_family family, const void *payload,
+                         uint32_t mask, void *record);
+
+/* Write every masked field's `reset` (inherit/default) value into the record. */
+void tp_op__fields_clear(tp_field_family family, uint32_t mask, void *record);
+
+/* Semantic-identity fast path: true when every masked field already equals the
+ * record. *needs_fold (may be NULL) is raised when a masked float differs in
+ * binary, which the canonical %.9g fold must still adjudicate. */
+bool tp_op__fields_match(tp_field_family family, const void *payload,
+                         uint32_t mask, const void *record, bool *needs_fold);
 
 #endif /* TP_CORE_SRC_TP_OP_INTERNAL_H */

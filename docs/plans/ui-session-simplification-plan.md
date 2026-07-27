@@ -433,6 +433,67 @@ inventory, not a gate; the structural result (4 mechanisms → 1, 17 globals →
 10 sequential ifs → 1 exhaustive switch, one new enforceable checker rule) is
 the deliverable.
 
+**S17 — core field registry (master spec §6).** One scalar knob used to be
+enumerated in parallel across seven translation units. `tp_op_catalog.c` now
+owns one const table per field-presence SET family — atlas (10 rows), sprite
+(11), animation (4), target (3) — each row `{mask bit, wire key, value type,
+offsetof in the op payload, offsetof in the project record, clear token, group
+label, reset value}`. `tp_op_field_rows(family, &count)` is public
+(`tp_operation.h`): the machine-readable argument schema §6 requires of the
+operation engine, indexable by a palette or MCP client. Three private walkers —
+`tp_op__fields_apply` / `__fields_clear` / `__fields_match` — each carry exactly
+ONE default-less `switch` over `tp_field_type`, so a new value type is a
+`-Wswitch` error at every codec instead of a silent drop. NO function-pointer
+columns.
+
+Converted consumers: `tp_op_apply.c` (atlas + animation copy blocks,
+`sprite_apply_set`, `sprite_apply_clear`, and target.set's scalar half → walker
+calls, −94 LOC), `tp_op_encode.c` (four field emitters + the sprite clear-token
+loop → one `push_fields`), `tp_txn_lower.c` (four JSON lowerers → one
+`lower_fields` that derives the presence mask and enforces grouped arity),
+`tp_txn_apply.c` (the ten-line `TP_SETTING_DIFF` macro → one `__fields_match`
+call), `apps/cli` (`fill_knob` and `fill_anim_settings` → one shared
+`cli_fill_registry_field`, and the "known: ..." hints are now GENERATED from the
+rows, so the CLI cannot advertise a stale vocabulary). The closed per-op
+vocabulary `k_fields[]` also stopped spelling the payload keys a second time: a
+SET row carries its family and `tp_op_field_allowed` consults the registry.
+`k_sprite_clear_fields` is gone — the `clear_token` column IS that vocabulary.
+
+Wire/JSON is byte-identical and every golden file is untouched: the canonical
+encoder sorts keys ascending (`emit_object`), so push order was never a wire
+contract; the JSON lowering keeps its row order because order fixes WHICH value
+fault is reported first, and the grouped-arity messages ("origin_x and origin_y
+must be provided together", "slice9_l/r/t/b must be provided together") are
+regenerated verbatim from the `group` column. Every CLI usage message is
+byte-identical, verified by hand against the pre-change forms.
+
+Stayed hand-written, by design: all four `tp_op_validate_*` families (ranges are
+cross-field — they run against EFFECTIVE values folded from atlas + op, iterate
+the atlas's sprites, and carry genuinely bespoke prose such as "extrude > 0
+requires shape RECT", "ov_allow_rotate = %d must be 0 (force no-rotate) or -1
+(inherit)", and the raw-vs-effective message pairs with different field
+attribution — so a range column would be dead data); target.set's string swap in
+apply (stage-then-commit dup must precede any mutation, and no function-pointer
+column is allowed); `cli_mutate_sprite.c` (the `inherit` sentinel, CSV group
+parsing, and a `rename` that lowers to a DIFFERENT op); `cli_mutate_target.c`
+(its CLI keys `exporter`/`out` are not the wire keys); `anim set playback` (an
+enum parse accepting index OR mode name); and `tp_project_parse.c` /
+`tp_project_write.c` (schema v5 is pinned by byte-contract tests and the §6
+requirement is on the operation engine, not the file codec). The GUI
+`k_draft_rows` table stays separate as specified — it already references the same
+mask constants.
+
+Battery: 153/153 debug, 152/152 release, zero warnings from our targets (the 13
+in a clean build are pre-existing `cgltf.h` deprecations in the vendored engine
+dep), `check_boundaries.sh` clean, standalone CMake checker clean, zero
+golden-data files changed. Deviation: production LOC went **+53**, not the
+−200..−350 the packet projected — the same shape as S16. The parallel
+enumerations removed ~165 lines; the typed mechanism that replaces them costs
+~220 (65 table + 100 walkers + 46 lines of new PUBLIC schema surface that §6
+requires and that replaced nothing). Per AGENTS.md the measurement is inventory,
+not a gate; the deliverable is that a new field is now one table row plus a GUI
+row plus a widget, where it used to be seven edits in seven files.
+
 ## Decision records
 
 - **Escape after a deferred gesture commit is accepted as-is.** `frame()` runs
