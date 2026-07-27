@@ -280,7 +280,7 @@ tp_status gui_project_lifecycle_pump(
             kind == GUI_PROJECT_LIFECYCLE_NEW ||
             kind == GUI_PROJECT_LIFECYCLE_OPEN);
         reset_cutover_state(kind);
-        gui_scan_invalidate_all();
+        gui_project_invalidate_sources();
     } else {
         NT_ASSERT(
             binding_completion ==
