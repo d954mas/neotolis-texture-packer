@@ -213,8 +213,6 @@ bool gui_rows_primary_matches(tp_id128 source_id, const char *source_key,
                               bool source_row);
 bool gui_rows_focus_matches(tp_id128 source_id, const char *source_key,
                             bool source_row);
-bool gui_rows_anchor_matches(tp_id128 source_id, const char *source_key,
-                             bool source_row);
 int gui_rows_focus_view_index(void);
 int gui_rows_anchor_view_index(void);
 void gui_rows_select_primary(const sprite_row *row);

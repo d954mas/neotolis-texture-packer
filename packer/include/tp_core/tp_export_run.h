@@ -67,13 +67,6 @@ tp_status tp_export_snapshot_job_atlas_info(const tp_export_snapshot_job *job,
                                             int atlas_index,
                                             tp_export_snapshot_atlas_info *out,
                                             tp_error *err);
-tp_status tp_export_snapshot_job_run_atlas(tp_export_snapshot_job *job,
-                                           int atlas_index,
-                                           struct tp_arena *arena,
-                                           struct tp_export_notices *notices,
-                                           int *out_pack_runs,
-                                           int *out_missing_sources,
-                                           tp_error *err);
 tp_status tp_export_snapshot_job_run_atlas_ex(tp_export_snapshot_job *job,
                                               int atlas_index,
                                               struct tp_arena *arena,

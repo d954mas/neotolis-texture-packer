@@ -53,7 +53,8 @@ size_t tp_utf8_codepoint_width(const char *text, size_t available) {
     return 0U;
 }
 
-bool tp_utf8_is_valid_bytes(const char *text, size_t length) {
+/* Every code point in [text, text+length) is a strict Unicode scalar. */
+static bool tp_utf8_is_valid_bytes(const char *text, size_t length) {
     if (!text) {
         return false;
     }

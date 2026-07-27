@@ -123,23 +123,6 @@ char *tp_txn_request_encode_bounded(const tp_txn_request *req, size_t max_bytes,
     return sb.buf;
 }
 
-bool tp_txn_request_encoded_size(const tp_txn_request *req, size_t *size_out) {
-    if (!size_out) {
-        return false;
-    }
-    *size_out = 0U;
-    s_test_last_measure_allocations = 0U;
-    tp_sb sb = {
-        .count_only = true,
-        .allocation_count = &s_test_last_measure_allocations,
-    };
-    if (!emit_request(&sb, req, NULL)) {
-        return false;
-    }
-    *size_out = sb.len;
-    return true;
-}
-
 char *tp_txn_request_encode_bounded_for_project(
     const tp_txn_request *req, const tp_project *project, size_t max_bytes,
     bool *too_large) {

@@ -283,10 +283,6 @@ void gui_canvas_invalidate(gui_canvas *canvas) {
     canvas->loaded_path[0] = '\0';
 }
 
-const char *gui_canvas_loaded_path(const gui_canvas *canvas) {
-    return canvas->loaded_path;
-}
-
 bool gui_canvas_has_image(const gui_canvas *canvas) {
     return canvas->has_tex;
 }
@@ -299,7 +295,10 @@ int gui_canvas_img_h(const gui_canvas *canvas) {
     return canvas->img_h;
 }
 
-void gui_canvas_set_result(gui_canvas *canvas, const tp_result *result) {
+/* Rebind payload: swap the borrowed result and reset the derived view state.
+ * Private -- gui_canvas_rebind_result is the only entry point, so a caller can
+ * never swap the result without invalidating the double-click identity. */
+static void gui_canvas_set_result(gui_canvas *canvas, const tp_result *result) {
     canvas->result = result;
     canvas->sel_sprite = -1;
     canvas->hover_sprite = -1;
@@ -396,10 +395,6 @@ void gui_canvas_set_page(gui_canvas *canvas, int page) {
         canvas->cur_page = page;
         canvas->fit_pending = true;
     }
-}
-
-void gui_canvas_set_mode(gui_canvas *canvas, gui_canvas_mode mode) {
-    canvas->mode = mode;
 }
 
 gui_canvas_mode gui_canvas_get_mode(const gui_canvas *canvas) {

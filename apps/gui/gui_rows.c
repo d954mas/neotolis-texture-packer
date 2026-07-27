@@ -1078,12 +1078,6 @@ bool gui_rows_focus_matches(tp_id128 source_id, const char *source_key,
                                 source_row);
 }
 
-bool gui_rows_anchor_matches(tp_id128 source_id, const char *source_key,
-                             bool source_row) {
-    return row_identity_matches(&s_selection.anchor, source_id, source_key,
-                                source_row);
-}
-
 int gui_rows_focus_view_index(void) {
     return view_index_for_identity(&s_selection.focus);
 }

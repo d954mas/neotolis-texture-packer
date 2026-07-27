@@ -194,7 +194,9 @@ bool tp_op_catalog_selfcheck(void) {
     return true;
 }
 
-const char *const *tp_op_fields(tp_op_kind kind, int *count) {
+/* The closed per-kind field vocabulary (excludes the "op" discriminator).
+ * Writes *count (>=0). */
+static const char *const *tp_op_fields(tp_op_kind kind, int *count) {
     if (kind <= TP_OP_INVALID || kind >= TP_OP_KIND_COUNT) {
         if (count) {
             *count = 0;

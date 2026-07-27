@@ -209,12 +209,6 @@ void tp_journal_io_memory__poke(tp_journal_io io, size_t at, uint8_t val) {
         m->buf[at] = val;
     }
 }
-void tp_journal_io_memory__set_len(tp_journal_io io, size_t len) {
-    journal_mem *m = mem_of(io);
-    if (m && len <= m->len) {
-        m->len = len;
-    }
-}
 
 /* ---- file backing store -------------------------------------------------- */
 

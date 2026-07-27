@@ -7,6 +7,7 @@
 #include "tp_fs_internal.h"
 #include "tp_journal_internal.h"
 #include "tp_model_seam.h"
+#include "tp_strutil.h" /* shared tp_path_basename (one core definition) */
 
 static bool s_test_fail_next_live_retire_cleanup;
 
@@ -18,13 +19,7 @@ bool tp_recovery__has_journal_suffix(const char *name) {
 }
 
 const char *tp_recovery__path_basename(const char *path) {
-    const char *base = path ? path : "";
-    for (const char *p = base; *p; ++p) {
-        if (*p == '/' || *p == '\\') {
-            base = p + 1;
-        }
-    }
-    return base;
+    return tp_path_basename(path ? path : ""); /* NULL-tolerant wrapper */
 }
 
 tp_status tp_recovery__store_journal_path(const tp_recovery_store *store, const char *input,

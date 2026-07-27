@@ -261,31 +261,25 @@ tp_status gui_host_binding_pump(
             "GUI host pump requires binding and completion output");
     }
     *completed = GUI_HOST_TRANSITION_NONE;
-    if (binding->transition ==
-        GUI_HOST_TRANSITION_NONE) {
+    /* ONE drain call site for both pump shapes. They differ only in WHICH queue
+     * lifecycle is drainable and in how a missing session is treated: an idle
+     * binding drains an OPEN queue and tolerates "no session attached yet",
+     * while a binding mid-transition drains a DRAINING queue and asserts the
+     * session is still attached (the transition owns it until cutover). The
+     * lifecycle is re-read after the drain -- draining is what advances it to
+     * READY_TO_CUTOVER. */
+    const bool idle = binding->transition ==
+                      GUI_HOST_TRANSITION_NONE;
+    const gui_host_lifecycle_state drainable =
+        idle ? GUI_HOST_OPEN : GUI_HOST_DRAINING;
+    if (gui_host_queue_lifecycle(&binding->queue) ==
+        drainable) {
         tp_session *active =
             gui_session_client_attached_session(
                 &binding->client);
-        if (!active ||
-            gui_host_queue_lifecycle(
-                &binding->queue) !=
-                GUI_HOST_OPEN) {
+        if (idle && !active) {
             return TP_STATUS_OK;
         }
-        const tp_status drain_status =
-            gui_host_queue_drain(
-                &binding->queue, active, err);
-        if (drain_status != TP_STATUS_OK) {
-            return drain_status;
-        }
-        return TP_STATUS_OK;
-    }
-    if (gui_host_queue_lifecycle(
-            &binding->queue) ==
-        GUI_HOST_DRAINING) {
-        tp_session *active =
-            gui_session_client_attached_session(
-                &binding->client);
         NT_ASSERT(active != NULL);
         const tp_status drain_status =
             gui_host_queue_drain(
@@ -294,9 +288,9 @@ tp_status gui_host_binding_pump(
             return drain_status;
         }
     }
-    if (gui_host_queue_lifecycle(
-            &binding->queue) !=
-        GUI_HOST_READY_TO_CUTOVER) {
+    if (idle ||
+        gui_host_queue_lifecycle(&binding->queue) !=
+            GUI_HOST_READY_TO_CUTOVER) {
         return TP_STATUS_OK;
     }
     if (binding->transition ==

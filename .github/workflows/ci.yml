@@ -37,9 +37,10 @@ jobs:
         run: git submodule foreach --recursive 'git lfs pull || true'
 
       # Boundary gates (see git history: docs/plans/op-layer-and-cli.md §A6, removed 2026-07-20): cheap grep rules
-      # keeping the tp_core/frontend split honest. One leg is enough.
+      # keeping the tp_core/frontend split honest. Runs on every leg -- bash is
+      # available on all three runners, and the script's own detector self-tests
+      # then get exercised under each platform's grep/awk/sed.
       - name: Check layer boundaries
-        if: runner.os == 'Linux'
         run: bash scripts/check_boundaries.sh
 
       - name: Install dependencies (Linux)

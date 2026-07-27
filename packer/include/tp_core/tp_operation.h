@@ -85,10 +85,9 @@ const char *tp_op_wire(tp_op_kind kind);           /* "" for INVALID/out-of-rang
 const char *tp_op_class_name(tp_op_class cls);     /* "create"/"remove"/"move"/"set" */
 bool tp_op_catalog_selfcheck(void);                /* row order == enum; pinned by a test */
 
-/* The CLOSED canonical field vocabulary of an op (addressing `*_id` keys + typed
- * payload keys; excludes the "op" discriminator). Makes "no raw field patch"
- * (§6.2) executable: a key outside this set is unknown. Writes *count (>=0). */
-const char *const *tp_op_fields(tp_op_kind kind, int *count);
+/* Admits a key against the CLOSED canonical field vocabulary of an op (addressing
+ * `*_id` keys + typed payload keys, plus the "op" discriminator). Makes "no raw
+ * field patch" (§6.2) executable: a key outside that set is unknown. */
 bool tp_op_field_allowed(tp_op_kind kind, const char *key);
 
 /* ---- field presence masks (SET ops apply a SUBSET of fields) ------------- */
@@ -340,19 +339,10 @@ char *tp_op_result_encode(const tp_operation *op, const tp_op_reject *rej);
  * ONLY on TP_STATUS_AMBIGUOUS_SELECTOR. On success *out owns its strings (free with
  * tp_operation_free). See tp_op_build.c for the full per-verb set. */
 
-/* Resolve a human `selector` to exactly one entity id of the wanted kind, for op
- * building. Wraps tp_selector_resolve + a kind check. */
-tp_status tp_op_resolve_target(const tp_project *p, const struct tp_sprite_index *sprites, int sprite_atlas_index,
-                               tp_selector_kind want, const char *selector, tp_selector_result *out,
-                               tp_selector_candidates *cand, tp_error *err);
-
 /* atlas.create: no selector (creates a new entity). `new_id` is the atlas's id. */
 tp_status tp_op_build_atlas_create(tp_id128 new_id, const char *name, tp_operation *out);
 /* atlas.rename: resolve `atlas_sel` -> atlas_id, set new name. */
 tp_status tp_op_build_atlas_rename(const tp_project *p, const char *atlas_sel, const char *new_name, tp_operation *out,
-                                   tp_selector_candidates *cand, tp_error *err);
-/* atlas.remove: resolve `atlas_sel` -> atlas_id. */
-tp_status tp_op_build_atlas_remove(const tp_project *p, const char *atlas_sel, tp_operation *out,
                                    tp_selector_candidates *cand, tp_error *err);
 /* target.set: resolve `target_sel` within atlas `atlas_sel` -> target_id. */
 tp_status tp_op_build_target_set(const tp_project *p, const char *atlas_sel, const char *target_sel,

@@ -100,12 +100,6 @@ tp_status tp_txn__preflight(tp_model *m, const char *id_hex, int64_t expected_re
  * committed/rejected; the live model is byte-unchanged unless it returns OK. */
 tp_status tp_txn__commit_validated(tp_model *m, const tp_txn_request *req, tp_txn_result *out, tp_error *err);
 
-/* Serialize + round-trip-prove `candidate`, then append an explicit recovery
- * checkpoint at `revision` when `m` has a journal. A no-op without a journal;
- * the helper never mutates the live model. */
-tp_status tp_model__append_history_checkpoint(tp_model *m, const tp_project *candidate, int64_t revision,
-                                              size_t snapshot_bytes, tp_error *err);
-
 /* Checked monotonic revision increment shared by transaction commit and Undo/Redo.
  * Rejects corrupted negative/MAX revisions before any staging or signed overflow. */
 tp_status tp_model__next_revision(int64_t current, int64_t *next, tp_error *err);

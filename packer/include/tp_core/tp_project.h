@@ -235,11 +235,6 @@ const tp_project_source *tp_project_atlas_source_by_id(
 const tp_project_target *tp_project_atlas_target_by_id(
     const tp_project_atlas *atlas, tp_id128 id);
 
-/* True when the atlas already holds a source whose '/'-normalized path equals `path`'s
- * -- the exact predicate add_source_kind uses to dedupe. Lets a caller (the op-engine
- * validator) reject a would-be-deduped add BEFORE it strands a new source's id. */
-bool tp_project_atlas_has_source_path(const tp_project_atlas *a, const char *path);
-
 /* True iff SOME target in the project OTHER than `exclude` has this exact (non-empty)
  * out_path. Scans EVERY atlas's targets (an out_path collision is project-wide: two
  * atlases exporting to one file silently overwrite each other). Only ENABLED targets

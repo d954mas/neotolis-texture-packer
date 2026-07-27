@@ -166,8 +166,10 @@ const tp_snapshot_animation *preview_animation(void) {
                : NULL;
 }
 
-int gui_actions__snapshot_atlas_index_by_id(const tp_session_snapshot *snapshot,
-                                            tp_id128 atlas_id) {
+/* Index of the atlas carrying `atlas_id` in the snapshot, or -1. Re-resolves the
+ * viewed atlas after an undo/redo shifts atlas ordering, and for the preview player. */
+static int gui_actions__snapshot_atlas_index_by_id(const tp_session_snapshot *snapshot,
+                                                   tp_id128 atlas_id) {
     const int count = snapshot ? tp_session_snapshot_atlas_count(snapshot) : 0;
     for (int i = 0; i < count; ++i) {
         const tp_snapshot_atlas *atlas =
