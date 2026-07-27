@@ -224,6 +224,19 @@ void test_submit_result_keeps_pending_commit_or_restores_rejected_draft(void) {
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
         gui_edit_submit_result(
+            &state, true, TP_STATUS_OOM,
+            false, false, false, 0, 7, &error));
+    TEST_ASSERT_EQUAL_INT(
+        GUI_EDIT_EDITING, state.phase);
+    TEST_ASSERT_EQUAL_INT64(
+        0, state.submitted_revision);
+    TEST_ASSERT_EQUAL_STRING(
+        "", state.submitted_transaction_id);
+
+    state = submitting_state();
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_edit_submit_result(
             &state, true, TP_STATUS_INVALID_ARGUMENT,
             false, false, false, 0, 8, &error));
     TEST_ASSERT_EQUAL_INT(GUI_EDIT_CONFLICTED, state.phase);
@@ -255,6 +268,47 @@ void test_model_revision_ignores_stale_resolves_exact_and_conflicts_false_exact(
     TEST_ASSERT_FALSE(state.target_present);
     TEST_ASSERT_TRUE(
         tp_id128_eq(test_id(0x11U), state.target_id));
+}
+
+void test_same_commit_resolves_only_the_view_with_the_exact_receipt(void) {
+    tp_error error = {{0}};
+    gui_edit_state owner;
+    gui_edit_state observer;
+
+    gui_edit_state_init(&owner, test_id(0x21U));
+    gui_edit_state_init(&observer, test_id(0x22U));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_edit_begin(
+            &owner, test_id(0x11U), 7,
+            test_id(0x31U), &error));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_edit_begin(
+            &observer, test_id(0x11U), 7,
+            test_id(0x32U), &error));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_edit_commit(
+            &owner, false, TX_ONE, 8, &error));
+
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_edit_model_revision(
+            &owner, 8, true, true, &error));
+    TEST_ASSERT_EQUAL_INT(GUI_EDIT_IDLE, owner.phase);
+
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_edit_model_revision(
+            &observer, 8, true, false, &error));
+    TEST_ASSERT_EQUAL_INT(
+        GUI_EDIT_CONFLICTED, observer.phase);
+    TEST_ASSERT_TRUE(
+        tp_id128_eq(test_id(0x11U), observer.target_id));
+    TEST_ASSERT_TRUE(
+        tp_id128_eq(
+            test_id(0x32U), observer.draft_instance_id));
 }
 
 void test_resync_conflicts_only_changed_revision_or_resolves_exact_terminal(void) {
@@ -372,6 +426,8 @@ int main(void) {
         test_submit_result_keeps_pending_commit_or_restores_rejected_draft);
     RUN_TEST(
         test_model_revision_ignores_stale_resolves_exact_and_conflicts_false_exact);
+    RUN_TEST(
+        test_same_commit_resolves_only_the_view_with_the_exact_receipt);
     RUN_TEST(
         test_resync_conflicts_only_changed_revision_or_resolves_exact_terminal);
     RUN_TEST(

@@ -463,6 +463,71 @@ void test_foreign_model_transaction_conflicts_active_atlas_draft(void) {
     gui_draft_discard();
 }
 
+void test_event_gap_resync_conflicts_active_draft_and_retains_visible_value(
+    void) {
+    const tp_session_snapshot *snapshot =
+        gui_project_snapshot();
+    const tp_snapshot_atlas *atlas =
+        tp_session_snapshot_atlas_at(snapshot, 0);
+    TEST_ASSERT_NOT_NULL(atlas);
+    const tp_id128 atlas_id = atlas->id;
+    TEST_ASSERT_TRUE(
+        gui_text_edit_begin_atlas_name(
+            atlas_id,
+            tp_session_snapshot_revision(snapshot),
+            atlas->name));
+    TEST_ASSERT_TRUE(
+        gui_text_edit_update("mine-survives-resync"));
+
+    char foreign_name[64] = {0};
+    tp_operation operation = {
+        .kind = TP_OP_ATLAS_RENAME,
+        .atlas_id = {{0}},
+        .u.atlas_rename.name = foreign_name,
+    };
+    operation.atlas_id = atlas_id;
+    int64_t expected_revision =
+        tp_session_snapshot_revision(snapshot);
+    for (int index = 0; index < 70; ++index) {
+        (void)snprintf(
+            foreign_name, sizeof foreign_name,
+            "event-gap-%d", index);
+        tp_txn_request request = {
+            .schema = TP_TXN_SCHEMA,
+            .expected_revision = expected_revision,
+            .label = "atlas.rename",
+            .author = "foreign",
+            .ops = &operation,
+            .op_count = 1,
+        };
+        (void)snprintf(
+            request.id_hex, sizeof request.id_hex,
+            "%032x", index + 1);
+        tp_txn_result result = {0};
+        tp_error error = {{0}};
+        TEST_ASSERT_EQUAL_INT(
+            TP_STATUS_OK,
+            tp_session_apply(
+                gui_project__test_session(),
+                &request, &result, &error));
+        TEST_ASSERT_TRUE(result.committed);
+        expected_revision = result.revision;
+        tp_txn_result_free(&result);
+    }
+
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_project_frame_begin(&error));
+    gui_project_frame_end();
+    TEST_ASSERT_EQUAL_INT(
+        GUI_EDIT_CONFLICTED, gui_draft_phase());
+    TEST_ASSERT_EQUAL_STRING(
+        "mine-survives-resync",
+        gui_text_edit_value());
+    gui_draft_discard();
+}
+
 void test_origin_apply_mine_preserves_foreign_sibling_component(void) {
     const gui_sprite_ref initial = add_test_sprite_ref(
         "__origin_component_source__.png", "origin-sprite.png");
@@ -806,7 +871,7 @@ void test_lifecycle_apply_mine_resolves_conflict_before_continuing(void) {
     apply_pending();
 }
 
-void test_failed_lifecycle_apply_keeps_explicit_draft_choice_open(void) {
+void test_exit_failed_apply_keeps_confirmation_and_draft_open(void) {
     const tp_session_snapshot *snapshot =
         gui_project_snapshot();
     const tp_snapshot_atlas *atlas =
@@ -818,7 +883,7 @@ void test_failed_lifecycle_apply_keeps_explicit_draft_choice_open(void) {
         atlas->id, revision,
         GUI_ATLAS_PADDING, -1, 0.0F);
 
-    request_new();
+    request_exit();
     apply_pending();
     TEST_ASSERT_TRUE(s_confirm_open);
     TEST_ASSERT_TRUE(s_confirm_draft);
@@ -828,10 +893,13 @@ void test_failed_lifecycle_apply_keeps_explicit_draft_choice_open(void) {
     TEST_ASSERT_TRUE(s_confirm_open);
     TEST_ASSERT_TRUE(s_confirm_draft);
     TEST_ASSERT_EQUAL_INT(
-        GUI_LIFECYCLE_REQUEST_NEW,
+        GUI_LIFECYCLE_REQUEST_EXIT,
         s_after_confirm);
     TEST_ASSERT_EQUAL_INT(
         GUI_EDIT_EDITING, gui_draft_phase());
+    TEST_ASSERT_EQUAL_INT(
+        GUI_PROJECT_LIFECYCLE_OPEN_IDLE,
+        gui_project_lifecycle_state_query());
     TEST_ASSERT_EQUAL_INT64(
         revision,
         tp_session_snapshot_revision(
@@ -839,6 +907,48 @@ void test_failed_lifecycle_apply_keeps_explicit_draft_choice_open(void) {
     s_modal_action = MODAL_CANCEL;
     apply_pending();
     gui_draft_discard();
+}
+
+void test_pack_request_submits_active_draft_before_starting_job(void) {
+    TEST_ASSERT_TRUE(
+        gui_pack_init(TP_GUI_TRACE_TEST_DIR));
+    const tp_session_snapshot *snapshot =
+        gui_project_snapshot();
+    const tp_snapshot_atlas *atlas =
+        tp_session_snapshot_atlas_at(snapshot, 0);
+    TEST_ASSERT_NOT_NULL(atlas);
+    TEST_ASSERT_EQUAL_INT(
+        GUI_ADD_ADDED,
+        gui_project_add_source_kind(
+            atlas->id,
+            tp_session_snapshot_revision(snapshot),
+            "__pack_after_draft__.png",
+            TP_SOURCE_KIND_FILE));
+    snapshot = gui_project_snapshot();
+    atlas = tp_session_snapshot_atlas_at(
+        snapshot, 0);
+    TEST_ASSERT_NOT_NULL(atlas);
+    const int64_t revision =
+        tp_session_snapshot_revision(snapshot);
+    const int new_padding = atlas->padding + 3;
+    gui_edit_atlas_setting(
+        atlas->id, revision,
+        GUI_ATLAS_PADDING, new_padding, 0.0F);
+
+    s_pending_pack = true;
+    apply_pending();
+
+    TEST_ASSERT_EQUAL_INT(
+        GUI_EDIT_IDLE, gui_draft_phase());
+    TEST_ASSERT_EQUAL_INT(
+        new_padding, atlas_at(0)->padding);
+    TEST_ASSERT_EQUAL_INT64(
+        revision + 1,
+        tp_session_snapshot_revision(
+            gui_project_snapshot()));
+    TEST_ASSERT_EQUAL_STRING(
+        "Packing\xE2\x80\xA6", s_status);
+    TEST_ASSERT_TRUE(gui_project_job_busy());
 }
 
 void test_one_draft_owner_rejects_text_begin_while_atlas_scalar_is_active(void) {
@@ -2599,6 +2709,8 @@ int main(int argc, char **argv) {
     RUN_TEST(
         test_foreign_model_transaction_conflicts_active_atlas_draft);
     RUN_TEST(
+        test_event_gap_resync_conflicts_active_draft_and_retains_visible_value);
+    RUN_TEST(
         test_origin_apply_mine_preserves_foreign_sibling_component);
     RUN_TEST(
         test_slice9_apply_mine_preserves_newest_untouched_components);
@@ -2614,7 +2726,9 @@ int main(int argc, char **argv) {
     RUN_TEST(
         test_lifecycle_apply_mine_resolves_conflict_before_continuing);
     RUN_TEST(
-        test_failed_lifecycle_apply_keeps_explicit_draft_choice_open);
+        test_exit_failed_apply_keeps_confirmation_and_draft_open);
+    RUN_TEST(
+        test_pack_request_submits_active_draft_before_starting_job);
     RUN_TEST(
         test_one_draft_owner_rejects_text_begin_while_atlas_scalar_is_active);
     RUN_TEST(
