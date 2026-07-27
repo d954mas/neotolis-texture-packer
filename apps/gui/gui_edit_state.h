@@ -15,6 +15,8 @@ typedef struct gui_edit_state {
     tp_id128 view_id;
     tp_id128 target_id;
     int64_t base_revision;
+    /* Receipt-reported landing revision of a committed-but-unechoed submit;
+     * 0 until the session answers. Never predicted by the draft. */
     int64_t submitted_revision;
     tp_id128 draft_instance_id;
     char submitted_transaction_id[33];
@@ -30,8 +32,7 @@ tp_status gui_edit_begin(
 
 tp_status gui_edit_commit(
     gui_edit_state *state, bool net_zero,
-    const char transaction_id[33],
-    int64_t submitted_revision, tp_error *err);
+    const char transaction_id[33], tp_error *err);
 
 tp_status gui_edit_submit_result(
     gui_edit_state *state, bool exact_owner,
@@ -49,7 +50,7 @@ tp_status gui_edit_resync(
 
 tp_status gui_edit_apply_mine(
     gui_edit_state *state, int64_t revision,
-    int64_t submitted_revision, bool target_present,
+    bool target_present,
     const char transaction_id[33], tp_error *err);
 
 tp_status gui_edit_discard(

@@ -35,6 +35,7 @@
 #include "tp_core/tp_session_snapshot_query.h"
 #include "gui_project_view.h"
 #include "gui_session_client.h"
+#include "gui_host_queue.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -63,18 +64,6 @@ typedef struct gui_project_controller_status_port {
     gui_project_controller_attached_fn attached;
     void *context;
 } gui_project_controller_status_port;
-
-typedef struct gui_project_job_completion {
-    bool publish_result;
-    uint64_t session_instance_generation;
-    uint64_t request_id;
-    tp_session_job_kind kind;
-    tp_session_job_state state;
-    tp_session_job_rejection rejection;
-    tp_status status;
-    tp_error error;
-    tp_session_job_result result;
-} gui_project_job_completion;
 
 /* Creates the initial fresh in-memory project (one default atlas, no path, clean). Crash recovery is
  * collected and resolved separately through the R6 APIs below; startup never adopts an orphan live. */
@@ -159,10 +148,11 @@ tp_status gui_project_lifecycle_pump(
     tp_error *err);
 gui_project_lifecycle_state
 gui_project_lifecycle_state_query(void);
+/* Host-owner ingress for the one staged job completion. The queue's typed
+ * completion IS the contract; the caller destroys it with
+ * gui_host_completion_destroy. */
 bool gui_project_host_take_completion(
-    gui_project_job_completion *out);
-void gui_project_job_completion_destroy(
-    gui_project_job_completion *completion);
+    gui_host_completion *out);
 bool gui_project_job_busy(void);
 tp_session_job_kind gui_project_job_active_kind(void);
 tp_session_job_observed_state gui_project_job_observed_state(void);
@@ -205,9 +195,8 @@ typedef struct gui_project_create_result {
  * "Removed X (Ctrl+Z)" + resets selection ONLY on a real removal, never a false success. */
 gui_project_create_result gui_project_add_atlas(void);
 bool gui_project_remove_atlas(tp_id128 atlas_id, int64_t expected_revision); /* true iff removed */
-gui_add_status gui_project_add_source(tp_id128 atlas_id, int64_t expected_revision,
-                                      const char *path); /* kind=folder */
-/* Kind-aware variant (schema v3): the "Add Files" dialog records TP_SOURCE_KIND_FILE. */
+/* Adds ONE source with an explicit kind (schema v3): the "Add Files" dialog
+ * records TP_SOURCE_KIND_FILE, the folder picker TP_SOURCE_KIND_FOLDER. */
 gui_add_status gui_project_add_source_kind(tp_id128 atlas_id, int64_t expected_revision,
                                            const char *path, tp_source_kind kind);
 /* Batch-add a multi-select as ONE atomic transaction (one undo step). Skips empties + duplicates (in the
@@ -221,28 +210,34 @@ bool gui_project_add_sources(tp_id128 atlas_id, int64_t expected_revision,
 bool gui_project_remove_source(tp_id128 atlas_id, tp_id128 source_id,
                                int64_t expected_revision); /* true iff removed */
 
-/* Atlas-family intents carry structural identity + the revision captured with the
+/* Every intent carries structural identity + the revision captured with the
  * immutable read view. The session is the sole admission/validation owner. */
-tp_status gui_project_submit_atlas_name(
-    tp_id128 atlas_id, int64_t expected_revision,
-    const char *name, gui_session_submit_identity identity,
-    const char transaction_id[33],
-    gui_session_submit_terminal *terminal, tp_error *err);
-tp_status gui_project_copy_atlas_name(tp_id128 atlas_id, char *out, size_t capacity,
-                                      tp_error *err);
-/* Sets/clears a sprite's rename export-name override (empty/NULL clears it). */
-tp_status gui_project_submit_sprite_name(
-    const gui_sprite_ref *sprite, const char *name,
-    gui_session_submit_identity identity,
+
+/* Address of an identified TEXT submit. `atlas_id` is always the owning atlas;
+ * `entity_id` names the animation or export target; `source_id`/`source_key`
+ * name the sprite. Unused members are nil/NULL. */
+typedef struct gui_text_ref {
+    tp_id128 atlas_id;
+    tp_id128 entity_id;
+    tp_id128 source_id;
+    const char *source_key;
+    int64_t expected_revision;
+} gui_text_ref;
+
+/* The one identified text submit: atlas.rename, animation.rename,
+ * sprite.name.set (empty/NULL clears the rename), or target.set out-path. */
+tp_status gui_project_submit_text(
+    tp_op_kind kind, const gui_text_ref *ref,
+    const char *value, gui_session_submit_identity identity,
     const char transaction_id[33],
     gui_session_submit_terminal *terminal, tp_error *err);
 
-/* Sets ONE atlas knob via an atlas.settings.set transaction. The int/bool knobs read
- * `ivalue` (bool as 0/1); pixels_per_unit reads `fvalue`. Value RANGES are core's now
- * (the op validates); the widget still parse-clamps. Returns true on commit. */
-tp_status gui_project_submit_atlas_setting(
+/* Sets atlas knobs via an atlas.settings.set transaction. The caller supplies the
+ * built payload + presence mask; value RANGES are core's (the op validates) and the
+ * widget still parse-clamps. */
+tp_status gui_project_submit_atlas_settings(
     tp_id128 atlas_id, int64_t expected_revision,
-    gui_atlas_field field, int ivalue, float fvalue,
+    const tp_op_atlas_settings *settings,
     gui_session_submit_identity identity,
     const char transaction_id[33],
     gui_session_submit_terminal *out_terminal,
@@ -260,8 +255,12 @@ tp_status gui_project_submit_sprite_slice9(
     gui_session_submit_identity identity,
     const char transaction_id[33],
     gui_session_submit_terminal *terminal, tp_error *err);
-tp_status gui_project_submit_sprite_override(
-    const gui_sprite_ref *sprite, gui_sprite_ov component, int value,
+/* Sprite payload submit: the caller supplies the built sprite.settings.set
+ * payload + presence mask. Origin/slice9 keep their own entry points because the
+ * untouched sibling components are read from the LIVE snapshot here. */
+tp_status gui_project_submit_sprite_settings(
+    const gui_sprite_ref *sprite,
+    const tp_op_sprite_set *settings,
     gui_session_submit_identity identity,
     const char transaction_id[33],
     gui_session_submit_terminal *terminal, tp_error *err);
@@ -276,23 +275,9 @@ gui_project_create_result gui_project_create_animation(
     int frame_count);
 /* Removes the animation with `id`. Returns true iff removed (false on flush-abort/not-found). */
 bool gui_project_remove_animation(const gui_animation_ref *animation);
-tp_status gui_project_submit_animation_name(
-    const gui_animation_ref *animation, const char *name,
-    gui_session_submit_identity identity,
-    const char transaction_id[33],
-    gui_session_submit_terminal *terminal, tp_error *err);
-tp_status gui_project_submit_animation_fps(
-    const gui_animation_ref *animation, float fps,
-    gui_session_submit_identity identity,
-    const char transaction_id[33],
-    gui_session_submit_terminal *terminal, tp_error *err);
-tp_status gui_project_submit_animation_playback(
-    const gui_animation_ref *animation, int playback,
-    gui_session_submit_identity identity,
-    const char transaction_id[33],
-    gui_session_submit_terminal *terminal, tp_error *err);
-tp_status gui_project_submit_animation_flip(
-    const gui_animation_ref *animation, int axis, bool value,
+tp_status gui_project_submit_animation_settings(
+    const gui_animation_ref *animation,
+    const tp_op_anim_settings *settings,
     gui_session_submit_identity identity,
     const char transaction_id[33],
     gui_session_submit_terminal *terminal, tp_error *err);
@@ -308,11 +293,6 @@ bool gui_project_anim_move_frame(const gui_animation_ref *animation, int frame_i
 gui_project_create_result gui_project_add_target(
     tp_id128 atlas_id, int64_t expected_revision);
 bool gui_project_remove_target(const gui_target_ref *target);
-tp_status gui_project_submit_target_out_path(
-    const gui_target_ref *target, const char *out_path,
-    gui_session_submit_identity identity,
-    const char transaction_id[33],
-    gui_session_submit_terminal *terminal, tp_error *err);
 bool gui_project_set_target_enabled(
     const gui_target_ref *target, bool enabled);
 bool gui_project_set_target_exporter(

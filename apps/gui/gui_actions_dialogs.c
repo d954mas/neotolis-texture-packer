@@ -297,7 +297,9 @@ static void do_add_folder(void) {
     tp_id128 atlas_id;
     int64_t revision = 0;
     const gui_add_status r = selected_atlas_intent(&atlas_id, &revision)
-                                 ? gui_project_add_source(atlas_id, revision, norm)
+                                 ? gui_project_add_source_kind(
+                                       atlas_id, revision, norm,
+                                       TP_SOURCE_KIND_FOLDER)
                                  : GUI_ADD_FAILED;
     if (r == GUI_ADD_ADDED) {
         set_statusf("Added folder %s", path_last(norm));

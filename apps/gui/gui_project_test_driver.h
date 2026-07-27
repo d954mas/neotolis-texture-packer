@@ -29,10 +29,10 @@ static inline tp_status gui_project_test_drain(
             if (status != TP_STATUS_OK) {
                 return status;
             }
-            gui_project_job_completion completion = {0};
+            gui_host_completion completion = {0};
             if (gui_project_host_take_completion(
                     &completion)) {
-                gui_project_job_completion_destroy(
+                gui_host_completion_destroy(
                     &completion);
             }
             gui_project_frame_end();

@@ -9,7 +9,6 @@
 
 #ifdef TP_ENABLE_TEST_SEAMS
 static unsigned int s_test_observe_failures;
-static unsigned int s_test_result_copy_failures;
 #endif
 
 static void destroy_observation_pair(
@@ -52,119 +51,11 @@ static void reduce_observation(
     }
 }
 
-static tp_status transaction_result_copy(
-    const tp_txn_result *source,
-    tp_txn_result *destination, tp_error *err) {
-#ifdef TP_ENABLE_TEST_SEAMS
-    if (s_test_result_copy_failures > 0U) {
-        s_test_result_copy_failures--;
-        return tp_error_set(
-            err, TP_STATUS_OOM,
-            "injected GUI transaction-result copy failure");
-    }
-#endif
-    if (!source || !destination) {
-        return tp_error_set(
-            err, TP_STATUS_INVALID_ARGUMENT,
-            "GUI transaction-result copy requires source and destination");
-    }
-    memset(destination, 0, sizeof *destination);
-    *destination = *source;
-    destination->ops = NULL;
-    destination->errors = NULL;
-    destination->string_storage = NULL;
-
-    size_t string_size = 0U;
-    for (int op_index = 0;
-         op_index < source->op_count; ++op_index) {
-        for (int address_index = 0;
-             address_index <
-             source->ops[op_index].addr_count;
-             ++address_index) {
-            const tp_txn_addr *address =
-                &source->ops[op_index]
-                     .addr[address_index];
-            if (address->idk == TP_ID_KIND_INVALID &&
-                address->str) {
-                string_size += strlen(address->str) + 1U;
-            }
-        }
-    }
-    if (source->op_count > 0) {
-        destination->ops = calloc(
-            (size_t)source->op_count,
-            sizeof *destination->ops);
-        if (!destination->ops) {
-            goto oom;
-        }
-        memcpy(
-            destination->ops, source->ops,
-            (size_t)source->op_count *
-                sizeof *destination->ops);
-    }
-    if (string_size > 0U) {
-        destination->string_storage =
-            malloc(string_size);
-        if (!destination->string_storage) {
-            goto oom;
-        }
-        char *cursor =
-            destination->string_storage;
-        for (int op_index = 0;
-             op_index < source->op_count; ++op_index) {
-            for (int address_index = 0;
-                 address_index <
-                 source->ops[op_index].addr_count;
-                 ++address_index) {
-                const tp_txn_addr *source_address =
-                    &source->ops[op_index]
-                         .addr[address_index];
-                tp_txn_addr *destination_address =
-                    &destination->ops[op_index]
-                         .addr[address_index];
-                if (source_address->idk ==
-                        TP_ID_KIND_INVALID &&
-                    source_address->str) {
-                    const size_t length =
-                        strlen(source_address->str) + 1U;
-                    memcpy(
-                        cursor, source_address->str,
-                        length);
-                    destination_address->str = cursor;
-                    cursor += length;
-                } else {
-                    destination_address->str = NULL;
-                }
-            }
-        }
-    }
-    if (source->error_count > 0) {
-        destination->errors = calloc(
-            (size_t)source->error_count,
-            sizeof *destination->errors);
-        if (!destination->errors) {
-            goto oom;
-        }
-        memcpy(
-            destination->errors, source->errors,
-            (size_t)source->error_count *
-                sizeof *destination->errors);
-    }
-    return TP_STATUS_OK;
-
-oom:
-    tp_txn_result_free(destination);
-    return tp_error_set(
-        err, TP_STATUS_OOM,
-        "GUI transaction-result receipt allocation failed");
-}
-
 static void pending_clear(
     gui_session_pending_submit *pending) {
     if (!pending) {
         return;
     }
-    tp_txn_result_free(&pending->result);
     memset(pending, 0, sizeof *pending);
 }
 
@@ -366,9 +257,7 @@ static tp_status pending_register_before_admission(
     const char transaction_id[33],
     gui_session_submit_identity identity,
     gui_session_pending_submit **out,
-    bool *out_existing,
     tp_error *err) {
-    *out_existing = false;
     gui_session_pending_submit *pending =
         pending_find_id(client, transaction_id);
     if (pending) {
@@ -379,7 +268,6 @@ static tp_status pending_register_before_admission(
                 err, TP_STATUS_INVALID_ARGUMENT,
                 "GUI retained transaction identity does not match its original view and draft");
         }
-        *out_existing = true;
         *out = pending;
         return TP_STATUS_OK;
     }
@@ -484,11 +372,6 @@ static void pending_finish(
             : GUI_SESSION_SUBMIT_ECHO_NOT_APPLICABLE;
     pending->observation_status =
         TP_STATUS_OK;
-    tp_error copy_error = {{0}};
-    pending->result_available =
-        transaction_result_copy(
-            transaction, &pending->result,
-            &copy_error) == TP_STATUS_OK;
 }
 
 void gui_session_client_init(gui_session_client *client) {
@@ -783,36 +666,13 @@ tp_status gui_session_client_submit(
     }
 
     gui_session_pending_submit *pending = NULL;
-    bool existing = false;
     status = pending_register_before_admission(
         client, transaction_id, request->identity,
-        &pending, &existing, err);
+        &pending, err);
     if (status != TP_STATUS_OK) {
         return fail_submit_with_receipt(
             client, request, transaction_id, out,
             status);
-    }
-    if (existing && pending->result_available) {
-        status = transaction_result_copy(
-            &pending->result, &out->transaction,
-            err);
-        if (status != TP_STATUS_OK) {
-            return fail_submit_with_receipt(
-                client, request, transaction_id, out,
-                status);
-        }
-        out->terminal_status =
-            pending->terminal.status;
-        out->observation_pending =
-            pending->terminal.echo_state ==
-            GUI_SESSION_SUBMIT_ECHO_PENDING;
-        out->observation_status =
-            pending->observation_status;
-        out->terminal = pending->terminal;
-        return pending->terminal.committed ||
-                       pending->terminal.no_change
-                   ? TP_STATUS_OK
-                   : pending->terminal.status;
     }
     tp_txn_request transaction_request = {0};
     transaction_request.schema = TP_TXN_SCHEMA;
@@ -1045,10 +905,6 @@ void gui_session_client__test_fail_next_observe(void) {
 void gui_session_client__test_fail_observes(
     unsigned int count) {
     s_test_observe_failures = count;
-}
-
-void gui_session_client__test_fail_next_result_copy(void) {
-    s_test_result_copy_failures = 1U;
 }
 
 void gui_session_client__test_set_transaction_rng(

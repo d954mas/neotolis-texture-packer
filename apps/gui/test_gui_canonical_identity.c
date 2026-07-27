@@ -75,8 +75,11 @@ static bool test_submit_atlas_name(
         test_submit_identity(transaction_id);
     gui_session_submit_terminal terminal = {0};
     tp_error error = {{0}};
-    return gui_project_submit_atlas_name(
-               atlas_id, revision, name, identity,
+    const gui_text_ref ref = {
+        atlas_id, tp_id128_nil(), tp_id128_nil(), NULL,
+        revision};
+    return gui_project_submit_text(
+               TP_OP_ATLAS_RENAME, &ref, name, identity,
                transaction_id, &terminal, &error) ==
            TP_STATUS_OK;
 }
@@ -89,8 +92,12 @@ static bool test_submit_animation_name(
         test_submit_identity(transaction_id);
     gui_session_submit_terminal terminal = {0};
     tp_error error = {{0}};
-    return gui_project_submit_animation_name(
-               animation, name, identity,
+    const gui_text_ref ref = {
+        animation->atlas_id, animation->animation_id,
+        tp_id128_nil(), NULL,
+        animation->expected_revision};
+    return gui_project_submit_text(
+               TP_OP_ANIMATION_RENAME, &ref, name, identity,
                transaction_id, &terminal, &error) ==
            TP_STATUS_OK;
 }
@@ -103,8 +110,12 @@ static bool test_submit_sprite_name(
         test_submit_identity(transaction_id);
     gui_session_submit_terminal terminal = {0};
     tp_error error = {{0}};
-    return gui_project_submit_sprite_name(
-               sprite, name, identity,
+    const gui_text_ref ref = {
+        sprite->atlas_id, tp_id128_nil(),
+        sprite->source_id, sprite->source_key,
+        sprite->expected_revision};
+    return gui_project_submit_text(
+               TP_OP_SPRITE_NAME_SET, &ref, name, identity,
                transaction_id, &terminal, &error) ==
            TP_STATUS_OK;
 }

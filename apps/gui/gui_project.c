@@ -296,42 +296,9 @@ tp_status gui_project_job_enqueue_cancel(
 }
 
 bool gui_project_host_take_completion(
-    gui_project_job_completion *out) {
-    if (!out) {
-        return false;
-    }
-    gui_host_completion completion = {0};
-    if (!gui_host_queue_take_completion(
-            &s_project.binding.queue, &completion)) {
-        return false;
-    }
-    *out = (gui_project_job_completion){
-        .publish_result = completion.publish_result,
-        .session_instance_generation =
-            completion.envelope
-                .session_instance_generation,
-        .request_id = completion.envelope.request_id,
-        .kind = completion.envelope.kind,
-        .state = completion.state,
-        .rejection = completion.rejection,
-        .status = completion.status,
-        .error = completion.error,
-        .result = completion.result,
-    };
-    completion.result = (tp_session_job_result){0};
-    gui_host_completion_destroy(&completion);
-    return true;
-}
-
-void gui_project_job_completion_destroy(
-    gui_project_job_completion *completion) {
-    if (!completion) {
-        return;
-    }
-    tp_session_job_result_destroy(
-        &completion->result);
-    *completion =
-        (gui_project_job_completion){0};
+    gui_host_completion *out) {
+    return out && gui_host_queue_take_completion(
+                      &s_project.binding.queue, out);
 }
 
 bool gui_project_job_busy(void) {

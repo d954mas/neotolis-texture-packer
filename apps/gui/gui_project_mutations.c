@@ -118,13 +118,6 @@ gui_add_status gui_project_add_source_kind(tp_id128 atlas_id,
                                                        : GUI_ADD_FAILED);
 }
 
-gui_add_status gui_project_add_source(tp_id128 atlas_id,
-                                      int64_t expected_revision,
-                                      const char *path) {
-    return gui_project_add_source_kind(atlas_id, expected_revision, path,
-                                       TP_SOURCE_KIND_FOLDER);
-}
-
 /* Batch-add multiple sources as ONE atomic transaction (H/P2-13) -- the "Add Files" multi-select path,
  * which previously committed one txn PER file (N undo steps + a mid-batch failure left a partial add).
  * The shared planner rejects invalid path elements and skips paths already in the atlas or queued in this
@@ -222,57 +215,77 @@ bool gui_project_remove_source(tp_id128 atlas_id, tp_id128 source_id,
     return true;
 }
 
-tp_status gui_project_submit_atlas_name(
-    tp_id128 atlas_id, int64_t expected_revision,
-    const char *name, gui_session_submit_identity identity,
+/* The one identified TEXT submit. `kind` is the typed operation the draft owner
+ * resolved from its descriptor; this owns the target/session validation and the
+ * session adapter routing, so the caller never sees the client. */
+tp_status gui_project_submit_text(
+    tp_op_kind kind, const gui_text_ref *ref,
+    const char *value, gui_session_submit_identity identity,
     const char transaction_id[33],
     gui_session_submit_terminal *terminal, tp_error *err) {
-    if (!gui_project__borrow_active_session() ||
-        tp_id128_is_nil(atlas_id) || !name || !transaction_id) {
+    if (!gui_project__borrow_active_session() || !ref ||
+        tp_id128_is_nil(ref->atlas_id) || !value ||
+        !transaction_id) {
         return tp_error_set(
             err, TP_STATUS_INVALID_ARGUMENT,
-            "atlas name draft submit requires an active session, target, value, and transaction");
+            "text draft submit requires an active session, target, value, and transaction");
     }
-    return gui_session_submit_atlas_name(
-        &s_project.binding.client, atlas_id,
-        expected_revision, name, identity,
-        transaction_id, terminal, err);
-}
-
-tp_status gui_project_copy_atlas_name(tp_id128 atlas_id, char *out, size_t capacity,
-                                      tp_error *err) {
-    return gui_session_copy_atlas_name(gui_project_snapshot(), atlas_id, out, capacity, err);
-}
-
-/* Maps a gui_atlas_field to its op mask bit + fills the matching payload field. */
-static bool fill_atlas_knob(tp_op_atlas_settings *s, gui_atlas_field f, int iv, float fv) {
-    switch (f) {
-        case GUI_ATLAS_MAX_SIZE: s->max_size = iv; s->mask = TP_AF_MAX_SIZE; return true;
-        case GUI_ATLAS_PADDING: s->padding = iv; s->mask = TP_AF_PADDING; return true;
-        case GUI_ATLAS_MARGIN: s->margin = iv; s->mask = TP_AF_MARGIN; return true;
-        case GUI_ATLAS_EXTRUDE: s->extrude = iv; s->mask = TP_AF_EXTRUDE; return true;
-        case GUI_ATLAS_ALPHA_THRESHOLD: s->alpha_threshold = iv; s->mask = TP_AF_ALPHA_THRESHOLD; return true;
-        case GUI_ATLAS_MAX_VERTICES: s->max_vertices = iv; s->mask = TP_AF_MAX_VERTICES; return true;
-        case GUI_ATLAS_SHAPE: s->shape = iv; s->mask = TP_AF_SHAPE; return true;
-        case GUI_ATLAS_ALLOW_TRANSFORM: s->allow_transform = (iv != 0); s->mask = TP_AF_ALLOW_TRANSFORM; return true;
-        case GUI_ATLAS_POWER_OF_TWO: s->power_of_two = (iv != 0); s->mask = TP_AF_POWER_OF_TWO; return true;
-        case GUI_ATLAS_PIXELS_PER_UNIT: s->pixels_per_unit = fv; s->mask = TP_AF_PIXELS_PER_UNIT; return true;
+    switch (kind) {
+        case TP_OP_ATLAS_RENAME:
+            return gui_session_submit_atlas_name(
+                &s_project.binding.client, ref->atlas_id,
+                ref->expected_revision, value, identity,
+                transaction_id, terminal, err);
+        case TP_OP_ANIMATION_RENAME:
+            if (tp_id128_is_nil(ref->entity_id)) {
+                break;
+            }
+            return gui_session_submit_animation_name(
+                &s_project.binding.client, ref->atlas_id,
+                ref->entity_id, ref->expected_revision,
+                value, identity, transaction_id,
+                terminal, err);
+        case TP_OP_SPRITE_NAME_SET:
+            if (tp_id128_is_nil(ref->source_id) ||
+                !ref->source_key ||
+                ref->source_key[0] == '\0') {
+                break;
+            }
+            return gui_session_submit_sprite_name(
+                &s_project.binding.client, ref->atlas_id,
+                ref->source_id, ref->source_key,
+                ref->expected_revision, value, identity,
+                transaction_id, terminal, err);
+        case TP_OP_TARGET_SET:
+            if (tp_id128_is_nil(ref->entity_id)) {
+                break;
+            }
+            return gui_session_submit_target_out_path(
+                &s_project.binding.client, ref->atlas_id,
+                ref->entity_id, ref->expected_revision,
+                value, identity, transaction_id,
+                terminal, err);
+        default:
+            break;
     }
-    return false;
+    return tp_error_set(
+        err, TP_STATUS_INVALID_ARGUMENT,
+        "text draft submit requires a stable target for its operation kind");
 }
 
-tp_status gui_project_submit_atlas_setting(
+tp_status gui_project_submit_atlas_settings(
     tp_id128 atlas_id, int64_t expected_revision,
-    gui_atlas_field field, int ivalue, float fvalue,
+    const tp_op_atlas_settings *settings,
     gui_session_submit_identity identity,
     const char transaction_id[33],
     gui_session_submit_terminal *out_terminal,
     tp_error *err) {
     if (!gui_project__borrow_active_session() ||
-        tp_id128_is_nil(atlas_id) || !transaction_id) {
+        tp_id128_is_nil(atlas_id) || !settings ||
+        !transaction_id) {
         return tp_error_set(
             err, TP_STATUS_INVALID_ARGUMENT,
-            "atlas draft submit requires an active session, target, and transaction");
+            "atlas draft submit requires an active session, target, component, and transaction");
     }
     const tp_session_snapshot *snapshot = gui_project_snapshot();
     if (!snapshot ||
@@ -281,25 +294,13 @@ tp_status gui_project_submit_atlas_setting(
             err, TP_STATUS_NOT_FOUND,
             "the edited atlas no longer exists");
     }
-    tp_operation op;
-    memset(&op, 0, sizeof op);
-    op.kind = TP_OP_ATLAS_SETTINGS_SET;
-    op.atlas_id = atlas_id;
-    if (!fill_atlas_knob(&op.u.atlas_settings, field, ivalue, fvalue)) {
-        return tp_error_set(
-            err, TP_STATUS_INVALID_ARGUMENT,
-            "unknown atlas draft component");
-    }
-    const tp_status status =
-        gui_session_set_atlas_settings(
-            &s_project.binding.client, atlas_id,
-            expected_revision, &op.u.atlas_settings,
-            identity, transaction_id, out_terminal, err);
-    tp_operation_free(&op);
-    return status;
+    return gui_session_set_atlas_settings(
+        &s_project.binding.client, atlas_id,
+        expected_revision, settings, identity,
+        transaction_id, out_terminal, err);
 }
 
-static tp_status submit_sprite_settings(
+tp_status gui_project_submit_sprite_settings(
     const gui_sprite_ref *sprite,
     const tp_op_sprite_set *settings,
     gui_session_submit_identity identity,
@@ -349,7 +350,7 @@ tp_status gui_project_submit_sprite_origin(
                         : (current ? current->origin_y
                                    : TP_PROJECT_ORIGIN_DEFAULT),
     };
-    return submit_sprite_settings(
+    return gui_project_submit_sprite_settings(
         sprite, &settings, identity, transaction_id,
         terminal, err);
 }
@@ -376,44 +377,7 @@ tp_status gui_project_submit_sprite_slice9(
             current ? current->slice9_lrtb[index] : 0;
     }
     settings.slice9[component] = value;
-    return submit_sprite_settings(
-        sprite, &settings, identity, transaction_id,
-        terminal, err);
-}
-
-tp_status gui_project_submit_sprite_override(
-    const gui_sprite_ref *sprite, gui_sprite_ov component, int value,
-    gui_session_submit_identity identity,
-    const char transaction_id[33],
-    gui_session_submit_terminal *terminal, tp_error *err) {
-    tp_op_sprite_set settings = {0};
-    switch (component) {
-        case GUI_SPRITE_OV_SHAPE:
-            settings.mask = TP_SPF_SHAPE;
-            settings.ov_shape = value;
-            break;
-        case GUI_SPRITE_OV_ROTATE:
-            settings.mask = TP_SPF_ALLOW_ROTATE;
-            settings.ov_allow_rotate = value;
-            break;
-        case GUI_SPRITE_OV_MAXVERT:
-            settings.mask = TP_SPF_MAX_VERTICES;
-            settings.ov_max_vertices = value;
-            break;
-        case GUI_SPRITE_OV_MARGIN:
-            settings.mask = TP_SPF_MARGIN;
-            settings.ov_margin = value;
-            break;
-        case GUI_SPRITE_OV_EXTRUDE:
-            settings.mask = TP_SPF_EXTRUDE;
-            settings.ov_extrude = value;
-            break;
-        default:
-            return tp_error_set(
-                err, TP_STATUS_INVALID_ARGUMENT,
-                "unknown sprite override component");
-    }
-    return submit_sprite_settings(
+    return gui_project_submit_sprite_settings(
         sprite, &settings, identity, transaction_id,
         terminal, err);
 }
@@ -486,47 +450,6 @@ bool gui_project_remove_target(const gui_target_ref *target) {
         return false;
     }
     return true;
-}
-
-tp_status gui_project_submit_sprite_name(
-    const gui_sprite_ref *sprite, const char *name,
-    gui_session_submit_identity identity,
-    const char transaction_id[33],
-    gui_session_submit_terminal *terminal, tp_error *err) {
-    if (!gui_project__borrow_active_session() || !sprite ||
-        tp_id128_is_nil(sprite->atlas_id) ||
-        tp_id128_is_nil(sprite->source_id) ||
-        !sprite->source_key || sprite->source_key[0] == '\0' ||
-        !transaction_id) {
-        return tp_error_set(
-            err, TP_STATUS_INVALID_ARGUMENT,
-            "sprite name draft submit requires an active session, stable target, and transaction");
-    }
-    return gui_session_submit_sprite_name(
-        &s_project.binding.client, sprite->atlas_id,
-        sprite->source_id, sprite->source_key,
-        sprite->expected_revision, name, identity,
-        transaction_id, terminal, err);
-}
-
-tp_status gui_project_submit_target_out_path(
-    const gui_target_ref *target, const char *out_path,
-    gui_session_submit_identity identity,
-    const char transaction_id[33],
-    gui_session_submit_terminal *terminal, tp_error *err) {
-    if (!gui_project__borrow_active_session() || !target ||
-        tp_id128_is_nil(target->atlas_id) ||
-        tp_id128_is_nil(target->target_id) ||
-        !out_path || !transaction_id) {
-        return tp_error_set(
-            err, TP_STATUS_INVALID_ARGUMENT,
-            "target path draft submit requires an active session, stable target, value, and transaction");
-    }
-    return gui_session_submit_target_out_path(
-        &s_project.binding.client, target->atlas_id,
-        target->target_id, target->expected_revision,
-        out_path, identity, transaction_id,
-        terminal, err);
 }
 
 bool gui_project_set_target_enabled(
@@ -639,7 +562,7 @@ bool gui_project_remove_animation(const gui_animation_ref *animation) {
     return true;
 }
 
-static tp_status submit_animation_settings(
+tp_status gui_project_submit_animation_settings(
     const gui_animation_ref *animation,
     const tp_op_anim_settings *settings,
     gui_session_submit_identity identity,
@@ -661,58 +584,6 @@ static tp_status submit_animation_settings(
         identity, transaction_id, terminal, err);
 }
 
-tp_status gui_project_submit_animation_fps(
-    const gui_animation_ref *animation, float fps,
-    gui_session_submit_identity identity,
-    const char transaction_id[33],
-    gui_session_submit_terminal *terminal, tp_error *err) {
-    const tp_op_anim_settings settings = {
-        .mask = TP_ANF_FPS,
-        .fps = fps,
-    };
-    return submit_animation_settings(
-        animation, &settings, identity,
-        transaction_id, terminal, err);
-}
-
-tp_status gui_project_submit_animation_playback(
-    const gui_animation_ref *animation, int playback,
-    gui_session_submit_identity identity,
-    const char transaction_id[33],
-    gui_session_submit_terminal *terminal, tp_error *err) {
-    const tp_op_anim_settings settings = {
-        .mask = TP_ANF_PLAYBACK,
-        .playback = playback,
-    };
-    return submit_animation_settings(
-        animation, &settings, identity,
-        transaction_id, terminal, err);
-}
-
-tp_status gui_project_submit_animation_flip(
-    const gui_animation_ref *animation, int axis, bool value,
-    gui_session_submit_identity identity,
-    const char transaction_id[33],
-    gui_session_submit_terminal *terminal, tp_error *err) {
-    if (axis < 0 || axis > 1) {
-        return tp_error_set(
-            err, TP_STATUS_INVALID_ARGUMENT,
-            "animation flip draft requires axis 0 or 1");
-    }
-    tp_op_anim_settings settings = {
-        .mask = axis == 0 ? TP_ANF_FLIP_H
-                          : TP_ANF_FLIP_V,
-    };
-    if (axis == 0) {
-        settings.flip_h = value;
-    } else {
-        settings.flip_v = value;
-    }
-    return submit_animation_settings(
-        animation, &settings, identity,
-        transaction_id, terminal, err);
-}
-
 bool gui_project_anim_add_frames(const gui_animation_ref *animation,
                                  const tp_op_sprite_ref *frames, int count) {
     if (!animation) {
@@ -729,26 +600,6 @@ bool gui_project_anim_add_frames(const gui_animation_ref *animation,
         return false;
     }
     return true;
-}
-
-tp_status gui_project_submit_animation_name(
-    const gui_animation_ref *animation, const char *name,
-    gui_session_submit_identity identity,
-    const char transaction_id[33],
-    gui_session_submit_terminal *terminal, tp_error *err) {
-    if (!gui_project__borrow_active_session() || !animation ||
-        tp_id128_is_nil(animation->atlas_id) ||
-        tp_id128_is_nil(animation->animation_id) ||
-        !name || !transaction_id) {
-        return tp_error_set(
-            err, TP_STATUS_INVALID_ARGUMENT,
-            "animation name draft submit requires an active session, stable target, value, and transaction");
-    }
-    return gui_session_submit_animation_name(
-        &s_project.binding.client, animation->atlas_id,
-        animation->animation_id,
-        animation->expected_revision, name,
-        identity, transaction_id, terminal, err);
 }
 
 bool gui_project_anim_remove_frame(const gui_animation_ref *animation,

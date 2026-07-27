@@ -46,6 +46,7 @@
 #include "gui_pack.h"     /* gui_pack_* + GUI_PACK_ASYNC_* */
 #include "gui_project.h"  /* gui_project_* + GUI_SPRITE_OV_SHAPE / GUI_ADD_DUPLICATE */
 #include "gui_project_test_driver.h"
+#include "gui_session_adapter.h" /* snapshot-read helpers behind the deleted forwarders */
 #include "gui_rows.h"     /* build_rows / multi_sel_* / select_row_for_region */
 #include "gui_scan.h"     /* gui_scan_* */
 #include "gui_shell.h"    /* UI_STATE_SLOTS / UI_STATE_PROBE_MAX / UI_ROW_ID_RING */
@@ -294,15 +295,17 @@ static bool selftest_remove_atlas_at(int index) {
 static tp_status selftest_copy_atlas_name_at(int index, char *out, size_t capacity,
                                              tp_error *err) {
     const tp_snapshot_atlas *atlas = selftest_atlas_at(index, NULL);
-    return atlas ? gui_project_copy_atlas_name(atlas->id, out, capacity, err)
+    return atlas ? gui_session_copy_atlas_name(gui_project_snapshot(), atlas->id,
+                                              out, capacity, err)
                  : tp_error_set(err, TP_STATUS_NOT_FOUND, "atlas index was not found");
 }
 
 static gui_add_status selftest_add_source_at(int index, const char *path) {
     const tp_session_snapshot *snapshot = NULL;
     const tp_snapshot_atlas *atlas = selftest_atlas_at(index, &snapshot);
-    return atlas ? gui_project_add_source(
-                       atlas->id, tp_session_snapshot_revision(snapshot), path)
+    return atlas ? gui_project_add_source_kind(
+                       atlas->id, tp_session_snapshot_revision(snapshot), path,
+                       TP_SOURCE_KIND_FOLDER)
                  : GUI_ADD_FAILED;
 }
 

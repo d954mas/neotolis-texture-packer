@@ -45,27 +45,26 @@ static void become_conflicted(
     state->target_present = target_present;
 }
 
+/* The submitted revision is NOT predictable here: the session, not the draft,
+ * decides which revision a commit lands at. Only the transaction identity is a
+ * precondition; the real revision arrives with the receipt. */
 static tp_status validate_submit(
-    int64_t base_revision,
-    const char transaction_id[33],
-    int64_t submitted_revision, tp_error *err) {
-    if (!transaction_id_valid(transaction_id) ||
-        submitted_revision <= base_revision) {
+    const char transaction_id[33], tp_error *err) {
+    if (!transaction_id_valid(transaction_id)) {
         return invalid_transition(
             err,
-            "GUI draft submit requires a canonical transaction and advancing revision");
+            "GUI draft submit requires a canonical transaction");
     }
     return TP_STATUS_OK;
 }
 
 static void start_submit(
     gui_edit_state *state,
-    const char transaction_id[33],
-    int64_t submitted_revision) {
+    const char transaction_id[33]) {
     NT_ASSERT(state != NULL);
     NT_ASSERT(transaction_id != NULL);
     state->phase = GUI_EDIT_SUBMITTING;
-    state->submitted_revision = submitted_revision;
+    state->submitted_revision = 0;
     (void)memcpy(
         state->submitted_transaction_id,
         transaction_id,
@@ -110,8 +109,7 @@ tp_status gui_edit_begin(
 
 tp_status gui_edit_commit(
     gui_edit_state *state, bool net_zero,
-    const char transaction_id[33],
-    int64_t submitted_revision, tp_error *err) {
+    const char transaction_id[33], tp_error *err) {
     if (!state) {
         return invalid_transition(
             err, "GUI edit commit requires state");
@@ -125,14 +123,11 @@ tp_status gui_edit_commit(
         return TP_STATUS_OK;
     }
     const tp_status status =
-        validate_submit(
-            state->base_revision, transaction_id,
-            submitted_revision, err);
+        validate_submit(transaction_id, err);
     if (status != TP_STATUS_OK) {
         return status;
     }
-    start_submit(
-        state, transaction_id, submitted_revision);
+    start_submit(state, transaction_id);
     return TP_STATUS_OK;
 }
 
@@ -214,7 +209,7 @@ tp_status gui_edit_resync(
 
 tp_status gui_edit_apply_mine(
     gui_edit_state *state, int64_t revision,
-    int64_t submitted_revision, bool target_present,
+    bool target_present,
     const char transaction_id[33], tp_error *err) {
     if (!state) {
         return invalid_transition(
@@ -231,17 +226,14 @@ tp_status gui_edit_apply_mine(
             "the edited target no longer exists");
     }
     const tp_status status =
-        validate_submit(
-            revision, transaction_id,
-            submitted_revision, err);
+        validate_submit(transaction_id, err);
     if (status != TP_STATUS_OK) {
         return status;
     }
 
     state->base_revision = revision;
     state->target_present = true;
-    start_submit(
-        state, transaction_id, submitted_revision);
+    start_submit(state, transaction_id);
     return TP_STATUS_OK;
 }
 

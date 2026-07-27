@@ -64,12 +64,6 @@ typedef struct invalid_corpus_result {
 } invalid_corpus_result;
 
 static gui_session_client *s_parity_client;
-typedef struct parity_receipt {
-    char transaction_id[33];
-    tp_status status;
-} parity_receipt;
-static parity_receipt s_headless_receipts[16];
-static size_t s_headless_receipt_count;
 
 static bool wait_for_terminal_job(
     tp_session *session, tp_session_job_progress *out,
@@ -168,31 +162,8 @@ static tp_status parity_apply(
     const char *transaction_id,
     tp_error *err) {
     if (adapter == CORPUS_HEADLESS) {
-        for (size_t index = 0U;
-             index < s_headless_receipt_count;
-             ++index) {
-            if (strcmp(
-                    s_headless_receipts[index].transaction_id,
-                    transaction_id) == 0) {
-                return s_headless_receipts[index].status;
-            }
-        }
-        const tp_status status = headless_apply(
-            session, operation, expected_revision,
-            transaction_id, err);
-        TEST_ASSERT_LESS_THAN_size_t(
-            sizeof s_headless_receipts /
-                sizeof s_headless_receipts[0],
-            s_headless_receipt_count);
-        parity_receipt *receipt =
-            &s_headless_receipts[
-                s_headless_receipt_count++];
-        (void)snprintf(
-            receipt->transaction_id,
-            sizeof receipt->transaction_id,
-            "%s", transaction_id);
-        receipt->status = status;
-        return status;
+        return headless_apply(session, operation, expected_revision,
+                              transaction_id, err);
     }
     const gui_session_submit_request request = {
         .operations = operation,
@@ -329,7 +300,6 @@ static tp_status apply_target_create(corpus_adapter adapter,
 }
 
 static corpus_result run_corpus(corpus_adapter adapter) {
-    s_headless_receipt_count = 0U;
     uint8_t seed = 17U;
     const tp_rng rng = {deterministic_fill, &seed};
     tp_error err = {{0}};
@@ -444,7 +414,6 @@ static corpus_result run_corpus(corpus_adapter adapter) {
 }
 
 static invalid_corpus_result run_invalid_corpus(corpus_adapter adapter) {
-    s_headless_receipt_count = 0U;
     uint8_t seed = 37U;
     const tp_rng rng = {deterministic_fill, &seed};
     tp_error err = {{0}};
@@ -853,7 +822,7 @@ void test_gui_and_headless_share_golden_transaction_session_corpus(void) {
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, gui.success);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OUT_OF_RANGE, gui.validation);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_REVISION_CONFLICT, gui.conflict);
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, gui.duplicate);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_DUPLICATE_ID, gui.duplicate);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, gui.source_add);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, gui.sprite_override);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, gui.animation_create);

@@ -842,13 +842,24 @@ void test_retained_id_retry_commits_once_and_returns_duplicate_result(void) {
     TEST_ASSERT_EQUAL_INT64(1, tp_session_revision(session));
     gui_session_submit_result duplicate = {0};
     TEST_ASSERT_EQUAL_INT(
-        TP_STATUS_OK,
+        TP_STATUS_DUPLICATE_ID,
         gui_session_client_submit(
             &client, &request, &duplicate, &error));
-    TEST_ASSERT_TRUE(duplicate.transaction.committed);
-    TEST_ASSERT_EQUAL_INT64(1, duplicate.transaction.revision);
+    TEST_ASSERT_FALSE(duplicate.transaction.committed);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_DUPLICATE_ID, duplicate.terminal_status);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_DUPLICATE_ID, duplicate.terminal.status);
+    TEST_ASSERT_EQUAL_STRING(
+        request.retained_transaction_id,
+        duplicate.terminal.transaction_id);
+    TEST_ASSERT_EQUAL_INT64(1, duplicate.terminal.revision);
     TEST_ASSERT_EQUAL_INT64(1, tp_session_revision(session));
     TEST_ASSERT_EQUAL_INT(1, tp_session_history_count(session));
+    gui_session_submit_terminal gone = {0};
+    TEST_ASSERT_FALSE(gui_session_client_pending_submit_query(
+        &client, request.retained_transaction_id,
+        request.identity, &gone));
     gui_session_submit_result_destroy(&first);
     gui_session_submit_result_destroy(&duplicate);
     tp_operation_free(&operation);
@@ -856,7 +867,7 @@ void test_retained_id_retry_commits_once_and_returns_duplicate_result(void) {
     tp_session_destroy(session);
 }
 
-void test_retained_id_retry_recovers_after_local_result_copy_failure(void) {
+void test_stale_retained_id_retry_reports_current_revision(void) {
     tp_session *session = make_session();
     gui_session_client client;
     tp_error error = {{0}};
@@ -879,7 +890,6 @@ void test_retained_id_retry_recovers_after_local_result_copy_failure(void) {
             "78787878787878787878787878787878",
     };
 
-    gui_session_client__test_fail_next_result_copy();
     gui_session_submit_result first = {0};
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
@@ -888,23 +898,6 @@ void test_retained_id_retry_recovers_after_local_result_copy_failure(void) {
     TEST_ASSERT_TRUE(first.transaction.committed);
     TEST_ASSERT_EQUAL_INT64(1, tp_session_revision(session));
     gui_session_submit_result_destroy(&first);
-
-    gui_session_submit_result retry = {0};
-    TEST_ASSERT_EQUAL_INT(
-        TP_STATUS_DUPLICATE_ID,
-        gui_session_client_submit(
-            &client, &request, &retry, &error));
-    TEST_ASSERT_FALSE(retry.transaction.committed);
-    TEST_ASSERT_EQUAL_INT(
-        TP_STATUS_DUPLICATE_ID,
-        retry.terminal_status);
-    TEST_ASSERT_EQUAL_INT64(1, retry.transaction.revision);
-    TEST_ASSERT_EQUAL_INT64(1, tp_session_revision(session));
-    TEST_ASSERT_EQUAL_INT(1, tp_session_history_count(session));
-    gui_session_submit_terminal duplicate_terminal = {0};
-    TEST_ASSERT_FALSE(gui_session_client_pending_submit_query(
-        &client, request.retained_transaction_id,
-        request.identity, &duplicate_terminal));
 
     tp_operation later_operation =
         make_rename_operation(session, "after-copy-retry");
@@ -940,7 +933,6 @@ void test_retained_id_retry_recovers_after_local_result_copy_failure(void) {
         &retry_after_revision);
     gui_session_submit_result_destroy(&later);
     tp_operation_free(&later_operation);
-    gui_session_submit_result_destroy(&retry);
     tp_operation_free(&operation);
     gui_session_client_detach(&client);
     tp_session_destroy(session);
@@ -1251,82 +1243,6 @@ void test_generated_id_collision_regenerates_instead_of_replaying(void) {
     tp_session_destroy(session);
 }
 
-void test_retained_retry_replays_complete_committed_and_rejected_results(void) {
-    tp_session *session = make_session();
-    gui_session_client client;
-    tp_error error = {{0}};
-    gui_session_client_init(&client);
-    TEST_ASSERT_EQUAL_INT(
-        TP_STATUS_OK,
-        gui_session_client_attach(&client, session, &error));
-    tp_operation rename =
-        make_rename_operation(session, "complete-retry");
-    gui_session_submit_request request = {
-        .operations = &rename,
-        .operation_count = 1,
-        .expected_revision = 0,
-        .semantic_label = "atlas.rename",
-        .retained_transaction_id =
-            "dededededededededededededededede",
-    };
-    gui_session_submit_result committed = {0};
-    gui_session_submit_result committed_retry = {0};
-    TEST_ASSERT_EQUAL_INT(
-        TP_STATUS_OK,
-        gui_session_client_submit(
-            &client, &request, &committed, &error));
-    TEST_ASSERT_EQUAL_INT(
-        TP_STATUS_OK,
-        gui_session_client_submit(
-            &client, &request, &committed_retry, &error));
-    TEST_ASSERT_EQUAL_INT(
-        committed.transaction.op_count,
-        committed_retry.transaction.op_count);
-    TEST_ASSERT_EQUAL_STRING(
-        committed.transaction.ops[0].wire,
-        committed_retry.transaction.ops[0].wire);
-    TEST_ASSERT_EQUAL_INT(
-        committed.transaction.ops[0].addr_count,
-        committed_retry.transaction.ops[0].addr_count);
-
-    tp_operation rejected = {0};
-    rejected.kind = TP_OP_ATLAS_SETTINGS_SET;
-    rejected.atlas_id = first_atlas_id(session);
-    rejected.u.atlas_settings.mask = TP_AF_PADDING;
-    rejected.u.atlas_settings.padding = -1;
-    request.operations = &rejected;
-    request.expected_revision = 1;
-    request.retained_transaction_id =
-        "efefefefefefefefefefefefefefefef";
-    gui_session_submit_result rejection = {0};
-    gui_session_submit_result rejection_retry = {0};
-    TEST_ASSERT_EQUAL_INT(
-        TP_STATUS_OUT_OF_RANGE,
-        gui_session_client_submit(
-            &client, &request, &rejection, &error));
-    TEST_ASSERT_EQUAL_INT(
-        TP_STATUS_OUT_OF_RANGE,
-        gui_session_client_submit(
-            &client, &request, &rejection_retry, &error));
-    TEST_ASSERT_EQUAL_INT(
-        rejection.transaction.error_count,
-        rejection_retry.transaction.error_count);
-    TEST_ASSERT_EQUAL_STRING(
-        rejection.transaction.errors[0].field,
-        rejection_retry.transaction.errors[0].field);
-    TEST_ASSERT_EQUAL_STRING(
-        rejection.transaction.errors[0].message,
-        rejection_retry.transaction.errors[0].message);
-
-    gui_session_submit_result_destroy(&committed);
-    gui_session_submit_result_destroy(&committed_retry);
-    gui_session_submit_result_destroy(&rejection);
-    gui_session_submit_result_destroy(&rejection_retry);
-    tp_operation_free(&rename);
-    gui_session_client_detach(&client);
-    tp_session_destroy(session);
-}
-
 void test_submit_100_operations_is_one_revision_event_and_undo_step(void) {
     enum { OPERATION_COUNT = 100 };
     tp_session *session = make_session();
@@ -1393,7 +1309,10 @@ void test_submit_100_operations_is_one_revision_event_and_undo_step(void) {
     tp_session_destroy(session);
 }
 
-void test_committed_submit_survives_observation_failure_and_retries_echo(void) {
+/* A committed submit whose post-commit observation failed keeps a PENDING echo
+ * receipt; the next successful observation reconciles it. The receipt -- not a
+ * resubmit -- is how the owner learns the outcome, so nothing replays here. */
+void test_committed_submit_survives_observation_failure_and_reconciles_echo(void) {
     tp_session *session = make_session();
     gui_session_client client;
     tp_error error = {{0}};
@@ -1405,11 +1324,16 @@ void test_committed_submit_survives_observation_failure_and_retries_echo(void) {
         gui_session_client_snapshot(&client);
     tp_operation operation =
         make_rename_operation(session, "echo-retry");
+    const gui_session_submit_identity identity = {
+        .origin_view_id = {{0xedU}},
+        .draft_instance_id = {{0xdeU}},
+    };
     const gui_session_submit_request request = {
         .operations = &operation,
         .operation_count = 1,
         .expected_revision = 0,
         .semantic_label = "atlas.rename",
+        .identity = identity,
         .retained_transaction_id =
             "edededededededededededededededed",
     };
@@ -1425,15 +1349,14 @@ void test_committed_submit_survives_observation_failure_and_retries_echo(void) {
     TEST_ASSERT_EQUAL_PTR(
         before, gui_session_client_snapshot(&client));
 
-    gui_session_submit_result retry = {0};
+    gui_session_submit_terminal terminal = {0};
+    TEST_ASSERT_TRUE(gui_session_client_pending_submit_query(
+        &client, request.retained_transaction_id,
+        identity, &terminal));
+    TEST_ASSERT_TRUE(terminal.committed);
     TEST_ASSERT_EQUAL_INT(
-        TP_STATUS_OK,
-        gui_session_client_submit(
-            &client, &request, &retry, &error));
-    TEST_ASSERT_TRUE(retry.transaction.committed);
-    TEST_ASSERT_TRUE(retry.observation_pending);
-    TEST_ASSERT_EQUAL_INT(
-        TP_STATUS_OOM, retry.observation_status);
+        GUI_SESSION_SUBMIT_ECHO_PENDING,
+        terminal.echo_state);
     TEST_ASSERT_EQUAL_INT64(
         1, tp_session_revision(session));
 
@@ -1442,8 +1365,13 @@ void test_committed_submit_survives_observation_failure_and_retries_echo(void) {
         gui_session_client_observe(&client, &error));
     TEST_ASSERT_NOT_EQUAL(
         before, gui_session_client_snapshot(&client));
+    TEST_ASSERT_TRUE(gui_session_client_pending_submit_query(
+        &client, request.retained_transaction_id,
+        identity, &terminal));
+    TEST_ASSERT_EQUAL_INT(
+        GUI_SESSION_SUBMIT_ECHO_OBSERVED,
+        terminal.echo_state);
     gui_session_submit_result_destroy(&result);
-    gui_session_submit_result_destroy(&retry);
     tp_operation_free(&operation);
     gui_session_client_detach(&client);
     tp_session_destroy(session);
@@ -1646,7 +1574,7 @@ int main(void) {
     RUN_TEST(
         test_retained_id_retry_commits_once_and_returns_duplicate_result);
     RUN_TEST(
-        test_retained_id_retry_recovers_after_local_result_copy_failure);
+        test_stale_retained_id_retry_reports_current_revision);
     RUN_TEST(
         test_retained_id_requires_exact_view_and_draft_identity);
     RUN_TEST(
@@ -1658,11 +1586,9 @@ int main(void) {
     RUN_TEST(
         test_generated_id_collision_regenerates_instead_of_replaying);
     RUN_TEST(
-        test_retained_retry_replays_complete_committed_and_rejected_results);
-    RUN_TEST(
         test_submit_100_operations_is_one_revision_event_and_undo_step);
     RUN_TEST(
-        test_committed_submit_survives_observation_failure_and_retries_echo);
+        test_committed_submit_survives_observation_failure_and_reconciles_echo);
     RUN_TEST(
         test_prepare_failure_preserves_attached_session_observation_and_generation);
     RUN_TEST(

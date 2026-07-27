@@ -38,7 +38,7 @@ static gui_edit_state submitting_state(void) {
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
         gui_edit_commit(
-            &state, false, TX_ONE, 8, &error));
+            &state, false, TX_ONE, &error));
     return state;
 }
 
@@ -124,7 +124,7 @@ void test_commit_net_zero_finishes_and_valid_submit_records_receipt_identity(voi
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
         gui_edit_commit(
-            &state, true, NULL, 0, &error));
+            &state, true, NULL, &error));
     TEST_ASSERT_EQUAL_INT(GUI_EDIT_IDLE, state.phase);
     TEST_ASSERT_TRUE(
         tp_id128_eq(test_id(0x21U), state.view_id));
@@ -133,21 +133,22 @@ void test_commit_net_zero_finishes_and_valid_submit_records_receipt_identity(voi
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
         gui_edit_commit(
-            &state, false, TX_ONE, 8, &error));
+            &state, false, TX_ONE, &error));
     TEST_ASSERT_EQUAL_INT(GUI_EDIT_SUBMITTING, state.phase);
-    TEST_ASSERT_EQUAL_INT64(8, state.submitted_revision);
+    /* The draft never predicts where the commit lands. */
+    TEST_ASSERT_EQUAL_INT64(0, state.submitted_revision);
     TEST_ASSERT_EQUAL_STRING(
         TX_ONE, state.submitted_transaction_id);
 }
 
-void test_commit_rejects_wrong_phase_bad_transaction_and_revision_without_mutation(void) {
+void test_commit_rejects_wrong_phase_and_bad_transaction_without_mutation(void) {
     tp_error error = {{0}};
     gui_edit_state state = idle_state();
     gui_edit_state before = state;
 
     assert_invalid_unchanged(
         gui_edit_commit(
-            &state, false, TX_ONE, 8, &error),
+            &state, false, TX_ONE, &error),
         &error, &before, &state);
 
     state = editing_state();
@@ -155,13 +156,13 @@ void test_commit_rejects_wrong_phase_bad_transaction_and_revision_without_mutati
     memset(&error, 0, sizeof error);
     assert_invalid_unchanged(
         gui_edit_commit(
-            &state, false, "ABC", 8, &error),
+            &state, false, "ABC", &error),
         &error, &before, &state);
 
     memset(&error, 0, sizeof error);
     assert_invalid_unchanged(
         gui_edit_commit(
-            &state, false, TX_ONE, 7, &error),
+            &state, false, NULL, &error),
         &error, &before, &state);
 }
 
@@ -290,7 +291,7 @@ void test_same_commit_resolves_only_the_view_with_the_exact_receipt(void) {
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
         gui_edit_commit(
-            &owner, false, TX_ONE, 8, &error));
+            &owner, false, TX_ONE, &error));
 
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
@@ -345,14 +346,14 @@ void test_apply_mine_rejects_deleted_target_and_bad_submit_byte_identically(void
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_NOT_FOUND,
         gui_edit_apply_mine(
-            &state, 8, 9, false, TX_TWO, &error));
+            &state, 8, false, TX_TWO, &error));
     TEST_ASSERT_NOT_EQUAL(0, (int)strlen(error.msg));
     TEST_ASSERT_EQUAL_MEMORY(&before, &state, sizeof state);
 
     memset(&error, 0, sizeof error);
     assert_invalid_unchanged(
         gui_edit_apply_mine(
-            &state, 8, 9, true, "bad", &error),
+            &state, 8, true, "bad", &error),
         &error, &before, &state);
 }
 
@@ -363,10 +364,10 @@ void test_apply_mine_submits_once_and_later_foreign_revision_conflicts(void) {
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
         gui_edit_apply_mine(
-            &state, 8, 9, true, TX_TWO, &error));
+            &state, 8, true, TX_TWO, &error));
     TEST_ASSERT_EQUAL_INT(GUI_EDIT_SUBMITTING, state.phase);
     TEST_ASSERT_EQUAL_INT64(8, state.base_revision);
-    TEST_ASSERT_EQUAL_INT64(9, state.submitted_revision);
+    TEST_ASSERT_EQUAL_INT64(0, state.submitted_revision);
     TEST_ASSERT_EQUAL_STRING(
         TX_TWO, state.submitted_transaction_id);
 
@@ -417,7 +418,7 @@ int main(void) {
     RUN_TEST(
         test_commit_net_zero_finishes_and_valid_submit_records_receipt_identity);
     RUN_TEST(
-        test_commit_rejects_wrong_phase_bad_transaction_and_revision_without_mutation);
+        test_commit_rejects_wrong_phase_and_bad_transaction_without_mutation);
     RUN_TEST(
         test_submit_result_requires_normalized_exact_owner);
     RUN_TEST(

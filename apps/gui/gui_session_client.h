@@ -57,10 +57,8 @@ typedef struct gui_session_submit_result {
 } gui_session_submit_result;
 
 typedef struct gui_session_pending_submit {
-    bool result_available;
     tp_status observation_status;
     gui_session_submit_terminal terminal;
-    tp_txn_result result;
 } gui_session_pending_submit;
 
 typedef void (*gui_session_client_reducer_fn)(
@@ -164,7 +162,6 @@ tp_session *gui_session_client_attached_session(
 #ifdef TP_ENABLE_TEST_SEAMS
 void gui_session_client__test_fail_next_observe(void);
 void gui_session_client__test_fail_observes(unsigned int count);
-void gui_session_client__test_fail_next_result_copy(void);
 void gui_session_client__test_set_transaction_rng(
     gui_session_client *client, tp_rng rng);
 #endif

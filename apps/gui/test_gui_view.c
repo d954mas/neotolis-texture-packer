@@ -73,8 +73,12 @@ static bool test_submit_sprite_name(
         (unsigned long long)s_test_submit_id);
     gui_session_submit_terminal terminal = {0};
     tp_error error = {{0}};
-    return gui_project_submit_sprite_name(
-               sprite, name, identity,
+    const gui_text_ref ref = {
+        sprite->atlas_id, tp_id128_nil(),
+        sprite->source_id, sprite->source_key,
+        sprite->expected_revision};
+    return gui_project_submit_text(
+               TP_OP_SPRITE_NAME_SET, &ref, name, identity,
                transaction_id, &terminal, &error) ==
            TP_STATUS_OK;
 }

@@ -1,7 +1,8 @@
 #include "gui_actions_internal.h"
 #include "gui_project.h"
 
-#include <limits.h>
+#include <stddef.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -63,6 +64,381 @@ static void draft_clear_if_idle(
     memset(&draft->animation, 0, sizeof draft->animation);
 }
 
+/* ---- draft descriptor table -----------------------------------------------
+ * One pure-data row per editable draft component. Target presence, "is this the
+ * component I am editing", net-zero detection, and submit all read the SAME
+ * rows, so adding a component is one row instead of four parallel switch arms.
+ * There are no function-pointer columns; exactly two exhaustive (default-less)
+ * switches over draft_value_type remain -- the payload write and the snapshot
+ * read -- so -Wswitch still proves every value shape is handled. */
+
+typedef enum draft_value_type {
+    DRAFT_VALUE_INT = 0, /* int payload,   int snapshot */
+    DRAFT_VALUE_BOOL,    /* bool payload,  bool snapshot */
+    DRAFT_VALUE_FLOAT,   /* float payload, float snapshot */
+    DRAFT_VALUE_TEXT,    /* char * payload, const char * snapshot */
+    DRAFT_VALUE_INT16,   /* int payload,   int16_t snapshot (sprite overrides) */
+    DRAFT_VALUE_UINT16   /* int payload,   uint16_t snapshot (sprite slice9) */
+} draft_value_type;
+
+/* Which immutable snapshot record a column addresses. Presence and value may
+ * differ: a sprite draft exists while its SOURCE exists, but its committed
+ * value lives on the per-key SPRITE record. */
+typedef enum draft_record_kind {
+    DRAFT_RECORD_ATLAS = 0,
+    DRAFT_RECORD_ANIMATION,
+    DRAFT_RECORD_SOURCE,
+    DRAFT_RECORD_SPRITE,
+    DRAFT_RECORD_TARGET
+} draft_record_kind;
+
+typedef struct draft_value {
+    int integer;
+    float real;
+    const char *text;
+} draft_value;
+
+typedef struct draft_descriptor {
+    gui_draft_family family;
+    int kind;      /* atlas field / text kind / sprite kind / animation kind */
+    int component; /* sub-index inside the kind (axis, slice9 slot, override) */
+    tp_op_kind op_kind;
+    uint32_t field_mask;
+    draft_value_type value_type;
+    /* offsetof inside the typed operation payload. Zero (and unused) where the
+     * concrete mutation owner builds the payload itself: TEXT submits and the
+     * sprite origin/slice9 read-modify-write against the live snapshot. */
+    size_t payload_offset;
+    draft_record_kind presence_record;
+    draft_record_kind value_record;
+    size_t value_offset; /* offsetof inside the value record */
+    /* Committed value to compare against when the record is absent. When
+     * `missing_comparable` is false an absent record is never net zero. TEXT
+     * rows ignore the flag and use `missing.text` (NULL == not comparable). */
+    bool missing_comparable;
+    draft_value missing;
+} draft_descriptor;
+
+#define DRAFT_ATLAS_ROW(field, mask, type, member)                            \
+    {GUI_DRAFT_ATLAS_SCALAR, (field), 0, TP_OP_ATLAS_SETTINGS_SET, (mask),    \
+     (type), offsetof(tp_op_atlas_settings, member), DRAFT_RECORD_ATLAS,      \
+     DRAFT_RECORD_ATLAS, offsetof(tp_snapshot_atlas, member), false,          \
+     {0, 0.0F, NULL}}
+
+#define DRAFT_SLICE9_ROW(slot)                                                \
+    {GUI_DRAFT_SPRITE, GUI_SPRITE_EDIT_SLICE9, (slot),                        \
+     TP_OP_SPRITE_OVERRIDE_SET, TP_SPF_SLICE9, DRAFT_VALUE_UINT16, 0U,        \
+     DRAFT_RECORD_SOURCE, DRAFT_RECORD_SPRITE,                                \
+     offsetof(tp_snapshot_sprite, slice9_lrtb) + (slot) * sizeof(uint16_t),   \
+     true, {0, 0.0F, NULL}}
+
+#define DRAFT_OVERRIDE_ROW(component, mask, payload, member)                  \
+    {GUI_DRAFT_SPRITE, GUI_SPRITE_EDIT_OVERRIDE, (component),                 \
+     TP_OP_SPRITE_OVERRIDE_SET, (mask), DRAFT_VALUE_INT16,                    \
+     offsetof(tp_op_sprite_set, payload), DRAFT_RECORD_SOURCE,                \
+     DRAFT_RECORD_SPRITE, offsetof(tp_snapshot_sprite, member), true,         \
+     {TP_PROJECT_OV_INHERIT, 0.0F, NULL}}
+
+#define DRAFT_ANIM_ROW(kind, component, mask, type, payload, member)          \
+    {GUI_DRAFT_ANIMATION, (kind), (component), TP_OP_ANIMATION_SETTINGS_SET,  \
+     (mask), (type), offsetof(tp_op_anim_settings, payload),                  \
+     DRAFT_RECORD_ANIMATION, DRAFT_RECORD_ANIMATION,                          \
+     offsetof(tp_snapshot_animation, member), false, {0, 0.0F, NULL}}
+
+#define DRAFT_ORIGIN_ROW(axis, member)                                        \
+    {GUI_DRAFT_SPRITE, GUI_SPRITE_EDIT_ORIGIN, (axis),                        \
+     TP_OP_SPRITE_OVERRIDE_SET, TP_SPF_ORIGIN, DRAFT_VALUE_FLOAT, 0U,         \
+     DRAFT_RECORD_SOURCE, DRAFT_RECORD_SPRITE,                                \
+     offsetof(tp_snapshot_sprite, member), true,                              \
+     {0, TP_PROJECT_ORIGIN_DEFAULT, NULL}}
+
+static const draft_descriptor k_draft_rows[] = {
+    DRAFT_ATLAS_ROW(GUI_ATLAS_MAX_SIZE, TP_AF_MAX_SIZE, DRAFT_VALUE_INT,
+                    max_size),
+    DRAFT_ATLAS_ROW(GUI_ATLAS_PADDING, TP_AF_PADDING, DRAFT_VALUE_INT, padding),
+    DRAFT_ATLAS_ROW(GUI_ATLAS_MARGIN, TP_AF_MARGIN, DRAFT_VALUE_INT, margin),
+    DRAFT_ATLAS_ROW(GUI_ATLAS_EXTRUDE, TP_AF_EXTRUDE, DRAFT_VALUE_INT, extrude),
+    DRAFT_ATLAS_ROW(GUI_ATLAS_ALPHA_THRESHOLD, TP_AF_ALPHA_THRESHOLD,
+                    DRAFT_VALUE_INT, alpha_threshold),
+    DRAFT_ATLAS_ROW(GUI_ATLAS_MAX_VERTICES, TP_AF_MAX_VERTICES,
+                    DRAFT_VALUE_INT, max_vertices),
+    DRAFT_ATLAS_ROW(GUI_ATLAS_SHAPE, TP_AF_SHAPE, DRAFT_VALUE_INT, shape),
+    DRAFT_ATLAS_ROW(GUI_ATLAS_ALLOW_TRANSFORM, TP_AF_ALLOW_TRANSFORM,
+                    DRAFT_VALUE_BOOL, allow_transform),
+    DRAFT_ATLAS_ROW(GUI_ATLAS_POWER_OF_TWO, TP_AF_POWER_OF_TWO,
+                    DRAFT_VALUE_BOOL, power_of_two),
+    DRAFT_ATLAS_ROW(GUI_ATLAS_PIXELS_PER_UNIT, TP_AF_PIXELS_PER_UNIT,
+                    DRAFT_VALUE_FLOAT, pixels_per_unit),
+
+    {GUI_DRAFT_TEXT, GUI_TEXT_EDIT_ATLAS_NAME, 0, TP_OP_ATLAS_RENAME, 0U,
+     DRAFT_VALUE_TEXT, 0U, DRAFT_RECORD_ATLAS, DRAFT_RECORD_ATLAS,
+     offsetof(tp_snapshot_atlas, name), true, {0, 0.0F, NULL}},
+    {GUI_DRAFT_TEXT, GUI_TEXT_EDIT_ANIMATION_NAME, 0, TP_OP_ANIMATION_RENAME,
+     0U, DRAFT_VALUE_TEXT, 0U, DRAFT_RECORD_ANIMATION, DRAFT_RECORD_ANIMATION,
+     offsetof(tp_snapshot_animation, name), true, {0, 0.0F, NULL}},
+    /* An absent sprite record reads as the EMPTY rename, so clearing a rename
+     * on a sprite the snapshot no longer carries is still net zero. */
+    {GUI_DRAFT_TEXT, GUI_TEXT_EDIT_SPRITE_RENAME, 0, TP_OP_SPRITE_NAME_SET, 0U,
+     DRAFT_VALUE_TEXT, 0U, DRAFT_RECORD_SOURCE, DRAFT_RECORD_SPRITE,
+     offsetof(tp_snapshot_sprite, rename), true, {0, 0.0F, ""}},
+    {GUI_DRAFT_TEXT, GUI_TEXT_EDIT_TARGET_OUT_PATH, 0, TP_OP_TARGET_SET,
+     TP_TF_OUT_PATH, DRAFT_VALUE_TEXT, 0U, DRAFT_RECORD_TARGET,
+     DRAFT_RECORD_TARGET, offsetof(tp_snapshot_target, out_path), true,
+     {0, 0.0F, NULL}},
+
+    DRAFT_ORIGIN_ROW(0, origin_x),
+    DRAFT_ORIGIN_ROW(1, origin_y),
+    DRAFT_SLICE9_ROW(0),
+    DRAFT_SLICE9_ROW(1),
+    DRAFT_SLICE9_ROW(2),
+    DRAFT_SLICE9_ROW(3),
+    DRAFT_OVERRIDE_ROW(GUI_SPRITE_OV_SHAPE, TP_SPF_SHAPE, ov_shape,
+                       override_shape),
+    DRAFT_OVERRIDE_ROW(GUI_SPRITE_OV_ROTATE, TP_SPF_ALLOW_ROTATE,
+                       ov_allow_rotate, override_allow_rotate),
+    DRAFT_OVERRIDE_ROW(GUI_SPRITE_OV_MAXVERT, TP_SPF_MAX_VERTICES,
+                       ov_max_vertices, override_max_vertices),
+    DRAFT_OVERRIDE_ROW(GUI_SPRITE_OV_MARGIN, TP_SPF_MARGIN, ov_margin,
+                       override_margin),
+    DRAFT_OVERRIDE_ROW(GUI_SPRITE_OV_EXTRUDE, TP_SPF_EXTRUDE, ov_extrude,
+                       override_extrude),
+
+    DRAFT_ANIM_ROW(GUI_ANIMATION_EDIT_FPS, 0, TP_ANF_FPS, DRAFT_VALUE_FLOAT,
+                   fps, fps),
+    DRAFT_ANIM_ROW(GUI_ANIMATION_EDIT_PLAYBACK, 0, TP_ANF_PLAYBACK,
+                   DRAFT_VALUE_INT, playback, playback),
+    DRAFT_ANIM_ROW(GUI_ANIMATION_EDIT_FLIP, 0, TP_ANF_FLIP_H,
+                   DRAFT_VALUE_BOOL, flip_h, flip_h),
+    DRAFT_ANIM_ROW(GUI_ANIMATION_EDIT_FLIP, 1, TP_ANF_FLIP_V,
+                   DRAFT_VALUE_BOOL, flip_v, flip_v),
+};
+
+#undef DRAFT_ATLAS_ROW
+#undef DRAFT_SLICE9_ROW
+#undef DRAFT_OVERRIDE_ROW
+#undef DRAFT_ANIM_ROW
+#undef DRAFT_ORIGIN_ROW
+
+/* The draft's own coordinates, normalized so every table consumer addresses a
+ * draft the same way regardless of family. */
+typedef struct draft_key {
+    gui_draft_family family;
+    int kind;
+    int component;
+    tp_id128 atlas_id;
+    tp_id128 entity_id; /* animation or export target */
+    tp_id128 source_id;
+    const char *source_key;
+} draft_key;
+
+static void draft_resolve(
+    const gui_draft_owner *draft, draft_key *out) {
+    memset(out, 0, sizeof *out);
+    out->family = draft->family;
+    out->atlas_id = tp_id128_nil();
+    out->entity_id = tp_id128_nil();
+    out->source_id = tp_id128_nil();
+    out->source_key = "";
+    if (draft->family == GUI_DRAFT_ATLAS_SCALAR) {
+        out->kind = (int)draft->atlas.component;
+        out->atlas_id = draft->lifecycle.target_id;
+        return;
+    }
+    if (draft->family == GUI_DRAFT_TEXT) {
+        out->kind = (int)draft->text.kind;
+        out->atlas_id = draft->text.atlas_id;
+        out->entity_id = draft->lifecycle.target_id;
+        if (draft->text.kind ==
+            GUI_TEXT_EDIT_SPRITE_RENAME) {
+            out->source_id = draft->text.source_id;
+            out->source_key = draft->text.source_key;
+        }
+        return;
+    }
+    if (draft->family == GUI_DRAFT_SPRITE) {
+        out->kind = (int)draft->sprite.kind;
+        out->component = draft->sprite.component;
+        out->atlas_id = draft->sprite.atlas_id;
+        out->entity_id = draft->lifecycle.target_id;
+        out->source_id = draft->sprite.source_id;
+        out->source_key = draft->sprite.source_key;
+        return;
+    }
+    if (draft->family == GUI_DRAFT_ANIMATION) {
+        out->kind = (int)draft->animation.kind;
+        out->component = draft->animation.component;
+        out->atlas_id = draft->animation.atlas_id;
+        out->entity_id = draft->lifecycle.target_id;
+    }
+}
+
+static const draft_descriptor *draft_row(
+    const draft_key *key) {
+    for (size_t index = 0U;
+         index < sizeof k_draft_rows / sizeof k_draft_rows[0];
+         ++index) {
+        const draft_descriptor *row = &k_draft_rows[index];
+        if (row->family == key->family &&
+            row->kind == key->kind &&
+            row->component == key->component) {
+            return row;
+        }
+    }
+    return NULL;
+}
+
+static const void *draft_record(
+    draft_record_kind record, const draft_key *key,
+    const tp_session_snapshot *snapshot) {
+    switch (record) {
+        case DRAFT_RECORD_ATLAS:
+            return tp_session_snapshot_atlas_by_id(
+                snapshot, key->atlas_id);
+        case DRAFT_RECORD_ANIMATION:
+            return tp_session_snapshot_animation_by_id(
+                snapshot, key->atlas_id, key->entity_id);
+        case DRAFT_RECORD_SOURCE:
+            return tp_session_snapshot_source_by_id(
+                snapshot, key->atlas_id, key->source_id);
+        case DRAFT_RECORD_SPRITE:
+            return tp_session_snapshot_sprite_by_key(
+                snapshot, key->atlas_id, key->source_id,
+                key->source_key);
+        case DRAFT_RECORD_TARGET:
+            return tp_session_snapshot_target_by_id(
+                snapshot, key->atlas_id, key->entity_id);
+    }
+    return NULL;
+}
+
+/* SNAPSHOT READ -- one of the two exhaustive value-type switches. False means
+ * the committed value is not comparable (the record is gone and the row has no
+ * defined absent value). */
+static bool draft_committed_value(
+    const draft_descriptor *row, const void *record,
+    draft_value *out) {
+    /* Never form `NULL + offset`: an absent record answers from the row. */
+    const char *field =
+        record ? (const char *)record + row->value_offset
+               : NULL;
+    *out = row->missing;
+    switch (row->value_type) {
+        case DRAFT_VALUE_INT:
+            if (record) {
+                memcpy(&out->integer, field,
+                       sizeof out->integer);
+            }
+            return record != NULL || row->missing_comparable;
+        case DRAFT_VALUE_BOOL:
+            if (record) {
+                bool flag = false;
+                memcpy(&flag, field, sizeof flag);
+                out->integer = flag ? 1 : 0;
+            }
+            return record != NULL || row->missing_comparable;
+        case DRAFT_VALUE_FLOAT:
+            if (record) {
+                memcpy(&out->real, field, sizeof out->real);
+            }
+            return record != NULL || row->missing_comparable;
+        case DRAFT_VALUE_TEXT: {
+            const char *text = NULL;
+            if (record) {
+                memcpy(&text, field, sizeof text);
+            }
+            if (text) {
+                out->text = text;
+            }
+            return out->text != NULL;
+        }
+        case DRAFT_VALUE_INT16:
+            if (record) {
+                int16_t narrow = 0;
+                memcpy(&narrow, field, sizeof narrow);
+                out->integer = narrow;
+            }
+            return record != NULL || row->missing_comparable;
+        case DRAFT_VALUE_UINT16:
+            if (record) {
+                uint16_t narrow = 0U;
+                memcpy(&narrow, field, sizeof narrow);
+                out->integer = (int)narrow;
+            }
+            return record != NULL || row->missing_comparable;
+    }
+    return false;
+}
+
+/* PAYLOAD WRITE -- the other exhaustive value-type switch. */
+static void draft_write_payload(
+    const draft_descriptor *row, void *payload,
+    const draft_value *value) {
+    char *field = (char *)payload + row->payload_offset;
+    switch (row->value_type) {
+        case DRAFT_VALUE_INT:
+        case DRAFT_VALUE_INT16:
+        case DRAFT_VALUE_UINT16: {
+            const int integer = value->integer;
+            memcpy(field, &integer, sizeof integer);
+            break;
+        }
+        case DRAFT_VALUE_BOOL: {
+            const bool flag = value->integer != 0;
+            memcpy(field, &flag, sizeof flag);
+            break;
+        }
+        case DRAFT_VALUE_FLOAT:
+            memcpy(field, &value->real, sizeof value->real);
+            break;
+        case DRAFT_VALUE_TEXT: {
+            char *text = (char *)value->text;
+            memcpy(field, &text, sizeof text);
+            break;
+        }
+    }
+}
+
+/* The in-progress value the draft is holding, in the row's shape. */
+static void draft_current_value(
+    const gui_draft_owner *draft,
+    const draft_descriptor *row, draft_value *out) {
+    memset(out, 0, sizeof *out);
+    out->text = draft->text.value;
+    if (row->family == GUI_DRAFT_ATLAS_SCALAR) {
+        out->integer = draft->atlas.integer;
+        out->real = draft->atlas.real;
+    } else if (row->family == GUI_DRAFT_SPRITE) {
+        out->integer = draft->sprite.integer;
+        out->real = draft->sprite.real;
+    } else if (row->family == GUI_DRAFT_ANIMATION) {
+        out->integer =
+            row->kind == GUI_ANIMATION_EDIT_FLIP
+                ? (draft->animation.flag ? 1 : 0)
+                : draft->animation.integer;
+        out->real = draft->animation.real;
+    }
+}
+
+/* True when the ONE active draft is exactly this family/component/target. */
+static bool draft_matches(
+    gui_draft_family family, int kind, int component,
+    tp_id128 atlas_id, tp_id128 entity_id,
+    tp_id128 source_id, const char *source_key) {
+    const gui_draft_owner *draft = &s_actions.draft;
+    if (draft->lifecycle.phase == GUI_EDIT_IDLE) {
+        return false;
+    }
+    draft_key key;
+    draft_resolve(draft, &key);
+    return key.family == family && key.kind == kind &&
+           key.component == component &&
+           tp_id128_eq(key.atlas_id, atlas_id) &&
+           tp_id128_eq(key.entity_id, entity_id) &&
+           tp_id128_eq(key.source_id, source_id) &&
+           strcmp(key.source_key,
+                  source_key ? source_key : "") == 0;
+}
+
 static bool draft_target_present(
     const gui_draft_owner *draft,
     const tp_session_snapshot *snapshot) {
@@ -70,41 +446,43 @@ static bool draft_target_present(
         draft->lifecycle.phase == GUI_EDIT_IDLE) {
         return false;
     }
-    if (draft->family == GUI_DRAFT_ATLAS_SCALAR ||
-        (draft->family == GUI_DRAFT_TEXT &&
-         draft->text.kind == GUI_TEXT_EDIT_ATLAS_NAME)) {
-        return tp_session_snapshot_atlas_by_id(
-                   snapshot, draft->lifecycle.target_id) != NULL;
+    draft_key key;
+    draft_resolve(draft, &key);
+    const draft_descriptor *row = draft_row(&key);
+    return row != NULL &&
+           draft_record(row->presence_record, &key,
+                        snapshot) != NULL;
+}
+
+/* True when submitting the draft would change nothing in the committed model. */
+static bool draft_is_net_zero(
+    const gui_draft_owner *draft,
+    const tp_session_snapshot *snapshot) {
+    if (!draft || !snapshot) {
+        return false;
     }
-    if (draft->family == GUI_DRAFT_TEXT) {
-        switch (draft->text.kind) {
-            case GUI_TEXT_EDIT_ATLAS_NAME:
-                return false;
-            case GUI_TEXT_EDIT_ANIMATION_NAME:
-                return tp_session_snapshot_animation_by_id(
-                           snapshot, draft->text.atlas_id,
-                           draft->lifecycle.target_id) != NULL;
-            case GUI_TEXT_EDIT_SPRITE_RENAME:
-                return tp_session_snapshot_source_by_id(
-                           snapshot, draft->text.atlas_id,
-                           draft->text.source_id) != NULL;
-            case GUI_TEXT_EDIT_TARGET_OUT_PATH:
-                return tp_session_snapshot_target_by_id(
-                           snapshot, draft->text.atlas_id,
-                           draft->lifecycle.target_id) != NULL;
-        }
+    draft_key key;
+    draft_resolve(draft, &key);
+    const draft_descriptor *row = draft_row(&key);
+    if (!row) {
+        return false;
     }
-    if (draft->family == GUI_DRAFT_SPRITE) {
-        return tp_session_snapshot_source_by_id(
-                   snapshot, draft->sprite.atlas_id,
-                   draft->sprite.source_id) != NULL;
+    draft_value committed;
+    if (!draft_committed_value(
+            row,
+            draft_record(row->value_record, &key, snapshot),
+            &committed)) {
+        return false;
     }
-    if (draft->family == GUI_DRAFT_ANIMATION) {
-        return tp_session_snapshot_animation_by_id(
-                   snapshot, draft->animation.atlas_id,
-                   draft->lifecycle.target_id) != NULL;
+    draft_value current;
+    draft_current_value(draft, row, &current);
+    if (row->value_type == DRAFT_VALUE_TEXT) {
+        return strcmp(committed.text, current.text) == 0;
     }
-    return false;
+    if (row->value_type == DRAFT_VALUE_FLOAT) {
+        return current.real == committed.real;
+    }
+    return current.integer == committed.integer;
 }
 
 static void reduce_draft_observation(
@@ -223,12 +601,9 @@ static bool component_draft_begin(
 
 static bool atlas_edit_matches(
     tp_id128 atlas_id, gui_atlas_field field) {
-    const gui_draft_owner *draft = &s_actions.draft;
-    return draft->family == GUI_DRAFT_ATLAS_SCALAR &&
-           draft->lifecycle.phase != GUI_EDIT_IDLE &&
-           tp_id128_eq(
-               draft->lifecycle.target_id, atlas_id) &&
-           draft->atlas.component == field;
+    return draft_matches(
+        GUI_DRAFT_ATLAS_SCALAR, (int)field, 0, atlas_id,
+        tp_id128_nil(), tp_id128_nil(), NULL);
 }
 
 void gui_edit_atlas_setting(
@@ -474,18 +849,12 @@ const char *gui_text_edit_value(void) {
 
 bool gui_target_path_edit_matches(
     const gui_target_ref *target) {
-    const gui_draft_owner *draft = &s_actions.draft;
     return target &&
-           draft->family == GUI_DRAFT_TEXT &&
-           draft->lifecycle.phase != GUI_EDIT_IDLE &&
-           draft->text.kind ==
-               GUI_TEXT_EDIT_TARGET_OUT_PATH &&
-           tp_id128_eq(
-               draft->text.atlas_id,
-               target->atlas_id) &&
-           tp_id128_eq(
-               draft->lifecycle.target_id,
-               target->target_id);
+           draft_matches(
+               GUI_DRAFT_TEXT,
+               GUI_TEXT_EDIT_TARGET_OUT_PATH, 0,
+               target->atlas_id, target->target_id,
+               tp_id128_nil(), NULL);
 }
 
 bool gui_inline_text_edit_active(void) {
@@ -656,21 +1025,11 @@ static bool component_draft_begin(
 static bool sprite_edit_matches(
     const gui_sprite_ref *sprite,
     gui_sprite_edit_kind kind, int component) {
-    const gui_draft_owner *draft = &s_actions.draft;
     return sprite &&
-           draft->family == GUI_DRAFT_SPRITE &&
-           draft->lifecycle.phase != GUI_EDIT_IDLE &&
-           tp_id128_eq(
-               draft->lifecycle.target_id,
-               sprite->source_id) &&
-           tp_id128_eq(
-               draft->sprite.atlas_id,
-               sprite->atlas_id) &&
-           draft->sprite.kind == kind &&
-           draft->sprite.component == component &&
-           strcmp(
-               draft->sprite.source_key,
-               sprite->source_key ? sprite->source_key : "") == 0;
+           draft_matches(
+               GUI_DRAFT_SPRITE, (int)kind, component,
+               sprite->atlas_id, sprite->source_id,
+               sprite->source_id, sprite->source_key);
 }
 
 static bool edit_sprite_component(
@@ -793,18 +1152,12 @@ static bool animation_intent_push(animation_edit_intent *intent) {
 static bool animation_edit_matches(
     const gui_animation_ref *animation,
     gui_animation_edit_kind kind, int component) {
-    const gui_draft_owner *draft = &s_actions.draft;
     return animation &&
-           draft->family == GUI_DRAFT_ANIMATION &&
-           draft->lifecycle.phase != GUI_EDIT_IDLE &&
-           tp_id128_eq(
-               draft->lifecycle.target_id,
-               animation->animation_id) &&
-           tp_id128_eq(
-               draft->animation.atlas_id,
-               animation->atlas_id) &&
-           draft->animation.kind == kind &&
-           draft->animation.component == component;
+           draft_matches(
+               GUI_DRAFT_ANIMATION, (int)kind, component,
+               animation->atlas_id,
+               animation->animation_id,
+               tp_id128_nil(), NULL);
 }
 
 static bool edit_animation_component(
@@ -973,313 +1326,73 @@ void gui_edit_anim_add_frames(const gui_animation_ref *animation,
     (void)animation_intent_push(&intent);
 }
 
-static bool atlas_draft_is_net_zero(
-    const gui_draft_owner *draft,
-    const tp_snapshot_atlas *atlas) {
-    if (!atlas) {
-        return false;
-    }
-    switch (draft->atlas.component) {
-        case GUI_ATLAS_MAX_SIZE:
-            return draft->atlas.integer == atlas->max_size;
-        case GUI_ATLAS_PADDING:
-            return draft->atlas.integer == atlas->padding;
-        case GUI_ATLAS_MARGIN:
-            return draft->atlas.integer == atlas->margin;
-        case GUI_ATLAS_EXTRUDE:
-            return draft->atlas.integer == atlas->extrude;
-        case GUI_ATLAS_ALPHA_THRESHOLD:
-            return draft->atlas.integer ==
-                   atlas->alpha_threshold;
-        case GUI_ATLAS_MAX_VERTICES:
-            return draft->atlas.integer ==
-                   atlas->max_vertices;
-        case GUI_ATLAS_SHAPE:
-            return draft->atlas.integer == atlas->shape;
-        case GUI_ATLAS_ALLOW_TRANSFORM:
-            return draft->atlas.integer ==
-                   (atlas->allow_transform ? 1 : 0);
-        case GUI_ATLAS_POWER_OF_TWO:
-            return draft->atlas.integer ==
-                   (atlas->power_of_two ? 1 : 0);
-        case GUI_ATLAS_PIXELS_PER_UNIT:
-            return draft->atlas.real ==
-                   atlas->pixels_per_unit;
-    }
-    return false;
-}
-
-static bool text_draft_is_net_zero(
-    const gui_draft_owner *draft,
-    const tp_session_snapshot *snapshot) {
-    const char *committed = NULL;
-    switch (draft->text.kind) {
-        case GUI_TEXT_EDIT_ATLAS_NAME: {
-            const tp_snapshot_atlas *atlas =
-                tp_session_snapshot_atlas_by_id(
-                    snapshot,
-                    draft->lifecycle.target_id);
-            committed = atlas ? atlas->name : NULL;
-            break;
-        }
-        case GUI_TEXT_EDIT_ANIMATION_NAME: {
-            const tp_snapshot_animation *animation =
-                tp_session_snapshot_animation_by_id(
-                    snapshot, draft->text.atlas_id,
-                    draft->lifecycle.target_id);
-            committed = animation ? animation->name
-                                  : NULL;
-            break;
-        }
-        case GUI_TEXT_EDIT_SPRITE_RENAME: {
-            const tp_snapshot_sprite *sprite =
-                tp_session_snapshot_sprite_by_key(
-                    snapshot, draft->text.atlas_id,
-                    draft->text.source_id,
-                    draft->text.source_key);
-            committed =
-                sprite && sprite->rename
-                    ? sprite->rename
-                    : "";
-            break;
-        }
-        case GUI_TEXT_EDIT_TARGET_OUT_PATH: {
-            const tp_snapshot_target *target =
-                tp_session_snapshot_target_by_id(
-                    snapshot, draft->text.atlas_id,
-                    draft->lifecycle.target_id);
-            committed = target ? target->out_path : NULL;
-            break;
-        }
-    }
-    return committed &&
-           strcmp(committed, draft->text.value) == 0;
-}
-
-static bool sprite_draft_is_net_zero(
-    const gui_draft_owner *draft,
-    const tp_session_snapshot *snapshot) {
-    const tp_snapshot_sprite *sprite =
-        tp_session_snapshot_sprite_by_key(
-            snapshot, draft->sprite.atlas_id,
-            draft->sprite.source_id,
-            draft->sprite.source_key);
-    switch (draft->sprite.kind) {
-        case GUI_SPRITE_EDIT_ORIGIN:
-            return draft->sprite.real ==
-                   (draft->sprite.component == 0
-                        ? (sprite ? sprite->origin_x
-                                  : TP_PROJECT_ORIGIN_DEFAULT)
-                        : (sprite ? sprite->origin_y
-                                  : TP_PROJECT_ORIGIN_DEFAULT));
-        case GUI_SPRITE_EDIT_SLICE9:
-            return draft->sprite.integer ==
-                   (sprite
-                        ? sprite->slice9_lrtb[
-                              draft->sprite.component]
-                        : 0);
-        case GUI_SPRITE_EDIT_OVERRIDE: {
-            int committed = TP_PROJECT_OV_INHERIT;
-            if (sprite) {
-                switch ((gui_sprite_ov)
-                            draft->sprite.component) {
-                    case GUI_SPRITE_OV_SHAPE:
-                        committed = sprite->override_shape;
-                        break;
-                    case GUI_SPRITE_OV_ROTATE:
-                        committed =
-                            sprite->override_allow_rotate;
-                        break;
-                    case GUI_SPRITE_OV_MAXVERT:
-                        committed =
-                            sprite->override_max_vertices;
-                        break;
-                    case GUI_SPRITE_OV_MARGIN:
-                        committed = sprite->override_margin;
-                        break;
-                    case GUI_SPRITE_OV_EXTRUDE:
-                        committed = sprite->override_extrude;
-                        break;
-                }
-            }
-            return draft->sprite.integer == committed;
-        }
-    }
-    return false;
-}
-
-static bool animation_draft_is_net_zero(
-    const gui_draft_owner *draft,
-    const tp_session_snapshot *snapshot) {
-    const tp_snapshot_animation *animation =
-        tp_session_snapshot_animation_by_id(
-            snapshot, draft->animation.atlas_id,
-            draft->lifecycle.target_id);
-    if (!animation) {
-        return false;
-    }
-    switch (draft->animation.kind) {
-        case GUI_ANIMATION_EDIT_FPS:
-            return draft->animation.real ==
-                   animation->fps;
-        case GUI_ANIMATION_EDIT_PLAYBACK:
-            return draft->animation.integer ==
-                   animation->playback;
-        case GUI_ANIMATION_EDIT_FLIP:
-            return draft->animation.flag ==
-                   (draft->animation.component == 0
-                        ? animation->flip_h
-                        : animation->flip_v);
-    }
-    return false;
-}
-
-static bool draft_is_net_zero(
-    const gui_draft_owner *draft,
-    const tp_session_snapshot *snapshot) {
-    if (!draft || !snapshot) {
-        return false;
-    }
-    if (draft->family == GUI_DRAFT_ATLAS_SCALAR) {
-        return atlas_draft_is_net_zero(
-            draft,
-            tp_session_snapshot_atlas_by_id(
-                snapshot,
-                draft->lifecycle.target_id));
-    }
-    if (draft->family == GUI_DRAFT_TEXT) {
-        return text_draft_is_net_zero(
-            draft, snapshot);
-    }
-    if (draft->family == GUI_DRAFT_SPRITE) {
-        return sprite_draft_is_net_zero(
-            draft, snapshot);
-    }
-    return draft->family == GUI_DRAFT_ANIMATION &&
-           animation_draft_is_net_zero(
-               draft, snapshot);
-}
-
+/* Builds the ONE typed operation payload this draft submits and hands it to its
+ * concrete mutation owner. Nothing here knows a field name: the row does. */
 static tp_status submit_draft_operation(
     const gui_draft_owner *draft,
     gui_session_submit_identity identity,
     const char transaction_id[33],
     gui_session_submit_terminal *terminal,
     tp_error *error) {
-    const gui_edit_state *edit = &draft->lifecycle;
-    if (draft->family == GUI_DRAFT_ATLAS_SCALAR) {
-        return gui_project_submit_atlas_setting(
-            edit->target_id, edit->base_revision,
-            draft->atlas.component,
-            draft->atlas.component ==
-                    GUI_ATLAS_PIXELS_PER_UNIT
-                ? 0
-                : draft->atlas.integer,
-            draft->atlas.component ==
-                    GUI_ATLAS_PIXELS_PER_UNIT
-                ? draft->atlas.real
-                : 0.0F,
-            identity, transaction_id, terminal,
-            error);
-    }
-    if (draft->family == GUI_DRAFT_SPRITE) {
-        const gui_sprite_ref sprite = {
-            draft->sprite.atlas_id,
-            draft->sprite.source_id,
-            draft->sprite.source_key,
-            edit->base_revision,
-        };
-        switch (draft->sprite.kind) {
-            case GUI_SPRITE_EDIT_ORIGIN:
-                return gui_project_submit_sprite_origin(
-                    &sprite, draft->sprite.component,
-                    draft->sprite.real, identity,
-                    transaction_id, terminal, error);
-            case GUI_SPRITE_EDIT_SLICE9:
-                return gui_project_submit_sprite_slice9(
-                    &sprite, draft->sprite.component,
-                    draft->sprite.integer, identity,
-                    transaction_id, terminal, error);
-            case GUI_SPRITE_EDIT_OVERRIDE:
-                return gui_project_submit_sprite_override(
-                    &sprite,
-                    (gui_sprite_ov)
-                        draft->sprite.component,
-                    draft->sprite.integer, identity,
-                    transaction_id, terminal, error);
-        }
-    }
-    if (draft->family == GUI_DRAFT_ANIMATION) {
-        const gui_animation_ref animation = {
-            draft->animation.atlas_id,
-            edit->target_id,
-            edit->base_revision,
-        };
-        switch (draft->animation.kind) {
-            case GUI_ANIMATION_EDIT_FPS:
-                return gui_project_submit_animation_fps(
-                    &animation, draft->animation.real,
-                    identity, transaction_id,
-                    terminal, error);
-            case GUI_ANIMATION_EDIT_PLAYBACK:
-                return gui_project_submit_animation_playback(
-                    &animation,
-                    draft->animation.integer,
-                    identity, transaction_id,
-                    terminal, error);
-            case GUI_ANIMATION_EDIT_FLIP:
-                return gui_project_submit_animation_flip(
-                    &animation,
-                    draft->animation.component,
-                    draft->animation.flag, identity,
-                    transaction_id, terminal, error);
-        }
-    }
-    if (draft->family != GUI_DRAFT_TEXT) {
+    draft_key key;
+    draft_resolve(draft, &key);
+    const draft_descriptor *row = draft_row(&key);
+    if (!row) {
         return tp_error_set(
-            error, TP_STATUS_INVALID_ARGUMENT,
-            "%s", "unknown GUI draft family");
+            error, TP_STATUS_INVALID_ARGUMENT, "%s",
+            "unknown GUI draft component");
     }
-    switch (draft->text.kind) {
-        case GUI_TEXT_EDIT_ATLAS_NAME:
-            return gui_project_submit_atlas_name(
-                edit->target_id, edit->base_revision,
-                draft->text.value, identity,
-                transaction_id, terminal, error);
-        case GUI_TEXT_EDIT_ANIMATION_NAME: {
-            const gui_animation_ref animation = {
-                draft->text.atlas_id, edit->target_id,
-                edit->base_revision};
-            return gui_project_submit_animation_name(
-                &animation, draft->text.value,
-                identity, transaction_id, terminal,
-                error);
-        }
-        case GUI_TEXT_EDIT_SPRITE_RENAME: {
-            const gui_sprite_ref sprite = {
-                draft->text.atlas_id,
-                draft->text.source_id,
-                draft->text.source_key,
-                edit->base_revision};
-            return gui_project_submit_sprite_name(
-                &sprite, draft->text.value,
-                identity, transaction_id, terminal,
-                error);
-        }
-        case GUI_TEXT_EDIT_TARGET_OUT_PATH: {
-            const gui_target_ref target = {
-                draft->text.atlas_id,
-                edit->target_id,
-                edit->base_revision};
-            return gui_project_submit_target_out_path(
-                &target, draft->text.value,
-                identity, transaction_id, terminal,
-                error);
-        }
+    const int64_t base_revision =
+        draft->lifecycle.base_revision;
+    draft_value value;
+    draft_current_value(draft, row, &value);
+    if (key.family == GUI_DRAFT_TEXT) {
+        const gui_text_ref ref = {
+            key.atlas_id, key.entity_id, key.source_id,
+            key.source_key, base_revision};
+        return gui_project_submit_text(
+            row->op_kind, &ref, value.text, identity,
+            transaction_id, terminal, error);
     }
-    return tp_error_set(
-        error, TP_STATUS_INVALID_ARGUMENT,
-        "%s", "unknown GUI draft family");
+    if (key.family == GUI_DRAFT_ATLAS_SCALAR) {
+        tp_op_atlas_settings settings = {0};
+        settings.mask = row->field_mask;
+        draft_write_payload(row, &settings, &value);
+        return gui_project_submit_atlas_settings(
+            key.atlas_id, base_revision, &settings,
+            identity, transaction_id, terminal, error);
+    }
+    if (key.family == GUI_DRAFT_ANIMATION) {
+        const gui_animation_ref animation = {
+            key.atlas_id, key.entity_id, base_revision};
+        tp_op_anim_settings settings = {0};
+        settings.mask = row->field_mask;
+        draft_write_payload(row, &settings, &value);
+        return gui_project_submit_animation_settings(
+            &animation, &settings, identity,
+            transaction_id, terminal, error);
+    }
+    const gui_sprite_ref sprite = {
+        key.atlas_id, key.source_id, key.source_key,
+        base_revision};
+    /* Origin and slice9 keep dedicated entry points: their untouched sibling
+     * components are read from the LIVE snapshot by the mutation owner. */
+    if (key.kind == GUI_SPRITE_EDIT_ORIGIN) {
+        return gui_project_submit_sprite_origin(
+            &sprite, key.component, value.real, identity,
+            transaction_id, terminal, error);
+    }
+    if (key.kind == GUI_SPRITE_EDIT_SLICE9) {
+        return gui_project_submit_sprite_slice9(
+            &sprite, key.component, value.integer,
+            identity, transaction_id, terminal, error);
+    }
+    tp_op_sprite_set settings = {0};
+    settings.mask = row->field_mask;
+    draft_write_payload(row, &settings, &value);
+    return gui_project_submit_sprite_settings(
+        &sprite, &settings, identity, transaction_id,
+        terminal, error);
 }
 
 static bool submit_draft(bool apply_mine) {
@@ -1306,7 +1419,7 @@ static bool submit_draft(bool apply_mine) {
         snapshot
             ? tp_session_snapshot_revision(snapshot)
             : -1;
-    if (revision < 0 || revision == INT64_MAX) {
+    if (revision < 0) {
         set_status_ex(
             STATUS_ERROR,
             "GUI draft cannot resolve a valid current revision.");
@@ -1339,14 +1452,14 @@ static bool submit_draft(bool apply_mine) {
     tp_status status = TP_STATUS_OK;
     if (apply_mine) {
         status = gui_edit_apply_mine(
-            edit, revision, revision + 1,
+            edit, revision,
             draft_target_present(draft, snapshot),
             transaction_id, &error);
     } else {
         status = gui_edit_commit(
             edit,
             draft_is_net_zero(draft, snapshot),
-            transaction_id, revision + 1, &error);
+            transaction_id, &error);
     }
     if (status != TP_STATUS_OK) {
         set_statusf_ex(
@@ -1573,172 +1686,3 @@ void gui_actions__discard_edits(void) {
 /* Set by a view widget when its gesture ends. The next frame submits the one active draft. */
 void gui_request_gesture_commit(void) { s_actions.gesture_commit = true; }
 // #endregion
-
-void gui_actions__apply_structural_edits(void) {
-    if (s_pending_add_atlas) {
-        const gui_project_create_result created =
-            gui_project_add_atlas();
-        if (created.committed) {
-            gui_view_select_atlas(created.created_id);
-            const tp_snapshot_atlas *added =
-                !tp_id128_is_nil(created.created_id)
-                    ? tp_session_snapshot_atlas_by_id(
-                          gui_project_snapshot(),
-                          created.created_id)
-                    : NULL;
-            set_statusf("Added atlas '%s'", added ? added->name : "?");
-        }
-    }
-    if (s_pending_remove_source) {
-        /* Side effects and success text run only after a real removal. */
-        if (gui_project_remove_source(s_pending_remove_source_atlas_id,
-                                      s_pending_remove_source_id,
-                                      s_pending_remove_source_revision)) {
-            reset_selection();
-            set_status("Removed source (Ctrl+Z to undo).");
-        }
-    }
-    if (s_pending_remove_atlas) {
-        if (gui_project_remove_atlas(s_pending_remove_atlas_id,
-                                     s_pending_remove_atlas_revision)) {
-            gui_view_reconcile_observation(
-                gui_project_snapshot());
-            set_status("Removed atlas (Ctrl+Z to undo).");
-        }
-    }
-    if (s_actions.pending_add_target) {
-        const gui_project_create_result created =
-            gui_project_add_target(
-                s_actions.pending_add_target_atlas_id,
-                s_actions.pending_add_target_revision);
-        if (created.committed) {
-            set_status("Added export target (Ctrl+Z to undo).");
-        }
-    }
-    if (s_actions.pending_remove_target) {
-        if (gui_project_remove_target(&s_actions.pending_remove_target_ref)) {
-            set_status("Removed export target (Ctrl+Z to undo).");
-        }
-    }
-    if (s_actions.pending_browse_target) {
-        gui_actions__browse_target(&s_actions.pending_browse_target_ref);
-    }
-    if (s_actions.pending_add_anim) {
-        const gui_project_create_result created =
-            gui_project_create_animation(
-            s_actions.pending_add_anim_atlas_id, s_actions.pending_add_anim_revision,
-            NULL, NULL, 0);
-        if (created.committed) {
-            const tp_session_snapshot *after_snapshot = gui_project_snapshot();
-            const tp_snapshot_atlas *after_atlas = after_snapshot
-                ? tp_session_snapshot_atlas_by_id(
-                      after_snapshot, s_actions.pending_add_anim_atlas_id)
-                : NULL;
-            const tp_snapshot_animation *animation =
-                after_atlas
-                    ? tp_session_snapshot_animation_by_id(
-                          after_snapshot, after_atlas->id,
-                          created.created_id)
-                    : NULL;
-            if (tp_id128_eq(
-                    gui_view_atlas_id(),
-                    s_actions.pending_add_anim_atlas_id)) {
-                gui_view_select_animation(created.created_id);
-            }
-            set_statusf("Added animation '%s' (Ctrl+Z to undo).", animation ? animation->name : "?");
-        }
-    }
-    if (s_actions.pending_create_anim.active) {
-        const gui_project_create_result created =
-            gui_project_create_animation(
-            s_actions.pending_create_anim.atlas_id,
-            s_actions.pending_create_anim.expected_revision,
-            s_actions.pending_create_anim.name[0] ? s_actions.pending_create_anim.name : NULL,
-            s_actions.pending_create_anim.frames,
-            s_actions.pending_create_anim.frame_count);
-        if (created.committed) {
-            const tp_session_snapshot *after_snapshot = gui_project_snapshot();
-            const tp_snapshot_atlas *after_atlas = after_snapshot
-                ? tp_session_snapshot_atlas_by_id(
-                      after_snapshot, s_actions.pending_create_anim.atlas_id)
-                : NULL;
-            const tp_snapshot_animation *animation =
-                after_atlas
-                    ? tp_session_snapshot_animation_by_id(
-                          after_snapshot, after_atlas->id,
-                          created.created_id)
-                    : NULL;
-            if (tp_id128_eq(
-                    gui_view_atlas_id(),
-                    s_actions.pending_create_anim.atlas_id)) {
-                gui_view_select_animation(created.created_id);
-            }
-            set_statusf("Created animation '%s' with %d frame(s) (Ctrl+Z to undo).",
-                        animation ? animation->name : "?",
-                        s_actions.pending_create_anim.frame_count);
-        }
-    }
-    gui_actions__pending_create_animation_dispose(
-        &s_actions.pending_create_anim);
-    if (s_actions.pending_remove_anim) {
-            /* preview_stop + selection reset + success text run only after a real removal.
-             * On any operation rejection the animation remains, so we must not clear its UI state.
-             * (preview_stop only resets flags,
-             * so running it AFTER the removal is safe -- no project deref.) */
-            const bool was_previewing =
-                s_preview_active &&
-                tp_id128_eq(s_actions.preview_animation_ref.atlas_id,
-                            s_actions.pending_remove_anim_ref.atlas_id) &&
-                tp_id128_eq(s_actions.preview_animation_ref.animation_id,
-                            s_actions.pending_remove_anim_ref.animation_id);
-            if (gui_project_remove_animation(&s_actions.pending_remove_anim_ref)) {
-                if (was_previewing) {
-                    preview_stop();
-                }
-                if (tp_id128_eq(
-                        gui_view_animation_id(),
-                        s_actions.pending_remove_anim_ref.animation_id)) {
-                    gui_view_select_animation(
-                        tp_id128_nil());
-                }
-                set_status("Removed animation (Ctrl+Z to undo).");
-            }
-    }
-    if (s_actions.pending_open_preview) {
-        open_preview_ref(
-            &s_actions.pending_open_preview_ref);
-    }
-}
-
-void gui_actions__clear_pending(void) {
-    gui_actions__clear_history_request();
-    s_actions.pending_lifecycle_request =
-        GUI_LIFECYCLE_REQUEST_NONE;
-    s_pending_open = s_pending_save = s_pending_save_as = false;
-    s_pending_add_files = s_pending_add_folder = s_pending_add_atlas = false;
-    s_pending_refresh = s_pending_pack = s_pending_export = false;
-    s_actions.pending_add_target = false;
-    s_actions.pending_add_target_atlas_id = tp_id128_nil();
-    s_actions.pending_add_target_revision = 0;
-    s_actions.pending_add_anim = false;
-    s_actions.pending_open_preview = false;
-    memset(&s_actions.pending_open_preview_ref, 0,
-           sizeof s_actions.pending_open_preview_ref);
-    s_actions.pending_add_anim_atlas_id = tp_id128_nil();
-    s_actions.pending_add_anim_revision = 0;
-    s_pending_remove_source = false;
-    s_pending_remove_source_atlas_id = tp_id128_nil();
-    s_pending_remove_source_id = tp_id128_nil();
-    s_pending_remove_source_revision = 0;
-    s_pending_remove_atlas = false;
-    s_pending_remove_atlas_id = tp_id128_nil();
-    s_pending_remove_atlas_revision = 0;
-    s_actions.pending_remove_target = false;
-    s_actions.pending_remove_anim = false;
-    gui_actions__pending_create_animation_dispose(
-        &s_actions.pending_create_anim);
-    s_actions.pending_browse_target = false;
-    memset(&s_actions.pending_browse_target_ref, 0,
-           sizeof s_actions.pending_browse_target_ref);
-    s_pending_preview_target = -1;
-}
