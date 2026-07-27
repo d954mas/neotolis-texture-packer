@@ -978,6 +978,15 @@ runs Pack, except where a future explicit auto-pack mode is introduced.
 The cache exists only for the live session. It is not written into the project or
 to a disk cache in the first implementation.
 
+The Pack artifact file the job worker writes (§10.6) is not a counter-example to
+that rule. It is a transient private handoff, not a cache: one file inside a
+per-request private directory under the worker's work directory, keyed by worker
+pid and request id, read exactly once by the host and then deleted — on
+adoption, on cancel, on failure, and on job destroy. A pid-liveness reaper
+removes directories orphaned by a crash. Nothing reads it a second time, nothing
+looks it up by pack-input hash, and it never outlives the request that produced
+it. Result reuse remains memory-only.
+
 Inactive Pack results are stored in a compressed representation containing
 layout/metadata/notices and compressed atlas pages or the normal serialized
 runtime artifact where practical. They do not retain GPU textures or independent
@@ -1028,12 +1037,26 @@ malformed response, or missing artifact becomes a structured
 `builder_crashed`/`builder_failed` result and cannot replace the last successful
 preview.
 
-Inside that outer job process, the existing raw-RGBA build-worker containment
-may remain as a nested child around the assertion-capable engine builder. The
-outer process is its parent and owns its bounded protocol; the host owns the
-outer process group/Job Object, so forced cancellation terminates both levels
-without stranding the nested builder. This is one job authority with a nested
-fault-containment detail, not two competing job owners.
+The outer worker protocol is version 2. Its bounded frames carry the request,
+coalesced progress, and the terminal response; the Pack artifact itself no
+longer travels on the wire. The terminal Pack frame carries the per-request
+artifact path plus its `u64` byte size, and the host validates that file by
+size, magic, and stat before a budgeted chunked read. No full-file digest is
+taken: this is the host's own private output under its own work directory, not
+untrusted input. The UTF-8 sprite name table stays on the wire because it must
+describe the names as they were at pack time — a rename admitted while Pack runs
+must not relabel the sprites in the completed result. Cancellation and transport
+failure fold into the terminal state for both Pack and Export, so a cancelled
+Pack reports `cancelled` rather than a crash.
+
+Inside that outer job process, the raw-RGBA build-worker containment remains as
+a nested child around the assertion-capable engine builder, for Pack and for
+Export alike: Export reaches the same nested worker through the shared
+cancellable pack path. The outer process is its parent and owns its bounded
+protocol; the host owns the outer process group/Job Object, so forced
+cancellation terminates both levels without stranding the nested builder. This
+is one job authority with a nested fault-containment detail, not two competing
+job owners.
 
 An upstream fallible memory/sink builder API may replace the process boundary
 after its error, ownership, cancellation, and UTF-8 contracts are executable-test
@@ -1236,6 +1259,14 @@ ntpacker-gui
 ```
 
 CLI and MCP are not the same mode.
+
+The killable job worker (§10.6) is not a fourth binary. Every first-party
+executable is its own worker: the host spawns its own resolved image with the
+reserved worker argv flag, and the child then selects which service to run by
+reading the frame magic of the first request on its stdin — outer job worker or
+nested build worker. Parent and child are therefore always the same build, and
+no dispatch decision depends on a second executable being installed, findable on
+`PATH`, or version-matched. Failure to resolve the running image fails closed.
 
 ### 14.2 CLI
 

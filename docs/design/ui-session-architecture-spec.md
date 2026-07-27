@@ -112,6 +112,10 @@ It is not a rewrite of `tp_session`.
 
 No GUI structure is a second project model.
 
+The `gui_edit_state` row above (and §1.3) states the ownership rule, not today's
+cardinality: production registers exactly one draft owner, so "per view"
+currently means "one". See §13.
+
 ## 6. Host and client topology
 
 ```text
@@ -263,6 +267,16 @@ The host tracks session-instance generation alongside this token. The exact
 public spelling and generation set may differ. Its semantics may not: every
 independently coalesced observable authority participates in change detection.
 
+A token is a cut over those counters, not a session identity. A client therefore
+never carries an observation token across session instances: attachment observes
+every candidate from scratch with an empty `after` cursor. A token minted by a
+session that has done work lies in a fresh session's future and forces resync,
+but two untouched sessions mint equal all-zero tokens, so a crossed token is not
+self-detecting. The host-owned session-instance generation, not the token, keeps
+instances apart. Embedding a session id in the token is rejected: it widens the
+DTO and adds a comparison to every no-change poll to re-prove a rule the host
+already owns.
+
 ### 7.1 Single cut
 
 Under one session gate, observation:
@@ -284,6 +298,11 @@ Recovery health has two independently changing inputs: model durability health
 and session-owned recovery attachment/requirement state. Both generations
 participate in the token; the typed recovery scalar is copied directly into the
 observation so a recovery-only change does not require project materialization.
+The published `generation` on that scalar is composed over both authorities — a
+saturating sum of the model durability counter and the session recovery-owner
+counter — so an owner-only transition advances it even when model durability is
+unchanged. The observation is the single fresh source: no snapshot carries a
+copy of recovery health.
 
 ### 7.2 Empty observation
 
@@ -453,10 +472,32 @@ acknowledges that submitted draft. Any other revision-changing commit conflicts
 active drafts, including another transaction from the same GUI process or a
 different GUI view.
 
+The pending map is a receipt map, not a replay buffer. It stores the observation
+status and the terminal result of a submitted transaction; it never retains the
+operation, so no path can re-submit a stale operation against a newer revision.
+Retry is caller-driven and idempotent-ID based: the caller supplies the retained
+transaction ID, the identity must match the originating view and draft instance,
+and the core answers `TP_STATUS_DUPLICATE_ID`. The client returns that as this
+attempt's terminal receipt and clears the entry rather than retaining a
+transient answer, so the transaction commits exactly once and a later retry
+re-asks the core instead of replaying.
+
+Not every intent has a receipt. Structural adapter intents that take no terminal
+out-parameter are receipt-free by contract; a consumer must treat an empty
+transaction ID as an explicit no-receipt branch, never as a lost result.
+
 The client owns attach, observe, resync, submit, and detach. The host binding is
 the sole replacement/shutdown owner and commits a prepared client attachment
 only after the old generation has drained. All GUI transaction adapters submit
 through the client; none call `tp_session_apply()` directly after cutover.
+
+Commands are not transactions and do not travel through the client. Undo, Redo,
+Save, Save As, and source invalidation — together with their capability and
+depth queries — belong to the host owner that owns admission (§6.1) and are
+reached through its ingress functions. This is mechanically enforced: a boundary
+sweep rejects `tp_session_undo`, `_redo`, `_save`, `_save_as`,
+`_invalidate_sources`, `_can_undo`, `_can_redo`, `_undo_depth`, and
+`_redo_depth` in every GUI translation unit except the host binding.
 
 ## 10. Frame contract
 
@@ -555,10 +596,20 @@ It must not store:
 Grouped operations rebuild untouched siblings from the newest snapshot on
 explicit Apply Mine.
 
+`submitted_revision` is reported, never predicted. It is filled from the
+transaction receipt; a draft must not fabricate `base_revision + 1`, because the
+revision an admitted transaction lands on is the host's answer and can differ.
+
 ### 12.3 Transitions
 
 - `IDLE -> EDITING` on gesture start.
-- `EDITING -> SUBMITTING` on one explicit gesture commit.
+- `EDITING -> SUBMITTING` on one explicit gesture commit, and only when the
+  submit actually reaches the session. Every non-mutating preflight runs first —
+  phase, current revision, target presence, transaction-id reservation — so a
+  rejection before admission leaves the draft in `EDITING`/`CONFLICTED` instead
+  of stranding it in `SUBMITTING`. A submit that did reach the session and
+  produced no receipt for its exact transaction and identity must likewise leave
+  `SUBMITTING`.
 - `EDITING -> IDLE` on cancel or net-zero gesture.
 - Active draft -> `CONFLICTED` on any revision-changing event except the exact
   transaction submitted by that draft instance.
@@ -596,6 +647,17 @@ model untouched. It must not commit the draft and then reject the outer action.
 
 No old `flush_pending` caller may survive without one exact row in this table.
 
+This table and the §8.3 event-impact table answer different questions and do not
+override each other. §8.3 (and `USA-21`) answers *"does an arriving
+revision-changing event conflict an active draft"*: Save at the same identity
+does not, Undo/Redo does. This table answers *"what happens when the local user
+triggers that outer action while a draft is active"*: Save submits the draft
+first, Undo/Redo is blocked with an explicit Apply/Discard choice. The two
+compose — because the local Undo/Redo trigger is blocked, it never reaches the
+conflict path, so the `USA-21` Undo/Redo half is exercised by an Undo or Redo
+admitted from another view or controller. Likewise, Save submitting the draft
+first is an ordering prerequisite, not a conflict: Save changes no revision.
+
 ## 13. Stable per-view identity
 
 Canonical retained state uses structural identity:
@@ -615,6 +677,17 @@ After observation replacement:
 
 One session event batch is reduced into every registered view, visible or not.
 Commit from View A conflicts an active draft in View B.
+
+The reducer contract above is unchanged, but the shipping GUI does not yet
+exercise it across two views. Production registers exactly **one** draft owner —
+a single embedded `gui_draft_owner` on the one process-wide actions state — and
+a second concurrent draft is impossible by construction: beginning a draft while
+one is active is rejected. Views own selection, navigation, and gestures; they
+own no draft storage. The two-view property is therefore a reducer-level
+property, proven at struct level on two independent draft state machines: only
+the exact `{transaction_id, origin_view_id, draft_instance_id}` receipt resolves
+its own draft, and the same commit conflicts the other. When a second view
+lands, the rule becomes reachable rather than new.
 
 ## 14. Source-runtime boundary
 
@@ -685,7 +758,9 @@ completion. No duplicate second runtime is introduced as an interim solution.
 - `USA-16`: agent commit during numeric, text, rename, and grouped edit preserves
   the draft and conflicts explicitly.
 - `USA-17`: same-field and different-field commits use the same v1 rule.
-- `USA-18`: commit from View A conflicts active draft in View B.
+- `USA-18`: commit from View A conflicts active draft in View B. While
+  production has a single draft owner (§13) this is proven at reducer level on
+  two draft state machines, not through two shipped views.
 - `USA-19`: target deletion disables Apply Mine without losing copyable text.
 - `USA-20`: Apply Mine never restores stale grouped sibling fields.
 - `USA-21`: Save/source/job state does not conflict a draft; Undo/Redo does.

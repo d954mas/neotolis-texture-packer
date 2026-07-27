@@ -1,6 +1,10 @@
 # UI/Session Simplification Plan (Track S)
 
-**Status:** approved for execution
+**Status:** complete — P1..P8 landed on `codex/ui-session-architecture-refactor`
+(`5d3a675`, `6db159a`, `032ba50`, `1a83549`, `d914b50`, `c2033ba`, `886f482`,
+plus this docs commit). Each packet below carries a `Landed:` line recording the
+commit and its deviations from the plan text above it. The plan text is kept as
+written; deviations are recorded, not retconned.
 **Baseline:** `7dc7f00` (branch `codex/ui-session-architecture-refactor`)
 **Normative:** `docs/ntpacker-master-spec.md`, `docs/design/ui-session-architecture-spec.md`
 **Provenance:** independent 6-agent critical review of `d9ff3ff..7dc7f00` (2026-07-27)
@@ -71,6 +75,15 @@ recorded in the review transcripts; this document is the executable result.
   `NTPACKER_GUI_HEADLESS` is a deployment flag and stays.
 - ctest delta: +1..+2 (new fallback/cancel-race assertions).
 
+**Landed:** `5d3a675` — 148/148 debug, 147/147 release (delta 0: the new
+assertions landed inside existing ctests). Deviations: transaction-id resolution
+stays *below* the admission/pin gates — filling the terminal receipt on every
+non-OK return made the move unnecessary, and hoisting it would have reserved an
+ID for calls that never reach admission; the three CLI `NTPACKER_TEST_*` hooks
+are gated by **per-binary** macros (`NTPACKER_CLI_INSPECT_FAULT_SEAM`,
+`NTPACKER_CLI_PACK_ARENA_FAULT_SEAM`) rather than `TP_ENABLE_TEST_SEAMS`, so
+production `ntpacker` has no environment-controlled behaviour at all.
+
 ### P2 — S6': boundary checker fixed in place (before write-path churn)
 
 Keep `cmake/check_architecture_boundaries.cmake` and its fixtures (3-platform,
@@ -89,6 +102,16 @@ ctest-wired). Fix what the review proved broken:
   already exist — verified live, kept.
 - Prune only ratchet entries whose guarded symbol AND file are both gone.
 - ctest delta: 0 (rules change, registrations stay).
+
+**Landed:** `6db159a` — 149/149 debug, 148/148 release (+1: the
+`tp_architecture_negative_unclassified_view` fixture, mutation-tested).
+Deviations: role classification is a **declared file list with bidirectional
+disk↔list guards**, not directory inference — adding or renaming an
+unclassified `gui_view_*` TU now fails the check; intentional deletions live in
+an `_arch_deleted_files` registry so `_arch_assert_absent` can fail closed; the
+`gui_host_queue` carve-out was replaced by two direct invariants (struct-storage
+scan + `gui_host_queue_*` containment sweep); **zero ratchet entries were
+pruned** — no entry had both its guarded symbol and its file gone.
 
 ### P3 — S1: job transport (includes the transport-side S0 items)
 
@@ -122,6 +145,20 @@ ctest-wired). Fix what the review proved broken:
   closes the CI headless gap).
 - ctest delta: 0 (Unity cases inside existing ctests).
 
+**Landed:** `032ba50` — 149/149 debug, 148/148 release (delta 0). Wire protocol
+version 2. Five deviations: (1) `tp_pack_cancellable` was not left untouched —
+`tp_pack_cancellable_observed` is reimplemented on top of the new
+`tp_pack_produce_observed` seam (Export/CLI behaviour unchanged); (2) the frame
+cap did not go away — `TP_JOB_WORKER_PROTO_MAX_FRAME_BYTES` was kept and lowered
+272 MiB → **80 MiB** (64 MiB project JSON + 16 MiB), and the stream cap stays
+derived from it (+16 MiB); (3) `artifact_size` is kept on the wire as a **u64
+validation input**, checked against `tp_fs_stat` rather than replaced by it;
+(4) cancel relabelling was single-sited into `job_publish_response` instead of
+being fixed per terminal path (this is what fixed cancelled-Pack reporting
+`crashed`); (5) `tp_job_worker__test_*` had to be fenced behind
+`TP_ENABLE_TEST_SEAMS` with the worker main TU compiled into the transport test
+target, so the racy cancel test could be fixed in place as planned.
+
 ### P4 — S3: GUI write path
 
 - One `tp_operation` build per mutation: `gui_project_submit_*` passes the
@@ -145,6 +182,18 @@ ctest-wired). Fix what the review proved broken:
   `gui_selftest.c:654-667`).
 - ctest delta: 0. Frozen oracle tests must not change.
 
+**Landed:** `1a83549` — 149/149 debug, 148/148 release (delta 0); net −496 LOC;
+the five frozen oracle tests are byte-identical. Deviations: **three**
+default-less switches remain, not two (payload write, snapshot read, and the
+draft-value read all need `-Wswitch` exhaustiveness); the descriptor table is
+**25 rows**; 11 forwarders were deleted rather than 6-8, but **four thin
+submit-ingress functions were kept on purpose** — `gui_project_submit_text`,
+`_atlas_settings`, `_sprite_settings`, `_animation_settings` — because they are
+the family-level payload boundary the parity harness binds to, not per-field
+pass-throughs. The one sanctioned behaviour change is the parity corpus moving
+to `TP_STATUS_DUPLICATE_ID`; USA-12's named successor is the core retained-ID
+test plus `test_retained_id_retry_commits_once_and_returns_duplicate_result`.
+
 ### P5 — S4': host owner boundary closure (no merge)
 
 - Close the 7-8 `gui_project.c` → `binding.queue` bypass sites with thin
@@ -155,6 +204,18 @@ ctest-wired). Fix what the review proved broken:
   null-probe borrows.
 - Terminality poll-DTO cleanup inside the queue (observation is the authority).
 - ctest delta: 0 (queue tests keep their entry points).
+
+**Landed:** `d914b50` — 149/149 debug, 148/148 release (delta 0). Deviations:
+the ingress cost **+244 LOC, not ~40** — re-homing Undo/Redo/Save/SaveAs/
+invalidate onto the host owner needs nine command functions plus four
+capability queries (`can_undo`/`can_redo`/`undo_depth`/`redo_depth`), because
+the depth/capability reads borrow the session exactly like the commands do; the
+P2 rule alone did not express this, so a new **`R2d single host command owner`
+sweep** was added (`cmake/check_architecture_boundaries.cmake`) banning
+`tp_session_undo|redo|save|save_as|invalidate_sources|can_undo|can_redo|
+undo_depth|redo_depth` in every GUI TU except `gui_host_binding.c`. The
+`is_attached()` predicate replaced 13 null-probe borrows (not ~14) and cut the
+borrow-owner list 5 → 3.
 
 ### P6 — S5': observation cleanup
 
@@ -172,6 +233,19 @@ ctest-wired). Fix what the review proved broken:
   (proves the existing host-side instance-generation check).
 - ctest delta: 0.
 
+**Landed:** `c2033ba` — 149/149 debug, 148/148 release (delta 0). Deviations:
+the planned cross-session test found that a token is a **counter cut, not a
+session identity** — a token from a session that did work sits in a fresh
+session's future and correctly forces resync, but two *untouched* sessions mint
+equal **all-zero** tokens, so crossing one between them reads as "nothing
+changed". That is documented, not patched: embedding a session id in the token
+was rejected (wider DTO, extra comparison per poll) in favour of the host-owned
+rule, which the paired GUI test now pins — `gui_session_client_prepare` observes
+every candidate with `after == NULL`, so **attachment always observes from
+scratch**. Deleting the snapshot `recovery_health` field also cleaned the
+detached `tp_session_snapshot_load` path, which had been hand-seeding a
+`recovery_degraded` notice on a snapshot that has no session behind it.
+
 ### P7 — S7: test consolidation
 
 - Split `test_gui_action_trace.c` → `_draft` (28) / `_refresh` (10) /
@@ -185,6 +259,16 @@ ctest-wired). Fix what the review proved broken:
   successor. The manifest self-test and cross-product oracles stay (rule 3).
 - ctest delta: +2 (148→150 debug, 147→149 release).
 
+**Landed:** `886f482` — 151/151 debug, 150/150 release (+2 as planned, on the
+149/148 base the earlier packets had already reached). Deviations: the split is
+`_draft` **25** / `_refresh` **10** / `_job` **21** (57 tests, all bodies
+byte-identical incl. the five frozen oracles); **zero deletions** — no
+duplicated integration fixture met the named-successor rule, because each facade
+test exercises a path the pure reducer table cannot reach; USA tagging landed as
+**15 full and 17 partial** coverage claims, each partial carrying its named
+limit in the tag comment, enforced by a new `check_boundaries.sh` R22 grep gate
+with self-tests.
+
 ### P8 — S8: docs
 
 - Spec: §13/USA-18 → single draft owner reality; USA-21 vs §12.4 — quote both,
@@ -192,6 +276,19 @@ ctest-wired). Fix what the review proved broken:
   handoff reconciled with master-spec §10.4 ("transient private handoff, not
   a cache"); structural-intent receipt-free contract; §12.4 already-green table.
 - Old refactor plan: mark superseded items; this plan gets the ledger.
+
+**Landed:** this commit — docs only, no ctest/boundary delta (151/151 debug,
+150/150 release unchanged). Deviations: **USA-21 vs §12.4 is not a
+contradiction** — §8.3/USA-21 answer "does an arriving revision-changing event
+conflict an active draft" while §12.4 answers "what happens when the local user
+triggers the outer action while a draft is active". Both texts are quoted in the
+report; the only edit is one clarifying sentence under §12.4 naming the two
+axes, since the local Undo/Redo trigger is blocked-with-choice and never reaches
+the conflict path — USA-21's Undo/Redo half is exercised by an Undo/Redo
+admitted from another view or controller. Two further amendments beyond the
+packet text: master-spec §14.1 gains the worker mode (argv flag for worker mode,
+then frame magic selects job vs build service), and §10.6 records wire v2 with
+the path + u64 size terminal frame.
 
 ## Deferred (explicitly out of Track S)
 
