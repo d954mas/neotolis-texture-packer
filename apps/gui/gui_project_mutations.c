@@ -45,12 +45,6 @@ static gui_coalesce_key make_key(gui_coalesce_kind kind, int field) {
     return k;
 }
 
-static gui_coalesce_key make_atlas_key(tp_id128 atlas_id, int field) {
-    gui_coalesce_key key = make_key(CK_ATLAS_SETTING, field);
-    key.atlas_id = atlas_id;
-    return key;
-}
-
 static bool make_sprite_key(gui_coalesce_kind kind, const gui_sprite_ref *sprite,
                             int field, gui_coalesce_key *out) {
     if (!sprite || !sprite->source_key || !out) {
@@ -388,30 +382,42 @@ static bool fill_atlas_knob(tp_op_atlas_settings *s, gui_atlas_field f, int iv, 
     return false;
 }
 
-bool gui_project_set_atlas_setting(tp_id128 atlas_id, int64_t expected_revision,
-                                   gui_atlas_field field, int ivalue, float fvalue) {
-    if (!gui_project__borrow_active_session() || tp_id128_is_nil(atlas_id)) {
-        return false;
+tp_status gui_project_submit_atlas_setting(
+    tp_id128 atlas_id, int64_t expected_revision,
+    gui_atlas_field field, int ivalue, float fvalue,
+    gui_session_submit_identity identity,
+    const char transaction_id[33],
+    gui_session_submit_terminal *out_terminal,
+    tp_error *err) {
+    if (!gui_project__borrow_active_session() ||
+        tp_id128_is_nil(atlas_id) || !transaction_id) {
+        return tp_error_set(
+            err, TP_STATUS_INVALID_ARGUMENT,
+            "atlas draft submit requires an active session, target, and transaction");
     }
-    gui_coalesce_key ck = make_atlas_key(atlas_id, (int)field);
-    const int64_t revision_before_route = tp_session_revision(gui_project__borrow_active_session());
-    gui_project_pending_route(&ck); /* flush a different knob's pending BEFORE reading this atlas */
     const tp_session_snapshot *snapshot = gui_project_snapshot();
-    if (!snapshot || !tp_session_snapshot_atlas_by_id(snapshot, atlas_id)) {
-        return false;
+    if (!snapshot ||
+        !tp_session_snapshot_atlas_by_id(snapshot, atlas_id)) {
+        return tp_error_set(
+            err, TP_STATUS_NOT_FOUND,
+            "the edited atlas no longer exists");
     }
     tp_operation op;
     memset(&op, 0, sizeof op);
     op.kind = TP_OP_ATLAS_SETTINGS_SET;
     op.atlas_id = atlas_id;
     if (!fill_atlas_knob(&op.u.atlas_settings, field, ivalue, fvalue)) {
-        tp_operation_free(&op);
-        return false;
+        return tp_error_set(
+            err, TP_STATUS_INVALID_ARGUMENT,
+            "unknown atlas draft component");
     }
-    expected_revision = revision_after_owned_route(expected_revision,
-                                                   revision_before_route);
-    s_project.pending_expected_revision = expected_revision;
-    return gui_project_pending_offer(&ck, &op);
+    const tp_status status =
+        gui_session_set_atlas_settings(
+            &s_project.binding.client, atlas_id,
+            expected_revision, &op.u.atlas_settings,
+            identity, transaction_id, out_terminal, err);
+    tp_operation_free(&op);
+    return status;
 }
 
 /* Buffers a sprite.override.set at its canonical {source_id, source-local key}.
@@ -660,7 +666,7 @@ bool gui_project_set_target(const gui_target_ref *target, const char *exporter_i
  * field, however, fired one gui_project_set_target per keystroke -> one committed TP_OP_TARGET_SET per
  * keystroke = undo spam. Buffering it under a per-target key (field = index) makes
  * the field's existing Enter/blur gesture-commit flush the whole edit as ONE undo step -- mirrors the
- * atlas-settings path (gui_project_set_atlas_setting). The op is MASKED to TP_TF_OUT_PATH: it carries ONLY
+ * target out-path path below. The op is MASKED to TP_TF_OUT_PATH: it carries ONLY
  * out_path, so exporter_id + enabled are left untouched by apply -- no RMW-seed, and no way for this edit to
  * clobber a concurrently-changed sibling field (C1 mask). Switching to a different target index is a
  * different key -> gui_project_pending_route flushes -> a correct one-undo-per-target boundary. */

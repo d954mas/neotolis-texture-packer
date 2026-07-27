@@ -286,8 +286,18 @@ static void bench_run_probes(void) {
         const int64_t rev = tp_session_snapshot_revision(snap);
         const int newpad = (a0->padding == 4) ? 2 : 4; /* always differs; stays in a valid band */
         const double e0 = bench_now_ms();
+        gui_edit_atlas_setting(
+            a0->id, rev, GUI_ATLAS_PADDING,
+            newpad, 0.0F);
+        gui_request_gesture_commit();
+        apply_pending();
+        snap = gui_project_snapshot();
+        a0 = snap
+                 ? tp_session_snapshot_atlas_at(
+                       snap, 0)
+                 : NULL;
         const bool edit_ok =
-            gui_project_set_atlas_setting(a0->id, rev, GUI_ATLAS_PADDING, newpad, 0.0F);
+            a0 && a0->padding == newpad;
         const double e1 = bench_now_ms();
         bench_samples_record(&edit, edit_ok, e1 - e0);
         if (!edit_ok) {

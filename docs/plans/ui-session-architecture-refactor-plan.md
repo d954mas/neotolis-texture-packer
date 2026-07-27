@@ -119,22 +119,49 @@ ownership.
 **Implement:**
 
 1. Concrete states: `IDLE`, `EDITING`, `SUBMITTING`, `CONFLICTED`.
-2. Store only stable target, exact component, draft value, base revision,
-   view ID, draft instance ID, and submitted transaction ID.
+2. `gui_edit_state` stores only stable lifecycle identity and revisions. The
+   concrete `gui_atlas_draft` beside it stores the exact component and scalar
+   value; there is no generic field/value union.
 3. Reduce exact submit echo, foreign model event, no-op, validation/OOM,
    gap/resync, target deletion, Apply Mine, and Discard.
 4. Convert the complete `CK_ATLAS_SETTING` family end to end.
 5. Keep simple committed values as direct pinned-snapshot reads.
+6. Apply the normative lifecycle table to the first converted draft family:
+   failed gesture/Save/Pack prerequisites abort dependent actions; Undo/Redo
+   preserve the draft; Open/New and in-app Exit require Apply and Continue,
+   Discard and Continue, or Cancel.
+
+**Verified owner/dependency cut:**
+
+- the settings view emits one scalar intent and renders the reducer's effective
+  value over the pinned snapshot;
+- one concrete `gui_atlas_draft` combines the lifecycle state with the exact
+  atlas component/value and is the only semantic uncommitted value;
+- the action sink rebuilds one narrow masked atlas operation only at submit;
+- after an exact successful atlas prerequisite, only remaining intents captured
+  at that exact pre-submit revision advance with the local action batch; an
+  already-stale intent is never rebased or retried;
+- `gui_session_client` supplies exact view/draft/transaction receipts and the
+  atomic observation stream;
+- `tp_session` remains the only model, validation, revision, history, and
+  mutation owner.
 
 **Delete:**
 
 - the `CK_ATLAS_SETTING` route from the broad pending operation;
-- any atlas scalar buffer that mirrors the same draft;
-- any revision-only acknowledgement.
+- the atlas action-intent array and ready-to-submit pending operation;
+- atlas scalar mirrors as semantic state. Engine-required text/caret scratch may
+  remain only as presentation storage and must be refreshed from the reducer's
+  effective value when it is not focused;
+- the atlas use of revision-only acknowledgement/rebase. The shared
+  `revision_after_owned_route()` helper remains until its R3c consumers are
+  converted and is deleted with them.
 
 **Gate:** exhaustive pure reducer table; one gesture is one transaction/Undo;
 another transaction from the same GUI process conflicts unless view/draft ID is
-an exact match.
+an exact match; failed prerequisite submission cannot continue or retry its
+dependent action; every session-replacing lifecycle request requires the
+explicit draft decision.
 
 ### R3b — Text, rename, and path drafts
 
@@ -197,6 +224,10 @@ Prove:
 - one flow per outer-action ordering class;
 - validation, OOM, resync, target deletion, and two-view conflict;
 - raw close/shutdown never converts a failed draft commit into silent success.
+
+Raw title-bar Close requires a public engine close-request/veto seam. The
+engine submodule remains read-only: that seam must ship through an upstream
+engine issue/PR before this R3d acceptance item can pass.
 
 Remove integration fixtures that duplicate the pure reducer table.
 

@@ -15,6 +15,7 @@
 
 #include <stdbool.h>
 
+#include "gui_edit_state.h"
 #include "tp_core/tp_model.h"   /* tp_result (preview_target_result return type) */
 
 #include "gui_project_view.h" /* passive identities + deferred-edit enqueue types */
@@ -47,7 +48,7 @@ void gui_request_remove_target_ref(const gui_target_ref *target);
 void gui_request_browse_target(int atlas_index, int target_index);
 extern int s_pending_preview_target; /* boundary-ok: exporter option, not a target entity index */
 
-/* --- new/open/exit unsaved-changes confirm flow --- */
+/* --- new/open/exit draft resolution + unsaved-changes confirm flow --- */
 typedef enum gui_lifecycle_request {
     GUI_LIFECYCLE_REQUEST_NONE = 0,
     GUI_LIFECYCLE_REQUEST_NEW,
@@ -56,6 +57,7 @@ typedef enum gui_lifecycle_request {
 } gui_lifecycle_request;
 extern gui_lifecycle_request s_after_confirm;
 extern bool s_confirm_open;
+extern bool s_confirm_draft;
 enum { MODAL_NONE = 0, MODAL_SAVE, MODAL_DISCARD, MODAL_CANCEL };
 extern int s_modal_action;
 
@@ -74,18 +76,19 @@ void gui_actions_recovery_request(int row, int action);        /* action = gui_r
 extern double s_last_pack_ms;   /* wall-clock ms of the last successful pack (for the stats line) */
 extern int s_last_pack_atlas;   /* which atlas that timing belongs to */
 
-/* --- deferred MODEL-EDIT queue (decision 0015) ---
- * A commit clone-swaps the model and frees the old project, so a declare_* render fn must
- * NEVER commit while holding a live atlas/sprite/anim/target pointer (the whole
- * pointer-invalidation UAF class). Instead the declare fns ENQUEUE the edit here (capturing
- * the atlas INDEX + typed args + copied strings -- never a pointer); apply_pending drains
- * the queue at frame top, where no live declare-fn pointer is held, by calling the
- * self-contained gui_project_* setters. Coalescable setters BUFFER into gui_project's pending
- * transaction (they do not commit on drain); a gesture boundary raises
- * gui_request_gesture_commit(), which apply_pending honours by flushing the buffer -- so one
- * interaction = one committed transaction = one undo step (decision 0015). */
-void gui_queue_atlas_setting(tp_id128 atlas_id, int64_t expected_revision,
-                             gui_atlas_field field, int ivalue, float fvalue);
+/* --- deferred semantic ingress ---
+ * Atlas scalars update one view-local draft reducer during declaration and submit one typed
+ * operation at the gesture boundary. Other edit families still enqueue owned values for the
+ * frame-top drain until their R3 cutover. No retained edit stores a model/session pointer. */
+void gui_edit_atlas_setting(tp_id128 atlas_id, int64_t expected_revision,
+                            gui_atlas_field field, int ivalue, float fvalue);
+bool gui_atlas_edit_value(tp_id128 atlas_id, gui_atlas_field field,
+                          int *ivalue, float *fvalue);
+bool gui_atlas_edit_targets(tp_id128 atlas_id);
+gui_edit_phase gui_atlas_edit_phase(void);
+bool gui_atlas_edit_can_apply(void);
+void gui_atlas_edit_apply_mine(void);
+void gui_atlas_edit_discard(void);
 void gui_queue_sprite_origin(const gui_sprite_ref *sprite, int axis, float value); /* axis 0=X, 1=Y (#2) */
 void gui_queue_sprite_slice9(const gui_sprite_ref *sprite, int lrtb_index, int value);
 void gui_queue_sprite_override(const gui_sprite_ref *sprite, gui_sprite_ov which, int value);

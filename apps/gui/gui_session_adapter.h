@@ -24,6 +24,8 @@ tp_status gui_session_remove_atlas(gui_session_client *client, tp_id128 atlas_id
 tp_status gui_session_set_atlas_settings(gui_session_client *client, tp_id128 atlas_id,
                                          int64_t expected_revision,
                                          const tp_op_atlas_settings *settings,
+                                         gui_session_submit_identity identity,
+                                         const char transaction_id[33],
                                          gui_session_submit_terminal *out_terminal,
                                          tp_error *err);
 tp_status gui_session_add_sources(gui_session_client *client, tp_id128 atlas_id,

@@ -320,7 +320,8 @@ static int outcome_error(const char *path) {
     settings.mask = TP_AF_PADDING;
     settings.padding = -1;
     const tp_status status = gui_session_set_atlas_settings(
-        &s_replay_client, atlas_id, revision_before, &settings, NULL, &err);
+        &s_replay_client, atlas_id, revision_before, &settings,
+        (gui_session_submit_identity){0}, NULL, NULL, &err);
     int64_t revision_after = 0;
     uint64_t events_after = 0U;
     const int snapshot_rc = snapshot_counters(
@@ -542,7 +543,9 @@ static int replay_atlas(tp_session *session, const harvest_ids *ids,
     settings.margin = 2;
     status = gui_session_set_atlas_settings(&s_replay_client, ids->atlas_id,
                                             revision_of(session, err),
-                                            &settings, NULL, err);
+                                            &settings,
+                                            (gui_session_submit_identity){0},
+                                            NULL, NULL, err);
     return status == TP_STATUS_OK ? 0 : fail("atlas settings", status, err);
 }
 

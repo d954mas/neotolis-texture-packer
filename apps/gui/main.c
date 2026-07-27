@@ -564,7 +564,15 @@ static void frame(void) {
             s_recovery_open = false; /* Esc = "Later": leave every orphan on disk, no data loss */
         } else if (s_confirm_open) {
             s_confirm_open = false;
+            s_confirm_draft = false;
             s_after_confirm = GUI_LIFECYCLE_REQUEST_NONE;
+        } else if (gui_atlas_edit_phase() !=
+                   GUI_EDIT_IDLE) {
+            gui_atlas_edit_discard();
+            if (gui_atlas_edit_phase() ==
+                GUI_EDIT_IDLE) {
+                set_status("Atlas edit discarded.");
+            }
         } else if (s_filter_active || gui_rows_filter_active()) {
             gui_rows_set_filter(""); /* Esc clears the sprite-tree speed-search. */
             s_filter_active = false;

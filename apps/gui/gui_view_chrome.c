@@ -653,20 +653,46 @@ void declare_export_modal(nt_ui_context_t *ctx) {
 
 void declare_confirm_modal(nt_ui_context_t *ctx) {
     if (nt_ui_modal_visible(ctx, s_id_modal, &s_modal_style, &s_confirm_open)) {
-        CLAY({.layout = {.sizing = {CLAY_SIZING_FIXED(S(460)), CLAY_SIZING_FIT(0)},
+        const gui_edit_phase draft_phase =
+            gui_atlas_edit_phase();
+        const bool apply_enabled =
+            !s_confirm_draft ||
+            draft_phase == GUI_EDIT_EDITING ||
+            (draft_phase == GUI_EDIT_CONFLICTED &&
+             gui_atlas_edit_can_apply());
+        CLAY({.layout = {.sizing = {
+                             CLAY_SIZING_FIXED(
+                                 S(s_confirm_draft ? 520 : 460)),
+                             CLAY_SIZING_FIT(0)},
                          .padding = {Su(22), Su(22), Su(22), Su(22)},
                          .layoutDirection = CLAY_TOP_TO_BOTTOM,
                          .childGap = Su(16)},
               .backgroundColor = C_PANEL,
               .cornerRadius = CLAY_CORNER_RADIUS(S(8)),
               .border = {.color = C_BORDER, .width = {Su(1), Su(1), Su(1), Su(1), 0}}}) {
-            nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), "Unsaved changes", &g_body);
-            nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), "Save changes before continuing?", &g_caption);
+            nt_ui_label(
+                ctx, NT_UI_DATA_LAYER(LAYER_TEXT),
+                s_confirm_draft
+                    ? "Uncommitted edit"
+                    : "Unsaved changes",
+                &g_body);
+            nt_ui_label(
+                ctx, NT_UI_DATA_LAYER(LAYER_TEXT),
+                s_confirm_draft
+                    ? "Apply this edit before continuing?"
+                    : "Save changes before continuing?",
+                &g_caption);
             CLAY({.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT, .childGap = Su(12), .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
-                if (ui_btn(ctx, nt_ui_id("ntpacker/modal_save"), "Save", &g_btn_primary, true, 100.0F, 34.0F, &g_onaccent)) {
+                if (ui_btn(ctx, nt_ui_id("ntpacker/modal_save"),
+                           s_confirm_draft ? "Apply & Continue" : "Save",
+                           &g_btn_primary, apply_enabled,
+                           s_confirm_draft ? 150.0F : 100.0F, 34.0F, &g_onaccent)) {
                     s_modal_action = MODAL_SAVE;
                 }
-                if (ui_btn(ctx, nt_ui_id("ntpacker/modal_discard"), "Discard", &g_btn, true, 100.0F, 34.0F, &g_body)) {
+                if (ui_btn(ctx, nt_ui_id("ntpacker/modal_discard"),
+                           s_confirm_draft ? "Discard & Continue" : "Discard",
+                           &g_btn, true,
+                           s_confirm_draft ? 165.0F : 100.0F, 34.0F, &g_body)) {
                     s_modal_action = MODAL_DISCARD;
                 }
                 if (ui_btn(ctx, nt_ui_id("ntpacker/modal_cancel"), "Cancel", &g_btn, true, 100.0F, 34.0F, &g_body)) {

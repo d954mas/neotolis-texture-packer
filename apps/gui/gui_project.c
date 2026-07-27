@@ -13,9 +13,8 @@
 #include "tp_session_internal.h"
 #endif
 
-/* GUI mutation and Undo/Redo run through tp_session; reads use one cached owned
- * snapshot. Field edits coalesce by exact target until the gesture boundary, so
- * one gesture produces one transaction and one Undo step. */
+/* GUI mutation and Undo/Redo run through tp_session; reads use one atomically observed
+ * immutable snapshot. Feature-local draft owners submit one typed transaction per gesture. */
 
 gui_project_state s_project;
 
@@ -248,6 +247,20 @@ void gui_project_frame_end(void) {
 bool gui_project_frame_is_pinned(void) {
     return gui_session_client_frame_is_pinned(
         &s_project.binding.client);
+}
+
+tp_status gui_project_register_observation_reducer(
+    gui_session_client_reducer_fn reduce, void *context, tp_error *err) {
+    return gui_session_client_register_reducer(
+        &s_project.binding.client, reduce, context, err);
+}
+
+bool gui_project_submit_receipt_query(
+    const char transaction_id[33],
+    gui_session_submit_identity identity,
+    gui_session_submit_terminal *out) {
+    return gui_session_client_pending_submit_query(
+        &s_project.binding.client, transaction_id, identity, out);
 }
 
 tp_status gui_project_job_enqueue_pack(

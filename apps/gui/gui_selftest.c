@@ -40,6 +40,7 @@
 #include "nt_utf8_fs.h" /* UTF-8 fixture filenames on Windows */
 
 #include "gui_actions.h"  /* do_pack_blocking / reset_selection / preview_stop / anim ops + gui_request_gesture_commit */
+#include "gui_actions_internal.h" /* focused reducer submit prerequisite */
 #include "gui_canvas.h"   /* s_canvas ops + GUI_CANVAS_ATLAS */
 #include "gui_pack.h"     /* gui_pack_* + GUI_PACK_ASYNC_* */
 #include "gui_project.h"  /* gui_project_* + GUI_SPRITE_OV_SHAPE / GUI_ADD_DUPLICATE */
@@ -200,15 +201,6 @@ static bool selftest_set_atlas_name_at(int index, const char *name) {
                         atlas->id, tp_session_snapshot_revision(snapshot), name);
 }
 
-static bool selftest_set_atlas_setting_at(int index, gui_atlas_field field,
-                                          int ivalue, float fvalue) {
-    const tp_session_snapshot *snapshot = NULL;
-    const tp_snapshot_atlas *atlas = selftest_atlas_at(index, &snapshot);
-    return atlas && gui_project_set_atlas_setting(
-                        atlas->id, tp_session_snapshot_revision(snapshot), field,
-                        ivalue, fvalue);
-}
-
 static bool selftest_remove_atlas_at(int index) {
     const tp_session_snapshot *snapshot = NULL;
     const tp_snapshot_atlas *atlas = selftest_atlas_at(index, &snapshot);
@@ -221,15 +213,6 @@ static tp_status selftest_copy_atlas_name_at(int index, char *out, size_t capaci
     const tp_snapshot_atlas *atlas = selftest_atlas_at(index, NULL);
     return atlas ? gui_project_copy_atlas_name(atlas->id, out, capacity, err)
                  : tp_error_set(err, TP_STATUS_NOT_FOUND, "atlas index was not found");
-}
-
-static void selftest_queue_atlas_int(int index, gui_atlas_field field, int value) {
-    const tp_session_snapshot *snapshot = NULL;
-    const tp_snapshot_atlas *atlas = selftest_atlas_at(index, &snapshot);
-    if (atlas) {
-        gui_queue_atlas_setting(atlas->id, tp_session_snapshot_revision(snapshot),
-                                field, value, 0.0F);
-    }
 }
 
 static gui_add_status selftest_add_source_at(int index, const char *path) {
@@ -494,71 +477,10 @@ static void selftest_queue_target_at(int atlas_index, int target_index,
     }
 }
 
-/* A flush may advance the revision only for an intent that was current before
- * that flush.  A genuinely stale ref must not be rewritten to the new revision
- * merely because pending_route committed a different valid gesture. */
-static bool selftest_stale_coalesced_intent_is_rejected(void) {
-    if (!gui_project_test_new()) {
-        return false;
-    }
-    gui_target_ref stale_target;
-    if (!gui_project_target_ref_at(0, 0, &stale_target)) {
-        return false;
-    }
-    const tp_session_snapshot *snapshot = NULL;
-    const tp_snapshot_atlas *atlas = selftest_atlas_at(0, &snapshot);
-    if (!atlas || !gui_project_set_atlas_name(
-                      atlas->id, tp_session_snapshot_revision(snapshot), "advanced")) {
-        return false;
-    }
-    atlas = selftest_atlas_at(0, &snapshot);
-    if (!atlas || !gui_project_set_atlas_setting(
-                      atlas->id, tp_session_snapshot_revision(snapshot),
-                      GUI_ATLAS_PADDING, atlas->padding + 1, 0.0F)) {
-        return false;
-    }
-    if (!gui_project_set_target_out_path(&stale_target, "out/must-not-land")) {
-        return false;
-    }
-    const bool flushed = gui_project_flush_pending();
-    const tp_snapshot_target *target = selftest_target_at(0, 0);
-    return !flushed && target && strcmp(target->out_path, "out/must-not-land") != 0;
-}
-
-static bool selftest_stale_discrete_intent_is_rejected(void) {
-    if (!gui_project_test_new()) {
-        return false;
-    }
-    gui_target_ref stale_target;
-    if (!gui_project_target_ref_at(0, 0, &stale_target)) {
-        return false;
-    }
-    const tp_session_snapshot *snapshot = NULL;
-    const tp_snapshot_atlas *atlas = selftest_atlas_at(0, &snapshot);
-    if (!atlas || !gui_project_set_atlas_name(
-                      atlas->id, tp_session_snapshot_revision(snapshot),
-                      "advanced-discrete")) {
-        return false;
-    }
-    atlas = selftest_atlas_at(0, &snapshot);
-    if (!atlas || !gui_project_set_atlas_setting(
-                      atlas->id, tp_session_snapshot_revision(snapshot),
-                      GUI_ATLAS_PADDING, atlas->padding + 1, 0.0F)) {
-        return false;
-    }
-    const bool accepted = gui_project_set_target_enabled(&stale_target, false);
-    const tp_snapshot_target *target = selftest_target_at(0, 0);
-    return !accepted && target && target->enabled;
-}
-
 #define gui_project_set_atlas_name(index, name) selftest_set_atlas_name_at((index), (name))
-#define gui_project_set_atlas_setting(index, field, ivalue, fvalue) \
-    selftest_set_atlas_setting_at((index), (field), (ivalue), (fvalue))
 #define gui_project_remove_atlas(index) selftest_remove_atlas_at((index))
 #define gui_project_copy_atlas_name(index, out, capacity, err) \
     selftest_copy_atlas_name_at((index), (out), (capacity), (err))
-#define gui_edit_atlas_int(index, field, value) \
-    selftest_queue_atlas_int((index), (field), (value))
 #define gui_project_add_source(index, path) selftest_add_source_at((index), (path))
 #define gui_project_add_sources(index, paths, count, kind, added, duplicate) \
     selftest_add_sources_at((index), (paths), (count), (kind), (added), (duplicate))
@@ -1519,13 +1441,34 @@ void run_selftest(void) {
         gui_scan_invalidate_all();
 
         gui_project_mark_packed(); /* pretend current, then a setting change must set stale */
-        (void)gui_project_set_atlas_setting(0, GUI_ATLAS_PADDING, 7, 0.0F);
+        const tp_session_snapshot *setting_snapshot = NULL;
+        const tp_snapshot_atlas *setting_atlas =
+            selftest_atlas_at(0, &setting_snapshot);
+        NT_ASSERT(setting_atlas && "settings fixture resolves atlas 0");
+        gui_edit_atlas_setting(
+            setting_atlas->id,
+            tp_session_snapshot_revision(setting_snapshot),
+            GUI_ATLAS_PADDING, 7, 0.0F);
+        gui_request_gesture_commit();
+        apply_pending();
         nt_log_info("SELFTEST: setting change stale=%d (expect 1)", gui_project_is_stale());
         NT_ASSERT(gui_project_is_stale() && "a setting change sets preview stale");
 
         /* shape=concave + extrude=3 -> preview pack succeeds via the effective-extrude-0 rule */
-        (void)gui_project_set_atlas_setting(0, GUI_ATLAS_SHAPE, 2, 0.0F);
-        (void)gui_project_set_atlas_setting(0, GUI_ATLAS_EXTRUDE, 3, 0.0F);
+        setting_atlas = selftest_atlas_at(0, &setting_snapshot);
+        gui_edit_atlas_setting(
+            setting_atlas->id,
+            tp_session_snapshot_revision(setting_snapshot),
+            GUI_ATLAS_SHAPE, 2, 0.0F);
+        gui_request_gesture_commit();
+        apply_pending();
+        setting_atlas = selftest_atlas_at(0, &setting_snapshot);
+        gui_edit_atlas_setting(
+            setting_atlas->id,
+            tp_session_snapshot_revision(setting_snapshot),
+            GUI_ATLAS_EXTRUDE, 3, 0.0F);
+        gui_request_gesture_commit();
+        apply_pending();
         double pms = 0.0;
         char perr[256] = {0};
         char pnote[128] = {0};
@@ -1571,7 +1514,13 @@ void run_selftest(void) {
         /* Restore a valid export state: the EXPORT path (tp_export_run) does not yet
          * apply the effective-extrude-0 rule (point-7 follow-up in the parallel exporter
          * agent's file), so concave+extrude>0 would be rejected at core validation. */
-        (void)gui_project_set_atlas_setting(0, GUI_ATLAS_EXTRUDE, 0, 0.0F);
+        setting_atlas = selftest_atlas_at(0, &setting_snapshot);
+        gui_edit_atlas_setting(
+            setting_atlas->id,
+            tp_session_snapshot_revision(setting_snapshot),
+            GUI_ATLAS_EXTRUDE, 0, 0.0F);
+        gui_request_gesture_commit();
+        apply_pending();
 
         /* save + export a fresh GUI project -> the seeded target writes files (audit I1) */
         char fpath[1200];
@@ -1808,88 +1757,10 @@ void run_selftest(void) {
         s_sel_atlas = 0;
     }
 
-    /* --- F2-05b-ii-A: deferred edit queue + GESTURE-SCOPED transaction coalescing (decision 0015) ---
-     * The F2-03 diff history has no built-in coalescing (one commit = one undo step). A field-precise
-     * pending-transaction buffer coalesces a gesture; the gesture BOUNDARY (a widget's release/blur/
-     * discrete pick -- modelled here by gui_request_gesture_commit + apply_pending, or a direct
-     * gui_project_flush_pending) commits it as ONE transaction = ONE undo step. */
+    /* --- Deferred sprite/animation/target edit regressions.
+     * Atlas scalar reducer/gesture/history behavior is covered by
+     * test_gui_action_trace. --- */
     {
-        /* (1) A gui_edit_* enqueue does not touch the model synchronously; the drained coalescable
-         *     setter BUFFERS it (uncommitted); the model changes only when the gesture boundary flushes. */
-        gui_project_test_new();
-        gui_pack_clear(-1);
-        s_sel_atlas = 0;
-        reset_selection();
-        const int pad0 = selftest_atlas_at(0, NULL)->padding;
-        gui_edit_atlas_int(0, GUI_ATLAS_PADDING, pad0 + 5);
-        const int pad_enq = selftest_atlas_at(0, NULL)->padding; /* enqueue: not applied */
-        apply_pending();                                                          /* drains -> BUFFERS (no commit) */
-        const int pad_buf = selftest_atlas_at(0, NULL)->padding; /* buffered, still uncommitted */
-        gui_request_gesture_commit();                                             /* gesture end (e.g. slider release) */
-        apply_pending();                                                          /* flush -> commit */
-        const int pad_done = selftest_atlas_at(0, NULL)->padding;
-        nt_log_info("SELFTEST: gesture pad %d ->(enqueue) %d ->(drain/buffer) %d ->(gesture-commit) %d", pad0, pad_enq,
-                    pad_buf, pad_done);
-        NT_ASSERT(pad_enq == pad0 && pad_buf == pad0 && pad_done == pad0 + 5 &&
-                  "a coalescable edit buffers on drain and commits only at the gesture boundary");
-
-        /* (2) ONE-control drag = ONE undo step. 8 same-key ticks buffer (latest wins, no commit); the
-         *     gesture flush at release commits exactly ONE transaction; one undo reverts the WHOLE drag. */
-        gui_project_test_new();
-        gui_pack_clear(-1);
-        s_sel_atlas = 0;
-        const int pad_pre = selftest_atlas_at(0, NULL)->padding;
-        const int undo0 = gui_project_undo_depth();
-        for (int v = 1; v <= 8; v++) {
-            (void)gui_project_set_atlas_setting(0, GUI_ATLAS_PADDING, v, 0.0F); /* same key -> coalesce, no commit */
-        }
-        const int undo_mid = gui_project_undo_depth();                          /* still undo0: buffered */
-        const int pad_mid2 = selftest_atlas_at(0, NULL)->padding; /* still pad_pre */
-        gui_project_flush_pending();                                            /* the release boundary */
-        const int undo1 = gui_project_undo_depth();
-        const int pad_drag = selftest_atlas_at(0, NULL)->padding;
-        nt_log_info("SELFTEST: one-control drag: 8 ticks undo %d ->(buffered) %d ->(release) %d, final padding=%d", undo0,
-                    undo_mid, undo1, pad_drag);
-        NT_ASSERT(undo_mid == undo0 && pad_mid2 == pad_pre &&
-                  "an in-flight drag stays buffered (uncommitted) until its gesture boundary");
-        NT_ASSERT(undo1 - undo0 == 1 && pad_drag == 8 &&
-                  "one control drag = ONE committed transaction = ONE undo step (final value wins)");
-        NT_ASSERT(gui_project_undo() && selftest_atlas_at(0, NULL)->padding == pad_pre &&
-                  "one undo reverts the ENTIRE coalesced drag (not one tick)");
-
-        /* (2b) DIVERGENCE from b-i (decision 0015): b-i's tag-only key merged DISTINCT knobs edited
-         *      within the window into one undo step; A's FIELD-PRECISE key makes each distinct field its
-         *      own step. Two distinct knobs -> the second (different key) FLUSHES the first -> TWO steps. */
-        gui_project_test_new();
-        gui_pack_clear(-1);
-        s_sel_atlas = 0;
-        const int undo_b0 = gui_project_undo_depth();
-        (void)gui_project_set_atlas_setting(0, GUI_ATLAS_PADDING, 3, 0.0F); /* key = PADDING (buffered) */
-        (void)gui_project_set_atlas_setting(0, GUI_ATLAS_MARGIN, 4, 0.0F);  /* key = MARGIN: different -> flush PADDING */
-        gui_project_flush_pending();                                        /* commit MARGIN */
-        const int undo_b1 = gui_project_undo_depth();
-        const tp_snapshot_atlas *dka = selftest_atlas_at(0, NULL);
-        nt_log_info("SELFTEST: two distinct knobs padding=%d margin=%d undo delta=%d (want 2)", dka->padding, dka->margin,
-                    undo_b1 - undo_b0);
-        NT_ASSERT(undo_b1 - undo_b0 == 2 && dka->padding == 3 && dka->margin == 4 &&
-                  "two distinct knobs back-to-back = TWO undo steps (field-precise divergence)");
-
-        /* (2c) FLUSH-BEFORE-IS_DIRTY (the lost-edit trap New/Open/Exit must avoid): a buffered edit is
-         *      not yet in the identity, so is_dirty reads CLEAN; the destructive gates flush FIRST, so the
-         *      edit is committed (dirty) instead of silently discarded on a New/Open/Exit confirm. */
-        gui_project_test_new();
-        gui_pack_clear(-1);
-        s_sel_atlas = 0;
-        NT_ASSERT(!gui_project_is_dirty() && "fresh project is clean");
-        (void)gui_project_set_atlas_setting(0, GUI_ATLAS_PADDING, 9, 0.0F); /* buffered, uncommitted */
-        const bool dirty_buffered = gui_project_is_dirty();
-        gui_project_flush_pending();                                        /* what request_new/open/exit do first */
-        const bool dirty_flushed = gui_project_is_dirty();
-        nt_log_info("SELFTEST: flush-before-is_dirty: buffered dirty=%d, after pre-gate flush dirty=%d", dirty_buffered,
-                    dirty_flushed);
-        NT_ASSERT(!dirty_buffered && dirty_flushed &&
-                  "the pre-gate flush commits a buffered edit so New/Open/Exit confirm instead of discarding it");
-
         /* (2d) SLICE9 RMW lost-edit is IMPOSSIBLE: slice9 is a read-modify-write (seeds all 4 components
          *      from the record). Two DIFFERENT components edited back-to-back must NOT drop the first --
          *      the component-precise key makes the second a different key, flushing the first BEFORE the
@@ -1991,34 +1862,6 @@ void run_selftest(void) {
 
         /* --- F2-05b-ii-A FIX pass (adversarial-review corrections) regressions --- */
 
-        /* (#1) STALE-GUARD lost-edit: the view no longer guards `iv != committed`, so a control
-         *      returned to its COMMITTED value still enqueues that value (latest wins). A gesture that
-         *      nets back to committed commits NOTHING (the #3 flush-time no-op drop); a gesture that
-         *      ends at a NEW final value commits EXACTLY that value -- never the stale intermediate.
-         *      (Pre-fix: the guard skipped the correcting enqueue, so the buffer kept the intermediate
-         *      and the flush committed the WRONG value = data loss.) */
-        gui_project_test_new();
-        gui_pack_clear(-1);
-        s_sel_atlas = 0;
-        const int g1_pad = selftest_atlas_at(0, NULL)->padding; /* committed */
-        const int g1_u0 = gui_project_undo_depth();
-        (void)gui_project_set_atlas_setting(0, GUI_ATLAS_PADDING, g1_pad + 36, 0.0F); /* typed "40" (buffered) */
-        (void)gui_project_set_atlas_setting(0, GUI_ATLAS_PADDING, g1_pad, 0.0F);      /* corrected back to committed */
-        gui_project_flush_pending();                                                 /* Enter / boundary */
-        const int g1_u1 = gui_project_undo_depth();
-        const int g1_pad1 = selftest_atlas_at(0, NULL)->padding;
-        nt_log_info("SELFTEST: #1 revert-to-committed undo delta=%d padding=%d (want 0, %d)", g1_u1 - g1_u0, g1_pad1, g1_pad);
-        NT_ASSERT(g1_u1 == g1_u0 && g1_pad1 == g1_pad &&
-                  "#1: a gesture netting back to the committed value commits NOTHING (no phantom step / no wrong value)");
-        (void)gui_project_set_atlas_setting(0, GUI_ATLAS_PADDING, g1_pad + 36, 0.0F); /* "40" */
-        (void)gui_project_set_atlas_setting(0, GUI_ATLAS_PADDING, g1_pad + 3, 0.0F);  /* corrected to a real new value */
-        gui_project_flush_pending();
-        const int g1_pad2 = selftest_atlas_at(0, NULL)->padding;
-        nt_log_info("SELFTEST: #1 revert-to-new final padding=%d undo delta=%d (want %d, 1)", g1_pad2, gui_project_undo_depth() - g1_u0,
-                    g1_pad + 3);
-        NT_ASSERT(gui_project_undo_depth() - g1_u0 == 1 && g1_pad2 == g1_pad + 3 &&
-                  "#1: the final value the user leaves the control at is what commits (not the stale intermediate)");
-
         /* (#2) ORIGIN two-component RMW lost-edit: origin is now COMPONENT-keyed like slice9. Editing X
          *      then Y back-to-back (no flush between) -> the Y edit's different key flushes the buffered X
          *      first, then seeds the committed X -> BOTH survive. (Pre-fix: X and Y shared one key + a
@@ -2035,29 +1878,6 @@ void run_selftest(void) {
         nt_log_info("SELFTEST: #2 origin X=%g Y=%g (want 0.25,0.75 -- neither lost)", (double)g2_ox, (double)g2_oy);
         NT_ASSERT(g2_ox == 0.25F && g2_oy == 0.75F &&
                   "#2: origin two-component edit -- the component-precise key prevents the RMW lost-edit (both survive)");
-
-        /* (#3) NET-ZERO gesture drops NO redo branch + pushes NO phantom undo step. Make an edit, undo it
-         *      (a redo branch is now present), then run a gesture that nets back to the committed value:
-         *      the flush must DISCARD the no-op, leaving the redo branch intact + undo depth unchanged.
-         *      (Pre-fix: the unconditional commit pushed a phantom step AND dropped the redo branch.) */
-        gui_project_test_new();
-        gui_pack_clear(-1);
-        s_sel_atlas = 0;
-        const int g3_pad = selftest_atlas_at(0, NULL)->padding;
-        (void)gui_project_set_atlas_setting(0, GUI_ATLAS_PADDING, g3_pad + 11, 0.0F);
-        gui_project_flush_pending(); /* commit an edit (padding = +11) */
-        NT_ASSERT(gui_project_undo() && "#3 setup: undo the committed edit");
-        NT_ASSERT(gui_project_can_redo() && "#3 setup: a redo branch is present after the undo");
-        const int g3_u = gui_project_undo_depth();
-        (void)gui_project_set_atlas_setting(0, GUI_ATLAS_PADDING, g3_pad + 30, 0.0F); /* drag out */
-        (void)gui_project_set_atlas_setting(0, GUI_ATLAS_PADDING, g3_pad, 0.0F);      /* back to committed */
-        gui_project_flush_pending();                                                 /* release: must DISCARD the no-op */
-        nt_log_info("SELFTEST: #3 net-zero gesture undo delta=%d can_redo=%d (want 0, 1)", gui_project_undo_depth() - g3_u,
-                    gui_project_can_redo());
-        NT_ASSERT(gui_project_undo_depth() == g3_u && "#3: a net-zero gesture pushes NO phantom undo step");
-        NT_ASSERT(gui_project_can_redo() && "#3: a net-zero gesture preserves the redo branch (no unconditional commit)");
-        NT_ASSERT(gui_project_redo() && selftest_atlas_at(0, NULL)->padding == g3_pad + 11 &&
-                  "#3: the preserved redo branch still restores the edit");
 
         /* (#4) FLUSH-BEFORE-READ: a buffered slice9 edit is still in flight. Flush
          *      first, then reacquire the target DTO and copy exporter_id before the
@@ -2249,11 +2069,6 @@ void run_selftest(void) {
                   strcmp(t11i->out_path, "out/typed2.json") == 0 &&
                   "#11: [0] the toggle applied and kept the last valid (non-empty) out-path");
 
-        NT_ASSERT(selftest_stale_coalesced_intent_is_rejected() &&
-                  "#12: flushing another gesture must not launder a stale revision");
-        NT_ASSERT(selftest_stale_discrete_intent_is_rejected() &&
-                  "#12: discrete target setters must not launder a stale revision");
-
         /* Restore a packable atlas-0 project for the render frames below (the pixel probe packs
          * atlas 0 and probes its region outlines) -- gui_project_test_new left it source-less. */
         gui_project_test_new();
@@ -2402,8 +2217,8 @@ void run_selftest(void) {
                   j1after.generation == j1notice.generation &&
                   "J1: sticky recovery notice keeps its generation across later edits");
 
-        /* (J2) Save flushes the buffered edit even if its recovery append fails,
-         * publishes the project, and heals recovery with a fresh checkpoint. */
+        /* (J2) A reducer-owned draft commits even if its recovery append fails;
+         * the following Save publishes it and heals recovery with a checkpoint. */
         gui_project_test_new();
         gui_pack_clear(-1);
         s_sel_atlas = 0;
@@ -2412,8 +2227,15 @@ void run_selftest(void) {
         NT_ASSERT(gui_project_set_atlas_name(0, "before_save") && "J2: a committed edit lands (journal healthy)");
         NT_ASSERT(gui_project_is_dirty() && "J2: the committed edit dirties the model");
         const int j2pad = selftest_atlas_at(0, NULL)->padding;
-        (void)gui_project_set_atlas_setting(0, GUI_ATLAS_PADDING, j2pad + 5, 0.0F); /* BUFFERED (uncommitted) gesture */
-        gui_project__test_fail_next_recovery_writes(1); /* the flush's journal append will fail */
+        const tp_session_snapshot *j2snapshot = NULL;
+        const tp_snapshot_atlas *j2atlas =
+            selftest_atlas_at(0, &j2snapshot);
+        gui_edit_atlas_setting(
+            j2atlas->id, tp_session_snapshot_revision(j2snapshot),
+            GUI_ATLAS_PADDING, j2pad + 5, 0.0F);
+        gui_project__test_fail_next_recovery_writes(1);
+        NT_ASSERT(gui_actions__submit_atlas_edit() &&
+                  "J2: reducer draft submits despite recovery degradation");
         char s2path[1200];
         (void)snprintf(s2path, sizeof s2path, "%s/selftest_savefail.ntpacker_project", s_exe_dir);
         (void)remove(s2path);
@@ -2430,15 +2252,15 @@ void run_selftest(void) {
         NT_ASSERT(s2st == TP_STATUS_OK && !gui_project_is_dirty() && s2_written &&
                   "J2: Save succeeds independently of the failed diff append");
         NT_ASSERT(selftest_atlas_at(0, NULL)->padding == j2pad + 5 &&
-                  "J2: Save contains the buffered committed gesture");
+                  "J2: Save contains the submitted draft");
         NT_ASSERT(!j2health.degraded && "J2: the successful Save checkpoint heals recovery");
         NT_ASSERT(!gui_project_recovery_notice_query(NULL) &&
                   "J2: successful Save publishes the cleared recovery notice state");
         (void)remove(s2path);
         (void)gui_project_take_op_error(NULL, 0);
 
-        /* (J6) A structural wrapper may continue after its pre-flush commits a
-         * buffered gesture and only recovery recording degrades. Both edits land. */
+        /* (J6) A structural operation may continue after the reducer draft is
+         * submitted and only recovery recording degrades. Both edits land. */
         gui_project_test_new();
         gui_pack_clear(-1);
         s_sel_atlas = 0;
@@ -2447,8 +2269,15 @@ void run_selftest(void) {
         char j6name0[64];
         (void)snprintf(j6name0, sizeof j6name0, "%s", selftest_atlas_at(0, NULL)->name);
         const int j6pad = selftest_atlas_at(0, NULL)->padding;
-        (void)gui_project_set_atlas_setting(0, GUI_ATLAS_PADDING, j6pad + 7, 0.0F); /* BUFFERED (uncommitted) */
-        gui_project__test_fail_next_recovery_writes(1);                            /* the flush's append fails */
+        const tp_session_snapshot *j6snapshot = NULL;
+        const tp_snapshot_atlas *j6atlas =
+            selftest_atlas_at(0, &j6snapshot);
+        gui_edit_atlas_setting(
+            j6atlas->id, tp_session_snapshot_revision(j6snapshot),
+            GUI_ATLAS_PADDING, j6pad + 7, 0.0F);
+        gui_project__test_fail_next_recovery_writes(1);
+        NT_ASSERT(gui_actions__submit_atlas_edit() &&
+                  "J6: draft submit remains successful when recovery degrades");
         const bool j6ret = gui_project_set_atlas_name(0, "structural_should_abort");
         gui_recovery_notice j6notice = {0};
         const bool j6surfaced = gui_project__test_recovery_notice(
@@ -2464,8 +2293,8 @@ void run_selftest(void) {
                   "J6: both the buffered gesture and following structural edit landed");
         (void)gui_project_take_op_error(NULL, 0);
 
-        /* (J7) Pack uses the newly committed model even when recovery recording
-         * degraded during the entry flush. */
+        /* (J7) Pack submits the active draft first and uses the newly committed
+         * model even when recovery recording degrades. */
         gui_project_test_new();
         gui_pack_clear(-1);
         s_sel_atlas = 0;
@@ -2478,7 +2307,12 @@ void run_selftest(void) {
         NT_ASSERT(gui_project__test_attach_memory_recovery() && "J7: memory journal attached");
         gui_pack_clear(-1); /* no prior result */
         const int j7pad = selftest_atlas_at(0, NULL)->padding;
-        (void)gui_project_set_atlas_setting(0, GUI_ATLAS_PADDING, j7pad + 3, 0.0F); /* buffered */
+        const tp_session_snapshot *j7snapshot = NULL;
+        const tp_snapshot_atlas *j7atlas =
+            selftest_atlas_at(0, &j7snapshot);
+        gui_edit_atlas_setting(
+            j7atlas->id, tp_session_snapshot_revision(j7snapshot),
+            GUI_ATLAS_PADDING, j7pad + 3, 0.0F);
         gui_project__test_fail_next_recovery_writes(1);
         do_pack_blocking();
         const tp_result *j7r = gui_pack_result(0);
@@ -2490,8 +2324,9 @@ void run_selftest(void) {
                   !gui_project_take_op_error(NULL, 0) &&
                   "J7: Pack leaves the recovery warning persistent and non-rejecting");
 
-        /* (J8) The buffered edit commits despite recovery degradation, so the
-         * ordinary unsaved-changes gate still protects it before New. */
+        /* (J8) New/Open/Exit share the explicit reducer-draft choice:
+         * Apply & Continue, Discard & Continue, or Cancel. Exercise Apply on
+         * New here; the action-trace suite covers all three lifecycle requests. */
         gui_project_test_new();
         gui_pack_clear(-1);
         s_sel_atlas = 0;
@@ -2506,7 +2341,12 @@ void run_selftest(void) {
         (void)gui_project_take_op_error(NULL, 0);
         NT_ASSERT(gui_project__test_attach_memory_recovery() && "J8: memory journal attached");
         const int j8pad = selftest_atlas_at(0, NULL)->padding;
-        (void)gui_project_set_atlas_setting(0, GUI_ATLAS_PADDING, j8pad + 4, 0.0F); /* the ONLY unsaved change (buffered) */
+        const tp_session_snapshot *j8snapshot = NULL;
+        const tp_snapshot_atlas *j8atlas =
+            selftest_atlas_at(0, &j8snapshot);
+        gui_edit_atlas_setting(
+            j8atlas->id, tp_session_snapshot_revision(j8snapshot),
+            GUI_ATLAS_PADDING, j8pad + 4, 0.0F);
         gui_project__test_fail_next_recovery_writes(1);
         request_new();
         NT_ASSERT(gui_project_has_path() &&
@@ -2515,17 +2355,38 @@ void run_selftest(void) {
                   "J8: view-facing New only enqueues before the between-frame drain");
         apply_pending();
         const bool j8kept = gui_project_has_path();
-        nt_log_info("SELFTEST: J8 dirty-gate has_path=%d (want 1: unsaved project kept)",
-                    (int)j8kept);
-        NT_ASSERT(j8kept && s_confirm_open &&
-                  "J8: recovery degradation cannot bypass the ordinary dirty-project gate");
+        nt_log_info("SELFTEST: J8 draft-gate has_path=%d confirm=%d draft=%d",
+                    (int)j8kept, (int)s_confirm_open,
+                    (int)s_confirm_draft);
+        NT_ASSERT(j8kept && s_confirm_open && s_confirm_draft &&
+                  s_after_confirm == GUI_LIFECYCLE_REQUEST_NEW &&
+                  gui_atlas_edit_phase() == GUI_EDIT_EDITING &&
+                  "J8: New presents the explicit active-draft choice");
+        NT_ASSERT(!gui_project__test_recovery_notice(
+                       TP_STATUS_JOURNAL_FAILED, NULL) &&
+                  "J8: opening the draft choice does not submit it");
+        s_modal_action = MODAL_SAVE; /* Apply & Continue */
+        apply_pending();
+        NT_ASSERT(gui_atlas_edit_phase() == GUI_EDIT_IDLE &&
+                  s_confirm_open && !s_confirm_draft &&
+                  s_after_confirm == GUI_LIFECYCLE_REQUEST_NEW &&
+                  gui_project_is_dirty() &&
+                  selftest_atlas_at(0, NULL)->padding == j8pad + 4 &&
+                  "J8: Apply submits the draft, then continues to the dirty-project choice");
         NT_ASSERT(gui_project__test_recovery_notice(
                       TP_STATUS_JOURNAL_FAILED, NULL) &&
-                  !gui_project_take_op_error(NULL, 0) &&
-                  "J8: dirty gate preserves the persistent recovery warning");
+                      !gui_project_take_op_error(NULL, 0) &&
+                  "J8: draft submit preserves the persistent recovery warning");
+        s_modal_action = MODAL_CANCEL;
+        apply_pending();
+        NT_ASSERT(!s_confirm_open && !s_confirm_draft &&
+                  s_after_confirm == GUI_LIFECYCLE_REQUEST_NONE &&
+                  gui_project_has_path() &&
+                  "J8: Cancel keeps the current project after Apply");
         (void)remove(j8path);
 
-        /* (J9) Remove continues after the buffered edit commits and recovery degrades. */
+        /* (J9) Remove continues after a prerequisite draft submit degrades
+         * recovery. */
         gui_project_test_new();
         gui_pack_clear(-1);
         s_sel_atlas = 0;
@@ -2536,8 +2397,15 @@ void run_selftest(void) {
         NT_ASSERT(gui_project__test_attach_memory_recovery() && "J9: memory journal attached");
         const int j9count0 = tp_session_snapshot_atlas_count(gui_project_snapshot());
         const int j9pad = selftest_atlas_at(0, NULL)->padding;
-        (void)gui_project_set_atlas_setting(0, GUI_ATLAS_PADDING, j9pad + 6, 0.0F); /* buffered gesture */
+        const tp_session_snapshot *j9snapshot = NULL;
+        const tp_snapshot_atlas *j9atlas =
+            selftest_atlas_at(0, &j9snapshot);
+        gui_edit_atlas_setting(
+            j9atlas->id, tp_session_snapshot_revision(j9snapshot),
+            GUI_ATLAS_PADDING, j9pad + 6, 0.0F);
         gui_project__test_fail_next_recovery_writes(1);
+        NT_ASSERT(gui_actions__submit_atlas_edit() &&
+                  "J9: prerequisite draft submit succeeds");
         const bool j9ret_fail = gui_project_remove_atlas(j9added);
         const int j9count1 = tp_session_snapshot_atlas_count(gui_project_snapshot());
         nt_log_info("SELFTEST: J9 remove-after-degrade ret=%d count %d->%d (want 1, -1)", (int)j9ret_fail, j9count0, j9count1);
@@ -2567,12 +2435,19 @@ void run_selftest(void) {
         NT_ASSERT(!j10_collide_ret && j10_csurfaced && strstr(j10_cerr, "an animation named") != NULL &&
                   strstr(j10_cerr, "already exists") != NULL &&
                   "J10/live: a genuine duplicate -> set_anim_id false AND the op-error IS the core collision message");
-        /* Case B -- recovery-degraded flush on a UNIQUE name: the buffered edit
-         * and rename commit, with a recovery warning rather than a false collision. */
+        /* Case B -- recovery-degraded draft submit before a UNIQUE name: both
+         * operations commit, with a recovery warning rather than a false collision. */
         NT_ASSERT(gui_project__test_attach_memory_recovery() && "J10: memory journal attached");
         const int j10pad = selftest_atlas_at(0, NULL)->padding;
-        (void)gui_project_set_atlas_setting(0, GUI_ATLAS_PADDING, j10pad + 2, 0.0F); /* buffered */
+        const tp_session_snapshot *j10snapshot = NULL;
+        const tp_snapshot_atlas *j10atlas =
+            selftest_atlas_at(0, &j10snapshot);
+        gui_edit_atlas_setting(
+            j10atlas->id, tp_session_snapshot_revision(j10snapshot),
+            GUI_ATLAS_PADDING, j10pad + 2, 0.0F);
         gui_project__test_fail_next_recovery_writes(1);
+        NT_ASSERT(gui_actions__submit_atlas_edit() &&
+                  "J10: prerequisite draft submit succeeds");
         const bool j10_flush_ret = gui_project_set_anim_id(0, j10b, "totally_unique_name");
         gui_recovery_notice j10_notice = {0};
         const bool j10_fsurfaced = gui_project__test_recovery_notice(
@@ -2585,8 +2460,8 @@ void run_selftest(void) {
                   strcmp(selftest_animation_at(0, j10b)->name, "totally_unique_name") == 0 &&
                   "J10/live: a unique rename commits and recovery failure is only a warning");
 
-        /* (J11) Own-name remains a no-op success. A recovery-degraded entry
-         * flush also succeeds and exposes only the non-blocking warning. */
+        /* (J11) Own-name remains a no-op success. A recovery-degraded reducer
+         * submit also succeeds and exposes only the non-blocking warning. */
         gui_project_test_new();
         gui_pack_clear(-1);
         s_sel_atlas = 0;
@@ -2602,20 +2477,25 @@ void run_selftest(void) {
                     (int)j11_own_ret, (int)j11_own_err);
         NT_ASSERT(j11_own_ret && !j11_own_err &&
                   "J11/live: renaming to the OWN name is a no-op SUCCESS that raises no op-error");
-        /* Recovery failure during the entry flush is not an operation rejection. */
+        /* Recovery failure during draft submit is not an operation rejection. */
         NT_ASSERT(gui_project__test_attach_memory_recovery() && "J11: memory journal attached");
         const int j11pad = selftest_atlas_at(0, NULL)->padding;
-        (void)gui_project_set_atlas_setting(0, GUI_ATLAS_PADDING, j11pad + 1, 0.0F); /* buffered gesture */
+        const tp_session_snapshot *j11snapshot = NULL;
+        const tp_snapshot_atlas *j11atlas =
+            selftest_atlas_at(0, &j11snapshot);
+        gui_edit_atlas_setting(
+            j11atlas->id, tp_session_snapshot_revision(j11snapshot),
+            GUI_ATLAS_PADDING, j11pad + 1, 0.0F);
         gui_project__test_fail_next_recovery_writes(1);
-        const bool j11_entry_flush = gui_project_flush_pending(); /* the entry guard commit_active_edit runs FIRST */
+        const bool j11_submit = gui_actions__submit_atlas_edit();
         gui_recovery_notice j11_notice = {0};
         const bool j11_fsurfaced = gui_project__test_recovery_notice(
             TP_STATUS_JOURNAL_FAILED, &j11_notice);
-        nt_log_info("SELFTEST: J11 entry-flush ret=%d surfaced=%d (want 1,1 -> recovery warning)",
-                    (int)j11_entry_flush, (int)j11_fsurfaced);
-        NT_ASSERT(j11_entry_flush && j11_fsurfaced &&
-                  !gui_project_take_op_error(NULL, 0) &&
-                  "J11: recovery-degraded entry flush still commits successfully");
+        nt_log_info("SELFTEST: J11 draft-submit ret=%d surfaced=%d (want 1,1 -> recovery warning)",
+                    (int)j11_submit, (int)j11_fsurfaced);
+        NT_ASSERT(j11_submit && j11_fsurfaced &&
+                   !gui_project_take_op_error(NULL, 0) &&
+                   "J11: recovery-degraded draft submit still commits successfully");
 
         /* (J11b) A core-rejected atlas rename keeps the inline editor alive on Enter so the user can
          * correct the value. A forced blur dismisses it without mutating the model. */
@@ -2637,8 +2517,9 @@ void run_selftest(void) {
                   tp_session_snapshot_revision(gui_project_snapshot()) == j11b_revision &&
                   "J11b: forced blur cancels a rejected atlas rename without mutation");
 
-        /* (J12) Undo flushes and commits the buffered gesture, then reverses it;
-         * recovery degradation does not masquerade as an empty History. */
+        /* (J12) Undo blocks while a reducer-owned draft is active. Once the
+         * draft is explicitly applied, Undo operates on committed History and
+         * recovery degradation remains a separate warning. */
         gui_project_test_new();
         gui_pack_clear(-1);
         s_sel_atlas = 0;
@@ -2646,18 +2527,42 @@ void run_selftest(void) {
         NT_ASSERT(gui_project_set_atlas_name(0, "j12_edit") && "J12: a committed edit populates undo history");
         NT_ASSERT(gui_project__test_attach_memory_recovery() && "J12: memory journal attached");
         const int j12pad = selftest_atlas_at(0, NULL)->padding;
-        (void)gui_project_set_atlas_setting(0, GUI_ATLAS_PADDING, j12pad + 5, 0.0F); /* buffered gesture */
+        const tp_session_snapshot *j12snapshot = NULL;
+        const tp_snapshot_atlas *j12atlas =
+            selftest_atlas_at(0, &j12snapshot);
+        const int64_t j12revision =
+            tp_session_snapshot_revision(j12snapshot);
+        gui_edit_atlas_setting(
+            j12atlas->id, j12revision,
+            GUI_ATLAS_PADDING, j12pad + 5, 0.0F);
         gui_project__test_fail_next_recovery_writes(1);
         set_status("j12_sentinel"); /* a sentinel so we can tell do_undo replaced the status */
         do_undo();
-        nt_log_info("SELFTEST: J12 do_undo-after-recovery-fail status='%s' (want Undo)",
+        nt_log_info("SELFTEST: J12 do_undo-with-active-draft status='%s'",
                     s_status);
-        NT_ASSERT(strncmp(s_status, "Undo", 4) == 0 &&
-                  "J12: Undo remains available after recovery degradation");
+        NT_ASSERT(strcmp(
+                      s_status,
+                      "Apply or discard the active atlas edit before Undo.") == 0 &&
+                  gui_atlas_edit_phase() == GUI_EDIT_EDITING &&
+                  tp_session_snapshot_revision(gui_project_snapshot()) ==
+                      j12revision &&
+                  selftest_atlas_at(0, NULL)->padding == j12pad &&
+                  "J12: Undo blocks without submitting the active draft");
+        NT_ASSERT(!gui_project__test_recovery_notice(
+                       TP_STATUS_JOURNAL_FAILED, NULL) &&
+                  "J12: blocked Undo does not consume the pending recovery failure");
+        gui_request_gesture_commit();
+        apply_pending();
         NT_ASSERT(gui_project__test_recovery_notice(
                       TP_STATUS_JOURNAL_FAILED, NULL) &&
+                  gui_atlas_edit_phase() == GUI_EDIT_IDLE &&
+                  selftest_atlas_at(0, NULL)->padding == j12pad + 5 &&
                   !gui_project_take_op_error(NULL, 0) &&
-                  "J12: Undo keeps the persistent recovery warning outside status/op-error");
+                  "J12: explicit Apply commits and surfaces recovery degradation");
+        do_undo();
+        NT_ASSERT(strncmp(s_status, "Undo", 4) == 0 &&
+                  selftest_atlas_at(0, NULL)->padding == j12pad &&
+                  "J12: Undo resumes after the draft reaches a terminal state");
 
         /* (J12b) Undo/Redo publish History independently of recovery recording. */
         gui_project_test_new();
@@ -3207,7 +3112,15 @@ void selftest_pre_frame(void) {
                 char afolder[512];
                 to_abs("examples/defold-demo/examples/anim_trim/anims", afolder, sizeof afolder);
                 (void)gui_project_add_source(s_sel_atlas, afolder);
-                (void)gui_project_set_atlas_setting(s_sel_atlas, GUI_ATLAS_MAX_SIZE, 256, 0.0F);
+                const tp_session_snapshot *edit_snapshot = NULL;
+                const tp_snapshot_atlas *edit_atlas =
+                    selftest_atlas_at(s_sel_atlas, &edit_snapshot);
+                gui_edit_atlas_setting(
+                    edit_atlas->id,
+                    tp_session_snapshot_revision(edit_snapshot),
+                    GUI_ATLAS_MAX_SIZE, 256, 0.0F);
+                NT_ASSERT(gui_actions__submit_atlas_edit() &&
+                          "SELFTEST: stale-scene max-size draft submits");
                 gui_scan_invalidate_all();
             }
             double pms = 0.0;
@@ -3320,7 +3233,15 @@ void selftest_pre_frame(void) {
                 char afolder[512];
                 to_abs("examples/defold-demo/examples/anim_trim/anims", afolder, sizeof afolder);
                 (void)gui_project_add_source(0, afolder);
-                (void)gui_project_set_atlas_setting(0, GUI_ATLAS_ALLOW_TRANSFORM, 1, 0.0F);
+                const tp_session_snapshot *edit_snapshot = NULL;
+                const tp_snapshot_atlas *edit_atlas =
+                    selftest_atlas_at(0, &edit_snapshot);
+                gui_edit_atlas_setting(
+                    edit_atlas->id,
+                    tp_session_snapshot_revision(edit_snapshot),
+                    GUI_ATLAS_ALLOW_TRANSFORM, 1, 0.0F);
+                NT_ASSERT(gui_actions__submit_atlas_edit() &&
+                          "SELFTEST preview: allow-transform draft submits");
                 gui_scan_invalidate_all();
             }
             double nms = 0.0;

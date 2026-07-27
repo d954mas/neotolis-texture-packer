@@ -86,7 +86,9 @@ void test_atlas_structural_and_settings_use_stable_id_revision_contract(void) {
     settings.padding = 9;
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
-        gui_session_set_atlas_settings(&client, atlas_id, 1, &settings, NULL, &err));
+        gui_session_set_atlas_settings(
+            &client, atlas_id, 1, &settings,
+            (gui_session_submit_identity){0}, NULL, NULL, &err));
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_REVISION_CONFLICT,
         gui_session_remove_atlas(&client, atlas_id, 1, &err));

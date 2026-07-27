@@ -464,4 +464,35 @@ foreach(_source IN LISTS _gui_shipping_sources)
     endforeach()
 endforeach()
 
+# R3a atlas scalar drafts have one view-local reducer owner. The former action
+# array and broad ready-operation route must not return.
+_arch_assert_absent(
+    "apps/gui/gui_project_internal.h"
+    "CK_ATLAS_SETTING"
+    "R3a atlas draft owner")
+_arch_assert_absent(
+    "apps/gui/gui_project_mutations.c"
+    "make_atlas_key|gui_project_set_atlas_setting"
+    "R3a atlas draft submit")
+_arch_assert_absent(
+    "apps/gui/gui_project_pending.c"
+    "TP_OP_ATLAS_SETTINGS_SET"
+    "R3a broad pending deletion")
+_arch_assert_absent(
+    "apps/gui/gui_actions_internal.h"
+    "atlas_setting_intent"
+    "R3a action mirror deletion")
+foreach(_path IN ITEMS
+        apps/gui/gui_actions.h
+        apps/gui/gui_actions_edits.c
+        apps/gui/gui_view_settings.c
+        apps/gui/gui_selftest.c
+        apps/gui/test_gui_action_trace.c
+        apps/gui/test_gui_canonical_identity.c)
+    _arch_assert_absent(
+        "${_path}"
+        "gui_queue_atlas_setting|gui_project_set_atlas_setting"
+        "R3a legacy atlas ingress deletion")
+endforeach()
+
 message(STATUS "architecture boundaries hold")

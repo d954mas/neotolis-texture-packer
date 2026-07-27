@@ -55,6 +55,7 @@ int64_t s_pending_remove_source_revision;
 int s_pending_preview_target = -1; /* boundary-ok: exporter option, not a target entity index */
 gui_lifecycle_request s_after_confirm;
 bool s_confirm_open;
+bool s_confirm_draft;
 int s_modal_action;
 /* R6b: startup crash-recovery modal glue. The orphan list lives here; the modal reads it via the
  * count/at accessors and requests a per-row action, deferred to apply_pending() (below) so the
@@ -121,6 +122,12 @@ static void undo_redo_settle(tp_id128 animation_id) {
     gui_canvas_invalidate(&s_canvas);
 }
 void do_undo(void) {
+    if (gui_atlas_edit_phase() != GUI_EDIT_IDLE) {
+        set_status_ex(
+            STATUS_WARNING,
+            "Apply or discard the active atlas edit before Undo.");
+        return;
+    }
     /* Pack uses an immutable snapshot, so only a rejected buffered gesture
      * blocks Undo while it runs. */
     if (gui_actions__flush_failed()) {
@@ -137,6 +144,12 @@ void do_undo(void) {
     }
 }
 void do_redo(void) {
+    if (gui_atlas_edit_phase() != GUI_EDIT_IDLE) {
+        set_status_ex(
+            STATUS_WARNING,
+            "Apply or discard the active atlas edit before Redo.");
+        return;
+    }
     /* Redo follows the same immutable-snapshot rule as Undo. */
     if (gui_actions__flush_failed()) {
         return; /* The buffered gesture was rejected; do not redo a different step. */
@@ -874,21 +887,60 @@ void apply_pending(void) {
     }
     s_pending_commit_edit_enter = false;
 
-    /* Drain the deferred model-edit queue (settings / overrides / anim knobs / target edits the
-     * declare fns enqueued last frame). Runs here, at frame top, with no live declare-fn pointer
-     * held -- so the per-edit clone-swap can never dangle a panel's cached atlas/sprite/anim/target
-     * pointer (decision 0015). */
+    const tp_session_snapshot *before_atlas =
+        gui_project_snapshot();
+    const int64_t revision_before_atlas =
+        before_atlas
+            ? tp_session_snapshot_revision(before_atlas)
+            : -1;
+    if (s_actions.atlas_apply_mine) {
+        const bool applied =
+            gui_actions__apply_atlas_mine();
+        s_actions.atlas_apply_mine = false;
+        if (!applied) {
+            s_actions.gesture_commit = false;
+            gui_actions__discard_deferred_edits();
+            gui_actions__clear_pending();
+            return;
+        }
+    } else if (s_actions.gesture_commit &&
+               gui_atlas_edit_phase() !=
+                   GUI_EDIT_IDLE) {
+        if (!gui_actions__submit_atlas_edit()) {
+            s_actions.gesture_commit = false;
+            gui_actions__discard_deferred_edits();
+            gui_actions__clear_pending();
+            return;
+        }
+    }
+    const tp_session_snapshot *after_atlas =
+        gui_project_snapshot();
+    const int64_t revision_after_atlas =
+        after_atlas
+            ? tp_session_snapshot_revision(after_atlas)
+            : -1;
+    if (revision_before_atlas >= 0 &&
+        revision_after_atlas >= 0) {
+        gui_actions__rebase_deferred_edits(
+            revision_before_atlas,
+            revision_after_atlas);
+    }
+
+    /* The atlas draft is the prerequisite for the remaining edits in this
+     * frame. Only after it reaches a terminal success may dependent edit
+     * queues mutate the session. */
     gui_actions__drain_edits();
 
-    /* A gesture ended last frame (slider release / field Enter+blur / discrete pick): commit the
-     * buffered transaction NOW that gui_actions__drain_edits has folded in this frame's final value, so one
-     * interaction == one undo step (decision 0015). */
+    /* A gesture ended last frame: flush edit families that still use the
+     * pending route. */
     if (s_actions.gesture_commit) {
-        /* The bool is intentionally ignored at this gesture boundary. A genuine
-         * operation rejection is already visible on the shared error channel;
-         * recovery degradation returns success and preserves the gesture. */
-        (void)gui_project_flush_pending();
+        const bool failed =
+            gui_actions__flush_failed();
         s_actions.gesture_commit = false;
+        if (failed) {
+            gui_actions__clear_pending();
+            return;
+        }
     }
 
     if (gui_actions__apply_lifecycle_request() &&

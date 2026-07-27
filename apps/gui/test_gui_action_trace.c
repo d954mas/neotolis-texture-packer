@@ -76,6 +76,7 @@ static const state_owner_entry k_state_owners[] = {
     {"recovery-decision", TRACE_ACTION_PRIVATE},
     {"preview-captured-identity", TRACE_ACTION_PRIVATE},
     {"canvas-preview-dropdown", TRACE_VIEW_LOCAL},
+    {"atlas-scalar-draft", TRACE_VIEW_LOCAL},
     {"settings-edit-buffers", TRACE_VIEW_LOCAL},
     {"settings-dropdowns", TRACE_VIEW_LOCAL},
     {"chrome-menu-contexts", TRACE_VIEW_LOCAL},
@@ -104,6 +105,7 @@ static void reset_public_action_state(void) {
     s_pending_preview_target = -1;
     s_after_confirm = GUI_LIFECYCLE_REQUEST_NONE;
     s_confirm_open = false;
+    s_confirm_draft = false;
     s_modal_action = MODAL_NONE;
 }
 
@@ -156,7 +158,7 @@ void test_state_ownership_inventory_preserves_three_classes(void) {
     }
     TEST_ASSERT_EQUAL_INT(7, counts[TRACE_SESSION_SHARED]);
     TEST_ASSERT_EQUAL_INT(6, counts[TRACE_ACTION_PRIVATE]);
-    TEST_ASSERT_EQUAL_INT(4, counts[TRACE_VIEW_LOCAL]);
+    TEST_ASSERT_EQUAL_INT(5, counts[TRACE_VIEW_LOCAL]);
 
     /* Compile-time anchors for the shared representatives that cross modules. */
     const void *const shared_anchors[] = {
@@ -175,11 +177,13 @@ void test_deferred_edit_coalesces_then_undo_redo_trace_is_exact(void) {
     const int initial_max_size = atlas->max_size;
     const int64_t revision0 =
         tp_session_snapshot_revision(gui_project_snapshot());
+    const uint64_t event_sequence0 =
+        tp_session_event_sequence(gui_project__test_session());
 
-    gui_queue_atlas_setting(atlas_id, revision0, GUI_ATLAS_MAX_SIZE, 512,
-                            0.0F);
-    gui_queue_atlas_setting(atlas_id, revision0, GUI_ATLAS_MAX_SIZE, 1024,
-                            0.0F);
+    gui_edit_atlas_setting(atlas_id, revision0, GUI_ATLAS_MAX_SIZE, 512,
+                           0.0F);
+    gui_edit_atlas_setting(atlas_id, revision0, GUI_ATLAS_MAX_SIZE, 1024,
+                           0.0F);
 
     TEST_ASSERT_EQUAL_INT64(revision0,
                             tp_session_snapshot_revision(gui_project_snapshot()));
@@ -190,7 +194,7 @@ void test_deferred_edit_coalesces_then_undo_redo_trace_is_exact(void) {
     TEST_ASSERT_EQUAL_INT64(revision0,
                             tp_session_snapshot_revision(gui_project_snapshot()));
     TEST_ASSERT_EQUAL_INT(initial_max_size, atlas_at(0)->max_size);
-    TEST_ASSERT_TRUE(gui_project_can_undo());
+    TEST_ASSERT_FALSE(gui_project_can_undo());
     TEST_ASSERT_EQUAL_INT(0, gui_project_undo_depth());
 
     gui_request_gesture_commit();
@@ -204,6 +208,9 @@ void test_deferred_edit_coalesces_then_undo_redo_trace_is_exact(void) {
     TEST_ASSERT_EQUAL_INT(1, gui_project_undo_depth());
     TEST_ASSERT_EQUAL_INT(0, gui_project_redo_depth());
     TEST_ASSERT_TRUE(gui_project_is_dirty());
+    TEST_ASSERT_EQUAL_UINT64(
+        event_sequence0 + 1U,
+        tp_session_event_sequence(gui_project__test_session()));
 
     s_sel_src = 7;
     do_undo();
@@ -250,9 +257,11 @@ void test_undo_redo_preserves_selected_animation_by_stable_id(void) {
     const tp_id128 selected_id = selected->id;
     s_sel_anim = 1;
 
-    TEST_ASSERT_TRUE(gui_project_set_atlas_setting(
-        atlas_id, tp_session_snapshot_revision(snapshot), GUI_ATLAS_MAX_SIZE,
-        1024, 0.0F));
+    gui_edit_atlas_setting(
+        atlas_id, tp_session_snapshot_revision(snapshot),
+        GUI_ATLAS_MAX_SIZE, 1024, 0.0F);
+    gui_request_gesture_commit();
+    apply_pending();
 
     do_undo();
     TEST_ASSERT_GREATER_OR_EQUAL(0, s_sel_anim);
@@ -267,6 +276,246 @@ void test_undo_redo_preserves_selected_animation_by_stable_id(void) {
         gui_project_snapshot(), atlas_id, s_sel_anim);
     TEST_ASSERT_NOT_NULL(selected);
     TEST_ASSERT_TRUE(tp_id128_eq(selected_id, selected->id));
+}
+
+void test_atlas_draft_maps_every_scalar_component(void) {
+    const tp_snapshot_atlas *atlas = atlas_at(0);
+    TEST_ASSERT_NOT_NULL(atlas);
+    const tp_id128 atlas_id = atlas->id;
+    const struct {
+        gui_atlas_field field;
+        int integer;
+        float real;
+    } edits[] = {
+        {GUI_ATLAS_SHAPE, 0, 0.0F},
+        {GUI_ATLAS_MAX_SIZE, 1024, 0.0F},
+        {GUI_ATLAS_PADDING, 7, 0.0F},
+        {GUI_ATLAS_MARGIN, 3, 0.0F},
+        {GUI_ATLAS_EXTRUDE, 2, 0.0F},
+        {GUI_ATLAS_ALPHA_THRESHOLD, 100, 0.0F},
+        {GUI_ATLAS_MAX_VERTICES, 7, 0.0F},
+        {GUI_ATLAS_ALLOW_TRANSFORM, 0, 0.0F},
+        {GUI_ATLAS_POWER_OF_TWO, 0, 0.0F},
+        {GUI_ATLAS_PIXELS_PER_UNIT, 0, 2.0F},
+    };
+    for (size_t index = 0U;
+         index < sizeof edits / sizeof edits[0];
+         ++index) {
+        const tp_session_snapshot *snapshot =
+            gui_project_snapshot();
+        const int64_t revision =
+            tp_session_snapshot_revision(snapshot);
+        gui_edit_atlas_setting(
+            atlas_id, revision, edits[index].field,
+            edits[index].integer, edits[index].real);
+        gui_request_gesture_commit();
+        apply_pending();
+        TEST_ASSERT_EQUAL_INT(
+            GUI_EDIT_IDLE, gui_atlas_edit_phase());
+        TEST_ASSERT_EQUAL_INT64(
+            revision + 1,
+            tp_session_snapshot_revision(
+                gui_project_snapshot()));
+    }
+    atlas = tp_session_snapshot_atlas_by_id(
+        gui_project_snapshot(), atlas_id);
+    TEST_ASSERT_NOT_NULL(atlas);
+    TEST_ASSERT_EQUAL_INT(1024, atlas->max_size);
+    TEST_ASSERT_EQUAL_INT(7, atlas->padding);
+    TEST_ASSERT_EQUAL_INT(3, atlas->margin);
+    TEST_ASSERT_EQUAL_INT(2, atlas->extrude);
+    TEST_ASSERT_EQUAL_INT(100, atlas->alpha_threshold);
+    TEST_ASSERT_EQUAL_INT(7, atlas->max_vertices);
+    TEST_ASSERT_FALSE(atlas->allow_transform);
+    TEST_ASSERT_FALSE(atlas->power_of_two);
+    TEST_ASSERT_TRUE(atlas->pixels_per_unit == 2.0F);
+    TEST_ASSERT_EQUAL_INT(0, atlas->shape);
+}
+
+void test_undo_blocks_without_submitting_active_atlas_draft(void) {
+    const tp_session_snapshot *snapshot =
+        gui_project_snapshot();
+    const tp_snapshot_atlas *atlas =
+        tp_session_snapshot_atlas_at(snapshot, 0);
+    TEST_ASSERT_NOT_NULL(atlas);
+    gui_edit_atlas_setting(
+        atlas->id, tp_session_snapshot_revision(snapshot),
+        GUI_ATLAS_PADDING, atlas->padding + 1, 0.0F);
+    TEST_ASSERT_TRUE(gui_atlas_edit_targets(atlas->id));
+    TEST_ASSERT_FALSE(
+        gui_atlas_edit_targets(tp_id128_nil()));
+    const int64_t revision =
+        tp_session_snapshot_revision(
+            gui_project_snapshot());
+    do_undo();
+    TEST_ASSERT_EQUAL_INT64(
+        revision,
+        tp_session_snapshot_revision(
+            gui_project_snapshot()));
+    TEST_ASSERT_EQUAL_INT(
+        GUI_EDIT_EDITING, gui_atlas_edit_phase());
+    TEST_ASSERT_EQUAL_STRING(
+        "Apply or discard the active atlas edit before Undo.",
+        s_status);
+    gui_atlas_edit_discard();
+}
+
+void test_foreign_model_transaction_conflicts_active_atlas_draft(void) {
+    const tp_session_snapshot *snapshot =
+        gui_project_snapshot();
+    const tp_snapshot_atlas *atlas =
+        tp_session_snapshot_atlas_at(snapshot, 0);
+    TEST_ASSERT_NOT_NULL(atlas);
+    const tp_id128 atlas_id = atlas->id;
+    const int draft_padding = atlas->padding + 2;
+    gui_edit_atlas_setting(
+        atlas_id, tp_session_snapshot_revision(snapshot),
+        GUI_ATLAS_PADDING, draft_padding, 0.0F);
+
+    char foreign_name[] = "foreign-commit";
+    tp_operation operation = {
+        .kind = TP_OP_ATLAS_RENAME,
+        .atlas_id = {{0}},
+        .u.atlas_rename.name = foreign_name,
+    };
+    operation.atlas_id = atlas_id;
+    tp_txn_request request = {
+        .schema = TP_TXN_SCHEMA,
+        .expected_revision =
+            tp_session_snapshot_revision(snapshot),
+        .label = "atlas.rename",
+        .author = "human",
+        .ops = &operation,
+        .op_count = 1,
+    };
+    (void)snprintf(
+        request.id_hex, sizeof request.id_hex,
+        "%s", "77777777777777777777777777777777");
+    tp_txn_result result = {0};
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_session_apply(
+            gui_project__test_session(),
+            &request, &result, &error));
+    tp_txn_result_free(&result);
+
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_project_frame_begin(&error));
+    gui_project_frame_end();
+    TEST_ASSERT_EQUAL_INT(
+        GUI_EDIT_CONFLICTED,
+        gui_atlas_edit_phase());
+    int effective = 0;
+    TEST_ASSERT_TRUE(
+        gui_atlas_edit_value(
+            atlas_id, GUI_ATLAS_PADDING,
+            &effective, NULL));
+    TEST_ASSERT_EQUAL_INT(draft_padding, effective);
+    gui_atlas_edit_discard();
+}
+
+void test_lifecycle_apply_mine_resolves_conflict_before_continuing(void) {
+    const tp_session_snapshot *snapshot =
+        gui_project_snapshot();
+    const tp_snapshot_atlas *atlas =
+        tp_session_snapshot_atlas_at(snapshot, 0);
+    TEST_ASSERT_NOT_NULL(atlas);
+    const tp_id128 atlas_id = atlas->id;
+    const int draft_padding = atlas->padding + 2;
+    gui_edit_atlas_setting(
+        atlas_id, tp_session_snapshot_revision(snapshot),
+        GUI_ATLAS_PADDING, draft_padding, 0.0F);
+
+    char foreign_name[] = "lifecycle-foreign";
+    tp_operation operation = {
+        .kind = TP_OP_ATLAS_RENAME,
+        .atlas_id = {{0}},
+        .u.atlas_rename.name = foreign_name,
+    };
+    operation.atlas_id = atlas_id;
+    tp_txn_request request = {
+        .schema = TP_TXN_SCHEMA,
+        .expected_revision =
+            tp_session_snapshot_revision(snapshot),
+        .label = "atlas.rename",
+        .author = "human",
+        .ops = &operation,
+        .op_count = 1,
+    };
+    (void)snprintf(
+        request.id_hex, sizeof request.id_hex,
+        "%s", "88888888888888888888888888888888");
+    tp_txn_result result = {0};
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_session_apply(
+            gui_project__test_session(),
+            &request, &result, &error));
+    tp_txn_result_free(&result);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_project_frame_begin(&error));
+    gui_project_frame_end();
+    TEST_ASSERT_EQUAL_INT(
+        GUI_EDIT_CONFLICTED,
+        gui_atlas_edit_phase());
+
+    request_new();
+    apply_pending();
+    TEST_ASSERT_TRUE(s_confirm_open);
+    TEST_ASSERT_TRUE(s_confirm_draft);
+    s_modal_action = MODAL_SAVE;
+    apply_pending();
+
+    TEST_ASSERT_EQUAL_INT(
+        GUI_EDIT_IDLE, gui_atlas_edit_phase());
+    TEST_ASSERT_TRUE(s_confirm_open);
+    TEST_ASSERT_FALSE(s_confirm_draft);
+    atlas = tp_session_snapshot_atlas_by_id(
+        gui_project_snapshot(), atlas_id);
+    TEST_ASSERT_NOT_NULL(atlas);
+    TEST_ASSERT_EQUAL_INT(
+        draft_padding, atlas->padding);
+    s_modal_action = MODAL_CANCEL;
+    apply_pending();
+}
+
+void test_failed_lifecycle_apply_keeps_explicit_draft_choice_open(void) {
+    const tp_session_snapshot *snapshot =
+        gui_project_snapshot();
+    const tp_snapshot_atlas *atlas =
+        tp_session_snapshot_atlas_at(snapshot, 0);
+    TEST_ASSERT_NOT_NULL(atlas);
+    const int64_t revision =
+        tp_session_snapshot_revision(snapshot);
+    gui_edit_atlas_setting(
+        atlas->id, revision,
+        GUI_ATLAS_PADDING, -1, 0.0F);
+
+    request_new();
+    apply_pending();
+    TEST_ASSERT_TRUE(s_confirm_open);
+    TEST_ASSERT_TRUE(s_confirm_draft);
+    s_modal_action = MODAL_SAVE;
+    apply_pending();
+
+    TEST_ASSERT_TRUE(s_confirm_open);
+    TEST_ASSERT_TRUE(s_confirm_draft);
+    TEST_ASSERT_EQUAL_INT(
+        GUI_LIFECYCLE_REQUEST_NEW,
+        s_after_confirm);
+    TEST_ASSERT_EQUAL_INT(
+        GUI_EDIT_EDITING, gui_atlas_edit_phase());
+    TEST_ASSERT_EQUAL_INT64(
+        revision,
+        tp_session_snapshot_revision(
+            gui_project_snapshot()));
+    s_modal_action = MODAL_CANCEL;
+    apply_pending();
+    gui_atlas_edit_discard();
 }
 
 void test_pack_result_slots_reject_ownerless_results(void) {
@@ -655,6 +904,238 @@ void test_lifecycle_requests_are_declaration_only(void) {
         GUI_LIFECYCLE_REQUEST_EXIT);
 }
 
+static void assert_lifecycle_requires_draft_choice(
+    void (*request)(void),
+    gui_lifecycle_request expected) {
+    const tp_session_snapshot *snapshot =
+        gui_project_snapshot();
+    const tp_snapshot_atlas *atlas =
+        tp_session_snapshot_atlas_at(snapshot, 0);
+    TEST_ASSERT_NOT_NULL(atlas);
+    const int64_t revision =
+        tp_session_snapshot_revision(snapshot);
+    gui_edit_atlas_setting(
+        atlas->id, revision, GUI_ATLAS_PADDING,
+        atlas->padding + 1, 0.0F);
+
+    request();
+    apply_pending();
+    TEST_ASSERT_TRUE(s_confirm_open);
+    TEST_ASSERT_TRUE(s_confirm_draft);
+    TEST_ASSERT_EQUAL_INT(expected, s_after_confirm);
+    TEST_ASSERT_EQUAL_INT(
+        GUI_EDIT_EDITING, gui_atlas_edit_phase());
+    TEST_ASSERT_EQUAL_INT64(
+        revision,
+        tp_session_snapshot_revision(
+            gui_project_snapshot()));
+
+    s_modal_action = MODAL_CANCEL;
+    apply_pending();
+    TEST_ASSERT_FALSE(s_confirm_open);
+    TEST_ASSERT_FALSE(s_confirm_draft);
+    TEST_ASSERT_EQUAL_INT(
+        GUI_LIFECYCLE_REQUEST_NONE,
+        s_after_confirm);
+    TEST_ASSERT_EQUAL_INT(
+        GUI_EDIT_EDITING, gui_atlas_edit_phase());
+    gui_atlas_edit_discard();
+}
+
+void test_lifecycle_requests_require_explicit_draft_choice(void) {
+    assert_lifecycle_requires_draft_choice(
+        request_new, GUI_LIFECYCLE_REQUEST_NEW);
+    assert_lifecycle_requires_draft_choice(
+        request_open, GUI_LIFECYCLE_REQUEST_OPEN);
+    assert_lifecycle_requires_draft_choice(
+        request_exit, GUI_LIFECYCLE_REQUEST_EXIT);
+}
+
+void test_lifecycle_apply_continues_only_after_terminal_draft_submit(void) {
+    const tp_session_snapshot *snapshot =
+        gui_project_snapshot();
+    const tp_snapshot_atlas *atlas =
+        tp_session_snapshot_atlas_at(snapshot, 0);
+    TEST_ASSERT_NOT_NULL(atlas);
+    const int new_padding = atlas->padding + 2;
+    gui_edit_atlas_setting(
+        atlas->id,
+        tp_session_snapshot_revision(snapshot),
+        GUI_ATLAS_PADDING, new_padding, 0.0F);
+
+    request_new();
+    apply_pending();
+    TEST_ASSERT_TRUE(s_confirm_draft);
+    s_modal_action = MODAL_SAVE;
+    apply_pending();
+    TEST_ASSERT_EQUAL_INT(
+        GUI_EDIT_IDLE, gui_atlas_edit_phase());
+    TEST_ASSERT_TRUE(s_confirm_open);
+    TEST_ASSERT_FALSE(s_confirm_draft);
+    TEST_ASSERT_EQUAL_INT(
+        new_padding, atlas_at(0)->padding);
+    TEST_ASSERT_EQUAL_INT(
+        GUI_PROJECT_LIFECYCLE_OPEN_IDLE,
+        gui_project_lifecycle_state_query());
+    s_modal_action = MODAL_CANCEL;
+    apply_pending();
+}
+
+void test_lifecycle_discard_continues_without_submitting_draft(void) {
+    const tp_session_snapshot *snapshot =
+        gui_project_snapshot();
+    const tp_snapshot_atlas *atlas =
+        tp_session_snapshot_atlas_at(snapshot, 0);
+    TEST_ASSERT_NOT_NULL(atlas);
+    const int64_t revision =
+        tp_session_snapshot_revision(snapshot);
+    gui_edit_atlas_setting(
+        atlas->id, revision, GUI_ATLAS_PADDING,
+        atlas->padding + 2, 0.0F);
+
+    request_new();
+    apply_pending();
+    s_modal_action = MODAL_DISCARD;
+    apply_pending();
+    TEST_ASSERT_EQUAL_INT(
+        GUI_EDIT_IDLE, gui_atlas_edit_phase());
+    TEST_ASSERT_EQUAL_INT64(
+        revision,
+        tp_session_snapshot_revision(
+            gui_project_snapshot()));
+    TEST_ASSERT_EQUAL_INT(
+        GUI_PROJECT_LIFECYCLE_DRAINING,
+        gui_project_lifecycle_state_query());
+    gui_actions_pump_lifecycle();
+    TEST_ASSERT_EQUAL_INT(
+        GUI_PROJECT_LIFECYCLE_OPEN_IDLE,
+        gui_project_lifecycle_state_query());
+}
+
+void test_failed_atlas_gesture_aborts_dependent_action_batch(void) {
+    const tp_session_snapshot *snapshot =
+        gui_project_snapshot();
+    const tp_snapshot_atlas *atlas =
+        tp_session_snapshot_atlas_at(snapshot, 0);
+    TEST_ASSERT_NOT_NULL(atlas);
+    const int64_t revision =
+        tp_session_snapshot_revision(snapshot);
+    gui_target_ref target = {0};
+    TEST_ASSERT_TRUE(
+        gui_project_target_ref_at(0, 0, &target));
+    const tp_snapshot_target *target_before =
+        tp_session_snapshot_target_by_id(
+            snapshot, atlas->id, target.target_id);
+    TEST_ASSERT_NOT_NULL(target_before);
+    const bool target_enabled =
+        target_before->enabled;
+    gui_edit_atlas_setting(
+        atlas->id, revision,
+        GUI_ATLAS_PADDING, -1, 0.0F);
+    gui_edit_target_enabled(
+        &target, !target_enabled);
+    gui_request_gesture_commit();
+    s_pending_add_atlas = true;
+
+    apply_pending();
+    TEST_ASSERT_EQUAL_INT64(
+        revision,
+        tp_session_snapshot_revision(
+            gui_project_snapshot()));
+    TEST_ASSERT_EQUAL_INT(
+        1, tp_session_snapshot_atlas_count(
+               gui_project_snapshot()));
+    const tp_snapshot_target *target_after =
+        tp_session_snapshot_target_by_id(
+            gui_project_snapshot(), atlas->id,
+            target.target_id);
+    TEST_ASSERT_NOT_NULL(target_after);
+    TEST_ASSERT_EQUAL_INT(
+        target_enabled, target_after->enabled);
+    TEST_ASSERT_EQUAL_INT(
+        0, s_actions.target_intent_count);
+    TEST_ASSERT_FALSE(s_pending_add_atlas);
+    TEST_ASSERT_EQUAL_INT(
+        GUI_EDIT_EDITING, gui_atlas_edit_phase());
+    apply_pending();
+    TEST_ASSERT_EQUAL_INT(
+        1, tp_session_snapshot_atlas_count(
+               gui_project_snapshot()));
+    gui_atlas_edit_discard();
+}
+
+void test_successful_atlas_prerequisite_advances_dependent_intents(void) {
+    const tp_session_snapshot *snapshot =
+        gui_project_snapshot();
+    const tp_snapshot_atlas *atlas =
+        tp_session_snapshot_atlas_at(snapshot, 0);
+    TEST_ASSERT_NOT_NULL(atlas);
+    const tp_id128 atlas_id = atlas->id;
+    TEST_ASSERT_EQUAL_INT(
+        0, (gui_project_create_animation(
+               atlas_id,
+               tp_session_snapshot_revision(snapshot),
+               "dependent", NULL, 0))
+               .visible_index);
+
+    snapshot = gui_project_snapshot();
+    atlas = tp_session_snapshot_atlas_by_id(
+        snapshot, atlas_id);
+    TEST_ASSERT_NOT_NULL(atlas);
+    gui_animation_ref animation = {0};
+    gui_target_ref target = {0};
+    TEST_ASSERT_TRUE(
+        gui_project_animation_ref_at(
+            0, 0, &animation));
+    TEST_ASSERT_TRUE(
+        gui_project_target_ref_at(0, 0, &target));
+    const tp_snapshot_animation *animation_before =
+        tp_session_snapshot_animation_at(
+            snapshot, atlas_id, 0);
+    const tp_snapshot_target *target_before =
+        tp_session_snapshot_target_by_id(
+            snapshot, atlas_id, target.target_id);
+    TEST_ASSERT_NOT_NULL(animation_before);
+    TEST_ASSERT_NOT_NULL(target_before);
+    const float new_fps =
+        animation_before->fps + 1.0F;
+    const bool new_enabled =
+        !target_before->enabled;
+    const int64_t revision =
+        tp_session_snapshot_revision(snapshot);
+
+    gui_edit_atlas_setting(
+        atlas_id, revision,
+        GUI_ATLAS_PADDING,
+        atlas->padding + 1, 0.0F);
+    gui_edit_anim_fps(
+        &animation, new_fps);
+    gui_edit_target_enabled(
+        &target, new_enabled);
+    gui_request_gesture_commit();
+    apply_pending();
+
+    snapshot = gui_project_snapshot();
+    const tp_snapshot_animation *animation_after =
+        tp_session_snapshot_animation_by_id(
+            snapshot, atlas_id,
+            animation.animation_id);
+    const tp_snapshot_target *target_after =
+        tp_session_snapshot_target_by_id(
+            snapshot, atlas_id, target.target_id);
+    TEST_ASSERT_EQUAL_INT(
+        GUI_EDIT_IDLE, gui_atlas_edit_phase());
+    TEST_ASSERT_NOT_NULL(animation_after);
+    TEST_ASSERT_NOT_NULL(target_after);
+    TEST_ASSERT_TRUE(
+        animation_after->fps == new_fps);
+    TEST_ASSERT_EQUAL_INT(
+        new_enabled, target_after->enabled);
+    TEST_ASSERT_EQUAL_INT64(
+        revision + 3,
+        tp_session_snapshot_revision(snapshot));
+}
+
 void test_prepare_failure_preserves_buffered_edit(void) {
     const tp_session_snapshot *snapshot =
         gui_project_snapshot();
@@ -667,7 +1148,7 @@ void test_prepare_failure_preserves_buffered_edit(void) {
     const int64_t revision_before =
         tp_session_snapshot_revision(snapshot);
 
-    gui_queue_atlas_setting(
+    gui_edit_atlas_setting(
         atlas_id, revision_before,
         GUI_ATLAS_PADDING,
         padding_before + 3, 0.0F);
@@ -1399,10 +1880,28 @@ int main(int argc, char **argv) {
     RUN_TEST(
         test_lifecycle_requests_are_declaration_only);
     RUN_TEST(
+        test_lifecycle_requests_require_explicit_draft_choice);
+    RUN_TEST(
+        test_lifecycle_apply_continues_only_after_terminal_draft_submit);
+    RUN_TEST(
+        test_lifecycle_discard_continues_without_submitting_draft);
+    RUN_TEST(
+        test_failed_atlas_gesture_aborts_dependent_action_batch);
+    RUN_TEST(
+        test_successful_atlas_prerequisite_advances_dependent_intents);
+    RUN_TEST(
         test_prepare_failure_preserves_buffered_edit);
     RUN_TEST(
         test_busy_new_enters_drain_and_resets_only_after_completion);
     RUN_TEST(test_deferred_edit_coalesces_then_undo_redo_trace_is_exact);
+    RUN_TEST(test_atlas_draft_maps_every_scalar_component);
+    RUN_TEST(test_undo_blocks_without_submitting_active_atlas_draft);
+    RUN_TEST(
+        test_foreign_model_transaction_conflicts_active_atlas_draft);
+    RUN_TEST(
+        test_lifecycle_apply_mine_resolves_conflict_before_continuing);
+    RUN_TEST(
+        test_failed_lifecycle_apply_keeps_explicit_draft_choice_open);
     RUN_TEST(test_undo_redo_preserves_selected_animation_by_stable_id);
     RUN_TEST(
         test_deferred_frame_delete_clears_selection_only_after_commit);

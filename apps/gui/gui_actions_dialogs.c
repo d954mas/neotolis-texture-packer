@@ -311,6 +311,9 @@ static void do_add_folder(void) {
  * gate never discards the project and Pack never runs on stale state.
  * Returns true when the flush FAILED (the caller must abort); false when it is safe to proceed. */
 bool gui_actions__flush_failed(void) {
+    if (!gui_actions__submit_atlas_edit()) {
+        return true;
+    }
     if (gui_project_flush_pending()) {
         return false; /* nothing pending / net-zero no-op / committed OK -> proceed */
     }
@@ -385,11 +388,18 @@ bool gui_actions__apply_lifecycle_request(void) {
             "A project lifecycle transition is already in progress.");
         return false;
     }
+    if (gui_atlas_edit_phase() != GUI_EDIT_IDLE) {
+        s_after_confirm = request;
+        s_confirm_draft = true;
+        s_confirm_open = true;
+        return false;
+    }
     if (gui_actions__flush_failed()) {
         return false;
     }
     if (gui_project_is_dirty()) {
         s_after_confirm = request;
+        s_confirm_draft = false;
         s_confirm_open = true;
         return false;
     }
@@ -414,10 +424,56 @@ static void confirm_perform(void) {
     }
     s_after_confirm = GUI_LIFECYCLE_REQUEST_NONE;
 }
+
+static void confirm_continue(void) {
+    s_actions.pending_lifecycle_request =
+        s_after_confirm;
+    s_after_confirm =
+        GUI_LIFECYCLE_REQUEST_NONE;
+    (void)gui_actions__apply_lifecycle_request();
+}
 // #endregion
 
 
 void gui_actions__apply_confirm(void) {
+    if (s_confirm_draft) {
+        if (s_modal_action == MODAL_SAVE) {
+            const bool applied =
+                gui_atlas_edit_phase() ==
+                        GUI_EDIT_CONFLICTED
+                    ? gui_actions__apply_atlas_mine()
+                    : gui_actions__submit_atlas_edit();
+            if (applied &&
+                gui_atlas_edit_phase() ==
+                    GUI_EDIT_IDLE) {
+                s_confirm_open = false;
+                s_confirm_draft = false;
+                confirm_continue();
+            } else {
+                /* Keep the explicit choice open after validation, OOM, a
+                 * deleted target, or another conflict. The draft and outer
+                 * lifecycle request remain intact for retry, Discard, or
+                 * Cancel. */
+                s_confirm_open = true;
+                s_confirm_draft = true;
+            }
+        } else if (s_modal_action == MODAL_DISCARD) {
+            gui_atlas_edit_discard();
+            if (gui_atlas_edit_phase() ==
+                GUI_EDIT_IDLE) {
+                s_confirm_open = false;
+                s_confirm_draft = false;
+                confirm_continue();
+            }
+        } else if (s_modal_action == MODAL_CANCEL) {
+            s_confirm_open = false;
+            s_confirm_draft = false;
+            s_after_confirm =
+                GUI_LIFECYCLE_REQUEST_NONE;
+        }
+        s_modal_action = MODAL_NONE;
+        return;
+    }
     if (s_modal_action == MODAL_SAVE) {
         const bool saved = do_save();
         s_confirm_open = false;

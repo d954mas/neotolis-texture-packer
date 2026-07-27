@@ -33,11 +33,14 @@ static tp_status copy_frame_ref(const tp_op_sprite_ref *input,
     return TP_STATUS_OK;
 }
 
-static tp_status apply_atlas_ops(gui_session_client *client, tp_operation *operations,
-                                 int operation_count, int64_t expected_revision,
-                                 const char *batch_label,
-                                 gui_session_submit_terminal *out_terminal,
-                                 tp_error *err) {
+static tp_status apply_atlas_ops_identified(
+    gui_session_client *client, tp_operation *operations,
+    int operation_count, int64_t expected_revision,
+    const char *batch_label,
+    gui_session_submit_identity identity,
+    const char *transaction_id,
+    gui_session_submit_terminal *out_terminal,
+    tp_error *err) {
     if (!client || !operations || operation_count <= 0) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "invalid atlas session intent");
     }
@@ -54,8 +57,8 @@ static tp_status apply_atlas_ops(gui_session_client *client, tp_operation *opera
         .operation_count = operation_count,
         .expected_revision = expected_revision,
         .semantic_label = semantic_label,
-        /* R2c non-draft actions explicitly use not-applicable identity. */
-        .identity = {0},
+        .identity = identity,
+        .retained_transaction_id = transaction_id,
     };
     gui_session_submit_result result = {0};
     const tp_status status =
@@ -72,6 +75,19 @@ static tp_status apply_atlas_ops(gui_session_client *client, tp_operation *opera
     }
     gui_session_submit_result_destroy(&result);
     return status;
+}
+
+static tp_status apply_atlas_ops(
+    gui_session_client *client, tp_operation *operations,
+    int operation_count, int64_t expected_revision,
+    const char *batch_label,
+    gui_session_submit_terminal *out_terminal,
+    tp_error *err) {
+    return apply_atlas_ops_identified(
+        client, operations, operation_count,
+        expected_revision, batch_label,
+        (gui_session_submit_identity){0}, NULL,
+        out_terminal, err);
 }
 
 tp_status gui_session_rename_atlas(gui_session_client *client, tp_id128 atlas_id,
@@ -133,6 +149,8 @@ tp_status gui_session_remove_atlas(gui_session_client *client, tp_id128 atlas_id
 tp_status gui_session_set_atlas_settings(gui_session_client *client, tp_id128 atlas_id,
                                          int64_t expected_revision,
                                          const tp_op_atlas_settings *settings,
+                                         gui_session_submit_identity identity,
+                                         const char transaction_id[33],
                                          gui_session_submit_terminal *out_terminal,
                                          tp_error *err) {
     if (!settings) {
@@ -143,8 +161,10 @@ tp_status gui_session_set_atlas_settings(gui_session_client *client, tp_id128 at
     operation.kind = TP_OP_ATLAS_SETTINGS_SET;
     operation.atlas_id = atlas_id;
     operation.u.atlas_settings = *settings;
-    return apply_atlas_ops(client, &operation, 1, expected_revision, NULL,
-                           out_terminal, err);
+    return apply_atlas_ops_identified(
+        client, &operation, 1, expected_revision,
+        NULL, identity, transaction_id,
+        out_terminal, err);
 }
 
 tp_status gui_session_add_sources(gui_session_client *client, tp_id128 atlas_id,

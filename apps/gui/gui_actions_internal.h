@@ -47,14 +47,6 @@ typedef struct target_edit_intent {
     char *out_path;
 } target_edit_intent;
 
-typedef struct atlas_setting_intent {
-    tp_id128 atlas_id;
-    int64_t expected_revision;
-    gui_atlas_field field;
-    int ivalue;
-    float fvalue;
-} atlas_setting_intent;
-
 typedef enum sprite_intent_kind {
     SPRITE_INTENT_ORIGIN = 0,
     SPRITE_INTENT_SLICE9,
@@ -93,6 +85,13 @@ typedef struct animation_edit_intent {
     int frame_count;
 } animation_edit_intent;
 
+typedef struct gui_atlas_draft {
+    gui_edit_state lifecycle;
+    gui_atlas_field component;
+    int integer;
+    float real;
+} gui_atlas_draft;
+
 typedef struct gui_actions_state {
     gui_lifecycle_request pending_lifecycle_request;
     bool pending_add_anim;
@@ -121,9 +120,10 @@ typedef struct gui_actions_state {
     target_edit_intent *target_intents;
     int target_intent_count;
     int target_intent_cap;
-    atlas_setting_intent *atlas_setting_intents;
-    int atlas_setting_intent_count;
-    int atlas_setting_intent_cap;
+    gui_atlas_draft atlas_edit;
+    bool atlas_edit_initialized;
+    bool atlas_edit_reducer_registered;
+    bool atlas_apply_mine;
     sprite_edit_intent *sprite_intents;
     int sprite_intent_count;
     int sprite_intent_cap;
@@ -149,7 +149,13 @@ void gui_actions__frame_refs_dispose(tp_op_sprite_ref *frames, int count);
 tp_op_sprite_ref *gui_actions__frame_refs_copy(const tp_op_sprite_ref *frames,
                                                int count);
 void gui_actions__drain_edits(void);
+void gui_actions__rebase_deferred_edits(
+    int64_t revision_before,
+    int64_t revision_after);
+void gui_actions__discard_deferred_edits(void);
 void gui_actions__discard_edits(void);
+bool gui_actions__submit_atlas_edit(void);
+bool gui_actions__apply_atlas_mine(void);
 void gui_actions__pending_create_animation_dispose(
     pending_create_animation *request);
 bool gui_actions__resolve_animation_ref(const gui_animation_ref *animation,

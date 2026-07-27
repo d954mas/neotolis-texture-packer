@@ -325,8 +325,70 @@ static void offer_atlas_setting(const tp_session_snapshot *snapshot,
                                 const tp_snapshot_atlas *atlas,
                                 gui_atlas_field field, int ivalue, float fvalue) {
     if (snapshot && atlas) {
-        gui_queue_atlas_setting(atlas->id, tp_session_snapshot_revision(snapshot),
-                                field, ivalue, fvalue);
+        gui_edit_atlas_setting(
+            atlas->id,
+            tp_session_snapshot_revision(snapshot),
+            field, ivalue, fvalue);
+    }
+}
+
+static int atlas_int_value(
+    const tp_snapshot_atlas *atlas,
+    gui_atlas_field field, int committed) {
+    int value = committed;
+    (void)gui_atlas_edit_value(
+        atlas->id, field, &value, NULL);
+    return value;
+}
+
+static float atlas_real_value(
+    const tp_snapshot_atlas *atlas,
+    gui_atlas_field field, float committed) {
+    float value = committed;
+    (void)gui_atlas_edit_value(
+        atlas->id, field, NULL, &value);
+    return value;
+}
+
+static void declare_atlas_conflict(
+    nt_ui_context_t *ctx,
+    const tp_snapshot_atlas *selected) {
+    if (gui_atlas_edit_phase() != GUI_EDIT_CONFLICTED) {
+        return;
+    }
+    const bool target_selected =
+        selected &&
+        gui_atlas_edit_targets(selected->id);
+    const bool target_present =
+        gui_atlas_edit_can_apply();
+    panel_note(
+        ctx,
+        !target_present
+            ? "The edited atlas no longer exists."
+            : target_selected
+                  ? "This field changed in the project while you were editing it."
+                  : "Another atlas has a conflicted edit. Select it to apply, or discard.");
+    CLAY({.layout = {
+              .sizing = {
+                  CLAY_SIZING_GROW(0),
+                  CLAY_SIZING_FIXED(S(BASE_ROW_H))},
+              .childGap = Su(6),
+              .childAlignment = {
+                  CLAY_ALIGN_X_RIGHT,
+                  CLAY_ALIGN_Y_CENTER}}}) {
+        if (ui_btn(
+                ctx, nt_ui_id("set/conflict_apply"),
+                "Apply Mine", &g_btn,
+                target_selected && target_present,
+                0.0F, 24.0F, &g_caption)) {
+            gui_atlas_edit_apply_mine();
+        }
+        if (ui_btn(
+                ctx, nt_ui_id("set/conflict_discard"),
+                "Discard", &g_btn_ghost, true,
+                0.0F, 24.0F, &g_caption)) {
+            gui_atlas_edit_discard();
+        }
     }
 }
 
@@ -334,34 +396,40 @@ static void declare_atlas_settings(nt_ui_context_t *ctx,
                                    const tp_session_snapshot *snapshot,
                                    const tp_snapshot_atlas *a) {
     /* Basic: shape, max size, padding, allow transform. */
+    const int shape =
+        atlas_int_value(a, GUI_ATLAS_SHAPE, a->shape);
     const int ns = row_combo(ctx, "Shape", nt_ui_id("set/shape"), &s_dd_shape_open,
-                             (a->shape >= 0 && a->shape < 3) ? k_shape_names[a->shape] : "?", a->shape, k_shape_names, 3, true);
-    if (ns >= 0 && ns != a->shape) {
+                             (shape >= 0 && shape < 3) ? k_shape_names[shape] : "?", shape, k_shape_names, 3, true);
+    if (ns >= 0 && ns != shape) {
         offer_atlas_setting(snapshot, a, GUI_ATLAS_SHAPE, ns, 0.0F);
     }
+    const int max_size =
+        atlas_int_value(
+            a, GUI_ATLAS_MAX_SIZE, a->max_size);
     char szpv[16];
-    (void)snprintf(szpv, sizeof szpv, "%d", a->max_size);
+    (void)snprintf(szpv, sizeof szpv, "%d", max_size);
     static const char *const size_labels[7] = {"256", "512", "1024", "2048", "4096", "8192", "16384"};
-    const int nsz = row_combo(ctx, "Max page size", nt_ui_id("set/size"), &s_dd_size_open, szpv, size_preset_index(a->max_size),
+    const int nsz = row_combo(ctx, "Max page size", nt_ui_id("set/size"), &s_dd_size_open, szpv, size_preset_index(max_size),
                               size_labels, 7, true);
-    if (nsz >= 0 && k_size_presets[nsz] != a->max_size) {
+    if (nsz >= 0 && k_size_presets[nsz] != max_size) {
         offer_atlas_setting(snapshot, a, GUI_ATLAS_MAX_SIZE, k_size_presets[nsz], 0.0F);
     }
-    if (a->max_size > 4096) {
+    if (max_size > 4096) {
         panel_note(ctx, "Pages over 4096 may not load on mobile GPUs / stock engine runtime.");
     }
     int iv = 0;
-    /* No committed-value guard (`iv != a->padding`) here or on the other coalescable knobs below:
-     * during a buffered gesture the committed model is FROZEN, so a control returned
-     * to its committed value would SKIP the correcting enqueue while the pending buffer kept the stale
-     * intermediate -> the flush then committed the WRONG value (data loss). Every changed frame now
-     * enqueues (coalesced, latest wins); a gesture that nets back to committed is dropped by the flush-
-     * time no-op suppression (#3), so no phantom commit results. */
-    if (row_int(ctx, "Padding", nt_ui_id("set/pad"), s_nb_pad, sizeof s_nb_pad, a->padding, 0, 16384, true, &iv)) {
+    const int padding =
+        atlas_int_value(
+            a, GUI_ATLAS_PADDING, a->padding);
+    if (row_int(ctx, "Padding", nt_ui_id("set/pad"), s_nb_pad, sizeof s_nb_pad, padding, 0, 16384, true, &iv)) {
         offer_atlas_setting(snapshot, a, GUI_ATLAS_PADDING, iv, 0.0F);
     }
     bool bv = false;
-    if (row_check(ctx, "Allow transform", nt_ui_id("set/xform"), a->allow_transform, true, &bv)) {
+    const int allow_transform =
+        atlas_int_value(
+            a, GUI_ATLAS_ALLOW_TRANSFORM,
+            a->allow_transform ? 1 : 0);
+    if (row_check(ctx, "Allow transform", nt_ui_id("set/xform"), allow_transform != 0, true, &bv)) {
         offer_atlas_setting(snapshot, a, GUI_ATLAS_ALLOW_TRANSFORM, bv ? 1 : 0, 0.0F);
     }
 
@@ -370,29 +438,51 @@ static void declare_atlas_settings(nt_ui_context_t *ctx,
     if (!s_atlas_adv_open) {
         return;
     }
-    if (row_int(ctx, "Margin", nt_ui_id("set/margin"), s_nb_margin, sizeof s_nb_margin, a->margin, 0, 16384, true, &iv)) {
+    const int margin =
+        atlas_int_value(
+            a, GUI_ATLAS_MARGIN, a->margin);
+    if (row_int(ctx, "Margin", nt_ui_id("set/margin"), s_nb_margin, sizeof s_nb_margin, margin, 0, 16384, true, &iv)) {
         offer_atlas_setting(snapshot, a, GUI_ATLAS_MARGIN, iv, 0.0F);
     }
-    const bool extrude_ok = (a->shape == 0 /* RECT */);
-    if (row_int(ctx, "Extrude", nt_ui_id("set/extrude"), s_nb_extrude, sizeof s_nb_extrude, a->extrude, 0, 255, extrude_ok,
+    const int extrude =
+        atlas_int_value(
+            a, GUI_ATLAS_EXTRUDE, a->extrude);
+    const bool extrude_ok = (shape == 0 /* RECT */);
+    if (row_int(ctx, "Extrude", nt_ui_id("set/extrude"), s_nb_extrude, sizeof s_nb_extrude, extrude, 0, 255, extrude_ok,
                 &iv)) {
         offer_atlas_setting(snapshot, a, GUI_ATLAS_EXTRUDE, iv, 0.0F);
     }
     if (!extrude_ok) {
         panel_note(ctx, "Extrude requires Rect shape \xE2\x80\x94 use Padding for polygon modes.");
     }
-    if (row_slider(ctx, "Alpha threshold", nt_ui_id("set/alpha"), s_nb_alpha, sizeof s_nb_alpha, a->alpha_threshold, 0,
+    const int alpha_threshold =
+        atlas_int_value(
+            a, GUI_ATLAS_ALPHA_THRESHOLD,
+            a->alpha_threshold);
+    if (row_slider(ctx, "Alpha threshold", nt_ui_id("set/alpha"), s_nb_alpha, sizeof s_nb_alpha, alpha_threshold, 0,
                    255, true, &iv)) {
         offer_atlas_setting(snapshot, a, GUI_ATLAS_ALPHA_THRESHOLD, iv, 0.0F);
     }
-    if (row_int(ctx, "Max vertices", nt_ui_id("set/maxv"), s_nb_maxv, sizeof s_nb_maxv, a->max_vertices, 1, 16, true, &iv)) {
+    const int max_vertices =
+        atlas_int_value(
+            a, GUI_ATLAS_MAX_VERTICES,
+            a->max_vertices);
+    if (row_int(ctx, "Max vertices", nt_ui_id("set/maxv"), s_nb_maxv, sizeof s_nb_maxv, max_vertices, 1, 16, true, &iv)) {
         offer_atlas_setting(snapshot, a, GUI_ATLAS_MAX_VERTICES, iv, 0.0F);
     }
-    if (row_check(ctx, "Power of two", nt_ui_id("set/pot"), a->power_of_two, true, &bv)) {
+    const int power_of_two =
+        atlas_int_value(
+            a, GUI_ATLAS_POWER_OF_TWO,
+            a->power_of_two ? 1 : 0);
+    if (row_check(ctx, "Power of two", nt_ui_id("set/pot"), power_of_two != 0, true, &bv)) {
         offer_atlas_setting(snapshot, a, GUI_ATLAS_POWER_OF_TWO, bv ? 1 : 0, 0.0F);
     }
     float fv = 0.0F;
-    if (row_float(ctx, "Pixels/unit", nt_ui_id("set/ppu"), s_nb_ppu, sizeof s_nb_ppu, a->pixels_per_unit, 0.0001F,
+    const float pixels_per_unit =
+        atlas_real_value(
+            a, GUI_ATLAS_PIXELS_PER_UNIT,
+            a->pixels_per_unit);
+    if (row_float(ctx, "Pixels/unit", nt_ui_id("set/ppu"), s_nb_ppu, sizeof s_nb_ppu, pixels_per_unit, 0.0001F,
                   100000.0F, true, &fv)) {
         offer_atlas_setting(snapshot, a, GUI_ATLAS_PIXELS_PER_UNIT, 0, fv);
     }
@@ -950,6 +1040,7 @@ void declare_right_panel(nt_ui_context_t *ctx) {
                          .padding = {Su(8), Su(8), Su(8), Su(10)},
                          .layoutDirection = CLAY_TOP_TO_BOTTOM,
                          .childGap = Su(4)}}) {
+            declare_atlas_conflict(ctx, snapshot_atlas);
             if (!snapshot_atlas) {
                 nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), "No atlas selected.", &g_caption);
             } else {

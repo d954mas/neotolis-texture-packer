@@ -3,12 +3,12 @@
 
 /* GUI projection over one core-owned tp_session. The session is the sole mutable
  * project/history/idempotency/recovery owner; GUI code keeps only immutable snapshots,
- * the display path/name, pending gesture intent, and derived presentation state.
+ * the display path/name, feature-local draft/gesture state, and derived presentation state.
  * The two independently observed state axes are:
  *   - dirty        : session-owned semantic identity vs the last saved baseline, so
  *                    undoing back to the saved state clears it. Save/Open/New rebaseline it.
- *                    Menu-bar dot. (A buffered-but-uncommitted gesture is NOT yet in the identity;
- *                    the destructive gates flush the pending buffer BEFORE checking dirty.)
+ *                    Menu-bar dot. (An active draft is NOT yet in the identity; destructive
+ *                    gates first ask the feature owner to submit or reject it.)
  *   - preview_stale : model changed since the last successful pack. Since in-process packing is
  *                    blocked (engine #282), nothing clears it this round.
  *
@@ -16,8 +16,8 @@
  * one accepted transaction captures one semantic diff and one undo step. Undo/Redo also
  * run through tp_session. One gui_session_client atomically observes and frame-pins the
  * immutable state consumed by presentation.
- * Value edits (slider/field/etc.) coalesce through gui_project's ONE pending transaction and commit
- * per GESTURE (gui_project_flush_pending), so one interaction == one undo step (decision 0015).
+ * Atlas scalars use one view-local draft reducer and build a narrow typed operation only at
+ * submit. Older edit families still use gui_project's pending transaction until their R3 cutover.
  *
  * Refresh (F4) is deliberately NOT a model mutation: rescanning disk sources changes what is
  * DISPLAYED/packed, not the PROJECT MODEL (sources are paths). So Refresh calls
@@ -34,6 +34,7 @@
 #include "tp_core/tp_job.h"
 #include "tp_core/tp_session_snapshot_query.h"
 #include "gui_project_view.h"
+#include "gui_session_client.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -134,6 +135,12 @@ bool gui_project_observed_input_token(
 tp_status gui_project_frame_begin(tp_error *err);
 void gui_project_frame_end(void);
 bool gui_project_frame_is_pinned(void);
+tp_status gui_project_register_observation_reducer(
+    gui_session_client_reducer_fn reduce, void *context, tp_error *err);
+bool gui_project_submit_receipt_query(
+    const char transaction_id[33],
+    gui_session_submit_identity identity,
+    gui_session_submit_terminal *out);
 /* Host-thread admission facade. Request payloads are copied on enqueue; the
  * queue never exposes or retains the mutable session. */
 tp_status gui_project_job_enqueue_pack(
@@ -181,13 +188,9 @@ void gui_project_mark_stale(void);
 /* Advances the coalescing clock (seconds) each frame -- feeds the gated fallback flush only. */
 void gui_project_tick(double now_seconds);
 
-/* Commit the ONE buffered coalescable gesture NOW (no-op when nothing is buffered): the gesture-end
- * flush called at every commit boundary (save/save-as/new/open/exit/undo/redo/pack/export and before
- * each dirty gate) and by the view layer at a widget's gesture boundary. Committing folds the whole
- * gesture into ONE undo step. Returns FALSE iff a buffered gesture existed and its transaction was
- * rejected; callers that then persist, discard, or change history MUST stop rather than act on an
- * older committed state. Recovery degradation does not make a committed edit fail. Returns true
- * when nothing was pending, it was a no-op, or it committed successfully. */
+/* Commit the pending gesture families still awaiting their R3 cutover. Atlas scalar drafts are
+ * owned and submitted by gui_actions instead. Returns false when a buffered operation is rejected
+ * so persistence/history callers cannot act on older committed state. */
 bool gui_project_flush_pending(void);
 /* FALLBACK ONLY: commit a buffered gesture that never got a release/blur/discrete boundary, once the
  * 0.30 s window has elapsed. The caller MUST gate this on no active gesture so it can never split a
@@ -247,8 +250,13 @@ bool gui_project_set_sprite_rename(const gui_sprite_ref *sprite, const char *ren
 /* Sets ONE atlas knob via an atlas.settings.set transaction. The int/bool knobs read
  * `ivalue` (bool as 0/1); pixels_per_unit reads `fvalue`. Value RANGES are core's now
  * (the op validates); the widget still parse-clamps. Returns true on commit. */
-bool gui_project_set_atlas_setting(tp_id128 atlas_id, int64_t expected_revision,
-                                   gui_atlas_field field, int ivalue, float fvalue);
+tp_status gui_project_submit_atlas_setting(
+    tp_id128 atlas_id, int64_t expected_revision,
+    gui_atlas_field field, int ivalue, float fvalue,
+    gui_session_submit_identity identity,
+    const char transaction_id[33],
+    gui_session_submit_terminal *out_terminal,
+    tp_error *err);
 
 /* --- region-panel per-sprite overrides (sparse: a clear that leaves only defaults
  * drops the override entry, keeping byte-identical saves) --- */

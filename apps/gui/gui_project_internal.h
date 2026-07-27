@@ -8,8 +8,7 @@
 /* Private storage shared only by the physical gui_project implementation files.
  * This is the existing adapter state gathered in one place, not a second model. */
 typedef enum gui_coalesce_kind {
-    CK_ATLAS_SETTING = 1,
-    CK_SPRITE_ORIGIN,
+    CK_SPRITE_ORIGIN = 1,
     CK_SPRITE_SLICE9,
     CK_SPRITE_OVERRIDE,
     CK_ANIM_FPS,

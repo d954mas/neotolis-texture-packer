@@ -46,19 +46,6 @@ bool gui_project_flush_pending(void) {
     const bool preview_stale_before = s_project.pending_preview_stale_before;
     memset(&s_project.pending_op, 0, sizeof s_project.pending_op);
     s_project.pending_valid = false;
-    if (op.kind == TP_OP_ATLAS_SETTINGS_SET) {
-        tp_error err = {0};
-        gui_session_submit_terminal terminal = {0};
-        const tp_status status = gui_session_set_atlas_settings(&s_project.binding.client, op.atlas_id, expected_revision, &op.u.atlas_settings, &terminal, &err);
-        tp_operation_free(&op);
-        if (status == TP_STATUS_OK) {
-            settle_pending_success(
-                preview_stale_before, &terminal);
-            return true;
-        }
-        gui_project__note_session_reject(status, &err);
-        return false;
-    }
     if (op.kind == TP_OP_SPRITE_OVERRIDE_SET &&
         !tp_id128_is_nil(op.u.sprite_set.source_id)) {
         tp_error err = {0};
