@@ -158,6 +158,10 @@ bool gui_session_client_frame_is_pinned(
     const gui_session_client *client);
 tp_session *gui_session_client_attached_session(
     const gui_session_client *client);
+/* Liveness predicate. Callers that only need to know whether an active session
+ * exists ask this instead of null-probing a borrowed session pointer. */
+bool gui_session_client_is_attached(
+    const gui_session_client *client);
 
 #ifdef TP_ENABLE_TEST_SEAMS
 void gui_session_client__test_fail_next_observe(void);

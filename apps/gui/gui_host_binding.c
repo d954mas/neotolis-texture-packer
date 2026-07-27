@@ -283,3 +283,174 @@ gui_host_binding_lifecycle(
                      &binding->queue)
                : GUI_HOST_CLOSED;
 }
+
+/* Ingress and commands are refused while the owner is closed or draining: an
+ * uninitialized binding is all-zero, so CLOSED covers "no owner yet" too. */
+static bool binding_is_open(
+    const gui_host_binding *binding) {
+    return gui_host_binding_lifecycle(binding) ==
+           GUI_HOST_OPEN;
+}
+
+static tp_status ingress_closed(tp_error *err) {
+    return tp_error_set(
+        err, TP_STATUS_INVALID_ARGUMENT,
+        "GUI session ingress is closed during lifecycle transition");
+}
+
+tp_status gui_host_binding_enqueue_pack(
+    gui_host_binding *binding, tp_id128 atlas_id,
+    const char *work_dir,
+    const char *preview_exporter_id,
+    tp_error *err) {
+    if (!binding_is_open(binding)) {
+        return ingress_closed(err);
+    }
+    return gui_host_queue_enqueue_pack(
+        &binding->queue, atlas_id, work_dir,
+        preview_exporter_id, err);
+}
+
+tp_status gui_host_binding_enqueue_export(
+    gui_host_binding *binding, tp_id128 atlas_id,
+    const char *work_dir, tp_error *err) {
+    if (!binding_is_open(binding)) {
+        return ingress_closed(err);
+    }
+    return gui_host_queue_enqueue_export(
+        &binding->queue, atlas_id, work_dir, err);
+}
+
+/* Cancel is deliberately admitted while draining: a lifecycle transition is
+ * exactly when the running job has to be asked to stop. */
+tp_status gui_host_binding_enqueue_cancel(
+    gui_host_binding *binding, tp_error *err) {
+    if (!binding) {
+        return ingress_closed(err);
+    }
+    return gui_host_queue_enqueue_cancel(
+        &binding->queue, err);
+}
+
+bool gui_host_binding_take_completion(
+    gui_host_binding *binding,
+    gui_host_completion *out) {
+    return binding && out &&
+           gui_host_queue_take_completion(
+               &binding->queue, out);
+}
+
+bool gui_host_binding_job_busy(
+    const gui_host_binding *binding) {
+    return binding &&
+           gui_host_queue_busy(&binding->queue);
+}
+
+tp_session_job_kind
+gui_host_binding_job_active_kind(
+    const gui_host_binding *binding) {
+    return binding ? gui_host_queue_active_kind(
+                         &binding->queue)
+                   : TP_SESSION_JOB_NONE;
+}
+
+/* The host owner holds the sole active-session pointer. Commands take it from
+ * that ownership instead of a global borrow. */
+static tp_session *command_session(
+    gui_host_binding *binding) {
+    if (!binding_is_open(binding)) {
+        return NULL;
+    }
+    return gui_session_client_attached_session(
+        &binding->client);
+}
+
+static tp_session *query_session(
+    const gui_host_binding *binding) {
+    return binding ? gui_session_client_attached_session(
+                         &binding->client)
+                   : NULL;
+}
+
+static tp_status command_closed(tp_error *err) {
+    return tp_error_set(
+        err, TP_STATUS_INVALID_ARGUMENT,
+        "GUI host command requires an open session owner");
+}
+
+bool gui_host_binding_can_undo(
+    const gui_host_binding *binding) {
+    return tp_session_can_undo(
+        query_session(binding));
+}
+
+bool gui_host_binding_can_redo(
+    const gui_host_binding *binding) {
+    return tp_session_can_redo(
+        query_session(binding));
+}
+
+int gui_host_binding_undo_depth(
+    const gui_host_binding *binding) {
+    return tp_session_undo_depth(
+        query_session(binding));
+}
+
+int gui_host_binding_redo_depth(
+    const gui_host_binding *binding) {
+    return tp_session_redo_depth(
+        query_session(binding));
+}
+
+tp_status gui_host_binding_undo(
+    gui_host_binding *binding, tp_error *err) {
+    tp_session *session = command_session(binding);
+    return session ? tp_session_undo(session, err)
+                   : command_closed(err);
+}
+
+tp_status gui_host_binding_redo(
+    gui_host_binding *binding, tp_error *err) {
+    tp_session *session = command_session(binding);
+    return session ? tp_session_redo(session, err)
+                   : command_closed(err);
+}
+
+tp_status gui_host_binding_invalidate_sources(
+    gui_host_binding *binding, tp_error *err) {
+    tp_session *session = command_session(binding);
+    return session
+               ? tp_session_invalidate_sources(
+                     session, err)
+               : command_closed(err);
+}
+
+tp_status gui_host_binding_save(
+    gui_host_binding *binding,
+    tp_session_save_result *out, tp_error *err) {
+    tp_session *session = command_session(binding);
+    return session
+               ? tp_session_save(session, out, err)
+               : command_closed(err);
+}
+
+tp_status gui_host_binding_save_as(
+    gui_host_binding *binding,
+    const char *canonical_path,
+    tp_session_save_result *out, tp_error *err) {
+    tp_session *session = command_session(binding);
+    return session
+               ? tp_session_save_as(
+                     session, canonical_path, out,
+                     err)
+               : command_closed(err);
+}
+
+#ifdef TP_ENABLE_TEST_SEAMS
+bool gui_host_binding__test_has_staged(
+    const gui_host_binding *binding) {
+    return binding &&
+           gui_host_queue__test_has_staged(
+               &binding->queue);
+}
+#endif

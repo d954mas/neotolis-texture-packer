@@ -607,27 +607,57 @@ foreach(_source IN LISTS _gui_shipping_sources)
     endforeach()
 endforeach()
 
+# P5: history, identity, and source-runtime commands belong to the host owner
+# (spec 6.1), not to whichever file happens to hold a borrowed session. The
+# binding owns the sole active-session pointer, so these session entry points
+# may appear only there; every other GUI TU goes through
+# gui_host_binding_undo/redo/save/save_as/invalidate_sources.
+foreach(_source IN LISTS _gui_shipping_sources)
+    cmake_path(GET _source FILENAME _filename)
+    if(_filename STREQUAL "gui_host_binding.c")
+        continue()
+    endif()
+    cmake_path(RELATIVE_PATH _source BASE_DIRECTORY "${_arch_root}"
+               OUTPUT_VARIABLE _relative)
+    foreach(_symbol IN ITEMS
+            tp_session_undo
+            tp_session_redo
+            tp_session_save
+            tp_session_save_as
+            tp_session_invalidate_sources
+            tp_session_can_undo
+            tp_session_can_redo
+            tp_session_undo_depth
+            tp_session_redo_depth)
+        _arch_assert_absent(
+            "${_relative}" "${_symbol}"
+            "R2d single host command owner")
+    endforeach()
+endforeach()
+
 # The host queue is the host owner's private ingress, not a GUI-wide API.
 # This containment sweep replaces the old async-family carve-out: instead of
 # pretending the queue is async and then exempting it, the queue keeps its
 # host-thread session calls and its symbols stay inside the owner set.
-# P5 shrinks this list: gui_project.c's direct queue calls become
-# gui_host_binding_* ingress functions.
+# P5 closed the last bypass: gui_project.c's direct queue calls (enqueue,
+# take_completion, busy, active_kind, the staged-completion test seam) are now
+# gui_host_binding_* ingress functions, so the binding pair IS the owner set.
 set(_arch_host_queue_owners
     apps/gui/gui_host_queue.c
     apps/gui/gui_host_queue.h
     apps/gui/gui_host_binding.c
-    apps/gui/gui_host_binding.h
-    apps/gui/gui_project.c)
+    apps/gui/gui_host_binding.h)
 
-# The active session is borrowed, never held. P5 shrinks this list as the
-# lifecycle/mutation owners consolidate.
+# The active session is borrowed, never held. P5 shrank this list: the
+# lifecycle/file owner and the mutation owner ask the host binding (commands)
+# or gui_session_client_is_attached (liveness) instead of borrowing.
+# gui_project.c keeps the accessor itself, gui_project_internal.h its
+# declaration, and gui_project_recovery.c the borrow the session-scoped core
+# recovery API genuinely needs.
 set(_arch_borrow_session_owners
     apps/gui/gui_project.c
     apps/gui/gui_project_internal.h
-    apps/gui/gui_project_file.c
-    apps/gui/gui_project_recovery.c
-    apps/gui/gui_project_mutations.c)
+    apps/gui/gui_project_recovery.c)
 
 foreach(_source IN LISTS _gui_observation_sources)
     cmake_path(RELATIVE_PATH _source BASE_DIRECTORY "${_arch_root}"

@@ -87,7 +87,8 @@ static bool controller_attached(void) {
 
 static tp_status observe_current_identity(
     tp_error *err) {
-    if (!gui_project__borrow_active_session()) {
+    if (!gui_session_client_is_attached(
+            &s_project.binding.client)) {
         return tp_error_set(
             err, TP_STATUS_NOT_FOUND,
             "GUI session identity is unavailable");
@@ -98,7 +99,8 @@ static tp_status observe_current_identity(
 
 // #region lifecycle
 void gui_project_init(void) {
-    if (gui_project__borrow_active_session()) {
+    if (gui_session_client_is_attached(
+            &s_project.binding.client)) {
         return;
     }
     tp_error err = {{0}};
@@ -240,7 +242,8 @@ tp_status gui_project_lifecycle_pump(
     if (completed) {
         *completed = GUI_PROJECT_LIFECYCLE_NONE;
     }
-    if (!gui_project__borrow_active_session()) {
+    if (!gui_session_client_is_attached(
+            &s_project.binding.client)) {
         return tp_error_set(
             err, TP_STATUS_NOT_FOUND,
             "GUI host has no live session");
@@ -296,23 +299,22 @@ bool gui_project_take_save_notice(char *out, size_t cap) {
 
 // #region undo / redo
 bool gui_project_can_undo(void) {
-    tp_session *session =
-        gui_project__borrow_active_session();
     return gui_project__ingress_is_open() &&
-           tp_session_can_undo(session);
+           gui_host_binding_can_undo(
+               &s_project.binding);
 }
 bool gui_project_can_redo(void) {
     return gui_project__ingress_is_open() &&
-           tp_session_can_redo(
-               gui_project__borrow_active_session());
+           gui_host_binding_can_redo(
+               &s_project.binding);
 }
 int gui_project_undo_depth(void) {
-    return tp_session_undo_depth(
-        gui_project__borrow_active_session());
+    return gui_host_binding_undo_depth(
+        &s_project.binding);
 }
 int gui_project_redo_depth(void) {
-    return tp_session_redo_depth(
-        gui_project__borrow_active_session());
+    return gui_host_binding_redo_depth(
+        &s_project.binding);
 }
 
 /* Record an actual history rejection on the same structured soft-error channel as
@@ -331,9 +333,8 @@ bool gui_project_undo(void) {
         return false;
     }
     tp_error e = {0};
-    tp_status st = tp_session_undo(
-        gui_project__borrow_active_session(),
-        &e);
+    tp_status st = gui_host_binding_undo(
+        &s_project.binding, &e);
     if (st != TP_STATUS_OK) {
         if (st != TP_STATUS_NOT_FOUND) {
             note_history_reject("undo", st, &e);
@@ -350,9 +351,8 @@ bool gui_project_redo(void) {
         return false;
     }
     tp_error e = {0};
-    tp_status st = tp_session_redo(
-        gui_project__borrow_active_session(),
-        &e);
+    tp_status st = gui_host_binding_redo(
+        &s_project.binding, &e);
     if (st != TP_STATUS_OK) {
         if (st != TP_STATUS_NOT_FOUND) {
             note_history_reject("redo", st, &e);
@@ -390,9 +390,8 @@ tp_status gui_project_save(char *err_out, size_t err_cap) {
     }
     tp_error err = {0};
     tp_session_save_result result;
-    const tp_status st = tp_session_save(
-        gui_project__borrow_active_session(),
-        &result, &err);
+    const tp_status st = gui_host_binding_save(
+        &s_project.binding, &result, &err);
     if (st != TP_STATUS_OK) {
         if (err_out && err_cap) {
             (void)snprintf(err_out, err_cap, "%s", err.msg[0] ? err.msg : tp_status_str(st));
@@ -484,9 +483,9 @@ tp_status gui_project_save_as(const char *path, char *err_out, size_t err_cap) {
     }
     tp_error err = {0};
     tp_session_save_result result;
-    const tp_status st = tp_session_save_as(
-        gui_project__borrow_active_session(),
-        canonical_path, &result, &err);
+    const tp_status st = gui_host_binding_save_as(
+        &s_project.binding, canonical_path,
+        &result, &err);
     if (st != TP_STATUS_OK) {
         if (err_out && err_cap) {
             (void)snprintf(err_out, err_cap, "%s",
@@ -498,8 +497,7 @@ tp_status gui_project_save_as(const char *path, char *err_out, size_t err_cap) {
         gui_project__note_recovery_degraded(result.recovery_status);
     }
     if (result.recovery_rebind_required) {
-        gui_project__attach_recovery_live(
-            gui_project__borrow_active_session());
+        gui_project__attach_recovery_live();
     }
     if (result.file_durability_degraded) {
         s_project.save_notice_pending = true;

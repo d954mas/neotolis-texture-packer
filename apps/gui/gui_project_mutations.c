@@ -91,7 +91,8 @@ gui_project_create_result gui_project_add_atlas(void) {
 
 /* Returns true only after the identified removal commits. */
 bool gui_project_remove_atlas(tp_id128 atlas_id, int64_t expected_revision) {
-    if (tp_id128_is_nil(atlas_id) || !gui_project__borrow_active_session()) {
+    if (tp_id128_is_nil(atlas_id) || !gui_session_client_is_attached(
+            &s_project.binding.client)) {
         return false;
     }
     tp_error err = {0};
@@ -202,7 +203,8 @@ bool gui_project_add_sources(tp_id128 atlas_id, int64_t expected_revision,
 /* fix3 [0]: bool -- true iff the removal committed (see gui_project_remove_atlas). */
 bool gui_project_remove_source(tp_id128 atlas_id, tp_id128 source_id,
                                int64_t expected_revision) {
-    if (!gui_project__borrow_active_session() || tp_id128_is_nil(atlas_id) || tp_id128_is_nil(source_id)) {
+    if (!gui_session_client_is_attached(
+            &s_project.binding.client) || tp_id128_is_nil(atlas_id) || tp_id128_is_nil(source_id)) {
         return false;
     }
     tp_error err = {0};
@@ -223,7 +225,8 @@ tp_status gui_project_submit_text(
     const char *value, gui_session_submit_identity identity,
     const char transaction_id[33],
     gui_session_submit_terminal *terminal, tp_error *err) {
-    if (!gui_project__borrow_active_session() || !ref ||
+    if (!gui_session_client_is_attached(
+            &s_project.binding.client) || !ref ||
         tp_id128_is_nil(ref->atlas_id) || !value ||
         !transaction_id) {
         return tp_error_set(
@@ -280,7 +283,8 @@ tp_status gui_project_submit_atlas_settings(
     const char transaction_id[33],
     gui_session_submit_terminal *out_terminal,
     tp_error *err) {
-    if (!gui_project__borrow_active_session() ||
+    if (!gui_session_client_is_attached(
+            &s_project.binding.client) ||
         tp_id128_is_nil(atlas_id) || !settings ||
         !transaction_id) {
         return tp_error_set(
@@ -307,7 +311,8 @@ tp_status gui_project_submit_sprite_settings(
     const char transaction_id[33],
     gui_session_submit_terminal *terminal,
     tp_error *err) {
-    if (!gui_project__borrow_active_session() || !sprite ||
+    if (!gui_session_client_is_attached(
+            &s_project.binding.client) || !sprite ||
         tp_id128_is_nil(sprite->atlas_id) ||
         tp_id128_is_nil(sprite->source_id) ||
         !sprite->source_key || sprite->source_key[0] == '\0' ||
@@ -455,7 +460,8 @@ bool gui_project_remove_target(const gui_target_ref *target) {
 bool gui_project_set_target_enabled(
     const gui_target_ref *target, bool enabled) {
     tp_error err = {{0}};
-    if (!gui_project__borrow_active_session() || !target ||
+    if (!gui_session_client_is_attached(
+            &s_project.binding.client) || !target ||
         tp_id128_is_nil(target->atlas_id) ||
         tp_id128_is_nil(target->target_id)) {
         return false;
@@ -479,7 +485,8 @@ bool gui_project_set_target_enabled(
 bool gui_project_set_target_exporter(
     const gui_target_ref *target, const char *exporter_id) {
     tp_error err = {{0}};
-    if (!gui_project__borrow_active_session() || !target ||
+    if (!gui_session_client_is_attached(
+            &s_project.binding.client) || !target ||
         tp_id128_is_nil(target->atlas_id) ||
         tp_id128_is_nil(target->target_id) ||
         !exporter_id) {
@@ -569,7 +576,8 @@ tp_status gui_project_submit_animation_settings(
     const char transaction_id[33],
     gui_session_submit_terminal *terminal,
     tp_error *err) {
-    if (!gui_project__borrow_active_session() || !animation ||
+    if (!gui_session_client_is_attached(
+            &s_project.binding.client) || !animation ||
         tp_id128_is_nil(animation->atlas_id) ||
         tp_id128_is_nil(animation->animation_id) ||
         !settings || !transaction_id) {

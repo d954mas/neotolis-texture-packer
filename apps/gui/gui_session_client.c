@@ -897,6 +897,11 @@ tp_session *gui_session_client_attached_session(
     return client ? client->session : NULL;
 }
 
+bool gui_session_client_is_attached(
+    const gui_session_client *client) {
+    return client && client->session != NULL;
+}
+
 #ifdef TP_ENABLE_TEST_SEAMS
 void gui_session_client__test_fail_next_observe(void) {
     s_test_observe_failures = 1U;

@@ -36,7 +36,7 @@ tp_session *gui_project__borrow_active_session(void);
 void gui_project__note_session_reject(tp_status status, const tp_error *err);
 void gui_project__note_recovery_degraded(tp_status status);
 void gui_project__sync_recovery_notice(void);
-void gui_project__attach_recovery_live(tp_session *session);
+void gui_project__attach_recovery_live(void);
 tp_status gui_project__prepare_candidate_recovery(
     tp_session *session, tp_error *err);
 bool gui_project__ingress_is_open(void);

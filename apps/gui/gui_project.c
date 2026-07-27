@@ -189,7 +189,8 @@ bool gui_project__ingress_is_open(void) {
 
 static void request_observation(void) {
     if (!s_project.binding_initialized ||
-        !gui_project__borrow_active_session()) {
+        !gui_session_client_is_attached(
+            &s_project.binding.client)) {
         return;
     }
     tp_error err = {{0}};
@@ -266,39 +267,29 @@ bool gui_project_submit_receipt_query(
 tp_status gui_project_job_enqueue_pack(
     tp_id128 atlas_id, const char *work_dir,
     const char *preview_exporter_id, tp_error *err) {
-    if (!gui_project__ingress_is_open()) {
-        return tp_error_set(
-            err, TP_STATUS_INVALID_ARGUMENT,
-            "GUI session ingress is closed during lifecycle transition");
-    }
-    return gui_host_queue_enqueue_pack(
-        &s_project.binding.queue, atlas_id, work_dir,
+    return gui_host_binding_enqueue_pack(
+        &s_project.binding, atlas_id, work_dir,
         preview_exporter_id, err);
 }
 
 tp_status gui_project_job_enqueue_export(
     tp_id128 atlas_id, const char *work_dir,
     tp_error *err) {
-    if (!gui_project__ingress_is_open()) {
-        return tp_error_set(
-            err, TP_STATUS_INVALID_ARGUMENT,
-            "GUI session ingress is closed during lifecycle transition");
-    }
-    return gui_host_queue_enqueue_export(
-        &s_project.binding.queue, atlas_id, work_dir,
+    return gui_host_binding_enqueue_export(
+        &s_project.binding, atlas_id, work_dir,
         err);
 }
 
 tp_status gui_project_job_enqueue_cancel(
     tp_error *err) {
-    return gui_host_queue_enqueue_cancel(
-        &s_project.binding.queue, err);
+    return gui_host_binding_enqueue_cancel(
+        &s_project.binding, err);
 }
 
 bool gui_project_host_take_completion(
     gui_host_completion *out) {
-    return out && gui_host_queue_take_completion(
-                      &s_project.binding.queue, out);
+    return gui_host_binding_take_completion(
+        &s_project.binding, out);
 }
 
 bool gui_project_job_busy(void) {
@@ -315,14 +306,14 @@ bool gui_project_job_busy(void) {
     /* Before the next atomic observation, ingress and staged receipts are
      * host lifecycle facts rather than a second runtime-state projection.
      * `active` also keeps admission fail-safe if observation refresh failed. */
-    return gui_host_queue_busy(
-        &s_project.binding.queue);
+    return gui_host_binding_job_busy(
+        &s_project.binding);
 }
 
 tp_session_job_kind
 gui_project_job_active_kind(void) {
-    return gui_host_queue_active_kind(
-        &s_project.binding.queue);
+    return gui_host_binding_job_active_kind(
+        &s_project.binding);
 }
 
 tp_session_job_observed_state
@@ -361,17 +352,15 @@ gui_project_session_instance_generation(void) {
 
 void gui_project_invalidate_sources(void) {
     gui_scan_invalidate_all();
-    if (!gui_project__ingress_is_open()) {
-        return;
-    }
-    tp_session *session =
-        gui_project__borrow_active_session();
-    if (!session) {
+    if (!gui_project__ingress_is_open() ||
+        !gui_session_client_is_attached(
+            &s_project.binding.client)) {
         return;
     }
     tp_error err = {0};
     const tp_status status =
-        tp_session_invalidate_sources(session, &err);
+        gui_host_binding_invalidate_sources(
+            &s_project.binding, &err);
     if (status != TP_STATUS_OK) {
         gui_project__note_session_reject(status, &err);
         return;
@@ -437,8 +426,8 @@ void gui_project__test_fail_observes(
 
 bool
 gui_project__test_host_has_staged_completion(void) {
-    return gui_host_queue__test_has_staged(
-        &s_project.binding.queue);
+    return gui_host_binding__test_has_staged(
+        &s_project.binding);
 }
 #endif
 // #endregion

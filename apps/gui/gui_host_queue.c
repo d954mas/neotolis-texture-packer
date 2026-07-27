@@ -154,6 +154,13 @@ static void stage_host_failure(
         GUI_HOST_STAGED_READY;
 }
 
+/* The taken result contributes its retained payload and nothing else. Terminal
+ * state, rejection, status, and error are filled in
+ * gui_host_queue_reduce_observation from the atomically observed job state,
+ * which is the single authority: a staged completion cannot reach
+ * GUI_HOST_STAGED_READY (the only classification take_completion publishes)
+ * without passing through it, so copying the same facts off the take DTO here
+ * only created a second source that is always overwritten. */
 static void stage_terminal(
     gui_host_queue *queue,
     tp_session_job_result *result) {
@@ -164,9 +171,6 @@ static void stage_terminal(
         (gui_host_completion){
             .publish_result = false,
             .envelope = queue->active_envelope,
-            .state = result->state,
-            .status = result->status,
-            .error = result->error,
             .result = *result,
         };
     memset(result, 0, sizeof *result);
@@ -533,6 +537,11 @@ tp_status gui_host_queue_drain(
         return TP_STATUS_OK;
     }
 
+    /* The poll DTO is a pump side effect, not state: poll admits the job's
+     * latest typed projection into session-observed state, and the queue reads
+     * exactly one bit back out of the DTO — whether the job left RUNNING, i.e.
+     * whether a result may be taken. Every terminal fact the completion
+     * carries comes from the observation instead. */
     tp_session_job_progress progress = {0};
     tp_error poll_error = {{0}};
 #ifdef TP_ENABLE_TEST_SEAMS

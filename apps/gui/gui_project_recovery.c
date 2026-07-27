@@ -149,8 +149,12 @@ static void attach_recovery_with_snapshot(
 
 /* Attach one shared live recovery owner after the session identity is final.
  * The session owns the handle on every accepted attach path, including degraded
- * filesystem outcomes; GUI retains only configuration and presentation state. */
-void gui_project__attach_recovery_live(tp_session *session) {
+ * filesystem outcomes; GUI retains only configuration and presentation state.
+ * Recovery is the remaining session-borrow owner: the core recovery API is
+ * session-scoped, so the borrow stays here instead of leaking to the caller. */
+void gui_project__attach_recovery_live(void) {
+    tp_session *session =
+        gui_project__borrow_active_session();
     if (!session) {
         return;
     }
