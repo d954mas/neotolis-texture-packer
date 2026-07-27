@@ -75,8 +75,8 @@ static bool ui_int_field(nt_ui_context_t *ctx, uint32_t id, char *buf, size_t ca
             v = mx;
         }
         *out = (int)v;
-        /* Keystrokes BUFFER (coalesce, no commit); Enter is the gesture boundary that flushes the whole
-         * field edit as ONE undo step (out-of-panel blur flushes via s_blur_inputs in main.c). Decision 0015. */
+        /* Keystrokes update the reducer-owned value; Enter submits the field
+         * edit as one Undo step. Out-of-panel blur is the same boundary. */
         if (submitted) {
             gui_request_gesture_commit();
         }
@@ -591,33 +591,36 @@ static void declare_region_settings(nt_ui_context_t *ctx,
         panel_note(ctx, via);
     }
 
-    const float ox = ov ? ov->origin_x : TP_PROJECT_ORIGIN_DEFAULT;
-    const float oy = ov ? ov->origin_y : TP_PROJECT_ORIGIN_DEFAULT;
+    float ox = ov ? ov->origin_x : TP_PROJECT_ORIGIN_DEFAULT;
+    float oy = ov ? ov->origin_y : TP_PROJECT_ORIGIN_DEFAULT;
+    (void)gui_sprite_edit_value(
+        &sprite_ref, GUI_SPRITE_EDIT_ORIGIN,
+        0, NULL, &ox);
+    (void)gui_sprite_edit_value(
+        &sprite_ref, GUI_SPRITE_EDIT_ORIGIN,
+        1, NULL, &oy);
     float fv = 0.0F;
-    /* Pivot X/Y edit ONE component each (axis 0/1): the setter seeds the OTHER component from the
-     * committed record after flushing the buffered axis, so editing X then Y never loses X (#2). The
-     * view no longer does the stale read-modify-write that dropped a buffered X. */
     if (row_float(ctx, "Pivot X", nt_ui_id("reg/ox"), s_nb_ox, sizeof s_nb_ox, ox, -100.0F, 100.0F, true, &fv)) {
-        gui_queue_sprite_origin(&sprite_ref, 0, fv);
+        gui_edit_sprite_origin(&sprite_ref, 0, fv);
     }
     if (row_float(ctx, "Pivot Y", nt_ui_id("reg/oy"), s_nb_oy, sizeof s_nb_oy, oy, -100.0F, 100.0F, true, &fv)) {
-        gui_queue_sprite_origin(&sprite_ref, 1, fv);
+        gui_edit_sprite_origin(&sprite_ref, 1, fv);
     }
 
     static const char *const s9_labels[4] = {"Slice9 L", "Slice9 R", "Slice9 T", "Slice9 B"};
     static const char *const s9_ids[4] = {"reg/s9l", "reg/s9r", "reg/s9t", "reg/s9b"};
     bool any_s9 = false;
     for (int k = 0; k < 4; k++) {
-        const int cur = ov ? ov->slice9_lrtb[k] : 0;
+        int cur = ov ? ov->slice9_lrtb[k] : 0;
+        (void)gui_sprite_edit_value(
+            &sprite_ref, GUI_SPRITE_EDIT_SLICE9,
+            k, &cur, NULL);
         if (cur != 0) {
             any_s9 = true;
         }
         int iv = 0;
-        /* No committed-value guard (`iv != cur`): the committed record is frozen mid-gesture (#1), so
-         * a slice9 component returned to its committed value must still enqueue the correction. A net-
-         * zero gesture is dropped by the flush-time no-op suppression (#3). */
         if (row_int(ctx, s9_labels[k], nt_ui_id(s9_ids[k]), s_nb_s9[k], sizeof s_nb_s9[k], cur, 0, 4096, true, &iv)) {
-            gui_queue_sprite_slice9(&sprite_ref, k, iv);
+            gui_edit_sprite_slice9(&sprite_ref, k, iv);
         }
     }
     if (any_s9) {
@@ -647,11 +650,26 @@ static void declare_region_settings(nt_ui_context_t *ctx,
     if (!s_region_ov_open) {
         return;
     }
-    const int ov_shape = ov ? ov->override_shape : TP_PROJECT_OV_INHERIT;
-    const int ov_rot = ov ? ov->override_allow_rotate : TP_PROJECT_OV_INHERIT;
-    const int ov_mv = ov ? ov->override_max_vertices : TP_PROJECT_OV_INHERIT;
-    const int ov_margin = ov ? ov->override_margin : TP_PROJECT_OV_INHERIT;
-    const int ov_extrude = ov ? ov->override_extrude : TP_PROJECT_OV_INHERIT;
+    int ov_shape = ov ? ov->override_shape : TP_PROJECT_OV_INHERIT;
+    int ov_rot = ov ? ov->override_allow_rotate : TP_PROJECT_OV_INHERIT;
+    int ov_mv = ov ? ov->override_max_vertices : TP_PROJECT_OV_INHERIT;
+    int ov_margin = ov ? ov->override_margin : TP_PROJECT_OV_INHERIT;
+    int ov_extrude = ov ? ov->override_extrude : TP_PROJECT_OV_INHERIT;
+    (void)gui_sprite_edit_value(
+        &sprite_ref, GUI_SPRITE_EDIT_OVERRIDE,
+        GUI_SPRITE_OV_SHAPE, &ov_shape, NULL);
+    (void)gui_sprite_edit_value(
+        &sprite_ref, GUI_SPRITE_EDIT_OVERRIDE,
+        GUI_SPRITE_OV_ROTATE, &ov_rot, NULL);
+    (void)gui_sprite_edit_value(
+        &sprite_ref, GUI_SPRITE_EDIT_OVERRIDE,
+        GUI_SPRITE_OV_MAXVERT, &ov_mv, NULL);
+    (void)gui_sprite_edit_value(
+        &sprite_ref, GUI_SPRITE_EDIT_OVERRIDE,
+        GUI_SPRITE_OV_MARGIN, &ov_margin, NULL);
+    (void)gui_sprite_edit_value(
+        &sprite_ref, GUI_SPRITE_EDIT_OVERRIDE,
+        GUI_SPRITE_OV_EXTRUDE, &ov_extrude, NULL);
 
     /* Slice9 auto-forces RECT + no-rotate: show the shape/rotate overrides disabled. */
     if (any_s9) {
@@ -662,14 +680,14 @@ static void declare_region_settings(nt_ui_context_t *ctx,
     const int ps = row_override_combo(ctx, "Shape", nt_ui_id("reg/ov_shape"), &s_dd_ov_shape_open, ov_shape, 0,
                                       k_shape_names, 3, shape_def, !any_s9);
     if (ps != OV_UNCHANGED && ps != ov_shape) {
-        gui_queue_sprite_override(&sprite_ref, GUI_SPRITE_OV_SHAPE, ps);
+        gui_edit_sprite_override(&sprite_ref, GUI_SPRITE_OV_SHAPE, ps);
     }
     static const char *const rot_values[1] = {"No rotation"};
     const char *rot_def = atlas->allow_transform ? "Default (rotate/flip)" : "Default (no transform)";
     const int prv = row_override_combo(ctx, "Rotation", nt_ui_id("reg/ov_rot"), &s_dd_ov_rot_open, ov_rot, 0, rot_values,
                                        1, rot_def, !any_s9);
     if (prv != OV_UNCHANGED && prv != ov_rot) {
-        gui_queue_sprite_override(&sprite_ref, GUI_SPRITE_OV_ROTATE, prv);
+        gui_edit_sprite_override(&sprite_ref, GUI_SPRITE_OV_ROTATE, prv);
     }
     static const char *const mv_values[16] = {"1", "2",  "3",  "4",  "5",  "6",  "7",  "8",
                                               "9", "10", "11", "12", "13", "14", "15", "16"};
@@ -678,7 +696,7 @@ static void declare_region_settings(nt_ui_context_t *ctx,
     const int pmv = row_override_combo(ctx, "Max vertices", nt_ui_id("reg/ov_mv"), &s_dd_ov_mv_open, ov_mv, 1, mv_values,
                                        16, mv_def, true);
     if (pmv != OV_UNCHANGED && pmv != ov_mv) {
-        gui_queue_sprite_override(&sprite_ref, GUI_SPRITE_OV_MAXVERT, pmv);
+        gui_edit_sprite_override(&sprite_ref, GUI_SPRITE_OV_MAXVERT, pmv);
     }
 
     /* margin / extrude overrides: a "override?" checkbox + numeric (1..255). extrude is
@@ -693,19 +711,16 @@ static void declare_region_settings(nt_ui_context_t *ctx,
             }
             const int seed = (atlas->margin >= 1) ? (atlas->margin > 255 ? 255 : atlas->margin) : 1;
             if (cbc) {
-                gui_queue_sprite_override(&sprite_ref, GUI_SPRITE_OV_MARGIN,
+                gui_edit_sprite_override(&sprite_ref, GUI_SPRITE_OV_MARGIN,
                                          on ? seed : TP_PROJECT_OV_INHERIT);
-                gui_request_gesture_commit(); /* discrete toggle -> commit now (coalescable override, decision 0015) */
+                gui_request_gesture_commit();
             }
             const int disp = (ov_margin != TP_PROJECT_OV_INHERIT) ? ov_margin : seed;
             int iv = 0;
-            /* Drop the committed-value guard (`iv != ov_margin`) -- same stale-committed-value lost-edit
-             * class as #1 (this override field is coalescable; the flush-time no-op suppression #3 drops a
-             * net-zero gesture). Keep the `on` gate (only enqueue while the override is active). */
             if (ui_int_field(ctx, nt_ui_id("reg/ov_mf"), s_nb_ov_margin, sizeof s_nb_ov_margin, disp, 1, 255,
                              on && !cbc, &iv) &&
                 on) {
-                gui_queue_sprite_override(&sprite_ref, GUI_SPRITE_OV_MARGIN, iv);
+                gui_edit_sprite_override(&sprite_ref, GUI_SPRITE_OV_MARGIN, iv);
             }
         }
         PANEL_ROW_END;
@@ -720,17 +735,16 @@ static void declare_region_settings(nt_ui_context_t *ctx,
             }
             const int seed = (atlas->extrude >= 1) ? (atlas->extrude > 255 ? 255 : atlas->extrude) : 1;
             if (cbc && ex_enabled) {
-                gui_queue_sprite_override(&sprite_ref, GUI_SPRITE_OV_EXTRUDE,
+                gui_edit_sprite_override(&sprite_ref, GUI_SPRITE_OV_EXTRUDE,
                                          on ? seed : TP_PROJECT_OV_INHERIT);
-                gui_request_gesture_commit(); /* discrete toggle -> commit now (coalescable override, decision 0015) */
+                gui_request_gesture_commit();
             }
             const int disp = (ov_extrude != TP_PROJECT_OV_INHERIT) ? ov_extrude : seed;
             int iv = 0;
-            /* Drop the committed-value guard (`iv != ov_extrude`) -- same #1 class; #3 drops a net-zero. */
             if (ui_int_field(ctx, nt_ui_id("reg/ov_ef"), s_nb_ov_extrude, sizeof s_nb_ov_extrude, disp, 1, 255,
                              ex_enabled && on && !cbc, &iv) &&
                 on) {
-                gui_queue_sprite_override(&sprite_ref, GUI_SPRITE_OV_EXTRUDE, iv);
+                gui_edit_sprite_override(&sprite_ref, GUI_SPRITE_OV_EXTRUDE, iv);
             }
         }
         PANEL_ROW_END;
@@ -752,7 +766,7 @@ static void declare_target_exporter_combo(nt_ui_context_t *ctx, uint32_t row_id,
                 if (nt_ui_combo_selectable(ctx, (uint32_t)i, exp_labels[i], i == cur_exp)) {
                     const tp_exporter *e = tp_exporter_at(i);
                     if (e) {
-                        gui_edit_target_exporter(target, e->id); /* H/G3: preserves a buffered out-path edit */
+                        gui_edit_target_exporter(target, e->id);
                     }
                 }
             }
@@ -818,7 +832,7 @@ static void declare_export_targets(nt_ui_context_t *ctx,
             const bool tgt_narrow = s_right_panel_w < S(210.0F);
             CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(BASE_ROW_H))}, .childGap = Su(6), .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
                 if (tp_checkbox(ctx, nt_ui_child_id(row_id, "en"), t->enabled, true)) {
-                    gui_edit_target_enabled(&target, !t->enabled); /* H/G3: preserves a buffered out-path edit */
+                    gui_edit_target_enabled(&target, !t->enabled);
                 }
                 if (!tgt_narrow) {
                     declare_target_exporter_combo(ctx, row_id, ti, &target,
@@ -963,23 +977,39 @@ static void declare_animation_editor(nt_ui_context_t *ctx,
     }
     PANEL_ROW_END;
 
+    float fps = an->fps;
+    (void)gui_animation_edit_value(
+        &animation_ref, GUI_ANIMATION_EDIT_FPS,
+        0, NULL, &fps);
     float fv = 0.0F;
-    if (row_float(ctx, "FPS", nt_ui_id("anim/fps"), s_nb_anim_fps, sizeof s_nb_anim_fps, an->fps, 1.0F, 240.0F, true,
+    if (row_float(ctx, "FPS", nt_ui_id("anim/fps"), s_nb_anim_fps, sizeof s_nb_anim_fps, fps, 1.0F, 240.0F, true,
                   &fv)) {
         gui_edit_anim_fps(&animation_ref, fv);
     }
-    const char *pv = (an->playback >= 0 && an->playback < 7) ? k_playback_names[an->playback] : "?";
-    const int npb = row_combo(ctx, "Playback", nt_ui_id("anim/pb"), &s_dd_playback_open, pv, an->playback,
+    int playback = an->playback;
+    (void)gui_animation_edit_value(
+        &animation_ref, GUI_ANIMATION_EDIT_PLAYBACK,
+        0, &playback, NULL);
+    const char *pv = (playback >= 0 && playback < 7) ? k_playback_names[playback] : "?";
+    const int npb = row_combo(ctx, "Playback", nt_ui_id("anim/pb"), &s_dd_playback_open, pv, playback,
                               k_playback_names, 7, true);
-    if (npb >= 0 && npb != an->playback) {
+    if (npb >= 0 && npb != playback) {
         gui_edit_anim_playback(&animation_ref, npb);
     }
+    int flip_h = an->flip_h ? 1 : 0;
+    int flip_v = an->flip_v ? 1 : 0;
+    (void)gui_animation_edit_value(
+        &animation_ref, GUI_ANIMATION_EDIT_FLIP,
+        0, &flip_h, NULL);
+    (void)gui_animation_edit_value(
+        &animation_ref, GUI_ANIMATION_EDIT_FLIP,
+        1, &flip_v, NULL);
     bool bv = false;
-    if (row_check(ctx, "Flip H", nt_ui_id("anim/fh"), an->flip_h, true, &bv)) {
-        gui_edit_anim_flip(&animation_ref, bv, an->flip_v);
+    if (row_check(ctx, "Flip H", nt_ui_id("anim/fh"), flip_h != 0, true, &bv)) {
+        gui_edit_anim_flip(&animation_ref, 0, bv);
     }
-    if (row_check(ctx, "Flip V", nt_ui_id("anim/fv"), an->flip_v, true, &bv)) {
-        gui_edit_anim_flip(&animation_ref, an->flip_h, bv);
+    if (row_check(ctx, "Flip V", nt_ui_id("anim/fv"), flip_v != 0, true, &bv)) {
+        gui_edit_anim_flip(&animation_ref, 1, bv);
     }
 
     /* Frames header + "Add frames" (from the current sprite multi-selection). */

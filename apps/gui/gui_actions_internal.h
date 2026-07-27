@@ -6,6 +6,20 @@
 #include "tp_core/tp_export.h"
 #include "tp_core/tp_srckey.h"
 
+typedef enum target_intent_kind {
+    TARGET_INTENT_ENABLED = 0,
+    TARGET_INTENT_EXPORTER
+} target_intent_kind;
+
+typedef struct target_edit_intent {
+    target_intent_kind kind;
+    tp_id128 atlas_id;
+    tp_id128 target_id;
+    int64_t expected_revision;
+    bool enabled;
+    char exporter_id[TP_EXPORTER_ID_MAX];
+} target_edit_intent;
+
 typedef struct pending_create_animation {
     bool active;
     tp_id128 atlas_id;
@@ -28,46 +42,8 @@ typedef struct preview_frame_cache {
     bool valid;
 } preview_frame_cache;
 
-typedef enum target_intent_kind {
-    TARGET_INTENT_FULL = 0,
-    TARGET_INTENT_ENABLED,
-    TARGET_INTENT_EXPORTER
-} target_intent_kind;
-
-typedef struct target_edit_intent {
-    target_intent_kind kind;
-    tp_id128 atlas_id;
-    tp_id128 target_id;
-    int64_t expected_revision;
-    int i0, i1, i2;
-    float f0, f1;
-    bool b0, b1;
-    char s0[TP_EXPORTER_ID_MAX];
-    char *out_path;
-} target_edit_intent;
-
-typedef enum sprite_intent_kind {
-    SPRITE_INTENT_ORIGIN = 0,
-    SPRITE_INTENT_SLICE9,
-    SPRITE_INTENT_OVERRIDE
-} sprite_intent_kind;
-
-typedef struct sprite_edit_intent {
-    sprite_intent_kind kind;
-    tp_id128 atlas_id;
-    tp_id128 source_id;
-    int64_t expected_revision;
-    char *source_key;
-    int field;
-    int ivalue;
-    float fvalue;
-} sprite_edit_intent;
-
 typedef enum animation_intent_kind {
-    ANIMATION_INTENT_FPS = 0,
-    ANIMATION_INTENT_PLAYBACK,
-    ANIMATION_INTENT_FLIP,
-    ANIMATION_INTENT_FRAME_REMOVE,
+    ANIMATION_INTENT_FRAME_REMOVE = 0,
     ANIMATION_INTENT_FRAME_MOVE,
     ANIMATION_INTENT_ADD_FRAMES
 } animation_intent_kind;
@@ -77,9 +53,6 @@ typedef struct animation_edit_intent {
     gui_animation_ref animation;
     int first;
     int second;
-    float value;
-    bool flip_h;
-    bool flip_v;
     tp_op_sprite_ref *frames;
     int frame_count;
 } animation_edit_intent;
@@ -87,7 +60,9 @@ typedef struct animation_edit_intent {
 typedef enum gui_draft_family {
     GUI_DRAFT_NONE = 0,
     GUI_DRAFT_ATLAS_SCALAR,
-    GUI_DRAFT_TEXT
+    GUI_DRAFT_TEXT,
+    GUI_DRAFT_SPRITE,
+    GUI_DRAFT_ANIMATION
 } gui_draft_family;
 
 typedef enum gui_text_edit_kind {
@@ -112,6 +87,23 @@ typedef struct gui_draft_owner {
         char source_key[TP_SRCKEY_MAX];
         char value[TP_IDENTITY_PATH_MAX];
     } text;
+    struct {
+        gui_sprite_edit_kind kind;
+        tp_id128 atlas_id;
+        tp_id128 source_id;
+        char source_key[TP_SRCKEY_MAX];
+        int component;
+        int integer;
+        float real;
+    } sprite;
+    struct {
+        gui_animation_edit_kind kind;
+        tp_id128 atlas_id;
+        int component;
+        int integer;
+        float real;
+        bool flag;
+    } animation;
 } gui_draft_owner;
 
 typedef struct gui_actions_state {
@@ -146,9 +138,6 @@ typedef struct gui_actions_state {
     bool draft_initialized;
     bool draft_reducer_registered;
     bool draft_apply_mine;
-    sprite_edit_intent *sprite_intents;
-    int sprite_intent_count;
-    int sprite_intent_cap;
     animation_edit_intent *animation_intents;
     int animation_intent_count;
     int animation_intent_cap;
@@ -178,7 +167,6 @@ bool gui_actions__resolve_animation_ref(const gui_animation_ref *animation,
  * re-resolve the viewed atlas after an undo/redo shifts atlas ordering, and by the preview player. */
 int gui_actions__snapshot_atlas_index_by_id(const tp_session_snapshot *snapshot,
                                             tp_id128 atlas_id);
-bool gui_actions__flush_failed(void);
 void gui_actions__apply_confirm(void);
 bool gui_actions__apply_file_dialogs(void);
 bool gui_actions__apply_lifecycle_request(void);

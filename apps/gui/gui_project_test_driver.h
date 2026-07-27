@@ -108,9 +108,6 @@ static inline tp_status gui_project_test_open(
 
 static inline void gui_project_test_shutdown(
     bool discard_recovery) {
-    (void)(gui_project_lifecycle_state_query() ==
-               GUI_PROJECT_LIFECYCLE_CLOSED ||
-           gui_project_flush_pending());
     if (gui_project_lifecycle_state_query() ==
         GUI_PROJECT_LIFECYCLE_DRAINING) {
         tp_error err = {{0}};

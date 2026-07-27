@@ -347,29 +347,40 @@ static bool selftest_rename_animation_frame_at(int atlas_index,
 static bool selftest_set_sprite_origin_at(int atlas_index, const char *source_key,
                                           int axis, float value) {
     gui_sprite_ref sprite;
-    return selftest_sprite_ref_at(atlas_index, source_key, &sprite) &&
-           gui_project_set_sprite_origin(&sprite, axis, value);
+    if (!selftest_sprite_ref_at(
+            atlas_index, source_key, &sprite)) {
+        return false;
+    }
+    gui_edit_sprite_origin(&sprite, axis, value);
+    gui_request_gesture_commit();
+    apply_pending();
+    return gui_draft_phase() == GUI_EDIT_IDLE;
 }
 
 static bool selftest_set_sprite_slice9_at(int atlas_index, const char *source_key,
                                           int component, int value) {
     gui_sprite_ref sprite;
-    return selftest_sprite_ref_at(atlas_index, source_key, &sprite) &&
-           gui_project_set_sprite_slice9(&sprite, component, value);
+    if (!selftest_sprite_ref_at(
+            atlas_index, source_key, &sprite)) {
+        return false;
+    }
+    gui_edit_sprite_slice9(&sprite, component, value);
+    gui_request_gesture_commit();
+    apply_pending();
+    return gui_draft_phase() == GUI_EDIT_IDLE;
 }
 
 static bool selftest_set_sprite_override_at(int atlas_index, const char *source_key,
                                             gui_sprite_ov which, int value) {
     gui_sprite_ref sprite;
-    return selftest_sprite_ref_at(atlas_index, source_key, &sprite) &&
-           gui_project_set_sprite_override(&sprite, which, value);
-}
-
-static bool selftest_peek_sprite_slice9_at(int atlas_index, const char *source_key,
-                                           int out_lrtb[4]) {
-    gui_sprite_ref sprite;
-    return selftest_sprite_ref_at(atlas_index, source_key, &sprite) &&
-           gui_project_peek_pending_slice9(&sprite, out_lrtb);
+    if (!selftest_sprite_ref_at(
+            atlas_index, source_key, &sprite)) {
+        return false;
+    }
+    gui_edit_sprite_override(&sprite, which, value);
+    gui_request_gesture_commit();
+    apply_pending();
+    return gui_draft_phase() == GUI_EDIT_IDLE;
 }
 
 static int selftest_create_animation_at(int atlas_index, const char *base,
@@ -438,22 +449,47 @@ static bool selftest_set_anim_id_at(int atlas_index, int animation_index,
 static bool selftest_set_anim_fps_at(int atlas_index, int animation_index,
                                      float fps) {
     gui_animation_ref animation;
-    return gui_project_animation_ref_at(atlas_index, animation_index, &animation) &&
-           gui_project_set_anim_fps(&animation, fps);
+    if (!gui_project_animation_ref_at(
+            atlas_index, animation_index, &animation)) {
+        return false;
+    }
+    gui_edit_anim_fps(&animation, fps);
+    gui_request_gesture_commit();
+    apply_pending();
+    return gui_draft_phase() == GUI_EDIT_IDLE;
 }
 
 static bool selftest_set_anim_playback_at(int atlas_index, int animation_index,
                                           int playback) {
     gui_animation_ref animation;
-    return gui_project_animation_ref_at(atlas_index, animation_index, &animation) &&
-           gui_project_set_anim_playback(&animation, playback);
+    if (!gui_project_animation_ref_at(
+            atlas_index, animation_index, &animation)) {
+        return false;
+    }
+    gui_edit_anim_playback(&animation, playback);
+    gui_request_gesture_commit();
+    apply_pending();
+    return gui_draft_phase() == GUI_EDIT_IDLE;
 }
 
 static bool selftest_set_anim_flip_at(int atlas_index, int animation_index,
                                       bool flip_h, bool flip_v) {
     gui_animation_ref animation;
-    return gui_project_animation_ref_at(atlas_index, animation_index, &animation) &&
-           gui_project_set_anim_flip(&animation, flip_h, flip_v);
+    if (!gui_project_animation_ref_at(
+            atlas_index, animation_index, &animation)) {
+        return false;
+    }
+    gui_edit_anim_flip(&animation, 0, flip_h);
+    gui_request_gesture_commit();
+    apply_pending();
+    if (!gui_project_animation_ref_at(
+            atlas_index, animation_index, &animation)) {
+        return false;
+    }
+    gui_edit_anim_flip(&animation, 1, flip_v);
+    gui_request_gesture_commit();
+    apply_pending();
+    return gui_draft_phase() == GUI_EDIT_IDLE;
 }
 
 static bool selftest_anim_remove_frame_at(int atlas_index, int animation_index,
@@ -492,12 +528,46 @@ static bool selftest_target_ref_at(int atlas_index, int target_index,
     return gui_project_target_ref_at(atlas_index, target_index, out);
 }
 
+static bool selftest_set_target_path_at(
+    int atlas_index, int target_index,
+    const char *out_path);
+
 static bool selftest_set_target_at(int atlas_index, int target_index,
                                    const char *exporter_id, const char *out_path,
                                    bool enabled) {
+    char exporter_copy[TP_EXPORTER_ID_MAX];
+    if (!exporter_id ||
+        strlen(exporter_id) >= sizeof exporter_copy) {
+        return false;
+    }
+    memcpy(
+        exporter_copy, exporter_id,
+        strlen(exporter_id) + 1U);
+    if (!selftest_set_target_path_at(
+            atlas_index, target_index, out_path) ||
+        !gui_actions__submit_draft()) {
+        return false;
+    }
     gui_target_ref target;
-    return selftest_target_ref_at(atlas_index, target_index, &target) &&
-           gui_project_set_target(&target, exporter_id, out_path, enabled);
+    if (!selftest_target_ref_at(
+            atlas_index, target_index, &target)) {
+        return false;
+    }
+    gui_edit_target_exporter(
+        &target, exporter_copy);
+    apply_pending();
+    if (!selftest_target_ref_at(
+            atlas_index, target_index, &target)) {
+        return false;
+    }
+    gui_edit_target_enabled(&target, enabled);
+    apply_pending();
+    const tp_snapshot_target *result =
+        selftest_target_at(atlas_index, target_index);
+    return result &&
+           strcmp(result->exporter_id, exporter_copy) == 0 &&
+           strcmp(result->out_path, out_path) == 0 &&
+           result->enabled == enabled;
 }
 
 static bool selftest_set_target_path_at(int atlas_index, int target_index,
@@ -518,48 +588,20 @@ static bool selftest_set_target_path_at(int atlas_index, int target_index,
     return gui_text_edit_update(out_path);
 }
 
-static void selftest_queue_target_at(int atlas_index, int target_index,
-                                     const char *exporter_id,
-                                     const char *out_path, bool enabled) {
-    gui_target_ref target;
-    if (selftest_target_ref_at(atlas_index, target_index, &target)) {
-        gui_edit_target(&target, exporter_id, out_path, enabled);
-    }
-}
-
 #define gui_project_remove_atlas(index) selftest_remove_atlas_at((index))
 #define gui_project_copy_atlas_name(index, out, capacity, err) \
     selftest_copy_atlas_name_at((index), (out), (capacity), (err))
 #define gui_project_add_source(index, path) selftest_add_source_at((index), (path))
 #define gui_project_add_sources(index, paths, count, kind, added, duplicate) \
     selftest_add_sources_at((index), (paths), (count), (kind), (added), (duplicate))
-#define gui_project_set_sprite_origin(index, key, axis, value) \
-    selftest_set_sprite_origin_at((index), (key), (axis), (value))
-#define gui_project_set_sprite_slice9(index, key, component, value) \
-    selftest_set_sprite_slice9_at((index), (key), (component), (value))
-#define gui_project_set_sprite_override(index, key, which, value) \
-    selftest_set_sprite_override_at((index), (key), (which), (value))
-#define gui_project_peek_pending_slice9(index, key, out_lrtb) \
-    selftest_peek_sprite_slice9_at((index), (key), (out_lrtb))
 #define gui_project_create_animation(index, base, frames, frame_count) \
     selftest_create_animation_at((index), (base), (frames), (frame_count))
-#define gui_project_set_anim_fps(index, animation, fps) \
-    selftest_set_anim_fps_at((index), (animation), (fps))
-#define gui_project_set_anim_playback(index, animation, playback) \
-    selftest_set_anim_playback_at((index), (animation), (playback))
-#define gui_project_set_anim_flip(index, animation, flip_h, flip_v) \
-    selftest_set_anim_flip_at((index), (animation), (flip_h), (flip_v))
 #define gui_project_anim_remove_frame(index, animation, frame) \
     selftest_anim_remove_frame_at((index), (animation), (frame))
 #define gui_project_anim_move_frame(index, animation, frame, delta) \
     selftest_anim_move_frame_at((index), (animation), (frame), (delta))
 #define gui_project_remove_animation(index, name) \
     selftest_remove_animation_named_at((index), (name))
-#define gui_project_set_target(index, target, exporter, path, enabled) \
-    selftest_set_target_at((index), (target), (exporter), (path), (enabled))
-#define gui_edit_target(index, target, exporter, path, enabled) \
-    selftest_queue_target_at((index), (target), (exporter), (path), (enabled))
-
 static void to_abs(const char *rel, char *out, size_t cap) {
 #ifdef _WIN32
     if (GetFullPathNameA(rel, (DWORD)cap, out, NULL) == 0) {
@@ -1080,14 +1122,14 @@ void run_selftest(void) {
                 if (strcmp(target->exporter_id, "json-neotolis") == 0) {
                     jtarget = k;
                 } else {
-                    gui_project_set_target(i_rotate, k, target->exporter_id,
+                    selftest_set_target_at(i_rotate, k, target->exporter_id,
                                            target->out_path, false);
                 }
             }
             char tbase[700] = {0};
             (void)snprintf(tbase, sizeof tbase, "%s/selftest_rotate_export", s_exe_dir);
             if (jtarget >= 0) {
-                gui_project_set_target(i_rotate, jtarget, "json-neotolis", tbase, true);
+                selftest_set_target_at(i_rotate, jtarget, "json-neotolis", tbase, true);
             }
             int etg = 0;
             int enc = 0;
@@ -1399,10 +1441,8 @@ void run_selftest(void) {
                   gui_pack_ref_index_work_get().lookup_calls == (uint64_t)M &&
                   "unchanged animation preview reuses the resolved frame map");
 
-        NT_ASSERT(gui_project_set_anim_fps(0, panim, 24.0F) &&
+        NT_ASSERT(selftest_set_anim_fps_at(0, panim, 24.0F) &&
                   "preview cache model-key edit commits");
-        NT_ASSERT(gui_project_flush_pending() &&
-                  "preview cache model-key edit flushes");
         update_preview();
         gui_preview_frame_work changed_preview_work =
             gui_preview_frame_work_get();
@@ -1490,10 +1530,13 @@ void run_selftest(void) {
             GUI_ATLAS_PADDING, 7, 0.0F);
         gui_request_gesture_commit();
         apply_pending();
+        NT_ASSERT(gui_draft_phase() == GUI_EDIT_IDLE &&
+                  "padding draft submits before continuing");
         nt_log_info("SELFTEST: setting change stale=%d (expect 1)", gui_project_is_stale());
         NT_ASSERT(gui_project_is_stale() && "a setting change sets preview stale");
 
-        /* shape=concave + extrude=3 -> preview pack succeeds via the effective-extrude-0 rule */
+        /* A valid concave atlas packs with zero extrusion. Invalid
+         * concave+extrude input is covered by structured validation tests. */
         setting_atlas = selftest_atlas_at(0, &setting_snapshot);
         gui_edit_atlas_setting(
             setting_atlas->id,
@@ -1501,19 +1544,15 @@ void run_selftest(void) {
             GUI_ATLAS_SHAPE, 2, 0.0F);
         gui_request_gesture_commit();
         apply_pending();
-        setting_atlas = selftest_atlas_at(0, &setting_snapshot);
-        gui_edit_atlas_setting(
-            setting_atlas->id,
-            tp_session_snapshot_revision(setting_snapshot),
-            GUI_ATLAS_EXTRUDE, 3, 0.0F);
-        gui_request_gesture_commit();
-        apply_pending();
+        NT_ASSERT(gui_draft_phase() == GUI_EDIT_IDLE &&
+                  "shape draft submits before continuing");
         double pms = 0.0;
         char perr[256] = {0};
         char pnote[128] = {0};
         const bool okc = gui_pack_atlas(0, &pms, perr, sizeof perr, pnote, sizeof pnote);
-        nt_log_info("SELFTEST: concave+extrude3 pack -> %d in %.1fms (%s)", okc, pms, okc ? "effective extrude 0" : perr);
-        NT_ASSERT(okc && "concave+extrude=3 packs (effective extrude 0)");
+        nt_log_info("SELFTEST: concave pack -> %d in %.1fms (%s)",
+                    okc, pms, okc ? "extrude 0" : perr);
+        NT_ASSERT(okc && "valid concave atlas packs");
 
         /* per-sprite shape=RECT override -> that region packs as an exact 4-vert rect */
         char afabs[TP_IDENTITY_PATH_MAX];
@@ -1538,8 +1577,25 @@ void run_selftest(void) {
                 if (dot) {
                     *dot = '\0';
                 }
-                gui_project_set_sprite_override(0, source_key, GUI_SPRITE_OV_SHAPE, 0 /* RECT */); /* coalescable: buffers */
-                gui_project_flush_pending(); /* commit the buffered override before the raw pack reads the model */
+                const tp_id128 shape_atlas_id =
+                    source_atlas->id;
+                const tp_id128 shape_source_id =
+                    source0->id;
+                NT_ASSERT(
+                    selftest_set_sprite_override_at(
+                        0, source_key,
+                        GUI_SPRITE_OV_SHAPE,
+                        0 /* RECT */) &&
+                    "sprite shape draft submits");
+                const tp_snapshot_sprite *shape_override =
+                    tp_session_snapshot_sprite_by_key(
+                        gui_project_snapshot(),
+                        shape_atlas_id, shape_source_id,
+                        source_key);
+                NT_ASSERT(
+                    shape_override &&
+                    shape_override->override_shape == 0 &&
+                    "sprite shape override is visible in the atomic snapshot");
                 (void)gui_pack_atlas(0, &pms, perr, sizeof perr, pnote, sizeof pnote);
                 const int rri =
                     selftest_pack_find_sprite_ref_at(0, 0, source_key);
@@ -1549,17 +1605,6 @@ void run_selftest(void) {
                 NT_ASSERT(vc == 4 && "RECT per-sprite override packs a 4-vert rect");
             }
         }
-
-        /* Restore a valid export state: the EXPORT path (tp_export_run) does not yet
-         * apply the effective-extrude-0 rule (point-7 follow-up in the parallel exporter
-         * agent's file), so concave+extrude>0 would be rejected at core validation. */
-        setting_atlas = selftest_atlas_at(0, &setting_snapshot);
-        gui_edit_atlas_setting(
-            setting_atlas->id,
-            tp_session_snapshot_revision(setting_snapshot),
-            GUI_ATLAS_EXTRUDE, 0, 0.0F);
-        gui_request_gesture_commit();
-        apply_pending();
 
         /* save + export a fresh GUI project -> the seeded target writes files (audit I1) */
         char fpath[1200];
@@ -1646,9 +1691,9 @@ void run_selftest(void) {
                   strcmp(an1->name, "walk_2") == 0 && strcmp(an2->name, "walk_10") == 0 &&
                   "frames natural-sorted (walk_2 before walk_10)");
 
-        gui_project_set_anim_playback(aidx, 0, 5); /* loop pingpong */
-        gui_project_set_anim_flip(aidx, 0, true, false);
-        gui_project_set_anim_fps(aidx, 0, 12.0F);
+        selftest_set_anim_playback_at(aidx, 0, 5); /* loop pingpong */
+        selftest_set_anim_flip_at(aidx, 0, true, false);
+        selftest_set_anim_fps_at(aidx, 0, 12.0F);
         gui_project_anim_move_frame(aidx, 0, 0, 2); /* walk_1 rides to the end */
         animation_snapshot = gui_project_snapshot();
         aa = selftest_atlas_at(aidx, NULL);
@@ -1796,26 +1841,24 @@ void run_selftest(void) {
         s_sel_atlas = 0;
     }
 
-    /* --- Deferred sprite/animation/target edit regressions.
-     * Atlas scalar reducer/gesture/history behavior is covered by
+    /* --- Draft-owned sprite/animation/target edit regressions.
+     * Detailed conflict and receipt behavior is covered by
      * test_gui_action_trace. --- */
     {
-        /* (2d) SLICE9 RMW lost-edit is IMPOSSIBLE: slice9 is a read-modify-write (seeds all 4 components
-         *      from the record). Two DIFFERENT components edited back-to-back must NOT drop the first --
-         *      the component-precise key makes the second a different key, flushing the first BEFORE the
-         *      second's RMW read, so the second seeds from the COMMITTED value. Both components survive. */
+        /* Slice-9 drafts own one component. Each submit rebuilds the grouped
+         * operation from the newest snapshot, so sequential component edits
+         * preserve both values. */
         gui_project_test_new();
         gui_pack_clear(-1);
         s_sel_atlas = 0;
-        (void)gui_project_set_sprite_slice9(0, "s9sprite", 0 /* L */, 11); /* buffered */
-        (void)gui_project_set_sprite_slice9(0, "s9sprite", 1 /* R */, 22); /* different component -> flush L, seed committed */
-        gui_project_flush_pending();                                       /* commit R */
+        (void)selftest_set_sprite_slice9_at(0, "s9sprite", 0 /* L */, 11);
+        (void)selftest_set_sprite_slice9_at(0, "s9sprite", 1 /* R */, 22);
         const tp_snapshot_sprite *s9ov = selftest_sprite_by_name(0, "s9sprite");
         const int s9l = s9ov ? s9ov->slice9_lrtb[0] : -1;
         const int s9r = s9ov ? s9ov->slice9_lrtb[1] : -1;
         nt_log_info("SELFTEST: slice9 RMW L=%d R=%d (want 11,22 -- neither lost)", s9l, s9r);
         NT_ASSERT(s9l == 11 && s9r == 22 &&
-                  "slice9 two-component edit: the field-precise key prevents the RMW lost-edit (both survive)");
+                  "slice9 component drafts preserve both submitted values");
 
         /* (3) F1: "Add frames" is DEFERRED (was a synchronous commit -> UAF while declare_animation_editor
          *     held a live `an` it kept dereferencing). The enqueue captures COPIED keys, so the frames land
@@ -1866,10 +1909,8 @@ void run_selftest(void) {
         (void)RemoveDirectoryA(add_frames_dir);
 #endif
 
-        /* (4) F2: a target toggle must carry the FULL out_path (heap), not truncate at 255. Set a >255-char
-         *     path, then toggle `enabled` through the SAME deferred gui_edit_target the checkbox uses; after
-         *     the drain the stored path must be byte-identical (the old fixed 256-byte queue slot corrupted
-         *     any out_path > 255 on a mere enable/disable). */
+        /* A narrow target-enabled operation must not resend or truncate the
+         * independently owned output path. */
         gui_project_test_new();
         gui_pack_clear(-1);
         s_sel_atlas = 0;
@@ -1886,123 +1927,34 @@ void run_selftest(void) {
         const tp_snapshot_atlas *f2a = selftest_atlas_at(0, NULL);
         const tp_snapshot_target *f2t = selftest_target_at(0, 0);
         NT_ASSERT(f2a && f2t && "fresh project seeds a target for the F2 toggle test");
-        /* seed the long path via the setter (stored as a heap char*, up to TP_PATH_MAX) */
-        (void)gui_project_set_target(0, 0, f2t->exporter_id, longp, f2t->enabled);
+        /* Seed the long path through the text-draft path. */
+        (void)selftest_set_target_at(
+            0, 0, f2t->exporter_id, longp, f2t->enabled);
         f2t = selftest_target_at(0, 0);
         const bool en_was = f2t->enabled;
-        /* the checkbox path: enqueue a toggle reading t->out_path (the full stored path) */
-        gui_edit_target(0, 0, f2t->exporter_id, f2t->out_path, !en_was);
-        apply_pending(); /* drains -> gui_project_set_target with the FULL path (no 255 truncation) */
+        gui_target_ref f2ref;
+        NT_ASSERT(selftest_target_ref_at(0, 0, &f2ref));
+        gui_edit_target_enabled(&f2ref, !en_was);
+        apply_pending();
         f2t = selftest_target_at(0, 0);
         nt_log_info("SELFTEST: F2 out_path len=%zu after toggle enabled %d->%d (match=%d)", strlen(f2t->out_path),
                     en_was, f2t->enabled, strcmp(f2t->out_path, longp) == 0);
         NT_ASSERT(strcmp(f2t->out_path, longp) == 0 && f2t->enabled == !en_was &&
-                  "a target toggle preserves the full >255 out_path (F2 no truncation)");
+                  "a target-enabled operation preserves the full output path");
 
-        /* --- F2-05b-ii-A FIX pass (adversarial-review corrections) regressions --- */
-
-        /* (#2) ORIGIN two-component RMW lost-edit: origin is now COMPONENT-keyed like slice9. Editing X
-         *      then Y back-to-back (no flush between) -> the Y edit's different key flushes the buffered X
-         *      first, then seeds the committed X -> BOTH survive. (Pre-fix: X and Y shared one key + a
-         *      stale view read-modify-write, so Y replaced {x=new,y=old} with {x=old,y=new} and dropped X.) */
+        /* Origin drafts also own one component and rebuild the grouped
+         * operation from the newest snapshot at submit time. */
         gui_project_test_new();
         gui_pack_clear(-1);
         s_sel_atlas = 0;
-        (void)gui_project_set_sprite_origin(0, "osprite", 0 /* X */, 0.25F); /* buffered */
-        (void)gui_project_set_sprite_origin(0, "osprite", 1 /* Y */, 0.75F); /* different key -> flush X, seed committed */
-        gui_project_flush_pending();                                         /* commit Y */
+        (void)selftest_set_sprite_origin_at(0, "osprite", 0 /* X */, 0.25F);
+        (void)selftest_set_sprite_origin_at(0, "osprite", 1 /* Y */, 0.75F);
         const tp_snapshot_sprite *oov = selftest_sprite_by_name(0, "osprite");
         const float g2_ox = oov ? oov->origin_x : -1.0F;
         const float g2_oy = oov ? oov->origin_y : -1.0F;
         nt_log_info("SELFTEST: #2 origin X=%g Y=%g (want 0.25,0.75 -- neither lost)", (double)g2_ox, (double)g2_oy);
         NT_ASSERT(g2_ox == 0.25F && g2_oy == 0.75F &&
-                  "#2: origin two-component edit -- the component-precise key prevents the RMW lost-edit (both survive)");
-
-        /* (#4) FLUSH-BEFORE-READ: a buffered slice9 edit is still in flight. Flush
-         *      first, then reacquire the target DTO and copy exporter_id before the
-         *      next operation invalidates the cached snapshot. */
-        gui_project_test_new();
-        gui_pack_clear(-1);
-        s_sel_atlas = 0;
-        const tp_snapshot_target *g4a = selftest_target_at(0, 0);
-        NT_ASSERT(g4a && "#4: fresh project seeds a default target");
-        (void)gui_project_set_sprite_slice9(0, "p4sprite", 0 /* L */, 5); /* buffered across the flush boundary */
-        gui_project_flush_pending();                                      /* commit -> clone-swap + free the old project */
-        const tp_snapshot_target *g4b = selftest_target_at(0, 0); /* re-get from the now-stable snapshot */
-        char g4_exp[TP_EXPORTER_ID_MAX];
-        memcpy(g4_exp, g4b->exporter_id, strlen(g4b->exporter_id) + 1U); /* COPY before set_target's flush */
-        (void)gui_project_set_target(0, 0, g4_exp, "out/p4", true);
-        const tp_snapshot_target *g4c = selftest_target_at(0, 0);
-        nt_log_info("SELFTEST: #4 flush-before-read target path='%s' exporter='%s'", g4c->out_path,
-                    g4c->exporter_id);
-        NT_ASSERT(strcmp(g4c->out_path, "out/p4") == 0 && strcmp(g4c->exporter_id, g4_exp) == 0 &&
-                  "#4: flush-before-read commits the target with no dangling exporter read (parity UAF fix)");
-
-        /* (#5) EFFECTIVE slice9 peek for the canvas guides: the peek returns the BUFFERED slice9 while a
-         *      slice9 gesture is buffered (so the on-canvas guides move THIS frame), and false once the
-         *      gesture flushes (the caller then reads the committed record). */
-        gui_project_test_new();
-        gui_pack_clear(-1);
-        s_sel_atlas = 0;
-        int g5[4] = {-1, -1, -1, -1};
-        NT_ASSERT(!gui_project_peek_pending_slice9(0, "p5sprite", g5) && "#5: no buffered slice9 -> peek returns false");
-        (void)gui_project_set_sprite_slice9(0, "p5sprite", 2 /* T */, 9); /* buffered */
-        const bool g5_hit = gui_project_peek_pending_slice9(0, "p5sprite", g5);
-        nt_log_info("SELFTEST: #5 slice9 peek hit=%d L,R,T,B=%d,%d,%d,%d (want 1 and 0,0,9,0)", g5_hit, g5[0], g5[1], g5[2],
-                    g5[3]);
-        NT_ASSERT(g5_hit && g5[0] == 0 && g5[1] == 0 && g5[2] == 9 && g5[3] == 0 &&
-                  "#5: peek returns the buffered slice9 (edited component + seeded others) while buffered");
-        NT_ASSERT(!gui_project_peek_pending_slice9(0, "other", g5) && "#5: the peek is keyed on the sprite (a different key misses)");
-        gui_project_flush_pending();
-        NT_ASSERT(!gui_project_peek_pending_slice9(0, "p5sprite", g5) &&
-                  "#5: after the gesture flush the peek returns false (read the committed record)");
-
-        /* (#9) BROWSE-TARGET ordering: a coalescable edit is buffered, then the
-         *      target update flushes it before admitting its own stable-ID intent.
-         *      The copied exporter remains exact across that boundary. */
-        gui_project_test_new();
-        gui_pack_clear(-1);
-        s_sel_atlas = 0;
-        gui_sprite_ref g9_sprite;
-        NT_ASSERT(selftest_sprite_ref_at(0, "g9sprite", &g9_sprite) &&
-                  "#9 setup: install canonical source identity before borrowing target strings");
-        const tp_snapshot_target *g9a = selftest_target_at(0, 0);
-        NT_ASSERT(g9a && "#9: fresh project seeds a default target");
-        char g9_want[TP_EXPORTER_ID_MAX];
-        memcpy(g9_want, g9a->exporter_id, strlen(g9a->exporter_id) + 1U); /* expected value (copied now) */
-        (void)gui_project_set_sprite_slice9(0, "g9sprite", 0 /* L */, 7); /* buffer a real (non-noop) pending op, UNFLUSHED */
-        const bool g9_set = gui_project_set_target(0, 0, g9_want, "out/g9", true);
-        const tp_snapshot_target *g9c = selftest_target_at(0, 0);
-        char g9_error[256] = {0};
-        const bool g9_had_error = gui_project_take_op_error(g9_error, sizeof g9_error);
-        nt_log_info("SELFTEST: #9 browse-target UAF set=%d error='%s' exporter='%s' path='%s' (want '%s','out/g9')",
-                    g9_set, g9_had_error ? g9_error : "", g9c->exporter_id, g9c->out_path, g9_want);
-        NT_ASSERT(g9_set && strcmp(g9c->exporter_id, g9_want) == 0 && strcmp(g9c->out_path, "out/g9") == 0 &&
-                  "#9: target intent preserves exporter and path across the pending flush");
-
-        /* (#10) SIBLING-SINK ordering: removing an animation after a buffered
-         *       gesture flush still resolves the intended stable animation and
-         *       removes exactly one record. */
-        gui_project_test_new();
-        gui_pack_clear(-1);
-        s_sel_atlas = 0;
-        gui_sprite_ref g10_sprite;
-        NT_ASSERT(selftest_sprite_ref_at(0, "g10sprite", &g10_sprite) &&
-                  "#10 setup: install canonical source identity before borrowing animation strings");
-        const int g10i = gui_project_create_animation(0, "g10anim", NULL, 0);
-        NT_ASSERT(g10i >= 0 && "#10: created an animation to remove");
-        const tp_snapshot_atlas *g10a = selftest_atlas_at(0, NULL);
-        const tp_snapshot_animation *g10anim = selftest_animation_at(0, g10i);
-        const int g10n0 = g10a->animation_count;
-        char g10name[128];
-        (void)snprintf(g10name, sizeof g10name, "%s", g10anim->name);
-        (void)gui_project_set_sprite_slice9(0, "g10sprite", 0 /* L */, 3); /* buffer a real (non-noop) op, UNFLUSHED */
-        gui_project_remove_animation(0, g10name); /* its flush frees the project g10name points into */
-        const tp_snapshot_atlas *g10c = selftest_atlas_at(0, NULL);
-        nt_log_info("SELFTEST: #10 sibling-sink remove-anim count %d->%d (want %d)", g10n0, g10c->animation_count,
-                    g10n0 - 1);
-        NT_ASSERT(g10c->animation_count == g10n0 - 1 &&
-                  "#10: remove_animation resolves the intended stable animation after the pending flush");
+                  "origin component drafts preserve both submitted values");
 
         /* (#11) Target-path typing is one reducer-owned draft. Keystrokes
          * replace only its value; one gesture submits one masked operation. */
@@ -2012,7 +1964,8 @@ void run_selftest(void) {
         const tp_snapshot_target *t11a = selftest_target_at(0, 0);
         NT_ASSERT(t11a && "#11: fresh project seeds a default target");
         /* committed baseline out_path (one immediate commit, as the discrete browse/toggle paths do) */
-        (void)gui_project_set_target(0, 0, t11a->exporter_id, "out/base.json", t11a->enabled);
+        (void)selftest_set_target_at(
+            0, 0, t11a->exporter_id, "out/base.json", t11a->enabled);
         t11a = selftest_target_at(0, 0);
         const char t11_base[] = "out/base.json";
         NT_ASSERT(strcmp(t11a->out_path, t11_base) == 0 && "#11: baseline out_path committed");
@@ -2300,7 +2253,7 @@ void run_selftest(void) {
         NT_ASSERT(j6surfaced && !gui_project_take_op_error(NULL, 0) &&
                   "J6: recovery degradation is a persistent exact notice, not an op-error");
         NT_ASSERT(strcmp(j6name1, "structural_should_abort") == 0 && j6pad1 == j6pad + 7 &&
-                  "J6: both the buffered gesture and following structural edit landed");
+                  "J6: both the submitted draft and following structural edit landed");
         (void)gui_project_take_op_error(NULL, 0);
 
         /* (J7) Pack submits the active draft first and uses the newly committed
@@ -2795,7 +2748,8 @@ void run_selftest(void) {
         if (e_atlas >= 0) {
             const tp_snapshot_target *t0 = selftest_target_at(e_atlas, 0);
             const bool was = t0->enabled;
-            gui_project_set_target(e_atlas, 0, t0->exporter_id, t0->out_path, !was); /* dialog toggle path */
+            selftest_set_target_at(
+                e_atlas, 0, t0->exporter_id, t0->out_path, !was);
             const tp_snapshot_target *changed = selftest_target_at(e_atlas, 0);
             const bool now = changed->enabled;
             char exporter[TP_EXPORTER_ID_MAX];
@@ -2803,7 +2757,8 @@ void run_selftest(void) {
             memcpy(exporter, changed->exporter_id,
                    strlen(changed->exporter_id) + 1U);
             (void)snprintf(out_path, sizeof out_path, "%s", changed->out_path);
-            gui_project_set_target(e_atlas, 0, exporter, out_path, was); /* restore */
+            selftest_set_target_at(
+                e_atlas, 0, exporter, out_path, was);
             nt_log_info("SELFTEST: export-dialog toggle atlas=%d target0 %d->%d (restored=%d)", e_atlas, was, now, was);
         }
         s_export_open = true;
@@ -3360,7 +3315,7 @@ void selftest_pre_frame(void) {
             gui_scan_invalidate_all();
             char base[600];
             (void)snprintf(base, sizeof base, "%s/selftest_async_export/at0", s_exe_dir); /* ABSOLUTE -> resolves w/o a saved dir */
-            gui_project_set_target(0, 0, "json-neotolis", base, true);
+            selftest_set_target_at(0, 0, "json-neotolis", base, true);
             char aerr[256] = {0};
             const bool started = gui_pack_export_async_start(aerr, sizeof aerr);
             nt_log_info("SELFTEST: async export start -> %d (%s)", (int)started, started ? "ok" : aerr);
@@ -3516,7 +3471,7 @@ void selftest_pre_frame(void) {
             multi_sel_clear();
             char base[600];
             (void)snprintf(base, sizeof base, "%s/selftest_a4_export/at0", s_exe_dir); /* ABSOLUTE -> resolves w/o a saved dir */
-            gui_project_set_target(0, 0, "json-neotolis", base, true);
+            selftest_set_target_at(0, 0, "json-neotolis", base, true);
             char aerr[256] = {0};
             const bool started = gui_pack_export_async_start(aerr, sizeof aerr);
             nt_log_info("SELFTEST: A4 rename export start -> %d k0='%s' (%s)", (int)started, k0, started ? "ok" : aerr);

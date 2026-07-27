@@ -606,7 +606,8 @@ static int replay_sprite(tp_session *session, tp_error *err) {
     settings.ov_extrude = 2;
     status = gui_session_set_sprite_override(
         &s_replay_client, atlas_id, source_id, source_key,
-        revision_of(session, err), &settings, NULL, err);
+        revision_of(session, err), &settings,
+        (gui_session_submit_identity){0}, NULL, NULL, err);
     return status == TP_STATUS_OK ? 0 : fail("sprite settings", status, err);
 }
 
@@ -633,7 +634,8 @@ static int replay_sprite_clear(tp_session *session, tp_error *err) {
     settings.ov_extrude = TP_PROJECT_OV_INHERIT;
     status = gui_session_set_sprite_override(
         &s_replay_client, atlas_id, source_id, source_key,
-        revision_of(session, err), &settings, NULL, err);
+        revision_of(session, err), &settings,
+        (gui_session_submit_identity){0}, NULL, NULL, err);
     return status == TP_STATUS_OK ? 0 : fail("sprite clear", status, err);
 }
 
@@ -676,7 +678,8 @@ static int replay_animation(tp_session *session, const harvest_ids *ids,
     settings.flip_v = false;
     status = gui_session_set_animation_settings(
         &s_replay_client, atlas_id, ids->animation_id,
-        revision_of(session, err), &settings, NULL, err);
+        revision_of(session, err), &settings,
+        (gui_session_submit_identity){0}, NULL, NULL, err);
     if (status != TP_STATUS_OK) return fail("animation settings", status, err);
     status = gui_session_rename_animation(
         &s_replay_client, atlas_id, ids->animation_id,
@@ -699,6 +702,7 @@ static int replay_target(tp_session *session, const harvest_ids *ids,
     settings.enabled = false;
     status = gui_session_set_target(&s_replay_client, atlas_id, ids->target_id,
                                     revision_of(session, err), &settings,
+                                    (gui_session_submit_identity){0}, NULL,
                                     NULL, err);
     return status == TP_STATUS_OK ? 0 : fail("target settings", status, err);
 }

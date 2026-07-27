@@ -131,11 +131,6 @@ void do_undo(void) {
             "Apply or discard the active edit before Undo.");
         return;
     }
-    /* Pack uses an immutable snapshot, so only a rejected buffered gesture
-     * blocks Undo while it runs. */
-    if (gui_actions__flush_failed()) {
-        return; /* The buffered gesture was rejected; do not undo a different step. */
-    }
     const tp_id128 animation_id = selected_animation_id();
     gui_selection_capture_reselect(); /* capture the primary leaf ref BEFORE the model shifts indices */
     if (gui_project_undo()) {
@@ -152,10 +147,6 @@ void do_redo(void) {
             STATUS_WARNING,
             "Apply or discard the active edit before Redo.");
         return;
-    }
-    /* Redo follows the same immutable-snapshot rule as Undo. */
-    if (gui_actions__flush_failed()) {
-        return; /* The buffered gesture was rejected; do not redo a different step. */
     }
     const tp_id128 animation_id = selected_animation_id();
     gui_selection_capture_reselect();
@@ -804,17 +795,7 @@ void apply_pending(void) {
      * queues mutate the session. */
     gui_actions__drain_edits();
 
-    /* A gesture ended last frame: flush edit families that still use the
-     * pending route. */
-    if (s_actions.gesture_commit) {
-        const bool failed =
-            gui_actions__flush_failed();
-        s_actions.gesture_commit = false;
-        if (failed) {
-            gui_actions__clear_pending();
-            return;
-        }
-    }
+    s_actions.gesture_commit = false;
 
     if (gui_actions__apply_lifecycle_request() &&
         gui_project_lifecycle_state_query() ==

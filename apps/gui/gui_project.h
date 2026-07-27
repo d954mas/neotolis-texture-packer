@@ -16,8 +16,8 @@
  * one accepted transaction captures one semantic diff and one undo step. Undo/Redo also
  * run through tp_session. One gui_session_client atomically observes and frame-pins the
  * immutable state consumed by presentation.
- * Atlas scalars use one view-local draft reducer and build a narrow typed operation only at
- * submit. Older edit families still use gui_project's pending transaction until their R3 cutover.
+ * Value edits use one view-local draft reducer and build a narrow typed
+ * operation only at submit.
  *
  * Refresh (F4) is deliberately NOT a model mutation: rescanning disk sources changes what is
  * DISPLAYED/packed, not the PROJECT MODEL (sources are paths). So Refresh calls
@@ -185,24 +185,6 @@ void gui_project_mark_packed(void);
 /* Marks the preview stale WITHOUT dirtying the project (Refresh: disk changed, model
  * did not). */
 void gui_project_mark_stale(void);
-/* Advances the coalescing clock (seconds) each frame -- feeds the gated fallback flush only. */
-void gui_project_tick(double now_seconds);
-
-/* Commit the pending gesture families still awaiting their R3 cutover. Atlas scalar drafts are
- * owned and submitted by gui_actions instead. Returns false when a buffered operation is rejected
- * so persistence/history callers cannot act on older committed state. */
-bool gui_project_flush_pending(void);
-/* FALLBACK ONLY: commit a buffered gesture that never got a release/blur/discrete boundary, once the
- * 0.30 s window has elapsed. The caller MUST gate this on no active gesture so it can never split a
- * live drag or a mid-typing field. */
-void gui_project_flush_elapsed(void);
-
-/* EFFECTIVE slice9 peek for the on-canvas guides (#5): true + fills out_lrtb[4] with the buffered
- * slice9 when a slice9 gesture is buffered for this atlas+sprite (else false -> read the committed
- * record). Lets the guides track typing this frame instead of freezing at the committed value while
- * the gesture buffers. Read-only (no commit). */
-bool gui_project_peek_pending_slice9(const gui_sprite_ref *sprite, int out_lrtb[4]);
-
 /* Monotonic model-edit counter: bumped once per REAL model mutation (the touch choke point, after the
  * memcmp dedup). Lets a view cheaply detect "the project changed since I snapshotted it" without
  * re-serializing every frame -- the export-target preview uses it to drop a stale preview on an edit. */
@@ -268,14 +250,21 @@ tp_status gui_project_submit_atlas_setting(
 
 /* --- region-panel per-sprite overrides (sparse: a clear that leaves only defaults
  * drops the override entry, keeping byte-identical saves) --- */
-/* Sets ONE origin/pivot component (axis 0 = Pivot X, 1 = Pivot Y) via a coalescable
- * sprite.override.set. Component-keyed + read-modify-write INSIDE the setter (mirrors slice9): the
- * non-edited component is seeded from the current record AFTER the other axis's buffered edit flushes,
- * so editing X then Y never merges against a stale model (no lost edit). */
-bool gui_project_set_sprite_origin(const gui_sprite_ref *sprite, int axis, float value);
-bool gui_project_set_sprite_slice9(const gui_sprite_ref *sprite, int lrtb_index, int value);
-/* Per-sprite packing override; `value` == TP_PROJECT_OV_INHERIT clears it. */
-bool gui_project_set_sprite_override(const gui_sprite_ref *sprite, gui_sprite_ov which, int value);
+tp_status gui_project_submit_sprite_origin(
+    const gui_sprite_ref *sprite, int axis, float value,
+    gui_session_submit_identity identity,
+    const char transaction_id[33],
+    gui_session_submit_terminal *terminal, tp_error *err);
+tp_status gui_project_submit_sprite_slice9(
+    const gui_sprite_ref *sprite, int component, int value,
+    gui_session_submit_identity identity,
+    const char transaction_id[33],
+    gui_session_submit_terminal *terminal, tp_error *err);
+tp_status gui_project_submit_sprite_override(
+    const gui_sprite_ref *sprite, gui_sprite_ov component, int value,
+    gui_session_submit_identity identity,
+    const char transaction_id[33],
+    gui_session_submit_terminal *terminal, tp_error *err);
 
 /* --- animations (ux.md §3.7b: explicit manual assembly only) --- */
 /* Appends an animation and fills it with `frames` (in the given order) as ONE undo entry. The id is
@@ -292,9 +281,21 @@ tp_status gui_project_submit_animation_name(
     gui_session_submit_identity identity,
     const char transaction_id[33],
     gui_session_submit_terminal *terminal, tp_error *err);
-bool gui_project_set_anim_fps(const gui_animation_ref *animation, float fps);
-bool gui_project_set_anim_playback(const gui_animation_ref *animation, int playback);
-bool gui_project_set_anim_flip(const gui_animation_ref *animation, bool flip_h, bool flip_v);
+tp_status gui_project_submit_animation_fps(
+    const gui_animation_ref *animation, float fps,
+    gui_session_submit_identity identity,
+    const char transaction_id[33],
+    gui_session_submit_terminal *terminal, tp_error *err);
+tp_status gui_project_submit_animation_playback(
+    const gui_animation_ref *animation, int playback,
+    gui_session_submit_identity identity,
+    const char transaction_id[33],
+    gui_session_submit_terminal *terminal, tp_error *err);
+tp_status gui_project_submit_animation_flip(
+    const gui_animation_ref *animation, int axis, bool value,
+    gui_session_submit_identity identity,
+    const char transaction_id[33],
+    gui_session_submit_terminal *terminal, tp_error *err);
 /* Appends `frames` (in order) to animation `anim_index` as ONE undo entry. */
 bool gui_project_anim_add_frames(const gui_animation_ref *animation,
                                  const tp_op_sprite_ref *frames, int count);
@@ -307,30 +308,24 @@ bool gui_project_anim_move_frame(const gui_animation_ref *animation, int frame_i
 gui_project_create_result gui_project_add_target(
     tp_id128 atlas_id, int64_t expected_revision);
 bool gui_project_remove_target(const gui_target_ref *target);
-bool gui_project_set_target(const gui_target_ref *target, const char *exporter_id,
-                            const char *out_path, bool enabled);
 tp_status gui_project_submit_target_out_path(
     const gui_target_ref *target, const char *out_path,
     gui_session_submit_identity identity,
     const char transaction_id[33],
     gui_session_submit_terminal *terminal, tp_error *err);
-/* H/G3: discrete target-field setters (IMMEDIATE, one undo step each). They flush any buffered out-path
- * gesture FIRST, then RMW-seed the un-edited fields from the NOW-committed record -- so a discrete
- * enabled/exporter edit made mid-typing never reverts the just-typed out_path (the hazard of re-sending a
- * stale committed out_path). Use these from the checkbox / exporter dropdown instead of gui_project_set_target. */
-bool gui_project_set_target_enabled(const gui_target_ref *target, bool enabled);
-bool gui_project_set_target_exporter(const gui_target_ref *target,
-                                     const char *exporter_id);
+bool gui_project_set_target_enabled(
+    const gui_target_ref *target, bool enabled);
+bool gui_project_set_target_exporter(
+    const gui_target_ref *target, const char *exporter_id);
 
 /* --- undo / redo (diff history) --- */
-bool gui_project_can_undo(void); /* true if a committed step OR a buffered gesture can be reverted */
+bool gui_project_can_undo(void); /* true when the session has a committed step */
 bool gui_project_can_redo(void);
 int gui_project_undo_depth(void); /* committed undoable steps from the session snapshot */
 int gui_project_redo_depth(void);
-/* Reverse/replay the most recent committed transaction through tp_session. A buffered gesture is
- * flushed to its own step first, so
- * Ctrl+Z reverts an in-flight edit. Sets stale, drops the display caches; selection re-clamp is the
- * caller's job. Returns false when there is nothing to undo/redo (or on a structured restore error). */
+/* Reverse/replay the most recent committed transaction through tp_session.
+ * Sets stale, drops display caches; selection re-clamp is the caller's job.
+ * Returns false when there is nothing to undo/redo or on structured error. */
 bool gui_project_undo(void);
 bool gui_project_redo(void);
 
@@ -350,16 +345,11 @@ tp_status gui_project_save_as(const char *path, char *err_out, size_t err_cap);
 void gui_project_set_controller_status_port(
     gui_project_controller_status_port port);
 
-/* Drains a pending transaction REJECT recorded by a mutator whose op(s) core rejected
+/* Drains a typed-submit REJECT recorded by a mutator whose op(s) core rejected
  * (out-of-range value / bad reference / OOM). The model is left byte-unchanged on a
  * reject; this surfaces the structured status to the status-bar soft-error channel.
  * Returns true once and copies the message into `out` (then clears it). */
 bool gui_project_take_op_error(char *out, size_t cap);
-
-/* Fills `out` with the reason the last flush's commit failed (fix3 [2]): the drained op-error, else a
- * NEUTRAL fallback that fits save + pack + the dirty gate. Consumes the op-error. NULL-safe. Shared by
- * every flush-failure abort path so they use one wording. */
-void gui_project_flush_error(char *out, size_t cap);
 
 #if defined(NTPACKER_GUI_SELFTEST) || defined(TP_ENABLE_TEST_SEAMS)
 /* Borrowed test-only access for recovery and external-observer proofs. */

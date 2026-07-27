@@ -438,21 +438,6 @@ bool gui_project_take_op_error(char *out, size_t cap) {
     return true;
 }
 
-/* fix3 [2]: fill `out` with the reason a flush's commit failed -- the drained op-error, else a NEUTRAL
- * fallback that fits save AND pack AND the dirty gate (the flush-failure abort paths share one wording,
- * no "saved"-specific verb). Consumes the op-error like gui_project_take_op_error. NULL-safe. */
-void gui_project_flush_error(char *out, size_t cap) {
-    if (!out || !cap) {
-        return;
-    }
-    char m[256] = {0};
-    if (!gui_project_take_op_error(m, sizeof m)) {
-        (void)snprintf(m, sizeof m,
-                       "Your last edit could not be committed -- correct it and try again.");
-    }
-    (void)snprintf(out, cap, "%s", m);
-}
-
 void gui_project__note_session_reject(tp_status status, const tp_error *err) {
     const char *message = (err && err->msg[0]) ? err->msg : tp_status_str(status);
     s_project.op_error = true;
@@ -522,10 +507,7 @@ bool gui_project_is_stale(void) { return s_project.preview_stale; }
 // #endregion
 
 // #region dirty/stale choke point
-/* Post-commit choke point: a REAL committed mutation makes the preview stale and bumps the
- * session generation. Undo history + dirty are core-owned. `act` is vestigial (coalescing moved to the
- * transaction buffer) but kept for call-site clarity + the dev-seam signature. */
+/* Preview freshness is presentation state; model/history/dirty remain session-owned. */
 void gui_project_mark_packed(void) { s_project.preview_stale = false; }
 void gui_project_mark_stale(void) { s_project.preview_stale = true; }
-void gui_project_tick(double now_seconds) { s_project.now = now_seconds; }
 // #endregion

@@ -1,15 +1,13 @@
 #ifndef NTPACKER_GUI_ACTIONS_H
 #define NTPACKER_GUI_ACTIONS_H
 
-/* Model/state mutation layer for the ntpacker GUI: the deferred side-effect queue (s_pending_*) +
- * its pump (apply_pending), the pack/export/undo/redo/refresh actions, file dialogs + add-files/
- * folder, the new/open/save/exit unsaved-changes confirm flow, inline-rename commits + the start-edit
- * entry points (start_atlas_edit/start_anim_edit/start_sprite_edit_ref/start_sprite_edit -- the
- * entry side of the same edit lifecycle, so every view that starts an inline
- * edit shares one home), the animation ops + preview player, and the small selection/edit helpers.
- * This layer is Clay-free AND nt_ui-free: views enqueue typed requests that capture stable structural IDs,
- * expected revision, typed arguments, and owned copied strings; apply_pending consumes them at the
- * top of the next frame. Include discipline: actions -> gui_state + gui_rows + model headers
+/* Model/state mutation layer for the ntpacker GUI: the single value-draft
+ * owner, between-frame structural requests, pack/export/undo/redo/refresh,
+ * file dialogs, lifecycle confirmation, animation operations, and preview.
+ * This layer is Clay-free AND nt_ui-free. Views declare values into typed
+ * drafts or enqueue structural requests with stable identities; apply_pending
+ * consumes them at the top of the next frame. Include discipline:
+ * actions -> gui_state + gui_rows + model headers
  * (gui_project/gui_scan/gui_canvas/gui_pack) + tinyfiledialogs; it must never include
  * widgets or any view header. */
 
@@ -74,10 +72,9 @@ void gui_actions_recovery_request(int row, int action);        /* action = gui_r
 extern double s_last_pack_ms;   /* wall-clock ms of the last successful pack (for the stats line) */
 extern int s_last_pack_atlas;   /* which atlas that timing belongs to */
 
-/* --- deferred semantic ingress ---
- * Atlas scalars update one view-local draft reducer during declaration and submit one typed
- * operation at the gesture boundary. Other edit families still enqueue owned values for the
- * frame-top drain until their R3 cutover. No retained edit stores a model/session pointer. */
+/* --- draft-owned semantic ingress ---
+ * A value edit stores stable identity, exact component, typed value, and
+ * captured revision. The gesture boundary submits one typed operation. */
 void gui_edit_atlas_setting(tp_id128 atlas_id, int64_t expected_revision,
                             gui_atlas_field field, int ivalue, float fvalue);
 bool gui_atlas_edit_value(tp_id128 atlas_id, gui_atlas_field field,
@@ -101,23 +98,34 @@ bool gui_text_edit_update(const char *value);
 const char *gui_text_edit_value(void);
 bool gui_target_path_edit_matches(const gui_target_ref *target);
 bool gui_inline_text_edit_active(void);
-void gui_queue_sprite_origin(const gui_sprite_ref *sprite, int axis, float value); /* axis 0=X, 1=Y (#2) */
-void gui_queue_sprite_slice9(const gui_sprite_ref *sprite, int lrtb_index, int value);
-void gui_queue_sprite_override(const gui_sprite_ref *sprite, gui_sprite_ov which, int value);
+typedef enum gui_sprite_edit_kind {
+    GUI_SPRITE_EDIT_ORIGIN = 0,
+    GUI_SPRITE_EDIT_SLICE9,
+    GUI_SPRITE_EDIT_OVERRIDE
+} gui_sprite_edit_kind;
+typedef enum gui_animation_edit_kind {
+    GUI_ANIMATION_EDIT_FPS = 0,
+    GUI_ANIMATION_EDIT_PLAYBACK,
+    GUI_ANIMATION_EDIT_FLIP
+} gui_animation_edit_kind;
+void gui_edit_sprite_origin(const gui_sprite_ref *sprite, int axis, float value);
+void gui_edit_sprite_slice9(const gui_sprite_ref *sprite, int component, int value);
+void gui_edit_sprite_override(const gui_sprite_ref *sprite, gui_sprite_ov component, int value);
+bool gui_sprite_edit_value(const gui_sprite_ref *sprite,
+                           gui_sprite_edit_kind kind, int component,
+                           int *integer, float *real);
 void gui_edit_anim_fps(const gui_animation_ref *animation, float fps);
 void gui_edit_anim_playback(const gui_animation_ref *animation, int playback);
-void gui_edit_anim_flip(const gui_animation_ref *animation, bool flip_h, bool flip_v);
+void gui_edit_anim_flip(const gui_animation_ref *animation, int axis, bool value);
+bool gui_animation_edit_value(const gui_animation_ref *animation,
+                              gui_animation_edit_kind kind, int component,
+                              int *integer, float *real);
 void gui_edit_anim_frame_remove(const gui_animation_ref *animation, int frame_index);
 void gui_edit_anim_frame_move(const gui_animation_ref *animation, int frame_index, int delta);
 /* Enqueue "Add frames": COPIES canonical refs into the edit so the drain can replay them next
  * frame -- "Add frames" must NOT commit synchronously from the anim editor's declare fn (F1 UAF). */
 void gui_edit_anim_add_frames(const gui_animation_ref *animation,
                               const tp_op_sprite_ref *frames, int count);
-void gui_edit_target(const gui_target_ref *target, const char *exporter_id,
-                     const char *out_path, bool enabled);
-/* H/G3: discrete enabled/exporter enqueues -- carry ONLY the changed field; the drain setters read the
- * un-edited fields from the committed record post-flush, so a discrete edit mid-typing never reverts the
- * just-typed out_path. Use these instead of gui_edit_target for the enabled checkbox / exporter dropdown. */
 void gui_edit_target_enabled(const gui_target_ref *target, bool enabled);
 void gui_edit_target_exporter(const gui_target_ref *target,
                               const char *exporter_id);
@@ -131,9 +139,8 @@ void gui_actions_poll_host_completion(void);
  * cutover/shutdown receipts before the next observation is pinned. */
 void gui_actions_pump_lifecycle(void);
 
-/* Raised by a view widget when an EDIT GESTURE ENDS (slider release / field Enter+blur / a discrete
- * dropdown/checkbox pick): apply_pending flushes gui_project's pending transaction AFTER the queue
- * drains, committing the whole gesture as ONE undo step (decision 0015). */
+/* Raised by a view widget when an edit gesture ends. apply_pending submits the
+ * active draft once, producing one transaction and one Undo step. */
 void gui_request_gesture_commit(void);
 
 /* --- pack / export / undo / redo / refresh --- */

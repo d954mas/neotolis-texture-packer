@@ -961,7 +961,7 @@ void test_deleted_pack_target_is_typed_failure_not_cancelled(void) {
         strstr(info.err, "target was deleted"));
 }
 
-void test_long_sprite_keys_with_shared_prefix_never_coalesce(void) {
+void test_long_sprite_keys_with_shared_prefix_keep_distinct_draft_identity(void) {
     const tp_id128 atlas_id = add_coin_source();
     const tp_session_snapshot *snapshot = gui_project_snapshot();
     const tp_snapshot_source *source =
@@ -979,14 +979,26 @@ void test_long_sprite_keys_with_shared_prefix_never_coalesce(void) {
     second[sizeof second - 1U] = '\0';
     TEST_ASSERT_EQUAL_MEMORY(first, second, 255U);
 
-    const int64_t revision = tp_session_snapshot_revision(snapshot);
-    const gui_sprite_ref first_ref = {atlas_id, source_id, first, revision};
-    const gui_sprite_ref second_ref = {atlas_id, source_id, second, revision};
-    TEST_ASSERT_TRUE(gui_project_set_sprite_override(
-        &first_ref, GUI_SPRITE_OV_MARGIN, 3));
-    TEST_ASSERT_TRUE(gui_project_set_sprite_override(
-        &second_ref, GUI_SPRITE_OV_MARGIN, 7));
-    TEST_ASSERT_TRUE(gui_project_flush_pending());
+    gui_sprite_ref first_ref = {
+        atlas_id, source_id, first,
+        tp_session_snapshot_revision(snapshot)
+    };
+    gui_edit_sprite_override(
+        &first_ref, GUI_SPRITE_OV_MARGIN, 3);
+    gui_request_gesture_commit();
+    apply_pending();
+    TEST_ASSERT_EQUAL_INT(GUI_EDIT_IDLE, gui_draft_phase());
+
+    snapshot = gui_project_snapshot();
+    gui_sprite_ref second_ref = {
+        atlas_id, source_id, second,
+        tp_session_snapshot_revision(snapshot)
+    };
+    gui_edit_sprite_override(
+        &second_ref, GUI_SPRITE_OV_MARGIN, 7);
+    gui_request_gesture_commit();
+    apply_pending();
+    TEST_ASSERT_EQUAL_INT(GUI_EDIT_IDLE, gui_draft_phase());
 
     snapshot = gui_project_snapshot();
     const tp_snapshot_sprite *first_sprite =
@@ -1938,7 +1950,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_gui_poll_does_not_decode_sources_on_gui_thread);
     RUN_TEST(
         test_deleted_pack_target_is_typed_failure_not_cancelled);
-    RUN_TEST(test_long_sprite_keys_with_shared_prefix_never_coalesce);
+    RUN_TEST(test_long_sprite_keys_with_shared_prefix_keep_distinct_draft_identity);
     RUN_TEST(test_oversized_names_cannot_enter_a_truncating_editor);
     RUN_TEST(test_recovery_entry_keeps_core_path_capacity);
     RUN_TEST(test_canvas_cache_key_keeps_core_path_capacity);

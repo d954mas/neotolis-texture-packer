@@ -515,9 +515,9 @@ void declare_tooltips(nt_ui_context_t *ctx) {
     (void)nt_ui_tooltip(ctx, NT_UI_DATA_LAYER(LAYER_IMG), LAYER_TEXT, nt_ui_id("ntpacker/zoom_fit"), "Fit atlas to view", &s_tip_style);
 }
 
-/* Export dialog (mouse-complete): every atlas's targets, toggle/browse per target, then Export runs the
- * same do_export path. All edits enqueue via gui_edit_target (committed at frame top; dirty + undo,
- * no parallel state) -- never commit while holding p/a/t (UAF fix). */
+/* Export dialog: every atlas's targets, toggle/browse per target, then Export
+ * runs the same action path. Mutations are captured by typed actions and run
+ * between frames, never while snapshot records are borrowed. */
 void declare_export_modal(nt_ui_context_t *ctx) {
     if (!nt_ui_modal_visible(ctx, s_id_export_modal, &s_modal_style, &s_export_open)) {
         return;

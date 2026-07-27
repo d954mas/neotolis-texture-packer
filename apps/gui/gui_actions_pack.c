@@ -17,8 +17,8 @@
 /* Blocking pack of the selected atlas (deterministic path for selftest + --shot). Interactive
  * Pack starts the same session job and polls its typed result at frame boundaries. */
 void do_pack_blocking(void) {
-    if (gui_actions__flush_failed()) {
-        return; /* A rejected buffered edit must not produce a stale Pack result. */
+    if (!gui_actions__submit_draft()) {
+        return;
     }
     const tp_session_snapshot *snapshot = gui_project_snapshot();
     const tp_snapshot_atlas *a = snapshot ? tp_session_snapshot_atlas_at(snapshot, s_sel_atlas) : NULL;
@@ -49,8 +49,8 @@ void do_pack_blocking(void) {
 /* Interactive Pack (Ctrl+P / strip / stale chip): enqueues immutable host
  * intent. Completion is applied only after host drain + atomic observation. */
 void do_pack(void) {
-    if (gui_actions__flush_failed()) {
-        return; /* A rejected buffered edit must not produce a stale Pack result. */
+    if (!gui_actions__submit_draft()) {
+        return;
     }
     const tp_session_snapshot *snapshot = gui_project_snapshot();
     const tp_snapshot_atlas *a = snapshot ? tp_session_snapshot_atlas_at(snapshot, s_sel_atlas) : NULL;
@@ -74,8 +74,8 @@ void do_pack(void) {
  * owned worker process (per-atlas failures non-fatal, ux.md §3.5).
  * Completion is reported through the classified host receipt. */
 static void do_export(void) {
-    if (gui_actions__flush_failed()) {
-        return; /* A rejected buffered edit must not produce a stale Export. */
+    if (!gui_actions__submit_draft()) {
+        return;
     }
     if (gui_pack_async_busy()) {
         set_status_ex(STATUS_WARNING, "Busy -- a pack or export is already running.");
@@ -255,7 +255,7 @@ static void poll_async(void) {
         default:
             break;
     }
-    /* Surface a pending transaction REJECT (core rejected a mutator's op -- out-of-range value
+    /* Surface a typed-submit REJECT (core rejected a mutator's op -- out-of-range value
      * or bad reference): the model was left byte-unchanged, so report it as a soft error.
      * In practice the widgets clamp valid ranges, so this rarely fires. */
     char op_err[256];

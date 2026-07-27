@@ -233,10 +233,21 @@ settings/list widgets, state, main loop, selftest, and focused integration tests
 
 **Implement:**
 
-1. Store only the exact edited component.
-2. On Apply Mine, rebuild untouched siblings from the newest observation.
-3. Convert every remaining grouped edit family.
-4. Test sibling change, target deletion, and foreign-view conflict.
+1. Extend the existing closed draft owner with concrete sprite and animation
+   payloads. Store stable target identity, exact component, typed value, and
+   captured revision only; do not add a generic field registry/value variant.
+2. Convert sprite origin, Slice-9, sprite overrides, animation FPS/playback,
+   and per-axis flip. Origin `{x,y}` and Slice-9 `{L,R,T,B}` are the only true
+   grouped read-modify-write operations in the current core contract.
+3. On submit or explicit Apply Mine, rebuild untouched origin/Slice-9 siblings
+   once from the newest atomic observation. Every other converted component
+   submits its exact independent operation mask; Flip H never resends Flip V
+   and vice versa.
+4. Keep animation frame add/remove/move and narrow target enabled/exporter
+   requests as structural/discrete between-frame intents. Delete the unused
+   broad whole-target compatibility path instead of creating another draft.
+5. Test sibling change, source/animation deletion, foreign-view conflict,
+   exact component masks, and one gesture -> one Undo step.
 
 **Delete completely:**
 
@@ -246,8 +257,11 @@ settings/list widgets, state, main loop, selftest, and focused integration tests
 - `gui_project_flush_pending`, `gui_project_pending_route`,
   `gui_project_pending_offer`, `gui_project_peek_pending_slice9`,
   `gui_project_flush_elapsed`, `gui_project_pending_discard`;
-- timer fallback, `gui_actions__flush_failed`, legacy inline draft globals,
-  superseded field buffers, and compatibility tests/drivers.
+- `gui_project_tick`, the pending-owner clock, timer fallback,
+  `gui_project_flush_error`, and `gui_actions__flush_failed`;
+- sprite scalar intent storage and animation FPS/playback/flip queue arms;
+- `TARGET_INTENT_FULL`, `gui_edit_target`, the broad whole-target setter, heap
+  target payload, superseded field buffers, and compatibility tests/drivers.
 
 **Gate:** no stale sibling overwrite, no failed prerequisite continuation, and
 zero legacy pending symbols.

@@ -157,7 +157,9 @@ void test_source_family_uses_stable_ids_and_atomic_batch_admission(void) {
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
         gui_session_set_sprite_override(&client, atlas_id, ids[0], "a.png", 1,
-                                        &sprite_settings, NULL, &err));
+                                        &sprite_settings,
+                                        (gui_session_submit_identity){0},
+                                        NULL, NULL, &err));
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
         gui_session_set_sprite_name(&client, atlas_id, ids[0], "a.png", 2,
@@ -241,7 +243,8 @@ void test_animation_family_uses_stable_ids_revision_and_snapshot_read(void) {
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
         gui_session_set_animation_settings(
-            &client, atlas_id, animation_id, 2, &settings, NULL, &err));
+            &client, atlas_id, animation_id, 2, &settings,
+            (gui_session_submit_identity){0}, NULL, NULL, &err));
     const tp_op_sprite_ref extra[1] = {{source_id, "walk_3.png"}};
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
@@ -302,7 +305,9 @@ void test_target_family_uses_stable_ids_revision_and_snapshot_read(void) {
     settings.enabled = false;
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
-        gui_session_set_target(&client, atlas_id, target_id, 1, &settings, NULL, &err));
+        gui_session_set_target(
+            &client, atlas_id, target_id, 1, &settings,
+            (gui_session_submit_identity){0}, NULL, NULL, &err));
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_REVISION_CONFLICT,
         gui_session_remove_target(&client, atlas_id, target_id, 1, &err));
@@ -377,6 +382,10 @@ void test_identified_text_submits_preserve_exact_receipts_and_stable_targets(voi
         "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     static const char sprite_tx[] =
         "cccccccccccccccccccccccccccccccc";
+    static const char sprite_settings_tx[] =
+        "11111111111111111111111111111111";
+    static const char animation_settings_tx[] =
+        "22222222222222222222222222222222";
     static const char target_tx[] =
         "dddddddddddddddddddddddddddddddd";
     static const char no_change_tx[] =
@@ -417,16 +426,50 @@ void test_identified_text_submits_preserve_exact_receipts_and_stable_targets(voi
         &identity, &terminal.identity, sizeof identity);
     TEST_ASSERT_EQUAL_INT64(6, terminal.revision);
 
+    const tp_op_sprite_set sprite_settings = {
+        .mask = TP_SPF_MARGIN,
+        .ov_margin = 37,
+    };
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_session_set_sprite_override(
+            &client, atlas_id, source_id, "hero.png", 6,
+            &sprite_settings, identity, sprite_settings_tx,
+            &terminal, &err));
+    TEST_ASSERT_EQUAL_STRING(
+        sprite_settings_tx, terminal.transaction_id);
+    TEST_ASSERT_EQUAL_MEMORY(
+        &identity, &terminal.identity, sizeof identity);
+    TEST_ASSERT_TRUE(terminal.committed);
+    TEST_ASSERT_EQUAL_INT64(7, terminal.revision);
+
+    const tp_op_anim_settings animation_settings = {
+        .mask = TP_ANF_FLIP_H,
+        .flip_h = true,
+    };
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_session_set_animation_settings(
+            &client, atlas_id, animation_id, 7,
+            &animation_settings, identity,
+            animation_settings_tx, &terminal, &err));
+    TEST_ASSERT_EQUAL_STRING(
+        animation_settings_tx, terminal.transaction_id);
+    TEST_ASSERT_EQUAL_MEMORY(
+        &identity, &terminal.identity, sizeof identity);
+    TEST_ASSERT_TRUE(terminal.committed);
+    TEST_ASSERT_EQUAL_INT64(8, terminal.revision);
+
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
         gui_session_submit_target_out_path(
-            &client, atlas_id, target_id, 6,
+            &client, atlas_id, target_id, 8,
             "out/identified", identity, target_tx,
             &terminal, &err));
     TEST_ASSERT_EQUAL_STRING(target_tx, terminal.transaction_id);
     TEST_ASSERT_EQUAL_MEMORY(
         &identity, &terminal.identity, sizeof identity);
-    TEST_ASSERT_EQUAL_INT64(7, terminal.revision);
+    TEST_ASSERT_EQUAL_INT64(9, terminal.revision);
 
     tp_session_snapshot *after = NULL;
     TEST_ASSERT_EQUAL_INT(
@@ -451,6 +494,10 @@ void test_identified_text_submits_preserve_exact_receipts_and_stable_targets(voi
         "identified-animation", animation->name);
     TEST_ASSERT_EQUAL_STRING(
         "identified-sprite", sprite->rename);
+    TEST_ASSERT_EQUAL_INT(
+        37, sprite->override_margin);
+    TEST_ASSERT_TRUE(animation->flip_h);
+    TEST_ASSERT_FALSE(animation->flip_v);
     TEST_ASSERT_EQUAL_STRING(
         "out/identified", target->out_path);
     TEST_ASSERT_EQUAL_STRING(
@@ -461,7 +508,7 @@ void test_identified_text_submits_preserve_exact_receipts_and_stable_targets(voi
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
         gui_session_submit_atlas_name(
-            &client, atlas_id, 7, "identified-atlas",
+            &client, atlas_id, 9, "identified-atlas",
             identity, no_change_tx, &terminal, &err));
     TEST_ASSERT_EQUAL_STRING(
         no_change_tx, terminal.transaction_id);
@@ -469,17 +516,17 @@ void test_identified_text_submits_preserve_exact_receipts_and_stable_targets(voi
         &identity, &terminal.identity, sizeof identity);
     TEST_ASSERT_FALSE(terminal.committed);
     TEST_ASSERT_TRUE(terminal.no_change);
-    TEST_ASSERT_EQUAL_INT64(7, terminal.revision);
+    TEST_ASSERT_EQUAL_INT64(9, terminal.revision);
 
     gui_session_submit_identity wrong_identity = identity;
     wrong_identity.draft_instance_id.bytes[0]++;
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_INVALID_ARGUMENT,
         gui_session_submit_target_out_path(
-            &client, atlas_id, target_id, 7,
+            &client, atlas_id, target_id, 9,
             "out/must-not-land", wrong_identity, target_tx,
             &terminal, &err));
-    TEST_ASSERT_EQUAL_INT64(7, tp_session_revision(session));
+    TEST_ASSERT_EQUAL_INT64(9, tp_session_revision(session));
 
     gui_session_client_detach(&client);
     tp_session_destroy(session);

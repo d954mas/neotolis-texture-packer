@@ -7,17 +7,11 @@
 #include <string.h>
 
 #include "gui_state.h"
-// #region deferred model-edit queue (decision 0015)
-/* Atlas scalar declaration changes the view-local reducer directly; it does not enter this
- * legacy queue. The remaining declare_* render functions enqueue owned values here so frame-top
- * drain can replay them without retaining model/session pointers. The queues grow rather than
- * silently dropping a second edit in one frame.
- *
- * String args that can be LONG carry a HEAP copy, not a fixed slot: out_path is up to
- * TP_PATH_MAX (4096) so a 256-byte slot silently truncated + persisted a corrupted export
- * path on a mere target toggle (F2); add-frames carries a variable-length list of COPIED
- * sprite keys so "Add frames" can defer instead of committing synchronously mid-declare (F1).
- * each typed intent queue frees its heap payload after drain (or queue OOM). */
+// #region draft owner and deferred structural edits
+/* One reducer owns every in-progress value edit. Animation frame operations
+ * and narrow target toggles remain copied between-frame intents because they
+ * are discrete commands, not editable values. No retained item holds a model
+ * or session pointer. */
 
 static bool edit_id_generate(tp_id128 *out, const char *what) {
     tp_rng rng = tp_rng_os();
@@ -65,6 +59,8 @@ static void draft_clear_if_idle(
     draft->family = GUI_DRAFT_NONE;
     memset(&draft->atlas, 0, sizeof draft->atlas);
     memset(&draft->text, 0, sizeof draft->text);
+    memset(&draft->sprite, 0, sizeof draft->sprite);
+    memset(&draft->animation, 0, sizeof draft->animation);
 }
 
 static bool draft_target_present(
@@ -80,24 +76,33 @@ static bool draft_target_present(
         return tp_session_snapshot_atlas_by_id(
                    snapshot, draft->lifecycle.target_id) != NULL;
     }
-    if (draft->family != GUI_DRAFT_TEXT) {
-        return false;
+    if (draft->family == GUI_DRAFT_TEXT) {
+        switch (draft->text.kind) {
+            case GUI_TEXT_EDIT_ATLAS_NAME:
+                return false;
+            case GUI_TEXT_EDIT_ANIMATION_NAME:
+                return tp_session_snapshot_animation_by_id(
+                           snapshot, draft->text.atlas_id,
+                           draft->lifecycle.target_id) != NULL;
+            case GUI_TEXT_EDIT_SPRITE_RENAME:
+                return tp_session_snapshot_source_by_id(
+                           snapshot, draft->text.atlas_id,
+                           draft->text.source_id) != NULL;
+            case GUI_TEXT_EDIT_TARGET_OUT_PATH:
+                return tp_session_snapshot_target_by_id(
+                           snapshot, draft->text.atlas_id,
+                           draft->lifecycle.target_id) != NULL;
+        }
     }
-    switch (draft->text.kind) {
-        case GUI_TEXT_EDIT_ATLAS_NAME:
-            return false;
-        case GUI_TEXT_EDIT_ANIMATION_NAME:
-            return tp_session_snapshot_animation_by_id(
-                       snapshot, draft->text.atlas_id,
-                       draft->lifecycle.target_id) != NULL;
-        case GUI_TEXT_EDIT_SPRITE_RENAME:
-            return tp_session_snapshot_source_by_id(
-                       snapshot, draft->text.atlas_id,
-                       draft->text.source_id) != NULL;
-        case GUI_TEXT_EDIT_TARGET_OUT_PATH:
-            return tp_session_snapshot_target_by_id(
-                       snapshot, draft->text.atlas_id,
-                       draft->lifecycle.target_id) != NULL;
+    if (draft->family == GUI_DRAFT_SPRITE) {
+        return tp_session_snapshot_source_by_id(
+                   snapshot, draft->sprite.atlas_id,
+                   draft->sprite.source_id) != NULL;
+    }
+    if (draft->family == GUI_DRAFT_ANIMATION) {
+        return tp_session_snapshot_animation_by_id(
+                   snapshot, draft->animation.atlas_id,
+                   draft->lifecycle.target_id) != NULL;
     }
     return false;
 }
@@ -555,24 +560,12 @@ tp_op_sprite_ref *gui_actions__frame_refs_copy(const tp_op_sprite_ref *frames,
     return copy;
 }
 
-/* Frees an edit's heap payload. Safe on a zeroed/partially-built edit. */
-static void target_intent_dispose(target_edit_intent *e) {
-    free(e->out_path);
-    e->out_path = NULL;
-}
-
-/* Appends `e` to the queue (shallow copy -> the queue TAKES OWNERSHIP of e's heap out_path/keys;
- * the caller must not free them afterward, on success OR failure). On queue-realloc OOM the edit
- * is DROPPED: its heap payload is freed (no leak) and a status-bar error is raised so the drop is
- * visible -- the widget already returned "committed", so without this the value silently reverts
- * next frame with no explanation (F5). Returns true iff queued. */
 static bool target_intent_push(target_edit_intent *e) {
     if (s_actions.target_intent_count == s_actions.target_intent_cap) {
         int nc = s_actions.target_intent_cap ? s_actions.target_intent_cap * 2 : 8;
         target_edit_intent *ne = (target_edit_intent *)realloc(
             s_actions.target_intents, (size_t)nc * sizeof *ne);
         if (!ne) {
-            target_intent_dispose(e);
             set_status_ex(STATUS_ERROR, "Out of memory: this edit could not be queued (change not applied).");
             return false;
         }
@@ -583,47 +576,167 @@ static bool target_intent_push(target_edit_intent *e) {
     return true;
 }
 
-static void queue_sprite_intent(sprite_intent_kind kind,
-                                const gui_sprite_ref *sprite, int field,
-                                int ivalue, float fvalue) {
+static bool component_draft_begin(
+    gui_draft_family family, tp_id128 target_id,
+    int64_t expected_revision, bool same_component,
+    const char *what) {
+    if (!ensure_draft_owner()) {
+        return false;
+    }
+    gui_draft_owner *draft = &s_actions.draft;
+    gui_edit_state *edit = &draft->lifecycle;
+    if (edit->phase == GUI_EDIT_IDLE) {
+        tp_id128 draft_id = tp_id128_nil();
+        if (!edit_id_generate(&draft_id, what)) {
+            return false;
+        }
+        tp_error error = {{0}};
+        const tp_status status = gui_edit_begin(
+            edit, target_id, expected_revision,
+            draft_id, &error);
+        if (status != TP_STATUS_OK) {
+            set_statusf_ex(
+                STATUS_WARNING, "%s: %s", what,
+                error.msg[0] ? error.msg
+                             : tp_status_str(status));
+            return false;
+        }
+        draft->family = family;
+        return true;
+    }
+    if (draft->family != family ||
+        !tp_id128_eq(edit->target_id, target_id) ||
+        !same_component) {
+        set_status_ex(
+            STATUS_WARNING,
+            "Finish or discard the active edit before editing another field.");
+        return false;
+    }
+    if (edit->phase != GUI_EDIT_EDITING &&
+        edit->phase != GUI_EDIT_CONFLICTED) {
+        set_status_ex(
+            STATUS_WARNING,
+            "The edit is awaiting its exact session result.");
+        return false;
+    }
+    return true;
+}
+
+static bool sprite_edit_matches(
+    const gui_sprite_ref *sprite,
+    gui_sprite_edit_kind kind, int component) {
+    const gui_draft_owner *draft = &s_actions.draft;
+    return sprite &&
+           draft->family == GUI_DRAFT_SPRITE &&
+           draft->lifecycle.phase != GUI_EDIT_IDLE &&
+           tp_id128_eq(
+               draft->lifecycle.target_id,
+               sprite->source_id) &&
+           tp_id128_eq(
+               draft->sprite.atlas_id,
+               sprite->atlas_id) &&
+           draft->sprite.kind == kind &&
+           draft->sprite.component == component &&
+           strcmp(
+               draft->sprite.source_key,
+               sprite->source_key ? sprite->source_key : "") == 0;
+}
+
+static bool edit_sprite_component(
+    const gui_sprite_ref *sprite,
+    gui_sprite_edit_kind kind, int component,
+    int integer, float real) {
     if (!sprite || tp_id128_is_nil(sprite->atlas_id) ||
         tp_id128_is_nil(sprite->source_id) || !sprite->source_key ||
         sprite->source_key[0] == '\0') {
-        return;
+        return false;
     }
-    char *source_key = gui_actions__strdup(sprite->source_key);
-    if (!source_key) {
-        set_status_ex(STATUS_ERROR,
-                      "Out of memory: this sprite edit could not be queued (change not applied).");
-        return;
+    const size_t key_length = strlen(sprite->source_key);
+    if (key_length >= sizeof s_actions.draft.sprite.source_key) {
+        set_status_ex(
+            STATUS_WARNING,
+            "Sprite edit rejected: source key exceeds the GUI limit.");
+        return false;
     }
-    if (s_actions.sprite_intent_count == s_actions.sprite_intent_cap) {
-        const int capacity = s_actions.sprite_intent_cap ? s_actions.sprite_intent_cap * 2 : 8;
-        sprite_edit_intent *intents = (sprite_edit_intent *)realloc(
-            s_actions.sprite_intents, (size_t)capacity * sizeof *intents);
-        if (!intents) {
-            free(source_key);
-            set_status_ex(STATUS_ERROR,
-                          "Out of memory: this sprite edit could not be queued (change not applied).");
-            return;
-        }
-        s_actions.sprite_intents = intents;
-        s_actions.sprite_intent_cap = capacity;
+    const bool idle =
+        s_actions.draft.lifecycle.phase == GUI_EDIT_IDLE;
+    if (!component_draft_begin(
+            GUI_DRAFT_SPRITE, sprite->source_id,
+            sprite->expected_revision,
+            sprite_edit_matches(sprite, kind, component),
+            "Could not create the sprite draft identity")) {
+        return false;
     }
-    s_actions.sprite_intents[s_actions.sprite_intent_count++] = (sprite_edit_intent){
-        kind, sprite->atlas_id, sprite->source_id, sprite->expected_revision,
-        source_key, field, ivalue, fvalue};
+    gui_draft_owner *draft = &s_actions.draft;
+    if (idle) {
+        draft->sprite.kind = kind;
+        draft->sprite.atlas_id = sprite->atlas_id;
+        draft->sprite.source_id = sprite->source_id;
+        draft->sprite.component = component;
+        memcpy(
+            draft->sprite.source_key,
+            sprite->source_key, key_length + 1U);
+    }
+    draft->sprite.integer = integer;
+    draft->sprite.real = real;
+    return true;
 }
 
-void gui_queue_sprite_origin(const gui_sprite_ref *sprite, int axis, float value) {
-    queue_sprite_intent(SPRITE_INTENT_ORIGIN, sprite, axis, 0, value);
+void gui_edit_sprite_origin(
+    const gui_sprite_ref *sprite, int axis, float value) {
+    if (axis < 0 || axis > 1) {
+        set_status_ex(
+            STATUS_WARNING,
+            "Sprite origin edit rejected: invalid axis.");
+        return;
+    }
+    (void)edit_sprite_component(
+        sprite, GUI_SPRITE_EDIT_ORIGIN,
+        axis, 0, value);
 }
-void gui_queue_sprite_slice9(const gui_sprite_ref *sprite, int lrtb_index, int value) {
-    queue_sprite_intent(SPRITE_INTENT_SLICE9, sprite, lrtb_index, value, 0.0F);
+void gui_edit_sprite_slice9(
+    const gui_sprite_ref *sprite, int component, int value) {
+    if (component < 0 || component >= 4) {
+        set_status_ex(
+            STATUS_WARNING,
+            "Sprite slice9 edit rejected: invalid component.");
+        return;
+    }
+    (void)edit_sprite_component(
+        sprite, GUI_SPRITE_EDIT_SLICE9,
+        component, value, 0.0F);
 }
-void gui_queue_sprite_override(const gui_sprite_ref *sprite, gui_sprite_ov which, int value) {
-    queue_sprite_intent(SPRITE_INTENT_OVERRIDE, sprite, (int)which, value, 0.0F);
+void gui_edit_sprite_override(
+    const gui_sprite_ref *sprite,
+    gui_sprite_ov component, int value) {
+    if (component < GUI_SPRITE_OV_SHAPE ||
+        component > GUI_SPRITE_OV_EXTRUDE) {
+        set_status_ex(
+            STATUS_WARNING,
+            "Sprite override edit rejected: invalid component.");
+        return;
+    }
+    (void)edit_sprite_component(
+        sprite, GUI_SPRITE_EDIT_OVERRIDE,
+        (int)component, value, 0.0F);
 }
+
+bool gui_sprite_edit_value(
+    const gui_sprite_ref *sprite,
+    gui_sprite_edit_kind kind, int component,
+    int *integer, float *real) {
+    if (!sprite_edit_matches(sprite, kind, component)) {
+        return false;
+    }
+    if (integer) {
+        *integer = s_actions.draft.sprite.integer;
+    }
+    if (real) {
+        *real = s_actions.draft.sprite.real;
+    }
+    return true;
+}
+
 static bool animation_intent_push(animation_edit_intent *intent) {
     if (!intent || tp_id128_is_nil(intent->animation.atlas_id) ||
         tp_id128_is_nil(intent->animation.animation_id)) {
@@ -646,27 +759,102 @@ static bool animation_intent_push(animation_edit_intent *intent) {
     return true;
 }
 
-void gui_edit_anim_fps(const gui_animation_ref *animation, float fps) {
-    animation_edit_intent intent = {0};
-    intent.kind = ANIMATION_INTENT_FPS;
-    if (animation) intent.animation = *animation;
-    intent.value = fps;
-    (void)animation_intent_push(&intent);
+static bool animation_edit_matches(
+    const gui_animation_ref *animation,
+    gui_animation_edit_kind kind, int component) {
+    const gui_draft_owner *draft = &s_actions.draft;
+    return animation &&
+           draft->family == GUI_DRAFT_ANIMATION &&
+           draft->lifecycle.phase != GUI_EDIT_IDLE &&
+           tp_id128_eq(
+               draft->lifecycle.target_id,
+               animation->animation_id) &&
+           tp_id128_eq(
+               draft->animation.atlas_id,
+               animation->atlas_id) &&
+           draft->animation.kind == kind &&
+           draft->animation.component == component;
 }
-void gui_edit_anim_playback(const gui_animation_ref *animation, int playback) {
-    animation_edit_intent intent = {0};
-    intent.kind = ANIMATION_INTENT_PLAYBACK;
-    if (animation) intent.animation = *animation;
-    intent.first = playback;
-    (void)animation_intent_push(&intent);
+
+static bool edit_animation_component(
+    const gui_animation_ref *animation,
+    gui_animation_edit_kind kind, int component,
+    int integer, float real, bool flag) {
+    if (!animation ||
+        tp_id128_is_nil(animation->atlas_id) ||
+        tp_id128_is_nil(animation->animation_id)) {
+        return false;
+    }
+    const bool idle =
+        s_actions.draft.lifecycle.phase == GUI_EDIT_IDLE;
+    if (!component_draft_begin(
+            GUI_DRAFT_ANIMATION,
+            animation->animation_id,
+            animation->expected_revision,
+            animation_edit_matches(
+                animation, kind, component),
+            "Could not create the animation draft identity")) {
+        return false;
+    }
+    gui_draft_owner *draft = &s_actions.draft;
+    if (idle) {
+        draft->animation.kind = kind;
+        draft->animation.atlas_id =
+            animation->atlas_id;
+        draft->animation.component = component;
+    }
+    draft->animation.integer = integer;
+    draft->animation.real = real;
+    draft->animation.flag = flag;
+    return true;
 }
-void gui_edit_anim_flip(const gui_animation_ref *animation, bool flip_h, bool flip_v) {
-    animation_edit_intent intent = {0};
-    intent.kind = ANIMATION_INTENT_FLIP;
-    if (animation) intent.animation = *animation;
-    intent.flip_h = flip_h;
-    intent.flip_v = flip_v;
-    (void)animation_intent_push(&intent);
+
+void gui_edit_anim_fps(
+    const gui_animation_ref *animation, float fps) {
+    (void)edit_animation_component(
+        animation, GUI_ANIMATION_EDIT_FPS,
+        0, 0, fps, false);
+}
+
+void gui_edit_anim_playback(
+    const gui_animation_ref *animation, int playback) {
+    (void)edit_animation_component(
+        animation, GUI_ANIMATION_EDIT_PLAYBACK,
+        0, playback, 0.0F, false);
+}
+
+void gui_edit_anim_flip(
+    const gui_animation_ref *animation,
+    int axis, bool value) {
+    if (axis < 0 || axis > 1) {
+        set_status_ex(
+            STATUS_WARNING,
+            "Animation flip edit rejected: invalid axis.");
+        return;
+    }
+    (void)edit_animation_component(
+        animation, GUI_ANIMATION_EDIT_FLIP,
+        axis, 0, 0.0F, value);
+}
+
+bool gui_animation_edit_value(
+    const gui_animation_ref *animation,
+    gui_animation_edit_kind kind, int component,
+    int *integer, float *real) {
+    if (!animation_edit_matches(
+            animation, kind, component)) {
+        return false;
+    }
+    if (integer) {
+        *integer =
+            kind == GUI_ANIMATION_EDIT_FLIP
+                ? (s_actions.draft.animation.flag ? 1 : 0)
+                : s_actions.draft.animation.integer;
+    }
+    if (real) {
+        *real = s_actions.draft.animation.real;
+    }
+    return true;
 }
 void gui_edit_anim_frame_remove(const gui_animation_ref *animation, int frame_index) {
     animation_edit_intent intent = {0};
@@ -705,40 +893,21 @@ static bool edit_copy_exporter_id(char out[TP_EXPORTER_ID_MAX],
     return true;
 }
 
-void gui_edit_target(const gui_target_ref *target, const char *exporter_id,
-                     const char *out_path, bool enabled) {
-    target_edit_intent e = {0};
-    e.kind = TARGET_INTENT_FULL;
-    edit_capture_target(&e, target);
-    e.b0 = enabled;
-    if (!edit_copy_exporter_id(e.s0, exporter_id)) {
-        return;
-    }
-    e.out_path = gui_actions__strdup(out_path); /* HEAP full path -- a >255 out_path must not truncate (F2) */
-    if (!e.out_path) {
-        set_status_ex(STATUS_ERROR, "Out of memory: export target edit not applied.");
-        return;
-    }
-    (void)target_intent_push(&e);
-}
-/* H/G3: discrete enabled toggle. Carries ONLY the new enabled + the target index; the drain setter reads
- * exporter_id + out_path from the committed record AFTER flushing any buffered out-path gesture, so a
- * still-uncommitted typed out-path is preserved (not reverted by a stale re-send). */
 void gui_edit_target_enabled(const gui_target_ref *target, bool enabled) {
     target_edit_intent e = {0};
     e.kind = TARGET_INTENT_ENABLED;
     edit_capture_target(&e, target);
-    e.b0 = enabled;
+    e.enabled = enabled;
     (void)target_intent_push(&e);
 }
-/* H/G3: discrete exporter change. Carries ONLY the new exporter_id + the target index; the drain setter
- * reads out_path + enabled from the committed record post-flush (same anti-stale-revert reason). */
+
 void gui_edit_target_exporter(const gui_target_ref *target,
                               const char *exporter_id) {
     target_edit_intent e = {0};
     e.kind = TARGET_INTENT_EXPORTER;
     edit_capture_target(&e, target);
-    if (!edit_copy_exporter_id(e.s0, exporter_id)) {
+    if (!edit_copy_exporter_id(
+            e.exporter_id, exporter_id)) {
         return;
     }
     (void)target_intent_push(&e);
@@ -850,6 +1019,84 @@ static bool text_draft_is_net_zero(
            strcmp(committed, draft->text.value) == 0;
 }
 
+static bool sprite_draft_is_net_zero(
+    const gui_draft_owner *draft,
+    const tp_session_snapshot *snapshot) {
+    const tp_snapshot_sprite *sprite =
+        tp_session_snapshot_sprite_by_key(
+            snapshot, draft->sprite.atlas_id,
+            draft->sprite.source_id,
+            draft->sprite.source_key);
+    switch (draft->sprite.kind) {
+        case GUI_SPRITE_EDIT_ORIGIN:
+            return draft->sprite.real ==
+                   (draft->sprite.component == 0
+                        ? (sprite ? sprite->origin_x
+                                  : TP_PROJECT_ORIGIN_DEFAULT)
+                        : (sprite ? sprite->origin_y
+                                  : TP_PROJECT_ORIGIN_DEFAULT));
+        case GUI_SPRITE_EDIT_SLICE9:
+            return draft->sprite.integer ==
+                   (sprite
+                        ? sprite->slice9_lrtb[
+                              draft->sprite.component]
+                        : 0);
+        case GUI_SPRITE_EDIT_OVERRIDE: {
+            int committed = TP_PROJECT_OV_INHERIT;
+            if (sprite) {
+                switch ((gui_sprite_ov)
+                            draft->sprite.component) {
+                    case GUI_SPRITE_OV_SHAPE:
+                        committed = sprite->override_shape;
+                        break;
+                    case GUI_SPRITE_OV_ROTATE:
+                        committed =
+                            sprite->override_allow_rotate;
+                        break;
+                    case GUI_SPRITE_OV_MAXVERT:
+                        committed =
+                            sprite->override_max_vertices;
+                        break;
+                    case GUI_SPRITE_OV_MARGIN:
+                        committed = sprite->override_margin;
+                        break;
+                    case GUI_SPRITE_OV_EXTRUDE:
+                        committed = sprite->override_extrude;
+                        break;
+                }
+            }
+            return draft->sprite.integer == committed;
+        }
+    }
+    return false;
+}
+
+static bool animation_draft_is_net_zero(
+    const gui_draft_owner *draft,
+    const tp_session_snapshot *snapshot) {
+    const tp_snapshot_animation *animation =
+        tp_session_snapshot_animation_by_id(
+            snapshot, draft->animation.atlas_id,
+            draft->lifecycle.target_id);
+    if (!animation) {
+        return false;
+    }
+    switch (draft->animation.kind) {
+        case GUI_ANIMATION_EDIT_FPS:
+            return draft->animation.real ==
+                   animation->fps;
+        case GUI_ANIMATION_EDIT_PLAYBACK:
+            return draft->animation.integer ==
+                   animation->playback;
+        case GUI_ANIMATION_EDIT_FLIP:
+            return draft->animation.flag ==
+                   (draft->animation.component == 0
+                        ? animation->flip_h
+                        : animation->flip_v);
+    }
+    return false;
+}
+
 static bool draft_is_net_zero(
     const gui_draft_owner *draft,
     const tp_session_snapshot *snapshot) {
@@ -863,8 +1110,17 @@ static bool draft_is_net_zero(
                 snapshot,
                 draft->lifecycle.target_id));
     }
-    return draft->family == GUI_DRAFT_TEXT &&
-           text_draft_is_net_zero(draft, snapshot);
+    if (draft->family == GUI_DRAFT_TEXT) {
+        return text_draft_is_net_zero(
+            draft, snapshot);
+    }
+    if (draft->family == GUI_DRAFT_SPRITE) {
+        return sprite_draft_is_net_zero(
+            draft, snapshot);
+    }
+    return draft->family == GUI_DRAFT_ANIMATION &&
+           animation_draft_is_net_zero(
+               draft, snapshot);
 }
 
 static tp_status submit_draft_operation(
@@ -888,6 +1144,64 @@ static tp_status submit_draft_operation(
                 : 0.0F,
             identity, transaction_id, terminal,
             error);
+    }
+    if (draft->family == GUI_DRAFT_SPRITE) {
+        const gui_sprite_ref sprite = {
+            draft->sprite.atlas_id,
+            draft->sprite.source_id,
+            draft->sprite.source_key,
+            edit->base_revision,
+        };
+        switch (draft->sprite.kind) {
+            case GUI_SPRITE_EDIT_ORIGIN:
+                return gui_project_submit_sprite_origin(
+                    &sprite, draft->sprite.component,
+                    draft->sprite.real, identity,
+                    transaction_id, terminal, error);
+            case GUI_SPRITE_EDIT_SLICE9:
+                return gui_project_submit_sprite_slice9(
+                    &sprite, draft->sprite.component,
+                    draft->sprite.integer, identity,
+                    transaction_id, terminal, error);
+            case GUI_SPRITE_EDIT_OVERRIDE:
+                return gui_project_submit_sprite_override(
+                    &sprite,
+                    (gui_sprite_ov)
+                        draft->sprite.component,
+                    draft->sprite.integer, identity,
+                    transaction_id, terminal, error);
+        }
+    }
+    if (draft->family == GUI_DRAFT_ANIMATION) {
+        const gui_animation_ref animation = {
+            draft->animation.atlas_id,
+            edit->target_id,
+            edit->base_revision,
+        };
+        switch (draft->animation.kind) {
+            case GUI_ANIMATION_EDIT_FPS:
+                return gui_project_submit_animation_fps(
+                    &animation, draft->animation.real,
+                    identity, transaction_id,
+                    terminal, error);
+            case GUI_ANIMATION_EDIT_PLAYBACK:
+                return gui_project_submit_animation_playback(
+                    &animation,
+                    draft->animation.integer,
+                    identity, transaction_id,
+                    terminal, error);
+            case GUI_ANIMATION_EDIT_FLIP:
+                return gui_project_submit_animation_flip(
+                    &animation,
+                    draft->animation.component,
+                    draft->animation.flag, identity,
+                    transaction_id, terminal, error);
+        }
+    }
+    if (draft->family != GUI_DRAFT_TEXT) {
+        return tp_error_set(
+            error, TP_STATUS_INVALID_ARGUMENT,
+            "%s", "unknown GUI draft family");
     }
     switch (draft->text.kind) {
         case GUI_TEXT_EDIT_ATLAS_NAME:
@@ -1063,11 +1377,8 @@ bool gui_actions__apply_draft_mine(void) {
     return submit_draft(true);
 }
 
-/* The queues below were captured from one pinned frame. When the atlas
- * prerequisite is our exact successful transaction, advance only entries
- * captured at that exact pre-submit revision. Entries that were already stale
- * remain stale and session admission still rejects them. R3c removes this with
- * the remaining queues. */
+/* Discrete commands captured in the same frame as a successful draft submit
+ * advance only from that exact revision. Already-stale commands stay stale. */
 void gui_actions__rebase_deferred_edits(
     int64_t revision_before,
     int64_t revision_after) {
@@ -1078,17 +1389,6 @@ void gui_actions__rebase_deferred_edits(
               revision_before + 1);
     if (revision_after != revision_before + 1) {
         return;
-    }
-    for (int i = 0;
-         i < s_actions.sprite_intent_count;
-         ++i) {
-        if (s_actions.sprite_intents[i]
-                .expected_revision ==
-            revision_before) {
-            s_actions.sprite_intents[i]
-                .expected_revision =
-                revision_after;
-        }
     }
     for (int i = 0;
          i < s_actions.animation_intent_count;
@@ -1114,47 +1414,11 @@ void gui_actions__rebase_deferred_edits(
     }
 }
 
-/* Replays the edit families that still use deferred queues, then clears them. Atlas scalar
- * drafts bypass this route and are submitted separately at the gesture boundary. */
+/* Replays discrete structural/target commands after any draft prerequisite. */
 void gui_actions__drain_edits(void) {
-    for (int i = 0; i < s_actions.sprite_intent_count; i++) {
-        sprite_edit_intent *intent = &s_actions.sprite_intents[i];
-        const gui_sprite_ref sprite = {
-            intent->atlas_id, intent->source_id, intent->source_key,
-            intent->expected_revision};
-        switch (intent->kind) {
-            case SPRITE_INTENT_ORIGIN:
-                (void)gui_project_set_sprite_origin(&sprite, intent->field,
-                                                     intent->fvalue);
-                break;
-            case SPRITE_INTENT_SLICE9:
-                (void)gui_project_set_sprite_slice9(&sprite, intent->field,
-                                                     intent->ivalue);
-                break;
-            case SPRITE_INTENT_OVERRIDE:
-                (void)gui_project_set_sprite_override(
-                    &sprite, (gui_sprite_ov)intent->field, intent->ivalue);
-                break;
-        }
-        free(intent->source_key);
-        intent->source_key = NULL;
-    }
-    s_actions.sprite_intent_count = 0;
     for (int i = 0; i < s_actions.animation_intent_count; i++) {
         animation_edit_intent *intent = &s_actions.animation_intents[i];
         switch (intent->kind) {
-            case ANIMATION_INTENT_FPS:
-                (void)gui_project_set_anim_fps(&intent->animation, intent->value);
-                break;
-            case ANIMATION_INTENT_PLAYBACK:
-                (void)gui_project_set_anim_playback(&intent->animation,
-                                                    intent->first);
-                break;
-            case ANIMATION_INTENT_FLIP:
-                (void)gui_project_set_anim_flip(&intent->animation,
-                                                intent->flip_h,
-                                                intent->flip_v);
-                break;
             case ANIMATION_INTENT_FRAME_REMOVE:
                 {
                     gui_animation_ref selected = {0};
@@ -1197,33 +1461,20 @@ void gui_actions__drain_edits(void) {
         const gui_target_ref target = {e->atlas_id, e->target_id,
                                        e->expected_revision};
         switch (e->kind) {
-            case TARGET_INTENT_FULL:
-                (void)gui_project_set_target(&target, e->s0,
-                                             e->out_path ? e->out_path : "",
-                                             e->b0);
-                break;
             case TARGET_INTENT_ENABLED:
-                (void)gui_project_set_target_enabled(&target, e->b0);
+                (void)gui_project_set_target_enabled(
+                    &target, e->enabled);
                 break;
             case TARGET_INTENT_EXPORTER:
-                (void)gui_project_set_target_exporter(&target, e->s0);
+                (void)gui_project_set_target_exporter(
+                    &target, e->exporter_id);
                 break;
         }
-        target_intent_dispose(e);
     }
     s_actions.target_intent_count = 0;
 }
 
 void gui_actions__discard_deferred_edits(void) {
-    for (int i = 0;
-         i < s_actions.sprite_intent_count;
-         ++i) {
-        free(s_actions.sprite_intents[i]
-                 .source_key);
-        s_actions.sprite_intents[i]
-            .source_key = NULL;
-    }
-    s_actions.sprite_intent_count = 0;
     for (int i = 0;
          i < s_actions.animation_intent_count;
          ++i) {
@@ -1236,12 +1487,6 @@ void gui_actions__discard_deferred_edits(void) {
             NULL;
     }
     s_actions.animation_intent_count = 0;
-    for (int i = 0;
-         i < s_actions.target_intent_count;
-         ++i) {
-        target_intent_dispose(
-            &s_actions.target_intents[i]);
-    }
     s_actions.target_intent_count = 0;
 }
 
@@ -1252,8 +1497,7 @@ void gui_actions__discard_edits(void) {
     s_actions.gesture_commit = false;
 }
 
-/* Set by a view widget when its gesture ends. At frame top this submits the active atlas draft
- * and flushes the remaining legacy edit families, producing one transaction per gesture. */
+/* Set by a view widget when its gesture ends. The next frame submits the one active draft. */
 void gui_request_gesture_commit(void) { s_actions.gesture_commit = true; }
 // #endregion
 

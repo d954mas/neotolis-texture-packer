@@ -14,7 +14,6 @@ static uint64_t s_test_open_call_count;
 
 static void reset_cutover_state(
     gui_project_lifecycle_kind kind) {
-    gui_project_pending_discard();
     s_project.op_error = false;
     s_project.op_error_status = TP_STATUS_OK;
     s_project.op_error_msg[0] = '\0';
@@ -110,7 +109,6 @@ void gui_project_init(void) {
             client_status, &err);
         return;
     }
-    gui_project_pending_discard();
     tp_session *initial = NULL;
     const tp_status create_status =
         create_fresh_candidate(
@@ -225,21 +223,6 @@ tp_status gui_project_lifecycle_begin_shutdown(
     if (lifecycle_status != TP_STATUS_OK) {
         return lifecycle_status;
     }
-    /* A raw window close bypasses the action/confirmation path. Commit its
-     * buffered gesture before admission closes so recovery sees the latest
-     * accepted edit. */
-    if (!gui_project_flush_pending()) {
-        const tp_status flush_status =
-            s_project.op_error_status !=
-                    TP_STATUS_OK
-                ? s_project.op_error_status
-                : TP_STATUS_INVALID_ARGUMENT;
-        return tp_error_set(
-            err, flush_status, "%s",
-            s_project.op_error_msg[0]
-                ? s_project.op_error_msg
-                : "buffered edit could not be committed");
-    }
     const tp_status status =
         gui_host_binding_begin_shutdown(
             &s_project.binding,
@@ -289,7 +272,6 @@ tp_status gui_project_lifecycle_pump(
         NT_ASSERT(
             kind ==
             GUI_PROJECT_LIFECYCLE_SHUTDOWN);
-        gui_project_pending_discard();
     }
     s_project.lifecycle_kind =
         GUI_PROJECT_LIFECYCLE_NONE;
@@ -313,13 +295,11 @@ bool gui_project_take_save_notice(char *out, size_t cap) {
 // #endregion
 
 // #region undo / redo
-/* A pending buffered edit counts as undoable (undo flushes it into a step, then reverts it). */
 bool gui_project_can_undo(void) {
     tp_session *session =
         gui_project__borrow_active_session();
     return gui_project__ingress_is_open() &&
-           (s_project.pending_valid ||
-            tp_session_can_undo(session));
+           tp_session_can_undo(session);
 }
 bool gui_project_can_redo(void) {
     return gui_project__ingress_is_open() &&
@@ -345,14 +325,9 @@ static void note_history_reject(const char *verb, tp_status st, const tp_error *
                    "%s rejected: %s", verb, detail);
 }
 
-/* Undo reverses the most recent committed transaction via its captured semantic diff.
- * A buffered gesture is committed FIRST (its own step) so Ctrl+Z reverts the in-flight drag.
- * Dirty is identity-derived, so an undo back to the saved baseline reads clean. */
+/* Undo reverses the most recent committed transaction via its semantic diff. */
 bool gui_project_undo(void) {
     if (!gui_project__ingress_is_open()) {
-        return false;
-    }
-    if (!gui_project_flush_pending()) {
         return false;
     }
     tp_error e = {0};
@@ -372,9 +347,6 @@ bool gui_project_undo(void) {
 
 bool gui_project_redo(void) {
     if (!gui_project__ingress_is_open()) {
-        return false;
-    }
-    if (!gui_project_flush_pending()) {
         return false;
     }
     tp_error e = {0};
@@ -415,13 +387,6 @@ tp_status gui_project_save(char *err_out, size_t err_cap) {
             (void)snprintf(err_out, err_cap, "no path (use Save As)");
         }
         return TP_STATUS_INVALID_ARGUMENT;
-    }
-    if (!gui_project_flush_pending()) {
-        const tp_status flush_status = s_project.op_error_status != TP_STATUS_OK
-                                           ? s_project.op_error_status
-                                           : TP_STATUS_INVALID_ARGUMENT;
-        gui_project_flush_error(err_out, err_cap);
-        return flush_status;
     }
     tp_error err = {0};
     tp_session_save_result result;
@@ -516,14 +481,6 @@ tp_status gui_project_save_as(const char *path, char *err_out, size_t err_cap) {
             path, canonical_path, err_out, err_cap);
     if (preflight_status != TP_STATUS_OK) {
         return preflight_status;
-    }
-    /* Never save an older snapshot when the pending edit failed to commit. */
-    if (!gui_project_flush_pending()) {
-        const tp_status flush_status = s_project.op_error_status != TP_STATUS_OK
-                                           ? s_project.op_error_status
-                                           : TP_STATUS_INVALID_ARGUMENT;
-        gui_project_flush_error(err_out, err_cap);
-        return flush_status;
     }
     tp_error err = {0};
     tp_session_save_result result;

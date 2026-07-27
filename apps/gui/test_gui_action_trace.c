@@ -1,5 +1,6 @@
 #include <stdbool.h>
 #include <errno.h>
+#include <limits.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -69,21 +70,72 @@ static const state_owner_entry k_state_owners[] = {
     {"confirmation-modal-visibility", TRACE_SESSION_SHARED},
     {"recovery-modal-visibility", TRACE_SESSION_SHARED},
     {"input-blur-request", TRACE_SESSION_SHARED},
-    {"deferred-edit-queue", TRACE_ACTION_PRIVATE},
+    {"draft-reducer", TRACE_ACTION_PRIVATE},
+    {"deferred-structural-edit-queue", TRACE_ACTION_PRIVATE},
     {"deferred-side-effect-queue", TRACE_ACTION_PRIVATE},
     {"gesture-boundary", TRACE_ACTION_PRIVATE},
     {"confirmation-intent", TRACE_ACTION_PRIVATE},
     {"recovery-decision", TRACE_ACTION_PRIVATE},
     {"preview-captured-identity", TRACE_ACTION_PRIVATE},
     {"canvas-preview-dropdown", TRACE_VIEW_LOCAL},
-    {"atlas-scalar-draft", TRACE_VIEW_LOCAL},
-    {"settings-edit-buffers", TRACE_VIEW_LOCAL},
     {"settings-dropdowns", TRACE_VIEW_LOCAL},
     {"chrome-menu-contexts", TRACE_VIEW_LOCAL},
 };
 
 static const tp_snapshot_atlas *atlas_at(int index) {
     return tp_session_snapshot_atlas_at(gui_project_snapshot(), index);
+}
+
+static gui_sprite_ref add_test_sprite_ref(const char *source_path,
+                                          const char *source_key) {
+    const tp_session_snapshot *snapshot = gui_project_snapshot();
+    const tp_snapshot_atlas *atlas =
+        tp_session_snapshot_atlas_at(snapshot, 0);
+    TEST_ASSERT_NOT_NULL(atlas);
+    const tp_id128 atlas_id = atlas->id;
+    TEST_ASSERT_EQUAL_INT(
+        GUI_ADD_ADDED,
+        gui_project_add_source_kind(
+            atlas_id, tp_session_snapshot_revision(snapshot),
+            source_path, TP_SOURCE_KIND_FILE));
+    snapshot = gui_project_snapshot();
+    const tp_snapshot_source *source =
+        tp_session_snapshot_source_at(snapshot, atlas_id, 0);
+    TEST_ASSERT_NOT_NULL(source);
+    const gui_sprite_ref sprite = {
+        atlas_id,
+        source->id,
+        source_key,
+        tp_session_snapshot_revision(snapshot),
+    };
+    return sprite;
+}
+
+static void apply_foreign_operation(tp_operation *operation,
+                                    const char *transaction_id) {
+    const tp_session_snapshot *snapshot = gui_project_snapshot();
+    tp_txn_request request = {
+        .schema = TP_TXN_SCHEMA,
+        .expected_revision =
+            tp_session_snapshot_revision(snapshot),
+        .label = "test.foreign",
+        .author = "test",
+        .ops = operation,
+        .op_count = 1,
+    };
+    (void)snprintf(request.id_hex, sizeof request.id_hex,
+                   "%s", transaction_id);
+    tp_txn_result result = {0};
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_session_apply(gui_project__test_session(),
+                         &request, &result, &error));
+    tp_txn_result_free(&result);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_project_frame_begin(&error));
+    gui_project_frame_end();
 }
 
 static void reset_public_action_state(void) {
@@ -155,8 +207,8 @@ void test_state_ownership_inventory_preserves_three_classes(void) {
         }
     }
     TEST_ASSERT_EQUAL_INT(7, counts[TRACE_SESSION_SHARED]);
-    TEST_ASSERT_EQUAL_INT(6, counts[TRACE_ACTION_PRIVATE]);
-    TEST_ASSERT_EQUAL_INT(5, counts[TRACE_VIEW_LOCAL]);
+    TEST_ASSERT_EQUAL_INT(7, counts[TRACE_ACTION_PRIVATE]);
+    TEST_ASSERT_EQUAL_INT(3, counts[TRACE_VIEW_LOCAL]);
 
     /* Compile-time anchors for the shared representatives that cross modules. */
     const void *const shared_anchors[] = {
@@ -168,7 +220,7 @@ void test_state_ownership_inventory_preserves_three_classes(void) {
                              sizeof shared_anchors / sizeof shared_anchors[0]);
 }
 
-void test_deferred_edit_coalesces_then_undo_redo_trace_is_exact(void) {
+void test_atlas_draft_updates_then_undo_redo_trace_is_exact(void) {
     const tp_snapshot_atlas *atlas = atlas_at(0);
     TEST_ASSERT_NOT_NULL(atlas);
     const tp_id128 atlas_id = atlas->id;
@@ -408,6 +460,282 @@ void test_foreign_model_transaction_conflicts_active_atlas_draft(void) {
             atlas_id, GUI_ATLAS_PADDING,
             &effective, NULL));
     TEST_ASSERT_EQUAL_INT(draft_padding, effective);
+    gui_draft_discard();
+}
+
+void test_origin_apply_mine_preserves_foreign_sibling_component(void) {
+    const gui_sprite_ref initial = add_test_sprite_ref(
+        "__origin_component_source__.png", "origin-sprite.png");
+    char source_key[] = "origin-sprite.png";
+    tp_operation baseline = {
+        .kind = TP_OP_SPRITE_OVERRIDE_SET,
+        .atlas_id = {{0}},
+        .u.sprite_set = {
+            .source_id = {{0}},
+            .src_key = source_key,
+            .mask = TP_SPF_ORIGIN,
+            .origin_x = 0.5F,
+            .origin_y = 0.5F,
+        },
+    };
+    baseline.atlas_id = initial.atlas_id;
+    baseline.u.sprite_set.source_id = initial.source_id;
+    apply_foreign_operation(
+        &baseline, "a1000000000000000000000000000001");
+
+    gui_sprite_ref sprite = initial;
+    sprite.expected_revision =
+        tp_session_snapshot_revision(gui_project_snapshot());
+    gui_edit_sprite_origin(&sprite, 0, 0.25F);
+
+    tp_operation foreign = baseline;
+    foreign.u.sprite_set.origin_y = 0.75F;
+    apply_foreign_operation(
+        &foreign, "a1000000000000000000000000000002");
+    TEST_ASSERT_EQUAL_INT(
+        GUI_EDIT_CONFLICTED, gui_draft_phase());
+    TEST_ASSERT_TRUE(gui_draft_can_apply());
+
+    gui_draft_apply_mine();
+    apply_pending();
+    TEST_ASSERT_EQUAL_INT(
+        GUI_EDIT_IDLE, gui_draft_phase());
+    const tp_snapshot_sprite *committed =
+        tp_session_snapshot_sprite_by_key(
+            gui_project_snapshot(), sprite.atlas_id,
+            sprite.source_id, sprite.source_key);
+    TEST_ASSERT_NOT_NULL(committed);
+    TEST_ASSERT_TRUE(committed->origin_x == 0.25F);
+    TEST_ASSERT_TRUE(committed->origin_y == 0.75F);
+}
+
+void test_slice9_apply_mine_preserves_newest_untouched_components(void) {
+    const gui_sprite_ref initial = add_test_sprite_ref(
+        "__slice9_component_source__.png", "slice9-sprite.png");
+    char source_key[] = "slice9-sprite.png";
+    tp_operation baseline = {
+        .kind = TP_OP_SPRITE_OVERRIDE_SET,
+        .atlas_id = {{0}},
+        .u.sprite_set = {
+            .source_id = {{0}},
+            .src_key = source_key,
+            .mask = TP_SPF_SLICE9,
+            .slice9 = {1, 2, 3, 4},
+        },
+    };
+    baseline.atlas_id = initial.atlas_id;
+    baseline.u.sprite_set.source_id = initial.source_id;
+    apply_foreign_operation(
+        &baseline, "a2000000000000000000000000000001");
+
+    gui_sprite_ref sprite = initial;
+    sprite.expected_revision =
+        tp_session_snapshot_revision(gui_project_snapshot());
+    gui_edit_sprite_slice9(&sprite, 0, 10);
+
+    tp_operation foreign = baseline;
+    foreign.u.sprite_set.slice9[1] = 22;
+    foreign.u.sprite_set.slice9[2] = 33;
+    foreign.u.sprite_set.slice9[3] = 44;
+    apply_foreign_operation(
+        &foreign, "a2000000000000000000000000000002");
+    TEST_ASSERT_EQUAL_INT(
+        GUI_EDIT_CONFLICTED, gui_draft_phase());
+
+    gui_draft_apply_mine();
+    apply_pending();
+    const tp_snapshot_sprite *committed =
+        tp_session_snapshot_sprite_by_key(
+            gui_project_snapshot(), sprite.atlas_id,
+            sprite.source_id, sprite.source_key);
+    TEST_ASSERT_NOT_NULL(committed);
+    TEST_ASSERT_EQUAL_UINT16(10, committed->slice9_lrtb[0]);
+    TEST_ASSERT_EQUAL_UINT16(22, committed->slice9_lrtb[1]);
+    TEST_ASSERT_EQUAL_UINT16(33, committed->slice9_lrtb[2]);
+    TEST_ASSERT_EQUAL_UINT16(44, committed->slice9_lrtb[3]);
+}
+
+void test_flip_h_apply_mine_preserves_foreign_flip_v(void) {
+    const tp_session_snapshot *snapshot = gui_project_snapshot();
+    const tp_snapshot_atlas *atlas =
+        tp_session_snapshot_atlas_at(snapshot, 0);
+    TEST_ASSERT_NOT_NULL(atlas);
+    TEST_ASSERT_EQUAL_INT(
+        0, (gui_project_create_animation(
+               atlas->id,
+               tp_session_snapshot_revision(snapshot),
+               "component-flip", NULL, 0))
+               .visible_index);
+    gui_animation_ref animation = {0};
+    TEST_ASSERT_TRUE(
+        gui_project_animation_ref_at(0, 0, &animation));
+    gui_edit_anim_flip(&animation, 0, true);
+
+    tp_operation foreign = {
+        .kind = TP_OP_ANIMATION_SETTINGS_SET,
+        .atlas_id = {{0}},
+        .u.anim_settings = {
+            .anim_id = {{0}},
+            .mask = TP_ANF_FLIP_V,
+            .flip_v = true,
+        },
+    };
+    foreign.atlas_id = animation.atlas_id;
+    foreign.u.anim_settings.anim_id =
+        animation.animation_id;
+    apply_foreign_operation(
+        &foreign, "a3000000000000000000000000000001");
+    TEST_ASSERT_EQUAL_INT(
+        GUI_EDIT_CONFLICTED, gui_draft_phase());
+
+    gui_draft_apply_mine();
+    apply_pending();
+    const tp_snapshot_animation *committed =
+        tp_session_snapshot_animation_by_id(
+            gui_project_snapshot(), animation.atlas_id,
+            animation.animation_id);
+    TEST_ASSERT_NOT_NULL(committed);
+    TEST_ASSERT_TRUE(committed->flip_h);
+    TEST_ASSERT_TRUE(committed->flip_v);
+}
+
+void test_one_sprite_gesture_creates_one_undo_entry(void) {
+    gui_sprite_ref sprite = add_test_sprite_ref(
+        "__sprite_gesture_source__.png", "gesture-sprite.png");
+    const int64_t revision_before =
+        tp_session_snapshot_revision(gui_project_snapshot());
+    const int undo_before = gui_project_undo_depth();
+
+    gui_edit_sprite_origin(&sprite, 0, 0.25F);
+    gui_edit_sprite_origin(&sprite, 0, 0.375F);
+    apply_pending();
+    TEST_ASSERT_EQUAL_INT64(
+        revision_before,
+        tp_session_snapshot_revision(gui_project_snapshot()));
+    TEST_ASSERT_EQUAL_INT(undo_before, gui_project_undo_depth());
+
+    gui_request_gesture_commit();
+    apply_pending();
+    TEST_ASSERT_EQUAL_INT64(
+        revision_before + 1,
+        tp_session_snapshot_revision(gui_project_snapshot()));
+    TEST_ASSERT_EQUAL_INT(
+        undo_before + 1, gui_project_undo_depth());
+    const tp_snapshot_sprite *committed =
+        tp_session_snapshot_sprite_by_key(
+            gui_project_snapshot(), sprite.atlas_id,
+            sprite.source_id, sprite.source_key);
+    TEST_ASSERT_NOT_NULL(committed);
+    TEST_ASSERT_TRUE(committed->origin_x == 0.375F);
+
+    do_undo();
+    const tp_snapshot_sprite *undone =
+        tp_session_snapshot_sprite_by_key(
+            gui_project_snapshot(), sprite.atlas_id,
+            sprite.source_id, sprite.source_key);
+    TEST_ASSERT_TRUE(
+        !undone ||
+        undone->origin_x == TP_PROJECT_ORIGIN_DEFAULT);
+}
+
+void test_invalid_sprite_value_is_rejected_without_losing_draft(void) {
+    const gui_sprite_ref sprite = add_test_sprite_ref(
+        "__invalid_sprite_value_source__.png",
+        "invalid-sprite.png");
+    const int64_t revision_before =
+        tp_session_snapshot_revision(
+            gui_project_snapshot());
+
+    gui_edit_sprite_override(
+        &sprite, GUI_SPRITE_OV_MARGIN,
+        INT_MAX);
+    gui_request_gesture_commit();
+    apply_pending();
+
+    TEST_ASSERT_EQUAL_INT(
+        GUI_EDIT_EDITING, gui_draft_phase());
+    TEST_ASSERT_EQUAL_INT64(
+        revision_before,
+        tp_session_snapshot_revision(
+            gui_project_snapshot()));
+    int retained = 0;
+    TEST_ASSERT_TRUE(gui_sprite_edit_value(
+        &sprite, GUI_SPRITE_EDIT_OVERRIDE,
+        GUI_SPRITE_OV_MARGIN, &retained, NULL));
+    TEST_ASSERT_EQUAL_INT(INT_MAX, retained);
+    gui_draft_discard();
+}
+
+void test_deleted_source_preserves_sprite_draft_and_disables_apply(void) {
+    const gui_sprite_ref sprite = add_test_sprite_ref(
+        "__deleted_source_draft__.png",
+        "deleted-source-sprite.png");
+    gui_edit_sprite_origin(
+        &sprite, 0, 0.25F);
+
+    tp_operation remove = {
+        .kind = TP_OP_SOURCE_REMOVE,
+        .atlas_id = {{0}},
+        .u.source_ref = {
+            .source_id = {{0}},
+            .key = NULL,
+        },
+    };
+    remove.atlas_id = sprite.atlas_id;
+    remove.u.source_ref.source_id =
+        sprite.source_id;
+    apply_foreign_operation(
+        &remove,
+        "a4000000000000000000000000000001");
+
+    TEST_ASSERT_EQUAL_INT(
+        GUI_EDIT_CONFLICTED, gui_draft_phase());
+    TEST_ASSERT_FALSE(gui_draft_can_apply());
+    float retained = 0.0F;
+    TEST_ASSERT_TRUE(gui_sprite_edit_value(
+        &sprite, GUI_SPRITE_EDIT_ORIGIN,
+        0, NULL, &retained));
+    TEST_ASSERT_TRUE(retained == 0.25F);
+    gui_draft_discard();
+}
+
+void test_deleted_animation_preserves_draft_and_disables_apply(void) {
+    const tp_session_snapshot *snapshot =
+        gui_project_snapshot();
+    const tp_snapshot_atlas *atlas =
+        tp_session_snapshot_atlas_at(snapshot, 0);
+    TEST_ASSERT_NOT_NULL(atlas);
+    TEST_ASSERT_EQUAL_INT(
+        0, (gui_project_create_animation(
+                atlas->id,
+                tp_session_snapshot_revision(snapshot),
+                "deleted-animation", NULL, 0))
+               .visible_index);
+    gui_animation_ref animation = {0};
+    TEST_ASSERT_TRUE(gui_project_animation_ref_at(
+        0, 0, &animation));
+    gui_edit_anim_fps(&animation, 24.0F);
+
+    tp_operation remove = {
+        .kind = TP_OP_ANIMATION_REMOVE,
+        .atlas_id = {{0}},
+        .u.anim_ref = {.anim_id = {{0}}},
+    };
+    remove.atlas_id = animation.atlas_id;
+    remove.u.anim_ref.anim_id =
+        animation.animation_id;
+    apply_foreign_operation(
+        &remove,
+        "a5000000000000000000000000000001");
+
+    TEST_ASSERT_EQUAL_INT(
+        GUI_EDIT_CONFLICTED, gui_draft_phase());
+    TEST_ASSERT_FALSE(gui_draft_can_apply());
+    float retained = 0.0F;
+    TEST_ASSERT_TRUE(gui_animation_edit_value(
+        &animation, GUI_ANIMATION_EDIT_FPS,
+        0, NULL, &retained));
+    TEST_ASSERT_TRUE(retained == 24.0F);
     gui_draft_discard();
 }
 
@@ -836,7 +1164,7 @@ void test_text_drafts_submit_exact_atlas_animation_sprite_and_target_ops(void) {
         GUI_EDIT_IDLE, gui_draft_phase());
 }
 
-void test_target_browse_flushes_typed_path_before_starting_dialog_gesture(void) {
+void test_target_browse_submits_typed_path_before_starting_dialog_gesture(void) {
     gui_target_ref target = {0};
     TEST_ASSERT_TRUE(
         gui_project_target_ref_at(0, 0, &target));
@@ -851,7 +1179,7 @@ void test_target_browse_flushes_typed_path_before_starting_dialog_gesture(void) 
     TEST_ASSERT_TRUE(
         gui_text_edit_update("typed-before-browse"));
 
-    TEST_ASSERT_FALSE(gui_actions__flush_failed());
+    TEST_ASSERT_TRUE(gui_actions__submit_draft());
     TEST_ASSERT_EQUAL_INT(
         GUI_EDIT_IDLE, gui_draft_phase());
     const tp_snapshot_target *typed =
@@ -1426,7 +1754,7 @@ void test_failed_atlas_gesture_aborts_dependent_action_batch(void) {
     gui_draft_discard();
 }
 
-void test_successful_atlas_prerequisite_advances_dependent_intents(void) {
+void test_sequential_drafts_and_dependent_intent_advance_exactly(void) {
     const tp_session_snapshot *snapshot =
         gui_project_snapshot();
     const tp_snapshot_atlas *atlas =
@@ -1470,11 +1798,21 @@ void test_successful_atlas_prerequisite_advances_dependent_intents(void) {
         atlas_id, revision,
         GUI_ATLAS_PADDING,
         atlas->padding + 1, 0.0F);
+    gui_request_gesture_commit();
+    apply_pending();
+
+    TEST_ASSERT_TRUE(
+        gui_project_animation_ref_at(
+            0, 0, &animation));
     gui_edit_anim_fps(
         &animation, new_fps);
+    gui_request_gesture_commit();
+    apply_pending();
+
+    TEST_ASSERT_TRUE(
+        gui_project_target_ref_at(0, 0, &target));
     gui_edit_target_enabled(
         &target, new_enabled);
-    gui_request_gesture_commit();
     apply_pending();
 
     snapshot = gui_project_snapshot();
@@ -2250,16 +2588,29 @@ int main(int argc, char **argv) {
     RUN_TEST(
         test_failed_atlas_gesture_aborts_dependent_action_batch);
     RUN_TEST(
-        test_successful_atlas_prerequisite_advances_dependent_intents);
+        test_sequential_drafts_and_dependent_intent_advance_exactly);
     RUN_TEST(
         test_prepare_failure_preserves_buffered_edit);
     RUN_TEST(
         test_busy_new_enters_drain_and_resets_only_after_completion);
-    RUN_TEST(test_deferred_edit_coalesces_then_undo_redo_trace_is_exact);
+    RUN_TEST(test_atlas_draft_updates_then_undo_redo_trace_is_exact);
     RUN_TEST(test_atlas_draft_maps_every_scalar_component);
     RUN_TEST(test_undo_blocks_without_submitting_active_atlas_draft);
     RUN_TEST(
         test_foreign_model_transaction_conflicts_active_atlas_draft);
+    RUN_TEST(
+        test_origin_apply_mine_preserves_foreign_sibling_component);
+    RUN_TEST(
+        test_slice9_apply_mine_preserves_newest_untouched_components);
+    RUN_TEST(
+        test_flip_h_apply_mine_preserves_foreign_flip_v);
+    RUN_TEST(test_one_sprite_gesture_creates_one_undo_entry);
+    RUN_TEST(
+        test_invalid_sprite_value_is_rejected_without_losing_draft);
+    RUN_TEST(
+        test_deleted_source_preserves_sprite_draft_and_disables_apply);
+    RUN_TEST(
+        test_deleted_animation_preserves_draft_and_disables_apply);
     RUN_TEST(
         test_lifecycle_apply_mine_resolves_conflict_before_continuing);
     RUN_TEST(
@@ -2277,7 +2628,7 @@ int main(int argc, char **argv) {
     RUN_TEST(
         test_text_drafts_submit_exact_atlas_animation_sprite_and_target_ops);
     RUN_TEST(
-        test_target_browse_flushes_typed_path_before_starting_dialog_gesture);
+        test_target_browse_submits_typed_path_before_starting_dialog_gesture);
     RUN_TEST(test_undo_redo_preserves_selected_animation_by_stable_id);
     RUN_TEST(
         test_deferred_frame_delete_clears_selection_only_after_commit);

@@ -84,9 +84,6 @@ static bool do_save_as(void) {
             revision_before, revision_after);
     }
     gui_actions__drain_edits();
-    if (gui_actions__flush_failed()) {
-        return false;
-    }
     if (gui_project_save_as(full, err, sizeof err) == TP_STATUS_OK) {
         char notice[256];
         if (gui_project_take_save_notice(notice, sizeof notice)) {
@@ -104,6 +101,9 @@ static bool do_save_as(void) {
 static bool do_save(void) {
     if (!gui_project_has_path()) {
         return do_save_as();
+    }
+    if (!gui_actions__submit_draft()) {
+        return false;
     }
     char err[256];
     if (gui_project_save(err, sizeof err) == TP_STATUS_OK) {
@@ -228,17 +228,10 @@ static void do_add_files(void) {
     }
 }
 
-bool gui_actions__flush_failed(void); /* defined below; a discrete browse is a flush-first entry point */
-
 /* Save dialog for a target's output path, relativized to the project like sources. Atlas-explicit so
  * the Export dialog (which spans all atlases) can browse any target, not just the selected atlas's. */
 void gui_actions__browse_target(const gui_target_ref *queued) {
-    /* H/G3: commit any BUFFERED out-path gesture FIRST so the Save dialog seeds from the just-typed path,
-     * not a stale committed one (clicking the "..." button is in-panel, so no blur gesture-commit fired).
-     * Route through gui_actions__flush_failed() like every other flush-first entry: an operation
-     * rejection surfaces the error and aborts. Re-fetch a/t AFTER the flush
-     * (a committed flush clone-swaps the project). */
-    if (gui_actions__flush_failed()) {
+    if (!gui_actions__submit_draft()) {
         return;
     }
     const tp_session_snapshot *snapshot = gui_project_snapshot();
@@ -340,23 +333,6 @@ static void do_add_folder(void) {
 // #endregion
 
 // #region new/exit confirm flow
-/* A rejected buffered gesture leaves the model older than the caller expects.
- * Surface the operation error and tell the caller to abort, so a destructive
- * gate never discards the project and Pack never runs on stale state.
- * Returns true when the flush FAILED (the caller must abort); false when it is safe to proceed. */
-bool gui_actions__flush_failed(void) {
-    if (!gui_actions__submit_draft()) {
-        return true;
-    }
-    if (gui_project_flush_pending()) {
-        return false; /* nothing pending / net-zero no-op / committed OK -> proceed */
-    }
-    char m[256];
-    gui_project_flush_error(m, sizeof m); /* fix3 [2]: shared neutral wording (save/pack/gate) */
-    set_status_ex(STATUS_ERROR, m);
-    return true;
-}
-
 void request_new(void) {
     s_actions.pending_lifecycle_request =
         GUI_LIFECYCLE_REQUEST_NEW;
@@ -426,9 +402,6 @@ bool gui_actions__apply_lifecycle_request(void) {
         s_after_confirm = request;
         s_confirm_draft = true;
         s_confirm_open = true;
-        return false;
-    }
-    if (gui_actions__flush_failed()) {
         return false;
     }
     if (gui_project_is_dirty()) {

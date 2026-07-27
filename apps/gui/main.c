@@ -493,7 +493,6 @@ static void frame(void) {
     nt_window_poll();
     nt_input_poll();
     nt_mem_scratch_reset();
-    gui_project_tick(g_nt_app.time); /* history coalescing clock */
 
 #ifdef NTPACKER_GUI_SELFTEST
     /* Verification build: render real frames (proves the canvas draw + walk + a pixel-level proof that
@@ -512,14 +511,6 @@ static void frame(void) {
     if (gui_project_lifecycle_state_query() ==
         GUI_PROJECT_LIFECYCLE_CLOSED) {
         return;
-    }
-
-    /* Fallback commit for a buffered gesture that never got a release/blur/discrete boundary
-     * (decision 0015). GATED on no active gesture -- no held pointer and no focused
-     * input -- so it can never split a live drag or a mid-typing field; the 0.30 s window inside
-     * only fires when the edit has truly gone idle. Primary commits are gesture-scoped. */
-    if (!g_nt_input.pointers[0].buttons[NT_BUTTON_LEFT].is_down && !nt_ui_input_any_focused(s_ctx)) {
-        gui_project_flush_elapsed();
     }
 
     tp_error observation_error = {{0}};
@@ -702,9 +693,8 @@ static void frame(void) {
                 s_blur_inputs = !in_panel;
             }
         }
-        /* A blur (press outside the panel while a field held focus) is a field's gesture boundary:
-         * flush its buffered edit as ONE undo step (decision 0015). The value is already
-         * in gui_project's pending buffer from the last keystroke; apply_pending commits it next frame. */
+        /* A blur outside the panel is the numeric field's gesture boundary.
+         * The reducer-owned value submits once on the next frame. */
         if (s_blur_inputs) {
             gui_request_gesture_commit();
         }
@@ -745,22 +735,16 @@ static void frame(void) {
                 const gui_sprite_ref sprite = {
                     atlas->id, selected->source_id, selected->source_key,
                     tp_session_snapshot_revision(snapshot)};
-                /* A slice9 edit buffers until the gesture boundary, so the committed
-                 * record freezes mid-typing. Prefer the buffered slice9 (peek) when one is in flight for
-                 * this atlas+sprite, so the guides move THIS frame; else read the committed record. */
-                int eff[4];
-                if (gui_project_peek_pending_slice9(&sprite, eff)) {
-                    for (int k = 0; k < 4; k++) {
-                        s_canvas.sel_slice9[k] = eff[k];
-                    }
-                } else {
-                    const tp_snapshot_sprite *s9ov =
-                        gui_rows_selected_override();
-                    if (s9ov) {
-                        for (int k = 0; k < 4; k++) {
-                            s_canvas.sel_slice9[k] = (int)s9ov->slice9_lrtb[k];
-                        }
-                    }
+                const tp_snapshot_sprite *s9ov =
+                    gui_rows_selected_override();
+                for (int k = 0; k < 4; k++) {
+                    int value =
+                        s9ov ? (int)s9ov->slice9_lrtb[k]
+                             : 0;
+                    (void)gui_sprite_edit_value(
+                        &sprite, GUI_SPRITE_EDIT_SLICE9,
+                        k, &value, NULL);
+                    s_canvas.sel_slice9[k] = value;
                 }
             }
         }

@@ -344,7 +344,6 @@ _arch_assert_absent("apps/gui/gui_session_adapter.c" "tp_session_apply" "R2c")
 _arch_assert_absent("apps/gui/gui_session_adapter.c" "\"project\\.edit\"" "R2c")
 _arch_assert_absent("apps/gui/gui_session_adapter.h" "tp_session[ \t]*\\*" "R2c")
 foreach(_path IN ITEMS apps/gui/gui_project.c
-                       apps/gui/gui_project_pending.c
                        apps/gui/gui_project_mutations.c)
     _arch_assert_absent(
         "${_path}" "gui_project__refresh_after_session_commit" "R2c")
@@ -475,10 +474,6 @@ _arch_assert_absent(
     "make_atlas_key|gui_project_set_atlas_setting"
     "R3a atlas draft submit")
 _arch_assert_absent(
-    "apps/gui/gui_project_pending.c"
-    "TP_OP_ATLAS_SETTINGS_SET"
-    "R3a broad pending deletion")
-_arch_assert_absent(
     "apps/gui/gui_actions_internal.h"
     "atlas_setting_intent"
     "R3a action mirror deletion")
@@ -493,6 +488,54 @@ foreach(_path IN ITEMS
         "${_path}"
         "gui_queue_atlas_setting|gui_project_set_atlas_setting"
         "R3a legacy atlas ingress deletion")
+endforeach()
+
+# R3c completes the value-edit cutover. The action draft reducer is the sole
+# retained value owner; project-level broad operations, timers, and mirror
+# queues must not return.
+_arch_assert_absent(
+    "apps/gui/CMakeLists.txt"
+    "gui_project_pending\\.c"
+    "R3c pending owner deletion")
+foreach(_path IN ITEMS
+        apps/gui/gui_project.h
+        apps/gui/gui_project.c
+        apps/gui/gui_project_file.c
+        apps/gui/gui_project_internal.h
+        apps/gui/gui_project_mutations.c
+        apps/gui/gui_project_test_driver.h
+        apps/gui/main.c)
+    _arch_assert_absent(
+        "${_path}"
+        "gui_project_(flush_pending|pending_route|pending_offer|pending_discard|peek_pending_slice9|flush_elapsed|tick|flush_error)"
+        "R3c pending API deletion")
+endforeach()
+_arch_assert_absent(
+    "apps/gui/gui_project_internal.h"
+    "gui_coalesce_(kind|key)|pending_(valid|key|op|time|expected_revision|preview_stale_before)"
+    "R3c pending storage deletion")
+foreach(_path IN ITEMS
+        apps/gui/gui_actions.h
+        apps/gui/gui_actions.c
+        apps/gui/gui_actions_dialogs.c
+        apps/gui/gui_actions_edits.c
+        apps/gui/gui_actions_internal.h
+        apps/gui/gui_actions_pack.c
+        apps/gui/gui_selftest.c
+        apps/gui/test_gui_action_trace.c
+        apps/gui/test_gui_canonical_identity.c)
+    _arch_assert_absent(
+        "${_path}"
+        "gui_actions__flush_failed|gui_edit_target[ \t]*\\(|gui_project_set_(sprite|anim)|gui_project_set_target[ \t]*\\(|SPRITE_INTENT_|ANIMATION_INTENT_(FPS|PLAYBACK|FLIP)|TARGET_INTENT_FULL"
+        "R3c legacy edit route deletion")
+endforeach()
+foreach(_source IN LISTS _gui_shipping_sources)
+    cmake_path(RELATIVE_PATH _source BASE_DIRECTORY "${_arch_root}"
+               OUTPUT_VARIABLE _relative)
+    _arch_assert_absent(
+        "${_relative}"
+        "gui_actions__flush_failed|gui_edit_target[ \t]*\\(|gui_project_(flush_pending|pending_route|pending_offer|pending_discard|peek_pending_slice9|flush_elapsed|tick|flush_error)|gui_project_set_(sprite|anim)|gui_project_set_target[ \t]*\\(|SPRITE_INTENT_|ANIMATION_INTENT_(FPS|PLAYBACK|FLIP)|TARGET_INTENT_FULL"
+        "R3c shipping legacy edit route deletion")
 endforeach()
 
 message(STATUS "architecture boundaries hold")
