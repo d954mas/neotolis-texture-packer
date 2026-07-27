@@ -120,13 +120,6 @@ static bool do_save(void) {
     }
 }
 
-void gui_request_remove_animation(int animation_index) {
-    gui_animation_ref animation;
-    if (gui_project_animation_ref_at(s_sel_atlas, animation_index, &animation)) {
-        gui_request_remove_animation_ref(&animation);
-    }
-}
-
 void gui_request_remove_animation_ref(const gui_animation_ref *animation) {
     if (animation && !tp_id128_is_nil(animation->atlas_id) &&
         !tp_id128_is_nil(animation->animation_id)) {
@@ -134,14 +127,6 @@ void gui_request_remove_animation_ref(const gui_animation_ref *animation) {
         s_actions.pending_remove_anim_ref = *animation;
     }
 }
-
-void gui_request_remove_target(int target_index) {
-    gui_target_ref target;
-    if (gui_project_target_ref_at(s_sel_atlas, target_index, &target)) {
-        gui_request_remove_target_ref(&target);
-    }
-}
-
 
 void gui_request_remove_target_ref(const gui_target_ref *target) {
     if (target && !tp_id128_is_nil(target->atlas_id) &&
@@ -153,8 +138,9 @@ void gui_request_remove_target_ref(const gui_target_ref *target) {
 
 static bool selected_atlas_intent(tp_id128 *atlas_id, int64_t *revision) {
     const tp_session_snapshot *snapshot = gui_project_snapshot();
+    const int atlas_index = gui_view_atlas_index(snapshot);
     const tp_snapshot_atlas *atlas = snapshot
-                                         ? tp_session_snapshot_atlas_at(snapshot, s_sel_atlas)
+                                         ? tp_session_snapshot_atlas_at(snapshot, atlas_index)
                                          : NULL;
     if (!atlas) {
         return false;
@@ -272,37 +258,28 @@ void gui_actions__browse_target(const gui_target_ref *queued) {
     }
 }
 
-void gui_request_browse_target(int atlas_index, int target_index) {
-    gui_target_ref target;
-    if (gui_project_target_ref_at(atlas_index, target_index, &target)) {
+void gui_request_browse_target_ref(const gui_target_ref *target) {
+    if (target && !tp_id128_is_nil(target->atlas_id) &&
+        !tp_id128_is_nil(target->target_id)) {
         s_actions.pending_browse_target = true;
-        s_actions.pending_browse_target_ref = target;
+        s_actions.pending_browse_target_ref = *target;
     }
 }
 
-void gui_request_add_target(int atlas_index) {
-    const tp_session_snapshot *snapshot = gui_project_snapshot();
-    const tp_snapshot_atlas *atlas = snapshot
-                                         ? tp_session_snapshot_atlas_at(snapshot,
-                                                                        atlas_index)
-                                         : NULL;
-    if (atlas) {
+void gui_request_add_target(tp_id128 atlas_id, int64_t expected_revision) {
+    if (!tp_id128_is_nil(atlas_id)) {
         s_actions.pending_add_target = true;
-        s_actions.pending_add_target_atlas_id = atlas->id;
-        s_actions.pending_add_target_revision = tp_session_snapshot_revision(snapshot);
+        s_actions.pending_add_target_atlas_id = atlas_id;
+        s_actions.pending_add_target_revision = expected_revision;
     }
 }
 
-void gui_request_add_animation(int atlas_index) {
-    const tp_session_snapshot *snapshot = gui_project_snapshot();
-    const tp_snapshot_atlas *atlas = snapshot
-                                         ? tp_session_snapshot_atlas_at(snapshot,
-                                                                        atlas_index)
-                                         : NULL;
-    if (atlas) {
+void gui_request_add_animation(tp_id128 atlas_id,
+                               int64_t expected_revision) {
+    if (!tp_id128_is_nil(atlas_id)) {
         s_actions.pending_add_anim = true;
-        s_actions.pending_add_anim_atlas_id = atlas->id;
-        s_actions.pending_add_anim_revision = tp_session_snapshot_revision(snapshot);
+        s_actions.pending_add_anim_atlas_id = atlas_id;
+        s_actions.pending_add_anim_revision = expected_revision;
     }
 }
 
@@ -550,7 +527,7 @@ void gui_actions_pump_lifecycle(void) {
     gui_pack_clear(-1);
     gui_shell_reset_shown_result();
     cancel_edit();
-    clamp_selection();
+    gui_view_reconcile_observation(gui_project_snapshot());
     reset_selection();
     if (completed ==
         GUI_PROJECT_LIFECYCLE_NEW) {

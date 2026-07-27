@@ -36,7 +36,6 @@
 static bool s_region_ov_open = false;   /* Region "Packing overrides" disclosure */
 static bool s_dd_shape_open, s_dd_size_open;           /* atlas shape / max-size combos */
 static bool s_dd_ov_shape_open, s_dd_ov_rot_open, s_dd_ov_mv_open; /* per-region override combos */
-static bool s_dd_target_open[GUI_MAX_TARGETS];         /* per-target exporter combos */
 /* Numeric/text field edit buffers (game-owned; nt_ui_input edits in place). Synced from
  * the model each frame while unfocused, parsed+clamped into the model on edit. */
 static char s_nb_pad[16], s_nb_margin[16], s_nb_extrude[16], s_nb_maxv[16], s_nb_ppu[24];
@@ -44,6 +43,7 @@ static char s_nb_alpha[16]; /* alpha-threshold numeric input (paired with the sl
 static char s_nb_ox[24], s_nb_oy[24], s_nb_s9[4][16];
 static char s_nb_ov_margin[16], s_nb_ov_extrude[16];
 static char s_target_path_scratch[TP_IDENTITY_PATH_MAX];
+static tp_id128 s_open_target_combo_id;
 /* --- animation editor (right-panel section 4) --- */
 static bool s_dd_playback_open;     /* playback-mode combo open bit */
 static char s_nb_anim_fps[16];      /* fps field edit buffer */
@@ -545,7 +545,8 @@ static void declare_region_settings(nt_ui_context_t *ctx,
                                     const tp_snapshot_atlas *atlas) {
     const sprite_row *row = gui_rows_selected_leaf();
     if (!row) {
-        if (s_sel_missing) {
+        const sprite_row *primary = gui_rows_primary();
+        if (primary && primary->missing) {
             panel_note(ctx, "Selected file is missing \xE2\x80\x94 restore it and press Refresh (F5).");
         } else {
             panel_note(ctx, "Select a sprite (list or canvas) to edit its region.");
@@ -556,8 +557,9 @@ static void declare_region_settings(nt_ui_context_t *ctx,
     const gui_sprite_ref sprite_ref = {atlas->id, row->source_id, row->source_key,
                                        tp_session_snapshot_revision(snapshot)};
     const tp_snapshot_sprite *ov = gui_rows_selected_override();
-    const tp_result *pr = gui_pack_result(s_sel_atlas);
-    const int ri = pr ? gui_pack_find_sprite_ref(s_sel_atlas, row->source_id,
+    const int atlas_index = gui_view_atlas_index(snapshot);
+    const tp_result *pr = gui_pack_result(atlas_index);
+    const int ri = pr ? gui_pack_find_sprite_ref(atlas_index, row->source_id,
                                                   row->source_key)
                       : -1;
 
@@ -756,12 +758,15 @@ static void declare_region_settings(nt_ui_context_t *ctx,
 
 /* The exporter dropdown cell for one target row (its own element so it can sit inline on a wide panel or
  * drop to a dedicated row when narrow). `preview` must already be width-fit (combo_preview_fit). */
-static void declare_target_exporter_combo(nt_ui_context_t *ctx, uint32_t row_id, int ti,
+static void declare_target_exporter_combo(nt_ui_context_t *ctx, uint32_t row_id,
                                           const gui_target_ref *target,
                                           const char *const *exp_labels, int nlabels, int cur_exp, const char *preview) {
+    bool open = tp_id128_eq(
+        s_open_target_combo_id,
+        target->target_id);
     CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}, .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
         if (nt_ui_combo_begin(ctx, NT_UI_DATA_LAYER(LAYER_IMG), LAYER_TEXT, nt_ui_child_id(row_id, "exp"), preview,
-                              &s_dd_style, &s_dd_target_open[ti])) {
+                              &s_dd_style, &open)) {
             for (int i = 0; i < nlabels; i++) {
                 if (nt_ui_combo_selectable(ctx, (uint32_t)i, exp_labels[i], i == cur_exp)) {
                     const tp_exporter *e = tp_exporter_at(i);
@@ -773,12 +778,34 @@ static void declare_target_exporter_combo(nt_ui_context_t *ctx, uint32_t row_id,
             nt_ui_combo_end(ctx);
         }
     }
+    if (open) {
+        s_open_target_combo_id = target->target_id;
+    } else if (tp_id128_eq(
+                   s_open_target_combo_id,
+                   target->target_id)) {
+        s_open_target_combo_id = tp_id128_nil();
+    }
 }
 
 /* --- Export targets (region G, audit I1) --- */
 static void declare_export_targets(nt_ui_context_t *ctx,
                                    const tp_session_snapshot *snapshot,
                                    const tp_snapshot_atlas *a) {
+    if (!tp_id128_is_nil(s_open_target_combo_id)) {
+        bool target_still_exists = false;
+        for (int i = 0; i < a->target_count; ++i) {
+            const tp_snapshot_target *target =
+                tp_session_snapshot_target_at(snapshot, a->id, i);
+            if (target &&
+                tp_id128_eq(target->id, s_open_target_combo_id)) {
+                target_still_exists = true;
+                break;
+            }
+        }
+        if (!target_still_exists) {
+            s_open_target_combo_id = tp_id128_nil();
+        }
+    }
     const int ne = tp_exporter_count();
     const char *exp_labels[24];
     int nlabels = 0;
@@ -789,19 +816,17 @@ static void declare_export_targets(nt_ui_context_t *ctx,
     if (a->target_count == 0) {
         panel_note(ctx, "No export targets. Add one so this atlas exports files.");
     }
-    const int shown = (a->target_count < GUI_MAX_TARGETS) ? a->target_count : GUI_MAX_TARGETS;
-    for (int ti = 0; ti < shown; ti++) {
+    for (int ti = 0; ti < a->target_count; ti++) {
         const tp_snapshot_target *t = tp_session_snapshot_target_at(snapshot, a->id, ti);
         if (!t) {
             continue;
         }
-        gui_target_ref target;
-        if (!gui_project_target_ref_at(s_sel_atlas, ti, &target)) {
-            continue;
-        }
-        char idbuf[48];
-        (void)snprintf(idbuf, sizeof idbuf, "tgt/row_%d", ti);
-        const uint32_t row_id = nt_ui_id(idbuf);
+        const gui_target_ref target = {
+            a->id, t->id,
+            tp_session_snapshot_revision(snapshot)};
+        const uint32_t row_id =
+            gui_stable_entity_ui_id(
+                "tgt/row", t->id);
         if (nt_ui_menu_open_trigger(ctx, s_id_ctx_menu, row_id, false, &s_ctx_state)) {
             close_menubar_menus();
             s_ctx_kind = CTX_TARGET;
@@ -835,7 +860,7 @@ static void declare_export_targets(nt_ui_context_t *ctx,
                     gui_edit_target_enabled(&target, !t->enabled);
                 }
                 if (!tgt_narrow) {
-                    declare_target_exporter_combo(ctx, row_id, ti, &target,
+                    declare_target_exporter_combo(ctx, row_id, &target,
                                                   exp_labels, nlabels, cur_exp,
                                                   pvbuf);
                 } else {
@@ -845,12 +870,12 @@ static void declare_export_targets(nt_ui_context_t *ctx,
                 record_row_tip(rm_id, "Remove target");
                 if (ui_icon_btn(ctx, rm_id, &s_ic_x, 12.0F, NULL, &g_btn_ghost, true, 24.0F, 22.0F,
                                 nt_ui_query_events(ctx, rm_id).hovered ? &g_danger : &g_caption)) {
-                    gui_request_remove_target(ti);
+                    gui_request_remove_target_ref(&target);
                 }
             }
             if (tgt_narrow) {
                 CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(BASE_ROW_H))}, .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
-                    declare_target_exporter_combo(ctx, row_id, ti, &target,
+                    declare_target_exporter_combo(ctx, row_id, &target,
                                                   exp_labels, nlabels, cur_exp,
                                                   pvbuf);
                 }
@@ -891,7 +916,7 @@ static void declare_export_targets(nt_ui_context_t *ctx,
                     }
                 }
                 if (ui_btn(ctx, nt_ui_child_id(row_id, "browse"), "\xE2\x80\xA6", &g_btn_ghost, true, 28.0F, 22.0F, &g_caption)) { /* U+2026 */
-                    gui_request_browse_target(s_sel_atlas, ti);
+                    gui_request_browse_target_ref(&target);
                 }
             }
             if (strlen(t->out_path) >=
@@ -916,16 +941,9 @@ static void declare_export_targets(nt_ui_context_t *ctx,
             }
         }
     }
-    /* Exporter dropdown state is fixed at GUI_MAX_TARGETS, so targets past
-     * that are not editable here. Export still writes all of them. */
-    if (a->target_count > GUI_MAX_TARGETS) {
-        char more[80];
-        (void)snprintf(more, sizeof more, "+%d more target(s) not editable here (still exported).",
-                       a->target_count - GUI_MAX_TARGETS);
-        panel_note(ctx, more);
-    }
     if (ui_icon_btn(ctx, nt_ui_id("tgt/add"), &s_ic_plus, 16.0F, "Target", &g_btn_ghost, true, 0.0F, 26.0F, &g_caption)) {
-        gui_request_add_target(s_sel_atlas);
+        gui_request_add_target(
+            a->id, tp_session_snapshot_revision(snapshot));
     }
 }
 
@@ -933,22 +951,22 @@ static void declare_export_targets(nt_ui_context_t *ctx,
 static void declare_animation_editor(nt_ui_context_t *ctx,
                                      const tp_session_snapshot *snapshot,
                                      const tp_snapshot_atlas *a) {
-    if (s_sel_anim < 0 || s_sel_anim >= a->animation_count) {
+    const int animation_index =
+        gui_view_animation_index(snapshot);
+    if (animation_index < 0 ||
+        animation_index >= a->animation_count) {
         panel_note(ctx, "Select an animation (left panel) to edit its frames, fps, playback and flips.");
         return;
     }
     const tp_snapshot_animation *an = tp_session_snapshot_animation_at(
-        snapshot, a->id, s_sel_anim);
+        snapshot, a->id, animation_index);
     if (!an) {
         panel_note(ctx, "The selected animation is no longer available.");
         return;
     }
-    gui_animation_ref animation_ref;
-    if (!gui_project_animation_ref_at(s_sel_atlas, s_sel_anim,
-                                      &animation_ref)) {
-        panel_note(ctx, "The selected animation is no longer available.");
-        return;
-    }
+    const gui_animation_ref animation_ref = {
+        a->id, an->id,
+        tp_session_snapshot_revision(snapshot)};
     const bool editing_id = gui_animation_edit_matches(a->id, an->id);
 
     if (editing_id) {
@@ -966,7 +984,7 @@ static void declare_animation_editor(nt_ui_context_t *ctx,
         }
         PANEL_ROW_END;
     } else if (right_panel_rename_row(ctx, "Id", an->name, nt_ui_id("anim/rename"))) {
-        start_anim_edit(s_sel_anim);
+        start_anim_edit_ref(&animation_ref);
     }
 
     PANEL_ROW_BEGIN("Preview", &g_row) {
@@ -1020,7 +1038,8 @@ static void declare_animation_editor(nt_ui_context_t *ctx,
         CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}}}) {}
         if (ui_btn(ctx, nt_ui_id("anim/addf"), "Add frames", &g_btn_ghost, s_multi_sel_count > 0, 0.0F, 24.0F,
                    &g_caption)) {
-            add_selection_frames_to_anim(s_sel_anim);
+            add_selection_frames_to_animation(
+                &animation_ref);
         }
     }
     if (an->frame_count == 0) {
@@ -1032,15 +1051,26 @@ static void declare_animation_editor(nt_ui_context_t *ctx,
     int fact = 0; /* 1 remove, 2 up, 3 down */
     int fidx = -1;
     const int fcount = an->frame_count;
+    int selected_frame =
+        gui_view_animation_frame(snapshot);
+    const uint32_t frames_id =
+        gui_stable_entity_ui_id(
+            "anim/frames", an->id);
+    const uint64_t model_generation =
+        tp_session_snapshot_model_generation(snapshot);
     for (int fi = 0; fi < fcount; fi++) {
         char idbuf[48];
-        (void)snprintf(idbuf, sizeof idbuf, "anim/frame_%d", fi);
-        const uint32_t row_id = nt_ui_id(idbuf);
+        (void)snprintf(
+            idbuf, sizeof idbuf, "%llu/%d",
+            (unsigned long long)model_generation, fi);
+        const uint32_t row_id =
+            nt_ui_child_id(frames_id, idbuf);
         const nt_ui_events_t ev = nt_ui_events(ctx, row_id, NULL);
         if (ev.clicked) {
-            s_sel_anim_frame = fi;
+            gui_view_select_animation_frame(snapshot, fi);
+            selected_frame = fi;
         }
-        const bool sel = (fi == s_sel_anim_frame);
+        const bool sel = (fi == selected_frame);
         const Clay_Color bg = sel ? C_SEL : (ev.hovered ? C_HOVER : C_BG);
         CLAY({.id = {.id = row_id},
               .layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(BASE_ROW_H))},
@@ -1077,20 +1107,19 @@ static void declare_animation_editor(nt_ui_context_t *ctx,
     }
     if (fact == 1 && fidx >= 0) {
         gui_edit_anim_frame_remove(&animation_ref, fidx);
-        s_sel_anim_frame = -1;
+        gui_view_select_animation_frame(snapshot, -1);
     } else if (fact == 2 && fidx >= 0) {
         gui_edit_anim_frame_move(&animation_ref, fidx, -1);
-        s_sel_anim_frame = fidx - 1;
     } else if (fact == 3 && fidx >= 0) {
         gui_edit_anim_frame_move(&animation_ref, fidx, +1);
-        s_sel_anim_frame = fidx + 1;
     }
 }
 
 void declare_right_panel(nt_ui_context_t *ctx) {
     const tp_session_snapshot *snapshot = gui_project_snapshot();
+    const int atlas_index = gui_view_atlas_index(snapshot);
     const tp_snapshot_atlas *snapshot_atlas = snapshot
-                                                  ? tp_session_snapshot_atlas_at(snapshot, s_sel_atlas)
+                                                  ? tp_session_snapshot_atlas_at(snapshot, atlas_index)
                                                   : NULL;
     /* Pin the combo trigger min-width to the widget cell so a FIT combo can't grow past the panel (Su(110)
      * scales up at 1.5/2.0 and would otherwise bleed on a narrow panel). Restored after the sections so the

@@ -61,7 +61,7 @@ int s_modal_action;
  * Save-As dialog + disk-mutating gui_recovery_resolve run outside nt_ui_begin/end, like s_pending_save_as. */
 bool s_recovery_open;
 double s_last_pack_ms;      /* wall-clock ms of the last successful pack (for the stats line) */
-int s_last_pack_atlas = -1; /* which atlas that timing belongs to */
+tp_id128 s_last_pack_atlas_id;
 
 gui_actions_state s_actions = {.recovery_pending_row = -1};
 
@@ -77,14 +77,7 @@ void gui_actions_copy_text(const char *text) {
 
 // #region undo/redo + refresh actions
 static tp_id128 selected_animation_id(void) {
-    const tp_session_snapshot *snapshot = gui_project_snapshot();
-    const tp_snapshot_atlas *atlas =
-        snapshot ? tp_session_snapshot_atlas_at(snapshot, s_sel_atlas) : NULL;
-    const tp_snapshot_animation *animation =
-        atlas && s_sel_anim >= 0
-            ? tp_session_snapshot_animation_at(snapshot, atlas->id, s_sel_anim)
-            : NULL;
-    return animation ? animation->id : tp_id128_nil();
+    return gui_view_animation_id();
 }
 
 /* After undo/redo, drop transient editor and preview state but retain canonical
@@ -92,32 +85,12 @@ static tp_id128 selected_animation_id(void) {
 static void undo_redo_settle(tp_id128 animation_id) {
     gui_shell_reset_shown_result();
     cancel_edit();
-    /* Resolve by stable id before a positional index can alias another atlas. */
-    if (!tp_id128_is_nil(s_reselect_atlas_id)) {
-        const int idx = gui_actions__snapshot_atlas_index_by_id(
-            gui_project_snapshot(), s_reselect_atlas_id);
-        if (idx >= 0) {
-            s_sel_atlas = idx;
-        }
+    gui_view_reconcile_observation(gui_project_snapshot());
+    if (tp_id128_is_nil(animation_id) ||
+        gui_view_animation_index(
+            gui_project_snapshot()) < 0) {
+        gui_view_select_animation(tp_id128_nil());
     }
-    clamp_selection();
-    s_sel_anchor_row = -1; /* view order shifts under the undo; a stale Shift anchor would mis-range */
-    s_sel_anim = -1;
-    if (!tp_id128_is_nil(animation_id)) {
-        const tp_session_snapshot *snapshot = gui_project_snapshot();
-        const tp_snapshot_atlas *atlas =
-            snapshot ? tp_session_snapshot_atlas_at(snapshot, s_sel_atlas)
-                     : NULL;
-        for (int i = 0; atlas && i < atlas->animation_count; ++i) {
-            const tp_snapshot_animation *animation =
-                tp_session_snapshot_animation_at(snapshot, atlas->id, i);
-            if (animation && tp_id128_eq(animation->id, animation_id)) {
-                s_sel_anim = i;
-                break;
-            }
-        }
-    }
-    s_sel_anim_frame = -1;
     if (s_preview_active) {
         preview_stop();
     }
@@ -132,12 +105,10 @@ void do_undo(void) {
         return;
     }
     const tp_id128 animation_id = selected_animation_id();
-    gui_selection_capture_reselect(); /* capture the primary leaf ref BEFORE the model shifts indices */
     if (gui_project_undo()) {
         undo_redo_settle(animation_id);
         set_statusf("Undo (undo:%d redo:%d)", gui_project_undo_depth(), gui_project_redo_depth());
     } else {
-        s_reselect_pending = false; /* nothing changed -- drop the capture, no revalidation needed */
         set_status("Nothing to undo.");
     }
 }
@@ -149,12 +120,10 @@ void do_redo(void) {
         return;
     }
     const tp_id128 animation_id = selected_animation_id();
-    gui_selection_capture_reselect();
     if (gui_project_redo()) {
         undo_redo_settle(animation_id);
         set_statusf("Redo (undo:%d redo:%d)", gui_project_undo_depth(), gui_project_redo_depth());
     } else {
-        s_reselect_pending = false;
         set_status("Nothing to redo.");
     }
 }
@@ -680,11 +649,6 @@ bool gui_actions_refresh_should_mark_stale(tp_status status,
 
 /* Rescan sources and mark derived preview data stale without dirtying the model. */
 static void do_refresh(void) {
-    /* Arm the reselect machinery BEFORE refresh_diff_core's gui_project_invalidate_sources() rebuilds the
-     * source set, so the per-frame gui_selection_revalidate re-anchors by {source_id, source_key} rather
-     * than by a bare index a source add/remove would silently shift onto a different sprite. Safe with
-     * nothing selected (captures a nil ref -> revalidate no-ops). */
-    gui_selection_capture_reselect();
     int added = 0;
     int removed = 0;
     int changed = 0;

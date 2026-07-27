@@ -41,15 +41,11 @@ void preview_stop(void) {
 }
 
 void reset_selection(void) {
-    s_sel_src = -1;
-    s_sel_child = -1;
-    s_sel_abs[0] = '\0';
-    s_sel_missing = false;
+    gui_rows_select_primary(NULL);
+    gui_rows_set_focus_view_index(-1);
+    gui_rows_set_anchor_view_index(-1);
     multi_sel_clear();
-    s_sel_anchor_row = -1;
-    s_focus_view = -1;
-    s_sel_anim = -1;
-    s_sel_anim_frame = -1;
+    gui_view_select_animation(tp_id128_nil());
     preview_stop();
     preview_target_reset(); /* export-target preview is bound to the selection/atlas -> drop it on any reset */
 }
@@ -58,16 +54,6 @@ void cancel_edit(void) {
     gui_draft_discard();
 }
 
-void start_atlas_edit(int i) {
-    const tp_session_snapshot *snapshot = gui_project_snapshot();
-    const tp_snapshot_atlas *atlas = snapshot
-                                         ? tp_session_snapshot_atlas_at(snapshot, i)
-                                         : NULL;
-    if (!atlas) {
-        return;
-    }
-    start_atlas_edit_ref(atlas->id, tp_session_snapshot_revision(snapshot));
-}
 void start_atlas_edit_ref(tp_id128 atlas_id, int64_t expected_revision) {
     const tp_session_snapshot *snapshot = gui_project_snapshot();
     const tp_snapshot_atlas *atlas = snapshot
@@ -80,17 +66,6 @@ void start_atlas_edit_ref(tp_id128 atlas_id, int64_t expected_revision) {
             atlas->id, expected_revision, atlas->name)) {
         set_status("Rename atlas: type, Enter to commit, Esc to discard.");
     }
-}
-void start_anim_edit(int i) {
-    const tp_session_snapshot *snapshot = gui_project_snapshot();
-    const tp_snapshot_atlas *a = snapshot ? tp_session_snapshot_atlas_at(snapshot, s_sel_atlas) : NULL;
-    const tp_snapshot_animation *animation = a ? tp_session_snapshot_animation_at(snapshot, a->id, i) : NULL;
-    if (!animation) {
-        return;
-    }
-    const gui_animation_ref ref = {
-        a->id, animation->id, tp_session_snapshot_revision(snapshot)};
-    start_anim_edit_ref(&ref);
 }
 void start_anim_edit_ref(const gui_animation_ref *ref) {
     if (!ref) {
@@ -139,8 +114,9 @@ void start_sprite_edit(const sprite_row *row) {
         return;
     }
     const tp_session_snapshot *snapshot = gui_project_snapshot();
+    const int atlas_index = gui_view_atlas_index(snapshot);
     const tp_snapshot_atlas *atlas = snapshot
-                                         ? tp_session_snapshot_atlas_at(snapshot, s_sel_atlas)
+                                         ? tp_session_snapshot_atlas_at(snapshot, atlas_index)
                                          : NULL;
     if (!atlas) {
         return;
@@ -178,21 +154,6 @@ bool gui_animation_edit_matches(tp_id128 atlas_id, tp_id128 animation_id) {
            tp_id128_eq(draft->lifecycle.target_id, animation_id);
 }
 
-void clamp_selection(void) {
-    const tp_session_snapshot *snapshot = gui_project_snapshot();
-    const int atlas_count = snapshot ? tp_session_snapshot_atlas_count(snapshot) : 0;
-    if (atlas_count == 0) {
-        s_sel_atlas = 0;
-        reset_selection();
-        return;
-    }
-    if (s_sel_atlas >= atlas_count) {
-        s_sel_atlas = atlas_count - 1;
-    }
-    if (s_sel_atlas < 0) {
-        s_sel_atlas = 0;
-    }
-}
 // #endregion
 
 // #region animation + preview actions (ux.md §3.7b)
@@ -253,9 +214,10 @@ void gui_request_create_animation_from_selection(void) {
         return;
     }
     const tp_session_snapshot *snapshot = gui_project_snapshot();
+    const int atlas_index = gui_view_atlas_index(snapshot);
     const tp_snapshot_atlas *atlas = snapshot
                                          ? tp_session_snapshot_atlas_at(snapshot,
-                                                                        s_sel_atlas)
+                                                                        atlas_index)
                                          : NULL;
     if (!atlas) {
         return;
@@ -300,31 +262,6 @@ void gui_request_open_preview(const gui_animation_ref *animation) {
     s_actions.pending_open_preview_ref = *animation;
 }
 
-bool gui_actions__resolve_animation_ref(const gui_animation_ref *animation,
-                                        int *atlas_index,
-                                        int *animation_index) {
-    const tp_session_snapshot *snapshot = gui_project_snapshot();
-    const int atlas_count = snapshot ? tp_session_snapshot_atlas_count(snapshot) : 0;
-    for (int ai = 0; ai < atlas_count; ai++) {
-        const tp_snapshot_atlas *atlas = tp_session_snapshot_atlas_at(snapshot, ai);
-        if (!atlas || !tp_id128_eq(atlas->id, animation->atlas_id)) {
-            continue;
-        }
-        for (int i = 0; i < atlas->animation_count; i++) {
-            const tp_snapshot_animation *candidate =
-                tp_session_snapshot_animation_at(snapshot, atlas->id, i);
-            if (candidate && tp_id128_eq(candidate->id,
-                                         animation->animation_id)) {
-                *atlas_index = ai;
-                *animation_index = i;
-                return true;
-            }
-        }
-        return false;
-    }
-    return false;
-}
-
 /* Creates an animation from the current multi-selection: frames natural-sorted, id from the common
  * prefix (auto "animN" when there is none). Selects the new animation (opens its editor). */
 int create_animation_from_selection(void) {
@@ -338,9 +275,10 @@ int create_animation_from_selection(void) {
     char base[192];
     tp_names_common_prefix(s_sel_sort_ptr, n, base, sizeof base);
     const tp_session_snapshot *snapshot = gui_project_snapshot();
+    const int atlas_index = gui_view_atlas_index(snapshot);
     const tp_snapshot_atlas *atlas = snapshot
                                          ? tp_session_snapshot_atlas_at(snapshot,
-                                                                        s_sel_atlas)
+                                                                        atlas_index)
                                          : NULL;
     const gui_project_create_result created =
         atlas
@@ -353,17 +291,16 @@ int create_animation_from_selection(void) {
                   .visible_index = -1,
               };
     if (created.committed) {
-        if (created.visible_index >= 0) {
-            s_sel_anim = created.visible_index;
-            s_sel_anim_frame = -1;
-        }
+        gui_view_select_animation(created.created_id);
         const tp_session_snapshot *after = gui_project_snapshot();
-        const tp_snapshot_atlas *a = after ? tp_session_snapshot_atlas_at(after, s_sel_atlas) : NULL;
+        const tp_snapshot_atlas *a = after
+            ? tp_session_snapshot_atlas_by_id(
+                  after, gui_view_atlas_id())
+            : NULL;
         const tp_snapshot_animation *created_animation =
-            a && created.visible_index >= 0
-                ? tp_session_snapshot_animation_at(
-                      after, a->id,
-                      created.visible_index)
+            a
+                ? tp_session_snapshot_animation_by_id(
+                      after, a->id, created.created_id)
                 : NULL;
         set_statusf("Created animation '%s' with %d frame(s) (Ctrl+Z to undo).",
                     created_animation
@@ -374,48 +311,60 @@ int create_animation_from_selection(void) {
     return created.visible_index;
 }
 
-/* Appends the current multi-selection (natural-sorted) as frames of animation `anim_index`.
+/* Appends the current multi-selection (natural-sorted) as frames of one stable animation.
  * DEFERRED: this is called from declare_animation_editor, which holds live
  * `a`/`an` pointers it keeps dereferencing AFTER this returns. A synchronous commit here would
  * clone-swap + free the project under those pointers -> use-after-free on a plain "Add frames"
  * click. So it builds the sorted selection (read-only) and ENQUEUES an add-frames edit carrying
  * COPIED keys; apply_pending drains it next frame with no live pointer held (benign one-frame
  * lag, consistent with every other panel edit). */
-void add_selection_frames_to_anim(int anim_index) {
-    if (s_multi_sel_count <= 0) {
+void add_selection_frames_to_animation(
+    const gui_animation_ref *animation) {
+    if (!animation || tp_id128_is_nil(animation->atlas_id) ||
+        tp_id128_is_nil(animation->animation_id) ||
+        s_multi_sel_count <= 0) {
         return;
     }
     const int n = build_sorted_selection();
     if (n <= 0) {
         return; /* OOM in the sort scratch (status already set) -- do nothing rather than truncate */
     }
-    gui_animation_ref animation;
-    if (!gui_project_animation_ref_at(s_sel_atlas, anim_index, &animation)) {
-        return;
-    }
-    gui_edit_anim_add_frames(&animation, s_sel_sort_refs, n);
+    gui_edit_anim_add_frames(animation, s_sel_sort_refs, n);
     set_statusf("Adding %d frame(s) to the animation (Ctrl+Z to undo).", n); /* lands on the next drain */
 }
 
-/* Opens the preview player on animation `anim_index` (plays from the packed regions; if the atlas is
+/* Opens the preview player on a stable animation ref (plays from the packed regions; if the atlas is
  * not packed yet, the canvas shows a "Pack to preview" hint). */
-void open_preview(int anim_index) {
+void open_preview_ref(const gui_animation_ref *ref) {
+    if (!ref || tp_id128_is_nil(ref->atlas_id) ||
+        tp_id128_is_nil(ref->animation_id)) {
+        return;
+    }
     const tp_session_snapshot *snapshot = gui_project_snapshot();
-    const tp_snapshot_atlas *a = snapshot ? tp_session_snapshot_atlas_at(snapshot, s_sel_atlas) : NULL;
-    const tp_snapshot_animation *animation = a ? tp_session_snapshot_animation_at(snapshot, a->id, anim_index) : NULL;
-    if (!animation) {
+    const int atlas_index =
+        gui_actions__snapshot_atlas_index_by_id(
+            snapshot, ref->atlas_id);
+    const tp_snapshot_animation *animation =
+        snapshot
+            ? tp_session_snapshot_animation_by_id(
+                  snapshot, ref->atlas_id,
+                  ref->animation_id)
+            : NULL;
+    if (atlas_index < 0 || !animation) {
         return;
     }
     cancel_edit();
     preview_target_reset(); /* the anim player owns the canvas -> never leave an export preview bound under it */
-    s_sel_anim = anim_index;
+    gui_view_select_atlas(ref->atlas_id);
+    gui_view_select_animation(ref->animation_id);
     s_actions.preview_animation_ref = (gui_animation_ref){
-        a->id, animation->id, tp_session_snapshot_revision(snapshot)};
+        ref->atlas_id, ref->animation_id,
+        tp_session_snapshot_revision(snapshot)};
     s_preview_active = true;
     s_preview_playing = true;
     s_preview_finished = false;
     s_preview_time = 0.0;
-    if (!gui_pack_result(s_sel_atlas)) {
+    if (!gui_pack_result(atlas_index)) {
         set_status("Pack (Ctrl+P) to preview the animation on packed regions.");
     } else {
         set_statusf("Previewing '%s' \xE2\x80\x94 Space play/pause.", animation->name);

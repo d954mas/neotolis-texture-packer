@@ -126,7 +126,9 @@ static nt_buffer_t s_frame_ubo;
 // #endregion
 
 // #region editor state
-static const tp_result *s_shown_result; /* pack result currently bound to the canvas (sync guard) */
+static tp_id128 s_shown_atlas_id;
+static uint64_t s_shown_result_version;
+static bool s_shown_export_preview;
 /* Canvas mouse model: a left press arms a potential click; if the pointer moves past a small
  * threshold while held it becomes a PAN (no selection on release); otherwise release = click-select.
  * Middle-drag always pans; wheel always zooms. Selection never captures later pan/zoom. */
@@ -147,7 +149,7 @@ static const nt_ui_events_cfg_t s_canvas_dbl_cfg = {
 /* s_pack_has_sources/s_pack_stale (pack-button state cached for the tooltip pass) live in
  * gui_state (written by gui_view_canvas's declare_canvas_strip, read by gui_view_chrome's
  * declare_tooltips). The right settings panel's disclosure/dropdown-open bits and numeric-field edit
- * buffers are panel-local statics in gui_view_settings.c. GUI_MAX_TARGETS and k_playback_names
+ * buffers are panel-local statics in gui_view_settings.c. k_playback_names
  * live in gui_defs.h (shared with gui_view_chrome's declare_export_modal / gui_view_canvas's
  * declare_canvas_preview). */
 
@@ -162,7 +164,9 @@ static const nt_ui_events_cfg_t s_canvas_dbl_cfg = {
  * next frame binds the then-current result without reusing the old borrow. */
 void gui_shell_reset_shown_result(void) {
     gui_canvas_rebind_result(&s_canvas, &s_canvas_input.double_click, NULL);
-    s_shown_result = NULL;
+    s_shown_atlas_id = tp_id128_nil();
+    s_shown_result_version = 0U;
+    s_shown_export_preview = false;
 }
 
 /* Empty atlas space clears the shared tree/inspector selection. reset_selection
@@ -172,7 +176,9 @@ static void clear_canvas_shared_selection(void) {
     reset_selection();
     const tp_result *native = preview_target_result();
     gui_canvas_rebind_result(&s_canvas, &s_canvas_input.double_click, native);
-    s_shown_result = native;
+    s_shown_atlas_id = gui_view_atlas_id();
+    s_shown_result_version = preview_target_result_version();
+    s_shown_export_preview = preview_target_result_is_export();
 }
 // #endregion
 
@@ -339,7 +345,7 @@ static void handle_canvas_double_click(void) {
     const nt_pointer_t *pointer = &g_nt_input.pointers[0];
     const int hit = gui_canvas_hit(&s_canvas, pointer->x, pointer->y);
     if (gui_canvas_double_click_press(&s_canvas_input.double_click,
-                                      s_canvas.result,
+                                      s_canvas.result_generation,
                                       hit, ev.double_clicked)) {
         gui_canvas_select(&s_canvas, hit);
         select_row_for_result_region(s_canvas.result, hit);
@@ -386,16 +392,20 @@ static void handle_shortcuts(void) {
     if (s_preview_active && nt_input_key_is_pressed(NT_KEY_SPACE)) {
         preview_toggle_play();
     }
+    const tp_session_snapshot *snapshot =
+        gui_project_snapshot();
+    const int selected_frame =
+        gui_view_animation_frame(snapshot);
     if (gui_draft_phase() == GUI_EDIT_IDLE &&
-        s_sel_anim >= 0 && s_sel_anim_frame >= 0 &&
+        !tp_id128_is_nil(gui_view_animation_id()) &&
+        selected_frame >= 0 &&
         nt_input_key_is_pressed(NT_KEY_DELETE)) {
-        gui_animation_ref animation;
-        if (gui_project_animation_ref_at(
-                s_sel_atlas, s_sel_anim,
-                &animation)) {
-            gui_edit_anim_frame_remove(
-                &animation, s_sel_anim_frame);
-        }
+        const gui_animation_ref animation = {
+            gui_view_atlas_id(),
+            gui_view_animation_id(),
+            tp_session_snapshot_revision(snapshot)};
+        gui_edit_anim_frame_remove(
+            &animation, selected_frame);
     }
     if (nt_input_key_is_pressed(NT_KEY_F5)) {
         s_pending_refresh = true;
@@ -480,7 +490,15 @@ static void auto_pack_tick(void) {
     }
     s_auto_pack_frame++;
     if (!s_auto_pack_started && s_auto_pack_frame == 8) {
-        s_sel_atlas = 0;
+        const tp_session_snapshot *snapshot =
+            gui_project_snapshot();
+        const tp_snapshot_atlas *first =
+            snapshot
+                ? tp_session_snapshot_atlas_at(
+                      snapshot, 0)
+                : NULL;
+        gui_view_select_atlas(
+            first ? first->id : tp_id128_nil());
         do_pack(); /* async */
         s_auto_pack_started = true;
     } else if (s_auto_pack_started && s_auto_pack_frame > 8 && !gui_pack_async_busy()) {
@@ -653,25 +671,15 @@ static void frame(void) {
         gui_canvas_set_frame_ubo(&s_canvas, s_frame_ubo);
         gui_canvas_set_ui_scale(&s_canvas, g_ui_scale); /* overlay line widths scale with DPI */
 
-        clamp_selection();
-        /* keep the animation selection valid after undo/redo/atlas changes */
-        {
-            const tp_session_snapshot *snapshot = gui_project_snapshot();
-            const tp_snapshot_atlas *sel_a = snapshot
-                                                 ? tp_session_snapshot_atlas_at(snapshot, s_sel_atlas)
-                                                 : NULL;
-            if (!sel_a || s_sel_anim >= sel_a->animation_count) {
-                s_sel_anim = -1;
-                s_sel_anim_frame = -1;
-                if (s_preview_active) {
-                    preview_stop();
-                }
-            }
+        gui_view_reconcile_observation(
+            gui_project_snapshot());
+        if (s_preview_active &&
+            !preview_animation()) {
+            preview_stop();
         }
         build_rows();
         filter_type_pump();
         build_view();
-        gui_selection_revalidate();
         handle_list_nav();
         s_content_w = scale.logical_w; /* for caption/status truncation */
         compute_panel_widths(scale.logical_w); /* clamp side-panel widths so they never leave the screen */
@@ -702,23 +710,30 @@ static void frame(void) {
         /* Bind the result the canvas shows (repack / atlas switch / clear): the export-target preview
          * while one is active + visible, else the native session pack (preview_target_result). */
         const tp_result *want = preview_target_result();
-        if (want != s_shown_result) {
+        const uint64_t want_version = preview_target_result_version();
+        const bool want_export_preview = preview_target_result_is_export();
+        if (!tp_id128_eq(gui_view_atlas_id(), s_shown_atlas_id) ||
+            want_version != s_shown_result_version ||
+            want_export_preview != s_shown_export_preview) {
             gui_canvas_rebind_result(&s_canvas, &s_canvas_input.double_click,
                                      want);
-            s_shown_result = want;
-            /* Result rebinding clears the highlight. Restore it from the
-             * primary leaf before canvas input when that leaf exists in the
-             * displayed atlas result. */
-            if (want && gui_canvas_get_mode(&s_canvas) == GUI_CANVAS_ATLAS) {
-                const sprite_row *leaf = gui_rows_selected_leaf();
-                if (leaf && leaf->source_key && leaf->source_key[0] != '\0') {
-                    const int region = gui_pack_find_sprite_ref_in_result(
-                        want, leaf->source_id, leaf->source_key);
-                    if (region >= 0 && region < want->sprite_count) {
-                        gui_canvas_select(&s_canvas, region);
-                    }
-                }
-            }
+            s_shown_atlas_id = gui_view_atlas_id();
+            s_shown_result_version = want_version;
+            s_shown_export_preview = want_export_preview;
+        }
+        /* Canvas indices are a projection of the canonical row identity, not
+         * retained selection state. Re-resolve every frame so model changes
+         * cannot leave a stale region index highlighted. */
+        if (want && gui_canvas_get_mode(&s_canvas) == GUI_CANVAS_ATLAS) {
+            const sprite_row *leaf = gui_rows_selected_leaf();
+            const int region =
+                leaf && leaf->source_key && leaf->source_key[0] != '\0'
+                    ? gui_pack_find_sprite_ref_in_result(
+                          want, leaf->source_id, leaf->source_key)
+                    : -1;
+            gui_canvas_select(
+                &s_canvas,
+                region >= 0 && region < want->sprite_count ? region : -1);
         }
         /* Feed the selected region's LIVE slice9 override to the canvas guides: the project is the
          * source of truth, so typing in the Region panel moves the lines this same frame (no repack;
@@ -727,9 +742,11 @@ static void frame(void) {
         if (want && s_canvas.sel_sprite >= 0 && s_canvas.sel_sprite < want->sprite_count) {
             const sprite_row *selected = gui_rows_selected_leaf();
             const tp_session_snapshot *snapshot = gui_project_snapshot();
+            const int atlas_index =
+                gui_view_atlas_index(snapshot);
             const tp_snapshot_atlas *atlas = snapshot
                                                   ? tp_session_snapshot_atlas_at(snapshot,
-                                                                                 s_sel_atlas)
+                                                                                 atlas_index)
                                                   : NULL;
             if (selected && atlas) {
                 const gui_sprite_ref sprite = {
@@ -803,13 +820,18 @@ static void frame(void) {
         /* SOURCE mode: refresh the decoded image for the selection before the walk draws it. In
          * ATLAS mode the canvas draws the packed pages, so leave the source texture alone. */
         if (gui_canvas_get_mode(&s_canvas) == GUI_CANVAS_SOURCE) {
-            if (s_sel_missing) {
+            const sprite_row *primary =
+                gui_rows_primary();
+            if (primary && primary->missing) {
                 gui_canvas_clear(&s_canvas); /* placeholder is drawn by declare_canvas (§3.7) */
-            } else if (s_sel_abs[0] != '\0') {
+            } else if (primary && primary->abs &&
+                       primary->abs[0] != '\0') {
                 char err[256];
-                if (!gui_canvas_set_image(&s_canvas, s_sel_abs, err, sizeof err)) {
+                if (!gui_canvas_set_image(
+                        &s_canvas, primary->abs,
+                        err, sizeof err)) {
                     set_statusf_ex(STATUS_ERROR, "Decode failed: %s", err);
-                    s_sel_missing = true; /* show the missing placeholder instead of a blank canvas */
+                    gui_canvas_clear(&s_canvas);
                 }
             } else {
                 gui_canvas_clear(&s_canvas);
@@ -1105,7 +1127,7 @@ static int gui_main_utf8(int argc, char *argv[]) {
     run_selftest();
 #endif
 
-    clamp_selection();
+    gui_view_reconcile_observation(gui_project_snapshot());
     nt_log_info("ntpacker-gui: starting (typed session jobs + atlas-page canvas)");
 
     nt_app_run(frame);

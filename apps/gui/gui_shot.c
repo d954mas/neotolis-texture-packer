@@ -28,7 +28,7 @@
 #include "gui_pack.h"    /* gui_pack_result / gui_pack_debug_force_busy / gui_pack_preview_blocking */
 #include "gui_project.h" /* gui_project_mark_stale / snapshot generation */
 #include "gui_rows.h"    /* select_row_for_region */
-#include "gui_state.h"   /* s_ctx / s_id_* / s_sel_atlas / g_ui_scale / s_status_fixed_time / s_preview_* */
+#include "gui_state.h"   /* s_ctx / s_id_* / stable view selection / scale / shot state */
 
 /* `--shot=out.png [--size=WxH] [--scale=F] [project]` renders the real UI at the requested window
  * size, packs the selected atlas, selects the first packed region (so the Region panel populates),
@@ -138,14 +138,33 @@ void gui_shot_tick(void) {
     }
     s_shot_frame++;
     if (s_shot_frame == 6) { /* resources are bound; pack the selected atlas like Ctrl+P would (blocking) */
-        if (s_sel_atlas < 0) {
-            s_sel_atlas = 0;
+        const tp_session_snapshot *snapshot =
+            gui_project_snapshot();
+        int atlas_index = gui_view_atlas_index(snapshot);
+        if (atlas_index < 0) {
+            const tp_snapshot_atlas *first =
+                snapshot
+                    ? tp_session_snapshot_atlas_at(
+                          snapshot, 0)
+                    : NULL;
+            gui_view_select_atlas(
+                first ? first->id : tp_id128_nil());
+            atlas_index =
+                gui_view_atlas_index(snapshot);
         }
-        if (!gui_pack_result(s_sel_atlas)) {
+        if (atlas_index >= 0 &&
+            !gui_pack_result(atlas_index)) {
             do_pack_blocking();
         }
     } else if (s_shot_frame == 10) { /* pages uploaded; mimic a canvas click on region 0 */
-        const tp_result *r = gui_pack_result(s_sel_atlas);
+        const tp_session_snapshot *snapshot =
+            gui_project_snapshot();
+        const int atlas_index =
+            gui_view_atlas_index(snapshot);
+        const tp_result *r =
+            atlas_index >= 0
+                ? gui_pack_result(atlas_index)
+                : NULL;
         if (r && r->sprite_count > 0) {
             s_canvas.mode = GUI_CANVAS_ATLAS;
             gui_canvas_select(&s_canvas, 0);
@@ -159,7 +178,10 @@ void gui_shot_tick(void) {
         }
         if (s_shot_preview[0] != '\0') { /* dev: bind the named export-target preview (selector + degradation chip) */
             char perr[256] = {0};
-            if (gui_pack_preview_blocking(s_sel_atlas, s_shot_preview, perr, sizeof perr)) {
+            if (atlas_index >= 0 &&
+                gui_pack_preview_blocking(
+                    atlas_index, s_shot_preview,
+                    perr, sizeof perr)) {
                 int idx = -1;
                 for (int i = 0; i < tp_exporter_count(); i++) {
                     const tp_exporter *e = tp_exporter_at(i);

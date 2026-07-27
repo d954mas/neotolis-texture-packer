@@ -26,7 +26,7 @@ extern "C" {
 /* --- deferred side-effect queue (set by views, consumed by apply_pending) --- */
 extern bool s_pending_open, s_pending_save, s_pending_save_as, s_pending_add_files, s_pending_add_folder, s_pending_add_atlas, s_pending_refresh;
 extern bool s_pending_pack, s_pending_export;
-void gui_request_add_animation(int atlas_index);
+void gui_request_add_animation(tp_id128 atlas_id, int64_t expected_revision);
 void gui_request_create_animation_from_selection(void);
 void gui_request_open_preview(const gui_animation_ref *animation);
 extern bool s_pending_remove_atlas;
@@ -36,12 +36,10 @@ extern bool s_pending_remove_source;
 extern tp_id128 s_pending_remove_source_atlas_id;
 extern tp_id128 s_pending_remove_source_id;
 extern int64_t s_pending_remove_source_revision;
-void gui_request_remove_animation(int animation_index);
 void gui_request_remove_animation_ref(const gui_animation_ref *animation);
-void gui_request_add_target(int atlas_index);
-void gui_request_remove_target(int target_index);
+void gui_request_add_target(tp_id128 atlas_id, int64_t expected_revision);
 void gui_request_remove_target_ref(const gui_target_ref *target);
-void gui_request_browse_target(int atlas_index, int target_index);
+void gui_request_browse_target_ref(const gui_target_ref *target);
 extern int s_pending_preview_target; /* boundary-ok: exporter option, not a target entity index */
 
 /* --- new/open/exit draft resolution + unsaved-changes confirm flow --- */
@@ -70,7 +68,7 @@ void gui_actions_recovery_request(int row, int action);        /* action = gui_r
 
 /* --- last successful pack timing (written by the pack actions; read by the canvas stats line) --- */
 extern double s_last_pack_ms;   /* wall-clock ms of the last successful pack (for the stats line) */
-extern int s_last_pack_atlas;   /* which atlas that timing belongs to */
+extern tp_id128 s_last_pack_atlas_id;
 
 /* --- draft-owned semantic ingress ---
  * A value edit stores stable identity, exact component, typed value, and
@@ -175,18 +173,17 @@ void request_exit(void);
 
 /* --- selection / edit helpers --- */
 void reset_selection(void);
-void clamp_selection(void);
 void cancel_edit(void);
 void preview_stop(void);
 
 /* --- export-target preview (packet EXP-PREVIEW) --- */
 void preview_target_reset(void);              /* back to Native: drop preview state + free the preview slot */
 const tp_result *preview_target_result(void); /* the result the canvas binds this frame (preview or native) */
+uint64_t preview_target_result_version(void);
+bool preview_target_result_is_export(void);
 
 /* --- start-edit entry points (pair with the inline-rename commits below) --- */
-void start_atlas_edit(int i);
 void start_atlas_edit_ref(tp_id128 atlas_id, int64_t expected_revision);
-void start_anim_edit(int i);
 void start_anim_edit_ref(const gui_animation_ref *animation);
 void start_sprite_edit_ref(const gui_sprite_ref *sprite,
                            const char *display_name);
@@ -198,8 +195,9 @@ bool gui_animation_edit_matches(tp_id128 atlas_id, tp_id128 animation_id);
 /* --- animation ops + preview player (ux.md §3.7b) --- */
 const tp_snapshot_animation *preview_animation(void); /* active stable-ID target, or NULL */
 int create_animation_from_selection(void);
-void add_selection_frames_to_anim(int anim_index);
-void open_preview(int anim_index);
+void add_selection_frames_to_animation(
+    const gui_animation_ref *animation);
+void open_preview_ref(const gui_animation_ref *animation);
 void preview_toggle_play(void);
 void preview_step(int delta);
 void update_preview(void);

@@ -577,14 +577,17 @@ void declare_export_modal(nt_ui_context_t *ctx) {
                     continue;
                 }
                 nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), a->name, &g_row);
-                for (int ti = 0; ti < a->target_count && ti < GUI_MAX_TARGETS; ti++) {
+                for (int ti = 0; ti < a->target_count; ti++) {
                     const tp_snapshot_target *t = tp_session_snapshot_target_at(snapshot, a->id, ti);
                     if (!t) {
                         continue;
                     }
-                    char idb[48];
-                    (void)snprintf(idb, sizeof idb, "export/a%d_t%d", ai, ti);
-                    const uint32_t rid = nt_ui_id(idb);
+                    const gui_target_ref target = {
+                        a->id, t->id,
+                        tp_session_snapshot_revision(snapshot)};
+                    const uint32_t rid =
+                        gui_stable_entity_ui_id(
+                            "export/target", t->id);
                     const char *exp_name = t->exporter_id;
                     for (int i = 0; i < ne; i++) {
                         const tp_exporter *e = tp_exporter_at(i);
@@ -596,17 +599,14 @@ void declare_export_modal(nt_ui_context_t *ctx) {
                     const bool has_path = (t->out_path && t->out_path[0] != '\0');
                     const nt_ui_events_t pev = nt_ui_events(ctx, nt_ui_child_id(rid, "path"), NULL);
                     if (pev.clicked) {
-                        gui_request_browse_target(ai, ti);
+                        gui_request_browse_target_ref(&target);
                     }
                     CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(BASE_ROW_H))},
                                      .padding = {Su(8), Su(6), 0, 0},
                                      .childGap = Su(8),
                                      .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
                         if (tp_checkbox(ctx, nt_ui_child_id(rid, "en"), t->enabled, true)) {
-                            gui_target_ref target;
-                            if (gui_project_target_ref_at(ai, ti, &target)) {
-                                gui_edit_target_enabled(&target, !t->enabled);
-                            }
+                            gui_edit_target_enabled(&target, !t->enabled);
                         }
                         CLAY({.layout = {.sizing = {CLAY_SIZING_FIXED(S(96)), CLAY_SIZING_GROW(0)}, .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
                             ui_label_fit(ctx, exp_name, &g_caption, S(96), 0U);
@@ -618,17 +618,9 @@ void declare_export_modal(nt_ui_context_t *ctx) {
                             ui_label_fit(ctx, has_path ? t->out_path : "(click to set output path)", has_path ? &g_row : &g_dim, S(300), 0U);
                         }
                         if (ui_btn(ctx, nt_ui_child_id(rid, "br"), "\xE2\x80\xA6", &g_btn_ghost, true, 28.0F, 22.0F, &g_caption)) {
-                            gui_request_browse_target(ai, ti);
+                            gui_request_browse_target_ref(&target);
                         }
                     }
-                }
-                /* Targets past GUI_MAX_TARGETS aren't listed (the per-target UI arrays are fixed), but they
-                 * DO export -- surface the hidden tail rather than dropping it silently (P2). */
-                if (a->target_count > GUI_MAX_TARGETS) {
-                    char more[80];
-                    (void)snprintf(more, sizeof more, "+%d more target(s) not shown (still exported).",
-                                   a->target_count - GUI_MAX_TARGETS);
-                    nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), more, &g_dim);
                 }
             }
         }

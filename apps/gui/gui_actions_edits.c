@@ -866,7 +866,13 @@ void gui_edit_anim_frame_remove(const gui_animation_ref *animation, int frame_in
 void gui_edit_anim_frame_move(const gui_animation_ref *animation, int frame_index, int delta) {
     animation_edit_intent intent = {0};
     intent.kind = ANIMATION_INTENT_FRAME_MOVE;
-    if (animation) intent.animation = *animation;
+    if (animation) {
+        intent.animation = *animation;
+        intent.follow_selection =
+            gui_view_animation_frame(gui_project_snapshot()) == frame_index &&
+            tp_id128_eq(gui_view_atlas_id(), animation->atlas_id) &&
+            tp_id128_eq(gui_view_animation_id(), animation->animation_id);
+    }
     intent.first = frame_index;
     intent.second = delta;
     (void)animation_intent_push(&intent);
@@ -1421,30 +1427,34 @@ void gui_actions__drain_edits(void) {
         switch (intent->kind) {
             case ANIMATION_INTENT_FRAME_REMOVE:
                 {
-                    gui_animation_ref selected = {0};
                     const bool removes_selection =
-                        s_sel_anim_frame == intent->first &&
-                        gui_project_animation_ref_at(
-                            s_sel_atlas, s_sel_anim,
-                            &selected) &&
+                        gui_view_animation_frame(
+                            gui_project_snapshot()) ==
+                            intent->first &&
                         tp_id128_eq(
-                            selected.atlas_id,
+                            gui_view_atlas_id(),
                             intent->animation.atlas_id) &&
                         tp_id128_eq(
-                            selected.animation_id,
+                            gui_view_animation_id(),
                             intent->animation.animation_id);
                     if (gui_project_anim_remove_frame(
                             &intent->animation,
                             intent->first) &&
                         removes_selection) {
-                        s_sel_anim_frame = -1;
+                        gui_view_select_animation_frame(
+                            gui_project_snapshot(), -1);
                     }
                 }
                 break;
             case ANIMATION_INTENT_FRAME_MOVE:
-                (void)gui_project_anim_move_frame(&intent->animation,
-                                                  intent->first,
-                                                  intent->second);
+                if (gui_project_anim_move_frame(&intent->animation,
+                                                intent->first,
+                                                intent->second) &&
+                    intent->follow_selection) {
+                    gui_view_select_animation_frame(
+                        gui_project_snapshot(),
+                        intent->first + intent->second);
+                }
                 break;
             case ANIMATION_INTENT_ADD_FRAMES:
                 (void)gui_project_anim_add_frames(
@@ -1506,12 +1516,9 @@ void gui_actions__apply_structural_edits(void) {
         const gui_project_create_result created =
             gui_project_add_atlas();
         if (created.committed) {
-            if (created.visible_index >= 0) {
-                s_sel_atlas = created.visible_index;
-                reset_selection();
-            }
+            gui_view_select_atlas(created.created_id);
             const tp_snapshot_atlas *added =
-                created.visible_index >= 0
+                !tp_id128_is_nil(created.created_id)
                     ? tp_session_snapshot_atlas_by_id(
                           gui_project_snapshot(),
                           created.created_id)
@@ -1531,8 +1538,8 @@ void gui_actions__apply_structural_edits(void) {
     if (s_pending_remove_atlas) {
         if (gui_project_remove_atlas(s_pending_remove_atlas_id,
                                      s_pending_remove_atlas_revision)) {
-            clamp_selection();
-            reset_selection();
+            gui_view_reconcile_observation(
+                gui_project_snapshot());
             set_status("Removed atlas (Ctrl+Z to undo).");
         }
     }
@@ -1565,22 +1572,15 @@ void gui_actions__apply_structural_edits(void) {
                       after_snapshot, s_actions.pending_add_anim_atlas_id)
                 : NULL;
             const tp_snapshot_animation *animation =
-                after_atlas &&
-                        created.visible_index >= 0
-                    ? tp_session_snapshot_animation_at(
+                after_atlas
+                    ? tp_session_snapshot_animation_by_id(
                           after_snapshot, after_atlas->id,
-                          created.visible_index)
+                          created.created_id)
                     : NULL;
-            const tp_snapshot_atlas *selected = after_snapshot
-                ? tp_session_snapshot_atlas_at(after_snapshot, s_sel_atlas)
-                : NULL;
-            if (created.visible_index >= 0 &&
-                selected &&
-                tp_id128_eq(
-                    selected->id,
+            if (tp_id128_eq(
+                    gui_view_atlas_id(),
                     s_actions.pending_add_anim_atlas_id)) {
-                s_sel_anim = created.visible_index;
-                s_sel_anim_frame = -1;
+                gui_view_select_animation(created.created_id);
             }
             set_statusf("Added animation '%s' (Ctrl+Z to undo).", animation ? animation->name : "?");
         }
@@ -1600,20 +1600,15 @@ void gui_actions__apply_structural_edits(void) {
                       after_snapshot, s_actions.pending_create_anim.atlas_id)
                 : NULL;
             const tp_snapshot_animation *animation =
-                after_atlas &&
-                        created.visible_index >= 0
-                    ? tp_session_snapshot_animation_at(
+                after_atlas
+                    ? tp_session_snapshot_animation_by_id(
                           after_snapshot, after_atlas->id,
-                          created.visible_index)
+                          created.created_id)
                     : NULL;
-            const tp_snapshot_atlas *selected = after_snapshot
-                ? tp_session_snapshot_atlas_at(after_snapshot, s_sel_atlas)
-                : NULL;
-            if (created.visible_index >= 0 &&
-                selected &&
-                tp_id128_eq(selected->id, s_actions.pending_create_anim.atlas_id)) {
-                s_sel_anim = created.visible_index;
-                s_sel_anim_frame = -1;
+            if (tp_id128_eq(
+                    gui_view_atlas_id(),
+                    s_actions.pending_create_anim.atlas_id)) {
+                gui_view_select_animation(created.created_id);
             }
             set_statusf("Created animation '%s' with %d frame(s) (Ctrl+Z to undo).",
                         animation ? animation->name : "?",
@@ -1637,20 +1632,18 @@ void gui_actions__apply_structural_edits(void) {
                 if (was_previewing) {
                     preview_stop();
                 }
-                s_sel_anim = -1;
-                s_sel_anim_frame = -1;
+                if (tp_id128_eq(
+                        gui_view_animation_id(),
+                        s_actions.pending_remove_anim_ref.animation_id)) {
+                    gui_view_select_animation(
+                        tp_id128_nil());
+                }
                 set_status("Removed animation (Ctrl+Z to undo).");
             }
     }
     if (s_actions.pending_open_preview) {
-        int atlas_index = -1;
-        int animation_index = -1;
-        if (gui_actions__resolve_animation_ref(
-                &s_actions.pending_open_preview_ref, &atlas_index,
-                &animation_index)) {
-            s_sel_atlas = atlas_index;
-            open_preview(animation_index);
-        }
+        open_preview_ref(
+            &s_actions.pending_open_preview_ref);
     }
 }
 

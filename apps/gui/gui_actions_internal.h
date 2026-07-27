@@ -53,6 +53,7 @@ typedef struct animation_edit_intent {
     gui_animation_ref animation;
     int first;
     int second;
+    bool follow_selection;
     tp_op_sprite_ref *frames;
     int frame_count;
 } animation_edit_intent;
@@ -160,9 +161,6 @@ bool gui_actions__submit_draft(void);
 bool gui_actions__apply_draft_mine(void);
 void gui_actions__pending_create_animation_dispose(
     pending_create_animation *request);
-bool gui_actions__resolve_animation_ref(const gui_animation_ref *animation,
-                                        int *atlas_index,
-                                        int *animation_index);
 /* Index of the atlas carrying `atlas_id` in the snapshot, or -1. Used by undo_redo_settle (F2) to
  * re-resolve the viewed atlas after an undo/redo shifts atlas ordering, and by the preview player. */
 int gui_actions__snapshot_atlas_index_by_id(const tp_session_snapshot *snapshot,

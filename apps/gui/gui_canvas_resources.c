@@ -319,6 +319,10 @@ void gui_canvas_rebind_result(gui_canvas *canvas,
                               gui_canvas_double_click_ref *double_click,
                               const tp_result *result) {
     gui_canvas_double_click_reset(double_click);
+    canvas->result_generation++;
+    if (canvas->result_generation == 0U) {
+        canvas->result_generation = 1U;
+    }
     gui_canvas_set_result(canvas, result);
 }
 

@@ -37,7 +37,7 @@ typedef enum { GUI_CANVAS_SOURCE = 0, GUI_CANVAS_ATLAS, GUI_CANVAS_ANIM } gui_ca
 #define GUI_CANVAS_MAX_PAGES 16
 
 typedef struct gui_canvas_double_click_ref {
-    const tp_result *result;
+    uint64_t result_generation;
     int sprite_index;
     bool valid;
 } gui_canvas_double_click_ref;
@@ -71,6 +71,7 @@ typedef struct gui_canvas {
     int page_count;
     int cur_page;
     const tp_result *result; /* borrowed (arena-owned by gui_pack); NULL = no atlas */
+    uint64_t result_generation; /* changes on every result rebind; pointer identity is not state */
     bool pages_dirty;        /* result set but textures not yet uploaded (GL deferred to the pass) */
     bool upload_failed;      /* a page exceeded the GPU max texture size / OOM'd -> skipped (16K pages) */
     int sel_sprite;          /* accent-outlined region index, -1 none */
@@ -160,7 +161,8 @@ bool gui_canvas_zoom_to_sprite(gui_canvas *c, const float bb[4],
                                int sprite_index);
 void gui_canvas_double_click_reset(gui_canvas_double_click_ref *ref);
 bool gui_canvas_double_click_press(gui_canvas_double_click_ref *ref,
-                                   const tp_result *result, int sprite_index,
+                                   uint64_t result_generation,
+                                   int sprite_index,
                                    bool engine_double_clicked);
 /* Shared raw-input ownership gate. Menus/modal editors own the pointer while
  * open, so all armed click/pan and retained double-click state is cancelled. */

@@ -109,6 +109,32 @@ static bool test_submit_sprite_name(
            TP_STATUS_OK;
 }
 
+static bool test_animation_ref_at(
+    int atlas_index, int animation_index,
+    gui_animation_ref *out) {
+    const tp_session_snapshot *snapshot =
+        gui_project_snapshot();
+    const tp_snapshot_atlas *atlas =
+        snapshot
+            ? tp_session_snapshot_atlas_at(
+                  snapshot, atlas_index)
+            : NULL;
+    const tp_snapshot_animation *animation =
+        atlas
+            ? tp_session_snapshot_animation_at(
+                  snapshot, atlas->id, animation_index)
+            : NULL;
+    if (!animation || !out) {
+        return false;
+    }
+    *out = (gui_animation_ref){
+        atlas->id,
+        animation->id,
+        tp_session_snapshot_revision(snapshot),
+    };
+    return true;
+}
+
 static bool remove_flat_test_dir(const char *root) {
 #ifdef _WIN32
     char pattern[TP_IDENTITY_PATH_MAX];
@@ -296,7 +322,7 @@ static bool prepare_two_source_project(tp_id128 *left_id,
         return false;
     }
     gui_project_invalidate_sources();
-    s_sel_atlas = 0;
+    gui_view_select_atlas(*atlas_id);
     build_rows();
     return true;
 }
@@ -365,7 +391,8 @@ void setUp(void) {
     gui_project_set_controller_status_port(
         (gui_project_controller_status_port){
             0});
-    s_sel_atlas = 0;
+    gui_view_reset();
+    gui_view_reconcile_observation(gui_project_snapshot());
     multi_sel_clear();
 }
 
@@ -428,18 +455,94 @@ void test_canvas_result_rebind_resets_double_click_identity(void) {
     gui_canvas canvas = {0};
     gui_canvas_double_click_ref click = {0};
 
+    gui_canvas_rebind_result(&canvas, &click, &first);
+    const uint64_t first_generation =
+        canvas.result_generation;
     TEST_ASSERT_FALSE(
-        gui_canvas_double_click_press(&click, &first, 0, false));
+        gui_canvas_double_click_press(
+            &click, first_generation, 0, false));
     TEST_ASSERT_TRUE(click.valid);
-    TEST_ASSERT_EQUAL_PTR(&first, click.result);
+    TEST_ASSERT_EQUAL_UINT64(
+        first_generation, click.result_generation);
+    TEST_ASSERT_EQUAL_INT(0, click.sprite_index);
 
     gui_canvas_rebind_result(&canvas, &click, &second);
 
     TEST_ASSERT_EQUAL_PTR(&second, canvas.result);
+    TEST_ASSERT_NOT_EQUAL(
+        first_generation, canvas.result_generation);
     TEST_ASSERT_FALSE(click.valid);
-    TEST_ASSERT_NULL(click.result);
+    TEST_ASSERT_EQUAL_UINT64(0U, click.result_generation);
     TEST_ASSERT_FALSE(
-        gui_canvas_double_click_press(&click, &second, 0, true));
+        gui_canvas_double_click_press(
+            &click, canvas.result_generation, 0, true));
+}
+
+void test_selected_atlas_id_survives_preceding_atlas_removal(void) {
+    const tp_session_snapshot *snapshot =
+        gui_project_snapshot();
+    const tp_snapshot_atlas *first =
+        tp_session_snapshot_atlas_at(snapshot, 0);
+    TEST_ASSERT_NOT_NULL(first);
+    const tp_id128 first_id = first->id;
+    const gui_project_create_result second =
+        gui_project_add_atlas();
+    TEST_ASSERT_TRUE(second.committed);
+
+    gui_view_select_atlas(second.created_id);
+    snapshot = gui_project_snapshot();
+    TEST_ASSERT_EQUAL_INT(
+        1, gui_view_atlas_index(snapshot));
+    TEST_ASSERT_TRUE(gui_project_remove_atlas(
+        first_id,
+        tp_session_snapshot_revision(snapshot)));
+
+    snapshot = gui_project_snapshot();
+    gui_view_reconcile_observation(snapshot);
+    TEST_ASSERT_TRUE(tp_id128_eq(
+        second.created_id, gui_view_atlas_id()));
+    TEST_ASSERT_EQUAL_INT(
+        0, gui_view_atlas_index(snapshot));
+}
+
+void test_selected_animation_id_survives_preceding_animation_removal(void) {
+    const tp_session_snapshot *snapshot =
+        gui_project_snapshot();
+    const tp_snapshot_atlas *atlas =
+        tp_session_snapshot_atlas_at(snapshot, 0);
+    TEST_ASSERT_NOT_NULL(atlas);
+    const tp_id128 atlas_id = atlas->id;
+    const gui_project_create_result first =
+        gui_project_create_animation(
+            atlas_id,
+            tp_session_snapshot_revision(snapshot),
+            "first", NULL, 0);
+    TEST_ASSERT_TRUE(first.committed);
+    snapshot = gui_project_snapshot();
+    const gui_project_create_result second =
+        gui_project_create_animation(
+            atlas_id,
+            tp_session_snapshot_revision(snapshot),
+            "second", NULL, 0);
+    TEST_ASSERT_TRUE(second.committed);
+
+    gui_view_select_atlas(atlas_id);
+    gui_view_select_animation(second.created_id);
+    snapshot = gui_project_snapshot();
+    TEST_ASSERT_EQUAL_INT(
+        1, gui_view_animation_index(snapshot));
+    gui_animation_ref first_ref = {0};
+    TEST_ASSERT_TRUE(
+        test_animation_ref_at(0, 0, &first_ref));
+    TEST_ASSERT_TRUE(
+        gui_project_remove_animation(&first_ref));
+
+    snapshot = gui_project_snapshot();
+    gui_view_reconcile_observation(snapshot);
+    TEST_ASSERT_TRUE(tp_id128_eq(
+        second.created_id, gui_view_animation_id()));
+    TEST_ASSERT_EQUAL_INT(
+        0, gui_view_animation_index(snapshot));
 }
 
 void test_preview_result_rejects_source_refresh_after_job_capture(void) {
@@ -1144,7 +1247,7 @@ void test_pack_result_follows_stable_atlas_across_index_shift(void) {
         1, gui_project_add_atlas().visible_index);
     const tp_id128 packed_atlas_id = add_coin_source_to_atlas(1);
 
-    s_sel_atlas = 1;
+    gui_view_select_atlas(packed_atlas_id);
     TEST_ASSERT_TRUE(gui_pack_init(TP_GUI_IDENTITY_TEST_DIR));
     do_pack_blocking();
     const tp_result *packed = gui_pack_result(1);
@@ -1176,7 +1279,7 @@ void test_pack_result_follows_stable_atlas_across_index_shift(void) {
     TEST_ASSERT_TRUE(test_offer_atlas_draft(
         packed_atlas_id, tp_session_snapshot_revision(snapshot),
         GUI_ATLAS_PIXELS_PER_UNIT, 0, 2.0F));
-    s_sel_atlas = 0;
+    gui_view_select_atlas(packed_atlas_id);
     do_pack_blocking();
     packed = gui_pack_result(0);
     TEST_ASSERT_NOT_NULL(packed);
@@ -1184,8 +1287,9 @@ void test_pack_result_follows_stable_atlas_across_index_shift(void) {
 
     TEST_ASSERT_EQUAL_INT(
         1, gui_project_add_atlas().visible_index);
-    (void)add_coin_source_to_atlas(1);
-    s_sel_atlas = 1;
+    const tp_id128 other_atlas_id =
+        add_coin_source_to_atlas(1);
+    gui_view_select_atlas(other_atlas_id);
     do_pack_blocking();
     TEST_ASSERT_NOT_NULL(gui_pack_result(1));
     packed = gui_pack_result(0);
@@ -1224,9 +1328,9 @@ void test_create_animation_preserves_both_canonical_selected_sprites(void) {
     multi_sel_add_ref(right->source_id, right->source_key);
     gui_request_create_animation_from_selection();
     multi_sel_clear();
-    s_sel_atlas = -1;
+    gui_view_select_atlas(tp_id128_nil());
     apply_pending();
-    s_sel_atlas = 0;
+    gui_view_select_atlas(atlas_id);
 
     const tp_session_snapshot *snapshot = gui_project_snapshot();
     const tp_snapshot_animation *animation =
@@ -1256,9 +1360,19 @@ void test_add_frames_preserves_both_canonical_selected_sprites(void) {
             "picked", NULL, 0)
             .visible_index;
     TEST_ASSERT_GREATER_OR_EQUAL_INT(0, animation_index);
+    const tp_snapshot_animation *created =
+        tp_session_snapshot_animation_at(
+            gui_project_snapshot(), atlas_id,
+            animation_index);
+    TEST_ASSERT_NOT_NULL(created);
+    const gui_animation_ref animation_ref = {
+        atlas_id, created->id,
+        tp_session_snapshot_revision(
+            gui_project_snapshot())};
     multi_sel_add_ref(left->source_id, left->source_key);
     multi_sel_add_ref(right->source_id, right->source_key);
-    add_selection_frames_to_anim(animation_index);
+    add_selection_frames_to_animation(
+        &animation_ref);
     apply_pending();
 
     snapshot = gui_project_snapshot();
@@ -1376,8 +1490,8 @@ void test_delayed_animation_context_ref_never_retargets_after_index_shift(void) 
 
     gui_animation_ref first;
     gui_animation_ref captured_second;
-    TEST_ASSERT_TRUE(gui_project_animation_ref_at(0, 0, &first));
-    TEST_ASSERT_TRUE(gui_project_animation_ref_at(0, 1, &captured_second));
+    TEST_ASSERT_TRUE(test_animation_ref_at(0, 0, &first));
+    TEST_ASSERT_TRUE(test_animation_ref_at(0, 1, &captured_second));
     const tp_snapshot_animation *third_before =
         tp_session_snapshot_animation_at(gui_project_snapshot(), atlas_id, 2);
     TEST_ASSERT_NOT_NULL(third_before);
@@ -1934,6 +2048,10 @@ int main(int argc, char **argv) {
     UNITY_BEGIN();
     RUN_TEST(test_arbitrary_result_lookup_follows_displayed_sprite_order);
     RUN_TEST(test_canvas_result_rebind_resets_double_click_identity);
+    RUN_TEST(
+        test_selected_atlas_id_survives_preceding_atlas_removal);
+    RUN_TEST(
+        test_selected_animation_id_survives_preceding_animation_removal);
     RUN_TEST(test_rows_apply_renames_by_canonical_source_and_key);
     RUN_TEST(test_create_animation_preserves_both_canonical_selected_sprites);
     RUN_TEST(test_add_frames_preserves_both_canonical_selected_sprites);

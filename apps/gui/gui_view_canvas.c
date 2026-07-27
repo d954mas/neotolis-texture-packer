@@ -213,7 +213,9 @@ static bool strip_preview_chip(nt_ui_context_t *ctx, float h) {
     }
     char chip[96];
     char tip[224];
-    const int nd = gui_pack_preview_diff(s_sel_atlas, e->id, chip, sizeof chip, tip, sizeof tip);
+    const int nd = gui_pack_preview_diff(
+        gui_view_atlas_index(gui_project_snapshot()),
+        e->id, chip, sizeof chip, tip, sizeof tip);
     if (nd <= 0) {
         return false; /* format holds everything -> no degradation chip (canvas simply shows the preview) */
     }
@@ -253,7 +255,10 @@ static void declare_status_pill(nt_ui_context_t *ctx); /* floating message pill,
 
 static void declare_canvas_strip(nt_ui_context_t *ctx, bool atlas) {
     const tp_session_snapshot *snapshot = gui_project_snapshot();
-    const tp_snapshot_atlas *a = snapshot ? tp_session_snapshot_atlas_at(snapshot, s_sel_atlas) : NULL;
+    const int atlas_index = gui_view_atlas_index(snapshot);
+    const tp_snapshot_atlas *a = snapshot
+        ? tp_session_snapshot_atlas_at(snapshot, atlas_index)
+        : NULL;
     s_pack_has_sources = a && a->source_count > 0;
     s_pack_stale = gui_project_is_stale();
     const bool accent = s_pack_has_sources && s_pack_stale;
@@ -391,7 +396,10 @@ static void declare_canvas_preview(nt_ui_context_t *ctx) {
                 nt_ui_custom(ctx, NT_UI_DATA_LAYER(LAYER_IMG), &s_canvas);
             } else if (an && an->frame_count == 0) {
                 nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), "This animation has no frames yet.", &g_canvas_hint);
-            } else if (an && gui_pack_result(s_sel_atlas) == NULL) {
+            } else if (
+                an &&
+                gui_pack_result(gui_view_atlas_index(
+                    gui_project_snapshot())) == NULL) {
                 nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), "Pack to preview \xE2\x80\x94 press Pack (Ctrl+P).", &g_canvas_hint);
             } else {
                 nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), "No frames resolve to packed regions \xE2\x80\x94 repack (Ctrl+P).", &g_canvas_hint);
@@ -411,6 +419,7 @@ void declare_canvas(nt_ui_context_t *ctx) {
     }
     const bool atlas = gui_canvas_get_mode(&s_canvas) == GUI_CANVAS_ATLAS && gui_canvas_has_atlas(&s_canvas);
     const bool has_img = gui_canvas_has_image(&s_canvas);
+    const sprite_row *primary = gui_rows_primary();
     const float cap_w = s_content_w - s_left_panel_w - s_right_panel_w - S(70.0F);
 
     /* caption / hover readout */
@@ -438,7 +447,10 @@ void declare_canvas(nt_ui_context_t *ctx) {
                 tv += r->sprites[i].vert_count;
             }
             const char *sep = "  \xC2\xB7  "; /* U+00B7 middle dot (now baked) */
-            if (s_last_pack_atlas == s_sel_atlas && s_last_pack_ms > 0.0) {
+            if (tp_id128_eq(
+                    s_last_pack_atlas_id,
+                    gui_view_atlas_id()) &&
+                s_last_pack_ms > 0.0) {
                 (void)snprintf(label, sizeof label,
                                "%d sprites%s%d pages%s%dx%d%s%.0f%% filled%s%d verts%spacked %.0f ms", r->sprite_count,
                                sep, r->page_count, sep, pw, ph, sep, (double)atlas_fill_pct(r), sep, tv, sep,
@@ -451,11 +463,12 @@ void declare_canvas(nt_ui_context_t *ctx) {
         } else {
             (void)snprintf(label, sizeof label, "No atlas");
         }
-    } else if (has_img) {
-        (void)snprintf(label, sizeof label, "%s  --  %d x %d", path_last(s_sel_abs), gui_canvas_img_w(&s_canvas),
+    } else if (has_img && primary && primary->abs) {
+        (void)snprintf(label, sizeof label, "%s  --  %d x %d", path_last(primary->abs), gui_canvas_img_w(&s_canvas),
                        gui_canvas_img_h(&s_canvas));
-    } else if (s_sel_missing) {
-        (void)snprintf(label, sizeof label, "file missing: %s", s_sel_abs);
+    } else if (primary && primary->missing) {
+        (void)snprintf(label, sizeof label, "file missing: %s",
+                       primary->abs ? primary->abs : "");
     } else {
         (void)snprintf(label, sizeof label, "No image selected");
     }
@@ -481,13 +494,15 @@ void declare_canvas(nt_ui_context_t *ctx) {
               .clip = {.horizontal = true, .vertical = true}}) {
             if (atlas || has_img) {
                 nt_ui_custom(ctx, NT_UI_DATA_LAYER(LAYER_IMG), &s_canvas);
-            } else if (s_sel_missing) {
+            } else if (primary && primary->missing) {
                 ui_label_fit(ctx, label, &g_warn, cap_w, 0U);
                 nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), "Restore the file and press Refresh (F5) to bring it back.", &g_caption);
             } else {
                 const tp_session_snapshot *snapshot = gui_project_snapshot();
+                const int atlas_index =
+                    gui_view_atlas_index(snapshot);
                 const tp_snapshot_atlas *ea = snapshot
-                                                  ? tp_session_snapshot_atlas_at(snapshot, s_sel_atlas)
+                                                  ? tp_session_snapshot_atlas_at(snapshot, atlas_index)
                                                   : NULL;
                 const bool no_sources = (ea == NULL || ea->source_count == 0);
                 if (no_sources) {

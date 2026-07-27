@@ -579,42 +579,6 @@ bool gui_project_set_target_exporter(
 }
 // #endregion
 // #region animations
-bool gui_project_animation_ref_at(int atlas_index, int animation_index,
-                                  gui_animation_ref *out) {
-    const tp_session_snapshot *snapshot = gui_project_snapshot();
-    const tp_snapshot_atlas *atlas = snapshot
-                                         ? tp_session_snapshot_atlas_at(snapshot,
-                                                                        atlas_index)
-                                         : NULL;
-    const tp_snapshot_animation *animation = atlas
-        ? tp_session_snapshot_animation_at(snapshot, atlas->id, animation_index)
-        : NULL;
-    if (!animation || !out) {
-        return false;
-    }
-    *out = (gui_animation_ref){atlas->id, animation->id,
-                               tp_session_snapshot_revision(snapshot)};
-    return true;
-}
-
-bool gui_project_target_ref_at(int atlas_index, int target_index,
-                               gui_target_ref *out) {
-    const tp_session_snapshot *snapshot = gui_project_snapshot();
-    const tp_snapshot_atlas *atlas = snapshot
-                                         ? tp_session_snapshot_atlas_at(snapshot,
-                                                                        atlas_index)
-                                         : NULL;
-    const tp_snapshot_target *target = atlas
-        ? tp_session_snapshot_target_at(snapshot, atlas->id, target_index)
-        : NULL;
-    if (!target || !out) {
-        return false;
-    }
-    *out = (gui_target_ref){atlas->id, target->id,
-                            tp_session_snapshot_revision(snapshot)};
-    return true;
-}
-
 gui_project_create_result gui_project_create_animation(
     tp_id128 atlas_id, int64_t expected_revision,
     const char *base, const tp_op_sprite_ref *frames,
@@ -659,7 +623,8 @@ gui_project_create_result gui_project_create_animation(
 }
 
 /* fix3 [0]: bool -- true iff the removal committed (see gui_project_remove_atlas). The deferred
- * handler guards preview_stop + the s_sel_anim reset + "Removed" message on this. */
+ * handler guards preview_stop + stable animation-selection reset + "Removed"
+ * message on this. */
 bool gui_project_remove_animation(const gui_animation_ref *animation) {
     if (!animation) {
         return false;

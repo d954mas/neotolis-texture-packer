@@ -144,17 +144,18 @@ void gui_canvas_double_click_reset(gui_canvas_double_click_ref *ref) {
 }
 
 bool gui_canvas_double_click_press(gui_canvas_double_click_ref *ref,
-                                   const tp_result *result, int sprite_index,
+                                   uint64_t result_generation,
+                                   int sprite_index,
                                    bool engine_double_clicked) {
     if (!ref) {
         return false;
     }
     const bool same_ref =
-        ref->valid && ref->result == result &&
+        ref->valid && ref->result_generation == result_generation &&
         ref->sprite_index == sprite_index;
-    ref->result = result;
+    ref->result_generation = result_generation;
     ref->sprite_index = sprite_index;
-    ref->valid = result != NULL && sprite_index >= 0;
+    ref->valid = result_generation != 0U && sprite_index >= 0;
     return engine_double_clicked && same_ref && ref->valid;
 }
 

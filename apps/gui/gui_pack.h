@@ -86,7 +86,7 @@ void gui_pack_clear(int atlas_index);
  * owned preview slot SEPARATE from the session slots (the native result is never clobbered). The
  * effective settings are tp_project_atlas_to_settings clamped through the exporter's caps
  * (tp_export_effective_settings). Only one preview is live at a time (dropped on atlas switch / edit),
- * so a single slot keyed by atlas_index guarantees coherent binding. */
+ * so one slot carrying the stable atlas ID guarantees coherent binding. */
 
 /* Synchronous preview adapter for selftest/shot-preview; drains the same typed
  * session Pack job and lands its result in the preview slot. */
@@ -99,6 +99,8 @@ bool gui_pack_preview_async_start(int atlas_index, const char *exporter_id, char
 /* The stored preview result IF it belongs to `atlas_index`, else NULL (coherent binding: a stale slot
  * from another atlas never shows). */
 const tp_result *gui_pack_preview_result(int atlas_index);
+/* Changes whenever a successful export preview publishes a new result. */
+uint64_t gui_pack_preview_result_version(int atlas_index);
 
 /* Drops the preview slot and releases its retained session-job result owner.
  * Call on back-to-Native / atlas switch / model edit. */
@@ -141,6 +143,7 @@ typedef struct {
     tp_session_job_rejection rejection;
     tp_status status;
     int atlas_index;    /* pack: which atlas landed */
+    tp_id128 atlas_id;  /* stable owner of the landed pack */
     double ms;          /* pack: wall-clock pack time */
     bool input_changed; /* pack: model/source token differs -> keep preview stale */
     int missing;        /* pack: skipped-missing-source count */

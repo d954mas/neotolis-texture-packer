@@ -4,6 +4,7 @@
 #include "gui_pack.h"
 #include "gui_rows.h"
 #include "gui_scan.h"
+#include "gui_state.h"
 
 #include "tp_bench_support.h"
 #include "tp_core/tp_project.h"
@@ -27,22 +28,6 @@
 #endif
 
 /* Exact narrow stubs for the non-build_rows references in gui_rows.c. */
-gui_selected_sprite *s_multi_sel;
-int s_multi_sel_count;
-int s_multi_sel_cap;
-int s_sel_atlas;
-int s_sel_src = -1;
-int s_sel_child = -1;
-char s_sel_abs[TP_IDENTITY_PATH_MAX];
-bool s_sel_missing;
-bool s_reselect_pending;
-tp_id128 s_reselect_source_id;
-char s_reselect_key[TP_SRCKEY_MAX];
-tp_id128 s_reselect_atlas_id;                /* F2: referenced by gui_selection_capture_reselect */
-char s_ctx_sprite_abs[TP_IDENTITY_PATH_MAX]; /* F12: not referenced by gui_rows.c, defined for parity */
-int s_focus_view = -1;     /* build_view() re-pins keyboard focus; the bench never drives a view */
-int s_sel_anchor_row = -1; /* build_view() re-pins the shift-anchor; unused in the row benchmark */
-bool s_focus_follow;       /* select_row_for_region requests ensure-visible; unused in the row benchmark */
 static const tp_session_snapshot *s_fixture_snapshot;
 static uint64_t s_fixture_snapshot_lifetime;
 
@@ -374,12 +359,16 @@ static bool fixture_prepare(row_fixture *fixture, row_fixture_spec spec, const c
         return false;
     }
     s_fixture_snapshot = fixture->snapshot;
-    s_sel_atlas = spec.atlases - 1;
+    const int atlas_index = spec.atlases - 1;
+    const tp_snapshot_atlas *selected_atlas =
+        tp_session_snapshot_atlas_at(fixture->snapshot, atlas_index);
+    gui_view_select_atlas(
+        selected_atlas ? selected_atlas->id : tp_id128_nil());
     if (spec.children > 0) {
         const tp_snapshot_source *source = NULL;
         char resolved_dir[TP_IDENTITY_PATH_MAX];
         if (tp_session_snapshot_source_resolved_at(
-                fixture->snapshot, s_sel_atlas, 0, &source, resolved_dir,
+                fixture->snapshot, atlas_index, 0, &source, resolved_dir,
                 sizeof resolved_dir, &err) != TP_STATUS_OK ||
             !source || !gui_scan_bench_seed_owned(resolved_dir, &seeded)) {
             tp_scan_free(&seeded);
@@ -483,10 +472,11 @@ static bool run_fixture(row_fixture *fixture, int iterations) {
         }
     }
     if (fixture->spec.children > 0) {
-        s_sel_src = 0;
-        s_sel_child = fixture->spec.overrides > 0
-                          ? fixture->spec.overrides - 1
-                          : fixture->spec.children - 1;
+        const int row_index =
+            fixture->spec.overrides > 0
+                ? fixture->spec.overrides
+                : fixture->spec.children;
+        gui_rows_select_primary(&s_rows[row_index]);
         if (!gui_rows_selected_leaf()) {
             return false;
         }

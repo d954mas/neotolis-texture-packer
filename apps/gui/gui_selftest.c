@@ -111,6 +111,38 @@ static const tp_snapshot_atlas *selftest_atlas_at(int index,
     return snapshot ? tp_session_snapshot_atlas_at(snapshot, index) : NULL;
 }
 
+static bool selftest_select_atlas(int index) {
+    const tp_snapshot_atlas *atlas = selftest_atlas_at(index, NULL);
+    gui_view_select_atlas(atlas ? atlas->id : tp_id128_nil());
+    return atlas != NULL;
+}
+
+static int selftest_selected_atlas_index(void) {
+    return gui_view_atlas_index(gui_project_snapshot());
+}
+
+static bool selftest_select_animation_at(int atlas_index,
+                                         int animation_index) {
+    const tp_session_snapshot *snapshot = gui_project_snapshot();
+    const tp_snapshot_atlas *atlas =
+        selftest_atlas_at(atlas_index, NULL);
+    const tp_snapshot_animation *animation =
+        atlas ? tp_session_snapshot_animation_at(
+                    snapshot, atlas->id, animation_index)
+              : NULL;
+    if (!atlas || !animation) {
+        gui_view_select_animation(tp_id128_nil());
+        return false;
+    }
+    gui_view_select_atlas(atlas->id);
+    gui_view_select_animation(animation->id);
+    return true;
+}
+
+static void selftest_clear_animation_selection(void) {
+    gui_view_select_animation(tp_id128_nil());
+}
+
 static void selftest_observe_session(void) {
     tp_error error = {{0}};
     NT_ASSERT(
@@ -145,10 +177,11 @@ static const tp_snapshot_frame *selftest_frame_at(int atlas_index,
  * the test intent boundary, then call the canonical production selection API. */
 static void selftest_multi_sel_add_name(const char *selector) {
     const tp_session_snapshot *snapshot = gui_project_snapshot();
-    const tp_snapshot_atlas *atlas = snapshot
-                                         ? tp_session_snapshot_atlas_at(
-                                               snapshot, s_sel_atlas)
-                                         : NULL;
+    const int atlas_index = gui_view_atlas_index(snapshot);
+    const tp_snapshot_atlas *atlas =
+        atlas_index >= 0
+            ? tp_session_snapshot_atlas_at(snapshot, atlas_index)
+            : NULL;
     tp_selector_result resolved;
     tp_id128 source_id = tp_id128_nil();
     char source_key[TP_SRCKEY_MAX];
@@ -178,6 +211,41 @@ static const tp_snapshot_target *selftest_target_at(int atlas_index,
     const tp_snapshot_atlas *atlas = selftest_atlas_at(atlas_index, NULL);
     return atlas ? tp_session_snapshot_target_at(snapshot, atlas->id, target_index)
                  : NULL;
+}
+
+static bool selftest_target_ref_at(int atlas_index, int target_index,
+                                   gui_target_ref *out) {
+    const tp_session_snapshot *snapshot = NULL;
+    const tp_snapshot_atlas *atlas = selftest_atlas_at(atlas_index, &snapshot);
+    const tp_snapshot_target *target =
+        atlas ? tp_session_snapshot_target_at(
+                    snapshot, atlas->id, target_index)
+              : NULL;
+    if (!target || !out) {
+        return false;
+    }
+    *out = (gui_target_ref){
+        atlas->id, target->id,
+        tp_session_snapshot_revision(snapshot)};
+    return true;
+}
+
+static bool selftest_animation_ref_at(
+    int atlas_index, int animation_index,
+    gui_animation_ref *out) {
+    const tp_session_snapshot *snapshot = NULL;
+    const tp_snapshot_atlas *atlas = selftest_atlas_at(atlas_index, &snapshot);
+    const tp_snapshot_animation *animation =
+        atlas ? tp_session_snapshot_animation_at(
+                    snapshot, atlas->id, animation_index)
+              : NULL;
+    if (!animation || !out) {
+        return false;
+    }
+    *out = (gui_animation_ref){
+        atlas->id, animation->id,
+        tp_session_snapshot_revision(snapshot)};
+    return true;
 }
 
 static const tp_snapshot_sprite *selftest_sprite_by_name(int atlas_index,
@@ -428,7 +496,7 @@ static int selftest_create_animation_at(int atlas_index, const char *base,
 static bool selftest_set_anim_id_at(int atlas_index, int animation_index,
                                     const char *name) {
     gui_animation_ref animation;
-    if (!gui_project_animation_ref_at(
+    if (!selftest_animation_ref_at(
             atlas_index, animation_index,
             &animation) ||
         !gui_text_edit_begin_animation_name(
@@ -449,7 +517,7 @@ static bool selftest_set_anim_id_at(int atlas_index, int animation_index,
 static bool selftest_set_anim_fps_at(int atlas_index, int animation_index,
                                      float fps) {
     gui_animation_ref animation;
-    if (!gui_project_animation_ref_at(
+    if (!selftest_animation_ref_at(
             atlas_index, animation_index, &animation)) {
         return false;
     }
@@ -462,7 +530,7 @@ static bool selftest_set_anim_fps_at(int atlas_index, int animation_index,
 static bool selftest_set_anim_playback_at(int atlas_index, int animation_index,
                                           int playback) {
     gui_animation_ref animation;
-    if (!gui_project_animation_ref_at(
+    if (!selftest_animation_ref_at(
             atlas_index, animation_index, &animation)) {
         return false;
     }
@@ -475,14 +543,14 @@ static bool selftest_set_anim_playback_at(int atlas_index, int animation_index,
 static bool selftest_set_anim_flip_at(int atlas_index, int animation_index,
                                       bool flip_h, bool flip_v) {
     gui_animation_ref animation;
-    if (!gui_project_animation_ref_at(
+    if (!selftest_animation_ref_at(
             atlas_index, animation_index, &animation)) {
         return false;
     }
     gui_edit_anim_flip(&animation, 0, flip_h);
     gui_request_gesture_commit();
     apply_pending();
-    if (!gui_project_animation_ref_at(
+    if (!selftest_animation_ref_at(
             atlas_index, animation_index, &animation)) {
         return false;
     }
@@ -495,14 +563,14 @@ static bool selftest_set_anim_flip_at(int atlas_index, int animation_index,
 static bool selftest_anim_remove_frame_at(int atlas_index, int animation_index,
                                           int frame_index) {
     gui_animation_ref animation;
-    return gui_project_animation_ref_at(atlas_index, animation_index, &animation) &&
+    return selftest_animation_ref_at(atlas_index, animation_index, &animation) &&
            gui_project_anim_remove_frame(&animation, frame_index);
 }
 
 static bool selftest_anim_move_frame_at(int atlas_index, int animation_index,
                                         int frame_index, int delta) {
     gui_animation_ref animation;
-    return gui_project_animation_ref_at(atlas_index, animation_index, &animation) &&
+    return selftest_animation_ref_at(atlas_index, animation_index, &animation) &&
            gui_project_anim_move_frame(&animation, frame_index, delta);
 }
 
@@ -521,11 +589,6 @@ static bool selftest_remove_animation_named_at(int atlas_index, const char *name
         }
     }
     return false;
-}
-
-static bool selftest_target_ref_at(int atlas_index, int target_index,
-                                   gui_target_ref *out) {
-    return gui_project_target_ref_at(atlas_index, target_index, out);
 }
 
 static bool selftest_set_target_path_at(
@@ -1072,26 +1135,25 @@ void run_selftest(void) {
              * the stale-focus state a real click starts from (focus/anchor on a DIFFERENT row A), then assert
              * the click re-pins both onto 'a.png'. Headless-reachable (run_selftest), unlike the visual-phase
              * select_row_for_region callsites which the NTPACKER_GUI_HEADLESS jump to phase 16 skips. */
-            s_sel_atlas = i_rotate;
+            NT_ASSERT(selftest_select_atlas(i_rotate));
             build_rows();
             build_view();
-            s_focus_view = -1;      /* pre-fix left focus on row A here; the re-pin must move it */
-            s_sel_anchor_row = -1;
+            gui_rows_set_focus_view_index(-1);
+            gui_rows_set_anchor_view_index(-1);
             select_row_for_region(rotate_a);
-            NT_ASSERT(s_focus_view >= 0 && s_focus_view < s_view_count &&
+            const int focus_view = gui_rows_focus_view_index();
+            NT_ASSERT(focus_view >= 0 && focus_view < s_view_count &&
                       "select_row_for_region re-pins keyboard focus onto the selected row");
             {
-                const sprite_row *frow = &s_rows[s_view[s_focus_view]];
-                const bool focus_on_selection =
-                    frow->is_source ? (s_sel_src == frow->src && s_sel_child == -1)
-                                    : (s_sel_src == frow->src && s_sel_child == frow->child);
-                NT_ASSERT(focus_on_selection &&
+                const sprite_row *frow = &s_rows[s_view[focus_view]];
+                NT_ASSERT(gui_rows_primary() == frow &&
                           "the re-pinned focus row is the one carrying the primary selection");
             }
-            NT_ASSERT(s_sel_anchor_row == s_focus_view &&
+            const int anchor_view = gui_rows_anchor_view_index();
+            NT_ASSERT(anchor_view == focus_view &&
                       "select_row_for_region anchors the Shift-range on the new focus");
             nt_log_info("SELFTEST: canvas-click focus re-pin OK (focus_view=%d anchor=%d view_count=%d)",
-                        s_focus_view, s_sel_anchor_row, s_view_count);
+                        focus_view, anchor_view, s_view_count);
 
             char pe2[256] = {0};
             const bool okb = (i_basic >= 0) && gui_pack_atlas(i_basic, &ms_b, pe2, sizeof pe2, note, sizeof note);
@@ -1239,7 +1301,7 @@ void run_selftest(void) {
             free(sbuf);
 
             /* Row model materializes 520+ rows (incl. the Cyrillic label) without overflow. */
-            s_sel_atlas = sidx;
+            NT_ASSERT(selftest_select_atlas(sidx));
             build_rows();
             bool cyr_row = false;
             for (int i = 0; i < s_row_count; i++) {
@@ -1314,7 +1376,7 @@ void run_selftest(void) {
                   "SELFTEST: all caps sources admitted");
         free(source_args);
         free(source_paths);
-        s_sel_atlas = 0;
+        NT_ASSERT(selftest_select_atlas(0));
         build_rows();
         nt_log_info("SELFTEST: caps rows=%d (want %d; old cap 4096)", s_row_count, BIG_N);
         NT_ASSERT(s_row_count == BIG_N && "sprite rows grow past the old 4096 cap");
@@ -1381,7 +1443,7 @@ void run_selftest(void) {
                     okc ? "" : cerr);
         NT_ASSERT(okc && cr && cr->sprite_count >= M && "caps: pack >512 real sprites");
 
-        s_sel_atlas = 0;
+        NT_ASSERT(selftest_select_atlas(0));
         build_rows();
         multi_sel_clear();
         for (int i = 0; i < s_row_count; i++) { /* select-all the leaf sprites (the real UI gesture) */
@@ -1401,7 +1463,13 @@ void run_selftest(void) {
         const int panim = create_animation_from_selection();
         NT_ASSERT(panim >= 0 && "caps: animation from M frames");
         gui_preview_frame_work_reset();
-        open_preview(panim);
+        gui_animation_ref preview_ref;
+        NT_ASSERT(
+            selftest_animation_ref_at(
+                gui_view_atlas_index(
+                    gui_project_snapshot()),
+                panim, &preview_ref));
+        open_preview_ref(&preview_ref);
         update_preview();
         nt_log_info("SELFTEST: caps preview frames resolved=%d (want %d; old cap 512)", s_preview_frame_count, M);
         NT_ASSERT(s_preview_frame_count == M && "preview resolves all >512 frames (idxs[] grows)");
@@ -1493,9 +1561,8 @@ void run_selftest(void) {
         /* leave a clean fresh project for the phases below */
         gui_project_test_new();
         gui_pack_clear(-1);
-        s_sel_atlas = 0;
-        s_sel_anim = -1;
-        s_sel_anim_frame = -1;
+        NT_ASSERT(selftest_select_atlas(0));
+        selftest_clear_animation_selection();
     }
 
     /* --- settings panel: stale-on-change, effective-extrude, per-region RECT override,
@@ -1656,7 +1723,7 @@ void run_selftest(void) {
 
         const int aidx =
             gui_project_add_atlas().visible_index;
-        s_sel_atlas = aidx;
+        NT_ASSERT(selftest_select_atlas(aidx));
         char anim_source_dir[700];
         (void)snprintf(anim_source_dir, sizeof anim_source_dir,
                        "%s/selftest_animation_frames", s_exe_dir);
@@ -1755,7 +1822,7 @@ void run_selftest(void) {
             aidx, "shift_target", shift_frame, 1);
         gui_animation_ref preview_ref;
         NT_ASSERT(shift0 >= 0 && shift1 >= 0 &&
-                  gui_project_animation_ref_at(aidx, shift1, &preview_ref) &&
+                  selftest_animation_ref_at(aidx, shift1, &preview_ref) &&
                   "M2: capture the deferred preview by stable animation ID");
         gui_request_open_preview(&preview_ref);
         NT_ASSERT(selftest_remove_animation_named_at(aidx, "shift_first") &&
@@ -1763,15 +1830,17 @@ void run_selftest(void) {
         apply_pending();
         const tp_session_snapshot *shift_snapshot = gui_project_snapshot();
         const tp_snapshot_atlas *shift_atlas = selftest_atlas_at(aidx, NULL);
+        const int shift_selection =
+            gui_view_animation_index(shift_snapshot);
         const tp_snapshot_animation *shift_selected = shift_atlas
             ? tp_session_snapshot_animation_at(shift_snapshot, shift_atlas->id,
-                                               s_sel_anim)
+                                               shift_selection)
             : NULL;
         NT_ASSERT(s_preview_active && shift_selected &&
                   tp_id128_eq(shift_selected->id, preview_ref.animation_id) &&
                   "M2: deferred preview follows the same animation after index shift");
 
-        s_sel_anim = -1;
+        selftest_clear_animation_selection();
         const tp_snapshot_animation *stable_preview = preview_animation();
         NT_ASSERT(stable_preview &&
                   tp_id128_eq(stable_preview->id, preview_ref.animation_id) &&
@@ -1780,12 +1849,13 @@ void run_selftest(void) {
             preview_ref.atlas_id, preview_ref.animation_id,
             tp_session_snapshot_revision(gui_project_snapshot())};
         gui_request_remove_animation_ref(&remove_preview_ref);
-        s_sel_anim = 0; /* stale numeric selection must not define preview ownership */
+        (void)selftest_select_animation_at(
+            aidx, 0); /* another stable selection must not define preview ownership */
         apply_pending();
         NT_ASSERT(!s_preview_active &&
                   "M2: removing the previewed animation compares stable IDs, not queued indices");
 
-        s_sel_atlas = aidx;
+        NT_ASSERT(selftest_select_atlas(aidx));
         multi_sel_clear();
         multi_sel_add("walk_10");
         multi_sel_add("walk_2");
@@ -1794,7 +1864,8 @@ void run_selftest(void) {
         const int animations_before_queued_create =
             shift_atlas ? shift_atlas->animation_count : -1;
         gui_request_create_animation_from_selection();
-        s_sel_atlas = 0; /* redirect the live UI after intent capture */
+        NT_ASSERT(selftest_select_atlas(
+            0)); /* redirect the live UI after intent capture */
         multi_sel_clear();
         multi_sel_add("wrong_selection");
         apply_pending();
@@ -1836,9 +1907,8 @@ void run_selftest(void) {
 #endif
 
         multi_sel_clear();
-        s_sel_anim = -1;
-        s_sel_anim_frame = -1;
-        s_sel_atlas = 0;
+        selftest_clear_animation_selection();
+        NT_ASSERT(selftest_select_atlas(0));
     }
 
     /* --- Draft-owned sprite/animation/target edit regressions.
@@ -1850,7 +1920,7 @@ void run_selftest(void) {
          * preserve both values. */
         gui_project_test_new();
         gui_pack_clear(-1);
-        s_sel_atlas = 0;
+        NT_ASSERT(selftest_select_atlas(0));
         (void)selftest_set_sprite_slice9_at(0, "s9sprite", 0 /* L */, 11);
         (void)selftest_set_sprite_slice9_at(0, "s9sprite", 1 /* R */, 22);
         const tp_snapshot_sprite *s9ov = selftest_sprite_by_name(0, "s9sprite");
@@ -1867,7 +1937,7 @@ void run_selftest(void) {
          *     assertion fails HERE -- the UAF cannot regress silently. */
         gui_project_test_new();
         gui_pack_clear(-1);
-        s_sel_atlas = 0;
+        NT_ASSERT(selftest_select_atlas(0));
         char add_frames_dir[700];
         (void)snprintf(add_frames_dir, sizeof add_frames_dir,
                        "%s/selftest_add_frames", s_exe_dir);
@@ -1882,11 +1952,16 @@ void run_selftest(void) {
                   "deferred add-frames fixture adds one real source");
         gui_scan_invalidate_all();
         const int f1anim = gui_project_create_animation(0, "addf", NULL, 0); /* empty animation */
-        s_sel_anim = f1anim;
+        NT_ASSERT(selftest_select_animation_at(0, f1anim));
         multi_sel_clear();
         multi_sel_add("f_2"); /* deliberately out of natural order */
         multi_sel_add("f_1");
-        add_selection_frames_to_anim(f1anim); /* ENQUEUE ONLY -- must not commit synchronously */
+        gui_animation_ref f1ref;
+        NT_ASSERT(
+            selftest_animation_ref_at(
+                0, f1anim, &f1ref));
+        add_selection_frames_to_animation(
+            &f1ref); /* ENQUEUE ONLY -- must not commit synchronously */
         const tp_snapshot_animation *f1a = selftest_animation_at(0, f1anim);
         const int fc_mid = f1a ? f1a->frame_count : -1;
         multi_sel_clear();                    /* mutate the selection AFTER the enqueue: copied keys stand */
@@ -1913,7 +1988,7 @@ void run_selftest(void) {
          * independently owned output path. */
         gui_project_test_new();
         gui_pack_clear(-1);
-        s_sel_atlas = 0;
+        NT_ASSERT(selftest_select_atlas(0));
         char longp[600];
         {
             size_t w = 0;
@@ -1946,7 +2021,7 @@ void run_selftest(void) {
          * operation from the newest snapshot at submit time. */
         gui_project_test_new();
         gui_pack_clear(-1);
-        s_sel_atlas = 0;
+        NT_ASSERT(selftest_select_atlas(0));
         (void)selftest_set_sprite_origin_at(0, "osprite", 0 /* X */, 0.25F);
         (void)selftest_set_sprite_origin_at(0, "osprite", 1 /* Y */, 0.75F);
         const tp_snapshot_sprite *oov = selftest_sprite_by_name(0, "osprite");
@@ -1960,7 +2035,7 @@ void run_selftest(void) {
          * replace only its value; one gesture submits one masked operation. */
         gui_project_test_new();
         gui_pack_clear(-1);
-        s_sel_atlas = 0;
+        NT_ASSERT(selftest_select_atlas(0));
         const tp_snapshot_target *t11a = selftest_target_at(0, 0);
         NT_ASSERT(t11a && "#11: fresh project seeds a default target");
         /* committed baseline out_path (one immediate commit, as the discrete browse/toggle paths do) */
@@ -2036,7 +2111,7 @@ void run_selftest(void) {
          * atlas 0 and probes its region outlines) -- gui_project_test_new left it source-less. */
         gui_project_test_new();
         gui_pack_clear(-1);
-        s_sel_atlas = 0;
+        NT_ASSERT(selftest_select_atlas(0));
         reset_selection();
         char pfolder[512];
         to_abs("examples/defold-demo/examples/anim_trim/anims", pfolder, sizeof pfolder);
@@ -2144,7 +2219,7 @@ void run_selftest(void) {
          * a model commit gate. The edit, dirty state, and History remain live. */
         gui_project_test_new();
         gui_pack_clear(-1);
-        s_sel_atlas = 0;
+        NT_ASSERT(selftest_select_atlas(0));
         reset_selection();
         (void)gui_project_take_op_error(NULL, 0); /* clear any stale soft-error */
         NT_ASSERT(gui_project__test_attach_memory_recovery() &&
@@ -2184,7 +2259,7 @@ void run_selftest(void) {
          * the following Save publishes it and heals recovery with a checkpoint. */
         gui_project_test_new();
         gui_pack_clear(-1);
-        s_sel_atlas = 0;
+        NT_ASSERT(selftest_select_atlas(0));
         (void)gui_project_take_op_error(NULL, 0);
         NT_ASSERT(gui_project__test_attach_memory_recovery() && "J2: memory recovery journal attached");
         NT_ASSERT(selftest_set_atlas_name_at(0, "before_save") && "J2: a committed edit lands (journal healthy)");
@@ -2226,7 +2301,7 @@ void run_selftest(void) {
          * submitted and only recovery recording degrades. Both edits land. */
         gui_project_test_new();
         gui_pack_clear(-1);
-        s_sel_atlas = 0;
+        NT_ASSERT(selftest_select_atlas(0));
         (void)gui_project_take_op_error(NULL, 0);
         NT_ASSERT(gui_project__test_attach_memory_recovery() && "J6: memory journal attached");
         char j6name0[64];
@@ -2260,7 +2335,7 @@ void run_selftest(void) {
          * model even when recovery recording degrades. */
         gui_project_test_new();
         gui_pack_clear(-1);
-        s_sel_atlas = 0;
+        NT_ASSERT(selftest_select_atlas(0));
         reset_selection();
         char j7folder[512];
         to_abs("examples/defold-demo/examples/anim_trim/anims", j7folder, sizeof j7folder);
@@ -2292,7 +2367,7 @@ void run_selftest(void) {
          * New here; the action-trace suite covers all three lifecycle requests. */
         gui_project_test_new();
         gui_pack_clear(-1);
-        s_sel_atlas = 0;
+        NT_ASSERT(selftest_select_atlas(0));
         char j8path[1200];
         (void)snprintf(j8path, sizeof j8path, "%s/selftest_gate.ntpacker_project", s_exe_dir);
         (void)remove(j8path);
@@ -2352,7 +2427,7 @@ void run_selftest(void) {
          * recovery. */
         gui_project_test_new();
         gui_pack_clear(-1);
-        s_sel_atlas = 0;
+        NT_ASSERT(selftest_select_atlas(0));
         (void)gui_project_take_op_error(NULL, 0);
         const int j9added =
             gui_project_add_atlas().visible_index; /* a 2nd atlas to remove (index 1) */
@@ -2383,7 +2458,7 @@ void run_selftest(void) {
          * reject, while a unique rename commits despite recovery degradation. */
         gui_project_test_new();
         gui_pack_clear(-1);
-        s_sel_atlas = 0;
+        NT_ASSERT(selftest_select_atlas(0));
         (void)gui_project_take_op_error(NULL, 0);
         const int j10a = gui_project_create_animation(0, "anim_a", NULL, 0);
         const int j10b = gui_project_create_animation(0, "anim_b", NULL, 0);
@@ -2426,7 +2501,7 @@ void run_selftest(void) {
          * submit also succeeds and exposes only the non-blocking warning. */
         gui_project_test_new();
         gui_pack_clear(-1);
-        s_sel_atlas = 0;
+        NT_ASSERT(selftest_select_atlas(0));
         (void)gui_project_take_op_error(NULL, 0);
         const int j11a = gui_project_create_animation(0, "keep_me", NULL, 0);
         NT_ASSERT(j11a == 0 && "J11: created an animation");
@@ -2461,8 +2536,14 @@ void run_selftest(void) {
 
         /* (J11b) A core-rejected atlas rename preserves the draft until the
          * user explicitly corrects or discards it. */
-        const int64_t j11b_revision = tp_session_snapshot_revision(gui_project_snapshot());
-        start_atlas_edit(0);
+        const tp_session_snapshot *j11b_snapshot = NULL;
+        const tp_snapshot_atlas *j11b_atlas =
+            selftest_atlas_at(0, &j11b_snapshot);
+        const int64_t j11b_revision =
+            tp_session_snapshot_revision(j11b_snapshot);
+        NT_ASSERT(j11b_atlas);
+        start_atlas_edit_ref(
+            j11b_atlas->id, j11b_revision);
         NT_ASSERT(gui_text_edit_update(""));
         gui_request_gesture_commit();
         apply_pending();
@@ -2481,7 +2562,7 @@ void run_selftest(void) {
          * recovery degradation remains a separate warning. */
         gui_project_test_new();
         gui_pack_clear(-1);
-        s_sel_atlas = 0;
+        NT_ASSERT(selftest_select_atlas(0));
         (void)gui_project_take_op_error(NULL, 0);
         NT_ASSERT(selftest_set_atlas_name_at(0, "j12_edit") && "J12: a committed edit populates undo history");
         NT_ASSERT(gui_project__test_attach_memory_recovery() && "J12: memory journal attached");
@@ -2526,7 +2607,7 @@ void run_selftest(void) {
         /* (J12b) Undo/Redo publish History independently of recovery recording. */
         gui_project_test_new();
         gui_pack_clear(-1);
-        s_sel_atlas = 0;
+        NT_ASSERT(selftest_select_atlas(0));
         (void)gui_project_take_op_error(NULL, 0);
         NT_ASSERT(gui_project__test_attach_memory_recovery() && "J12b: memory recovery journal attached");
         NT_ASSERT(selftest_set_atlas_name_at(0, "j12b_edit") && "J12b: committed edit populates history");
@@ -2721,7 +2802,7 @@ void run_selftest(void) {
         gui_project_test_shutdown(true);
         gui_project_init();
         gui_pack_clear(-1);
-        s_sel_atlas = 0;
+        NT_ASSERT(selftest_select_atlas(0));
         reset_selection();
         char rfolder[512];
         to_abs("examples/defold-demo/examples/anim_trim/anims", rfolder, sizeof rfolder);
@@ -2775,18 +2856,32 @@ void run_selftest(void) {
         if (source && tp_session_snapshot_resolve_path(cur, cur_atlas->id, source->id,
                                                        resolved, sizeof resolved,
                                                        &resolve_error) == TP_STATUS_OK) {
-            (void)snprintf(s_sel_abs, sizeof s_sel_abs, "%s", resolved);
-            s_sel_atlas = 0;
-            s_sel_src = ns - 1;
-            s_sel_child = -1;
-            s_sel_missing = false;
+            NT_ASSERT(selftest_select_atlas(0));
+            build_rows();
+            build_view();
+            for (int row_index = 0; row_index < s_row_count; ++row_index) {
+                const sprite_row *row = &s_rows[row_index];
+                if (row->is_source &&
+                    tp_id128_eq(row->source_id, source->id)) {
+                    gui_rows_select_primary(row);
+                    for (int view_index = 0;
+                         view_index < s_view_count; ++view_index) {
+                        if (s_view[view_index] == row_index) {
+                            gui_rows_set_focus_view_index(view_index);
+                            gui_rows_set_anchor_view_index(view_index);
+                            break;
+                        }
+                    }
+                    break;
+                }
+            }
         }
     }
     /* Render coverage: leave a real animation selected + previewing so the auto-quit frames exercise the
      * left-panel animations rows, the right-panel editor, and the canvas preview (draw_anim_frame on the
      * packed regions) -- a Clay layout bug in the new UI would crash these frames. */
     {
-        s_sel_atlas = 0;
+        NT_ASSERT(selftest_select_atlas(0));
         const tp_snapshot_atlas *pa = selftest_atlas_at(0, NULL);
         const tp_result *pr = gui_pack_result(0);
         if (pa && pr && pr->sprite_count > 0) {
@@ -2799,7 +2894,11 @@ void run_selftest(void) {
             const int pai = create_animation_from_selection();
             pa = selftest_atlas_at(0, NULL);
             if (pai >= 0 && pa) {
-                open_preview(pai);
+                gui_animation_ref preview_ref;
+                NT_ASSERT(
+                    selftest_animation_ref_at(
+                        0, pai, &preview_ref));
+                open_preview_ref(&preview_ref);
                 const tp_snapshot_animation *animation = selftest_animation_at(0, pai);
                 nt_log_info("SELFTEST: preview anim '%s' active=%d frames=%d", animation->name, s_preview_active,
                             animation->frame_count);
@@ -2808,8 +2907,10 @@ void run_selftest(void) {
         }
     }
     g_ui_scale = 1.5F; /* exercise the scaled layout during the auto-quit frames */
+    const sprite_row *selected_row = gui_rows_primary();
     nt_log_info("SELFTEST: end (undo:%d redo:%d; selection '%s')", gui_project_undo_depth(),
-                gui_project_redo_depth(), s_sel_abs);
+                gui_project_redo_depth(),
+                selected_row && selected_row->abs ? selected_row->abs : "");
 }
 
 /* --- Overlay pixel probe (F) + touch-on-render guard, driven across the auto-quit frames --- */
@@ -2923,11 +3024,11 @@ void selftest_pre_frame(void) {
             }
         }
         if (found < 0) {
-            s_sel_atlas = 0;
+            NT_ASSERT(selftest_select_atlas(0));
             do_pack_blocking();
             found = (gui_pack_result(0) && gui_pack_result(0)->sprite_count > 0) ? 0 : -1;
         }
-        s_sel_atlas = (found >= 0) ? found : 0;
+        NT_ASSERT(selftest_select_atlas((found >= 0) ? found : 0));
         gui_canvas_select(&s_canvas, -1); /* no selection -> plain hull outlines */
         s_canvas.mode = GUI_CANVAS_ATLAS;
         s_canvas.show_outline = true;
@@ -2946,7 +3047,7 @@ void selftest_pre_frame(void) {
          * fresh-session transition here at the next between-frame ingress
          * boundary, then capture the reducer-owned initial observation. */
         NT_ASSERT(gui_project_test_new());
-        s_sel_atlas = 0;
+        NT_ASSERT(selftest_select_atlas(0));
         reset_selection();
         s_about_open = false;
         s_sec_atlas_open = true;
@@ -3025,10 +3126,10 @@ void selftest_pre_frame(void) {
         g_nt_window.fb_height = 768;
         if (s_st_pf == 1) { /* enter: exercise the normal atlas strip + a populated Region panel */
             preview_stop();
-            s_sel_anim = -1;
-            s_sel_anim_frame = -1;
+            selftest_clear_animation_selection();
             s_canvas.mode = GUI_CANVAS_ATLAS;
-            const tp_result *pr = gui_pack_result(s_sel_atlas);
+            const tp_result *pr =
+                gui_pack_result(selftest_selected_atlas_index());
             if (pr && pr->sprite_count > 0) {
                 gui_canvas_select(&s_canvas, 0);
                 select_row_for_region(0);
@@ -3065,17 +3166,18 @@ void selftest_pre_frame(void) {
              * full-tier strip at 1920x1080) that is packed, then re-marked stale so the strip shows the amber
              * Pack + the "outdated" chip. mark_stale must run AFTER the pack (a successful pack clears stale). */
             preview_stop();
-            s_sel_anim = -1;
-            s_sel_anim_frame = -1;
-            s_sel_atlas = 0;
-            const tp_snapshot_atlas *sa = selftest_atlas_at(s_sel_atlas, NULL);
+            selftest_clear_animation_selection();
+            NT_ASSERT(selftest_select_atlas(0));
+            const int atlas_index = selftest_selected_atlas_index();
+            const tp_snapshot_atlas *sa =
+                selftest_atlas_at(atlas_index, NULL);
             if (sa && sa->source_count == 0) {
                 char afolder[512];
                 to_abs("examples/defold-demo/examples/anim_trim/anims", afolder, sizeof afolder);
-                (void)gui_project_add_source(s_sel_atlas, afolder);
+                (void)gui_project_add_source(atlas_index, afolder);
                 const tp_session_snapshot *edit_snapshot = NULL;
                 const tp_snapshot_atlas *edit_atlas =
-                    selftest_atlas_at(s_sel_atlas, &edit_snapshot);
+                    selftest_atlas_at(atlas_index, &edit_snapshot);
                 gui_edit_atlas_setting(
                     edit_atlas->id,
                     tp_session_snapshot_revision(edit_snapshot),
@@ -3087,9 +3189,10 @@ void selftest_pre_frame(void) {
             double pms = 0.0;
             char perr[256] = {0};
             char pnote[128] = {0};
-            (void)gui_pack_atlas(s_sel_atlas, &pms, perr, sizeof perr, pnote, sizeof pnote);
+            (void)gui_pack_atlas(atlas_index, &pms, perr, sizeof perr,
+                                 pnote, sizeof pnote);
             s_canvas.mode = GUI_CANVAS_ATLAS;
-            const tp_result *pr = gui_pack_result(s_sel_atlas);
+            const tp_result *pr = gui_pack_result(atlas_index);
             if (pr && pr->sprite_count > 0) {
                 gui_canvas_select(&s_canvas, 0);
                 select_row_for_region(0);
@@ -3099,7 +3202,8 @@ void selftest_pre_frame(void) {
             gui_project_mark_stale();
         }
         if (s_st_pf >= 3) { /* size + stale held >= 2 frames -> the lagged bbox reflects the stale strip here */
-            const tp_snapshot_atlas *a = selftest_atlas_at(s_sel_atlas, NULL);
+            const tp_snapshot_atlas *a = selftest_atlas_at(
+                selftest_selected_atlas_index(), NULL);
             NT_ASSERT(a && a->source_count > 0 && gui_project_is_stale() &&
                       "SELFTEST: stale precondition (sources present + preview stale -> amber Pack + chip)");
             selftest_assert_no_overflow(win_w, win_h);
@@ -3125,7 +3229,7 @@ void selftest_pre_frame(void) {
         g_nt_window.fb_width = 1280;
         g_nt_window.fb_height = 800;
         if (s_st_pf == 1) {
-            s_sel_atlas = 0;
+            NT_ASSERT(selftest_select_atlas(0));
             char aerr[256] = {0};
             const bool started = gui_pack_async_start(0, aerr, sizeof aerr);
             nt_log_info("SELFTEST: async pack start -> %d (%s)", (int)started, started ? "ok" : aerr);
@@ -3187,7 +3291,7 @@ void selftest_pre_frame(void) {
             gui_project_test_new();
             gui_pack_clear(-1);
             preview_target_reset();
-            s_sel_atlas = 0;
+            NT_ASSERT(selftest_select_atlas(0));
             reset_selection();
             const tp_snapshot_atlas *a0 = selftest_atlas_at(0, NULL);
             if (a0 && a0->source_count == 0) {
@@ -3307,7 +3411,7 @@ void selftest_pre_frame(void) {
         if (s_st_pf == 1) {
             gui_project_test_new();
             gui_pack_clear(-1);
-            s_sel_atlas = 0;
+            NT_ASSERT(selftest_select_atlas(0));
             reset_selection();
             char afolder[512];
             to_abs("examples/defold-demo/examples/anim_trim/anims", afolder, sizeof afolder);
@@ -3359,7 +3463,7 @@ void selftest_pre_frame(void) {
         if (s_st_pf == 1) {
             gui_project_test_new();
             gui_pack_clear(-1);
-            s_sel_atlas = 0;
+            NT_ASSERT(selftest_select_atlas(0));
             reset_selection();
             char afolder[512];
             to_abs("examples/defold-demo/examples/anim_trim/anims", afolder, sizeof afolder);
@@ -3398,7 +3502,7 @@ void selftest_pre_frame(void) {
                 gui_project_add_atlas().visible_index;
             NT_ASSERT(survivor == 1 && "SELFTEST: stable-publication atlas must be index 1");
             (void)selftest_set_atlas_name_at(1, "survivor");
-            s_sel_atlas = 1;
+            NT_ASSERT(selftest_select_atlas(1));
             reset_selection();
             char afolder[512];
             to_abs("examples/defold-demo/examples/anim_trim/anims", afolder, sizeof afolder);
@@ -3433,7 +3537,7 @@ void selftest_pre_frame(void) {
         if (s_st_pf == 1) {
             gui_project_test_new();
             gui_pack_clear(-1);
-            s_sel_atlas = 0;
+            NT_ASSERT(selftest_select_atlas(0));
             reset_selection();
             char afolder[512];
             to_abs("examples/defold-demo/examples/anim_trim/anims", afolder, sizeof afolder);
@@ -3509,7 +3613,7 @@ void selftest_pre_frame(void) {
             g_nt_window.fb_height = 800;
             gui_project_test_new();
             gui_pack_clear(-1);
-            s_sel_atlas = 0;
+            NT_ASSERT(selftest_select_atlas(0));
             reset_selection();
             char afolder[512];
             to_abs("examples/defold-demo/examples/anim_trim/anims", afolder, sizeof afolder);

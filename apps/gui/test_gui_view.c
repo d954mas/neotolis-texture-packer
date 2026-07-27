@@ -156,6 +156,14 @@ static bool prepare_files(void) {
                               sizeof s_png_solo_1x2);
 }
 
+static void select_atlas_index(int index) {
+    const tp_session_snapshot *snapshot = gui_project_snapshot();
+    const tp_snapshot_atlas *atlas =
+        tp_session_snapshot_atlas_at(snapshot, index);
+    TEST_ASSERT_NOT_NULL(atlas);
+    gui_view_select_atlas(atlas->id);
+}
+
 /* Adds the folder source (index 0) then the file source (index 1) to the
  * default atlas, rescans, and builds the row model. build_rows classifies by
  * DISK state (gui_scan_is_dir), so pack/ expands to its three children and
@@ -179,7 +187,7 @@ static void add_sources_and_build(tp_id128 *folder_id, tp_id128 *file_id) {
                                     s_solo, TP_SOURCE_KIND_FILE));
 
     gui_project_invalidate_sources();
-    s_sel_atlas = 0;
+    gui_view_select_atlas(atlas_id);
     build_rows();
 
     snapshot = gui_project_snapshot();
@@ -220,7 +228,7 @@ static void add_sources_reversed_and_build(tp_id128 *folder_id,
                                     s_pack_dir, TP_SOURCE_KIND_FOLDER));
 
     gui_project_invalidate_sources();
-    s_sel_atlas = 0;
+    gui_view_select_atlas(atlas_id);
     build_rows();
 
     snapshot = gui_project_snapshot();
@@ -264,7 +272,8 @@ void setUp(void) {
     tp_scan__test_reset_all();
     TEST_ASSERT_TRUE(prepare_files());
     gui_project_init();
-    s_sel_atlas = 0;
+    gui_view_reset();
+    select_atlas_index(0);
     multi_sel_clear();
 }
 
@@ -446,7 +455,7 @@ void test_view_collapse_hides_children_and_filter_overrides(void) {
  *    changes, the primary selection is re-resolved by canonical ref (kept if the sprite survives,
  *    cleared if gone) and multi-select refs pointing at removed sprites are pruned. Here the "model
  *    change" is deleting a child file + rescanning, standing in for an undo that drops a sprite. */
-void test_selection_revalidate_reresolves_primary_and_prunes_multi(void) {
+void test_view_reconcile_preserves_primary_and_prunes_multi(void) {
     add_sources_and_build(NULL, NULL);
     build_view();
 
@@ -456,15 +465,11 @@ void test_selection_revalidate_reresolves_primary_and_prunes_multi(void) {
     TEST_ASSERT_GREATER_OR_EQUAL_INT(0, bi);
 
     /* primary = alpha; multi-select = {alpha, beta}. */
-    s_sel_src = s_rows[ai].src;
-    s_sel_child = s_rows[ai].child;
+    gui_rows_select_primary(&s_rows[ai]);
     multi_sel_clear();
     multi_sel_add_ref(s_rows[ai].source_id, s_rows[ai].source_key);
     multi_sel_add_ref(s_rows[bi].source_id, s_rows[bi].source_key);
     TEST_ASSERT_EQUAL_INT(2, s_multi_sel_count);
-
-    gui_selection_capture_reselect(); /* capture alpha's ref BEFORE the model shifts */
-    TEST_ASSERT_TRUE(s_reselect_pending);
 
     /* beta vanishes from disk; alpha survives. */
     TEST_ASSERT_EQUAL_INT(0, remove(s_beta));
@@ -475,11 +480,11 @@ void test_selection_revalidate_reresolves_primary_and_prunes_multi(void) {
     const int ai2 = find_row_by_name("alpha");
     TEST_ASSERT_GREATER_OR_EQUAL_INT(0, ai2);
 
-    gui_selection_revalidate();
-    TEST_ASSERT_FALSE(s_reselect_pending);
-    /* primary re-resolved to alpha's (possibly shifted) row indices. */
-    TEST_ASSERT_EQUAL_INT(s_rows[ai2].src, s_sel_src);
-    TEST_ASSERT_EQUAL_INT(s_rows[ai2].child, s_sel_child);
+    /* The stable primary resolves to alpha in the replacement row model. */
+    const sprite_row *primary = gui_rows_primary();
+    TEST_ASSERT_NOT_NULL(primary);
+    TEST_ASSERT_EQUAL_INT(s_rows[ai2].src, primary->src);
+    TEST_ASSERT_EQUAL_INT(s_rows[ai2].child, primary->child);
     /* beta pruned, alpha kept. */
     TEST_ASSERT_EQUAL_INT(1, s_multi_sel_count);
     TEST_ASSERT_TRUE(
@@ -496,21 +501,20 @@ static int view_pos_of_row(int row_index) {
     return -1;
 }
 
-/* 8. gui_selection_revalidate, PRIMARY-DELETED branch: when the sprite carrying the primary selection
- *    is itself the one that vanishes, revalidate's `if (!found)` path clears the dangling primary to
- *    -1 (rather than snapping it onto a surviving neighbour). Here beta is the primary AND the removed
- *    child. */
-void test_selection_revalidate_clears_primary_when_it_is_deleted(void) {
+/* 8. When the sprite carrying the primary selection vanishes, stable view
+ *    reconciliation clears the dangling identity rather than snapping it onto
+ *    a surviving neighbour. Here beta is primary AND the removed child. */
+void test_view_reconcile_clears_removed_primary(void) {
     add_sources_and_build(NULL, NULL);
     build_view();
 
     const int bi = find_row_by_name("beta");
     TEST_ASSERT_GREATER_OR_EQUAL_INT(0, bi);
-    s_sel_src = s_rows[bi].src; /* primary = beta (the child about to disappear) */
-    s_sel_child = s_rows[bi].child;
-
-    gui_selection_capture_reselect();
-    TEST_ASSERT_TRUE(s_reselect_pending);
+    gui_rows_select_primary(&s_rows[bi]);
+    const int beta_view = view_pos_of_row(bi);
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, beta_view);
+    gui_rows_set_focus_view_index(beta_view);
+    gui_rows_set_anchor_view_index(beta_view);
 
     TEST_ASSERT_EQUAL_INT(0, remove(s_beta)); /* the primary's backing file is gone */
     gui_project_invalidate_sources();
@@ -518,33 +522,29 @@ void test_selection_revalidate_clears_primary_when_it_is_deleted(void) {
     build_view();
     TEST_ASSERT_EQUAL_INT(-1, find_row_by_name("beta"));
 
-    gui_selection_revalidate();
-    TEST_ASSERT_FALSE(s_reselect_pending);
-    /* the captured primary no longer resolves -> cleared, never re-pinned to alpha/gamma. */
-    TEST_ASSERT_EQUAL_INT(-1, s_sel_src);
-    TEST_ASSERT_EQUAL_INT(-1, s_sel_child);
-    TEST_ASSERT_FALSE(s_sel_missing);
-    TEST_ASSERT_EQUAL_INT(-1, s_focus_view); /* nothing selected -> focus has no home */
+    /* Removed identities clear; they never alias alpha/gamma at the recycled slot. */
+    TEST_ASSERT_NULL(gui_rows_primary());
+    TEST_ASSERT_FALSE(gui_rows_primary_is_set());
+    TEST_ASSERT_EQUAL_INT(-1, gui_rows_focus_view_index());
+    TEST_ASSERT_FALSE(gui_rows_focus_is_set());
+    TEST_ASSERT_EQUAL_INT(-1, gui_rows_anchor_view_index());
+    TEST_ASSERT_FALSE(gui_rows_anchor_is_set());
 }
 
-/* 9. focus_sync_to_selection (new): after a revalidate re-resolves the primary onto a SHIFTED row,
- *    the keyboard focus (an s_view index) must re-pin to that row's new view position. And when the
- *    still-selected row is hidden (collapsed folder), focus falls back to -1. */
-void test_selection_revalidate_resyncs_focus_to_shifted_row(void) {
+/* 9. Stable primary and focus identities resolve onto a shifted row's new
+ *    view position. When that row is hidden, the focus has no visible index
+ *    but retains its identity for a later reveal. */
+void test_view_reconcile_resolves_focus_after_row_shift(void) {
     tp_id128 folder_id = {{0}};
     add_sources_and_build(&folder_id, NULL);
     build_view();
 
     const int gi = find_row_by_name("gamma"); /* last child -> a later beta-delete shifts it up */
     TEST_ASSERT_GREATER_OR_EQUAL_INT(0, gi);
-    s_sel_src = s_rows[gi].src;
-    s_sel_child = s_rows[gi].child;
+    gui_rows_select_primary(&s_rows[gi]);
     const int gview = view_pos_of_row(gi);
     TEST_ASSERT_GREATER_OR_EQUAL_INT(0, gview);
-    s_focus_view = gview; /* focus pinned on gamma's current view row */
-
-    gui_selection_capture_reselect();
-    TEST_ASSERT_TRUE(s_reselect_pending);
+    gui_rows_set_focus_view_index(gview);
 
     /* a child AHEAD of gamma (beta) disappears -> gamma's row + view index both move up by one. */
     TEST_ASSERT_EQUAL_INT(0, remove(s_beta));
@@ -552,35 +552,34 @@ void test_selection_revalidate_resyncs_focus_to_shifted_row(void) {
     build_rows();
     build_view();
 
-    gui_selection_revalidate();
-    TEST_ASSERT_FALSE(s_reselect_pending);
-
     const int gi2 = find_row_by_name("gamma");
     TEST_ASSERT_GREATER_OR_EQUAL_INT(0, gi2);
-    TEST_ASSERT_EQUAL_INT(s_rows[gi2].src, s_sel_src);
-    TEST_ASSERT_EQUAL_INT(s_rows[gi2].child, s_sel_child);
+    const sprite_row *primary = gui_rows_primary();
+    TEST_ASSERT_NOT_NULL(primary);
+    TEST_ASSERT_EQUAL_INT(s_rows[gi2].src, primary->src);
+    TEST_ASSERT_EQUAL_INT(s_rows[gi2].child, primary->child);
     const int gview2 = view_pos_of_row(gi2);
     TEST_ASSERT_GREATER_OR_EQUAL_INT(0, gview2);
-    TEST_ASSERT_EQUAL_INT(gview2, s_focus_view); /* focus followed gamma to its new view position */
+    TEST_ASSERT_EQUAL_INT(
+        gview2, gui_rows_focus_view_index()); /* focus followed gamma */
 
     /* Now hide the still-selected row by collapsing its folder: the primary stays resolved in the row
      * model, but with no visible home the focus index re-pins to -1. */
     gui_rows_toggle_collapsed(folder_id);
     TEST_ASSERT_TRUE(gui_rows_is_collapsed(folder_id));
-    gui_selection_capture_reselect();
-    TEST_ASSERT_TRUE(s_reselect_pending);
     build_view();
-    gui_selection_revalidate();
-    TEST_ASSERT_EQUAL_INT(s_rows[gi2].src, s_sel_src); /* primary unchanged in the model */
-    TEST_ASSERT_EQUAL_INT(s_rows[gi2].child, s_sel_child);
+    primary = gui_rows_primary();
+    TEST_ASSERT_NOT_NULL(primary);
+    TEST_ASSERT_EQUAL_INT(s_rows[gi2].src, primary->src);
+    TEST_ASSERT_EQUAL_INT(s_rows[gi2].child, primary->child);
     TEST_ASSERT_EQUAL_INT(-1, view_pos_of_row(gi2)); /* gamma hidden by the collapse */
-    TEST_ASSERT_EQUAL_INT(-1, s_focus_view);
+    TEST_ASSERT_EQUAL_INT(-1, gui_rows_focus_view_index());
+    TEST_ASSERT_TRUE(gui_rows_focus_is_set()); /* hidden, not forgotten */
 }
 
-/* 10. Folder/source PRIMARY preserved by STABLE id (new capture branch): a selected folder source row
- *     (s_sel_child == -1, no leaf ref) is captured by its source id with an EMPTY key, so an undo that
- *     shifts the source ordering re-resolves it onto the SAME folder, not a shifted neighbour. */
-void test_selection_revalidate_folder_primary_follows_stable_id(void) {
+/* 10. A folder/source primary uses its stable source id and an empty key, so
+ *     shifting source order resolves it onto the same folder, not a neighbour. */
+void test_view_reconcile_folder_primary_follows_stable_id(void) {
     tp_id128 folder_id = {{0}};
     tp_id128 file_id = {{0}};
     add_sources_reversed_and_build(&folder_id, &file_id); /* file @ src 0, folder @ src 1 */
@@ -596,13 +595,8 @@ void test_selection_revalidate_folder_primary_follows_stable_id(void) {
     }
     TEST_ASSERT_GREATER_OR_EQUAL_INT(0, folder_row);
     TEST_ASSERT_EQUAL_INT(1, s_rows[folder_row].src); /* folder is source index 1 here */
-    s_sel_src = s_rows[folder_row].src;
-    s_sel_child = -1; /* primary is the folder/source row, not a leaf */
-
-    gui_selection_capture_reselect();
-    TEST_ASSERT_TRUE(s_reselect_pending);
-    TEST_ASSERT_TRUE(tp_id128_eq(s_reselect_source_id, folder_id));
-    TEST_ASSERT_EQUAL_INT('\0', s_reselect_key[0]); /* empty key == folder/source primary */
+    gui_rows_select_primary(&s_rows[folder_row]);
+    TEST_ASSERT_TRUE(gui_rows_primary_matches(folder_id, "", true));
 
     /* remove the FILE source at index 0 -> the folder's source index shifts 1 -> 0. */
     const tp_snapshot_atlas *atlas =
@@ -615,21 +609,13 @@ void test_selection_revalidate_folder_primary_follows_stable_id(void) {
     build_rows();
     build_view();
 
-    gui_selection_revalidate();
-    TEST_ASSERT_FALSE(s_reselect_pending);
-    TEST_ASSERT_EQUAL_INT(-1, s_sel_child);
-    TEST_ASSERT_EQUAL_INT(0, s_sel_src); /* index genuinely moved 1 -> 0 */
+    const sprite_row *primary = gui_rows_primary();
+    TEST_ASSERT_NOT_NULL(primary);
+    TEST_ASSERT_EQUAL_INT(-1, primary->child);
+    TEST_ASSERT_EQUAL_INT(0, primary->src); /* index genuinely moved 1 -> 0 */
     /* and it is the SAME folder (by id), not whatever else landed at index 0. */
-    int primary_row = -1;
-    for (int i = 0; i < s_row_count; ++i) {
-        if (s_rows[i].is_source && s_rows[i].src == s_sel_src) {
-            primary_row = i;
-            break;
-        }
-    }
-    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, primary_row);
-    TEST_ASSERT_TRUE(s_rows[primary_row].is_folder);
-    TEST_ASSERT_TRUE(tp_id128_eq(s_rows[primary_row].source_id, folder_id));
+    TEST_ASSERT_TRUE(primary->is_folder);
+    TEST_ASSERT_TRUE(tp_id128_eq(primary->source_id, folder_id));
 }
 
 /* 11. ADDED sort (§61.1): source spans order by the order they were added to the project (source
@@ -658,26 +644,21 @@ void test_view_sort_added_orders_by_add_order(void) {
     TEST_ASSERT_EQUAL_STRING("solo", s_rows[s_view[s_view_count - 1]].sprite_name);
 }
 
-/* 12. Empty state: an atlas with zero sources yields an empty row model + view, and revalidate +
- *     focus-sync stay crash-free (focus -> -1) against that empty s_view. */
+/* 12. Empty state: an atlas with zero sources yields an empty row model and
+ *     safely clears stale stable identities. */
 void test_view_empty_state_is_safe(void) {
-    s_sel_atlas = 0; /* default project: one atlas, no sources added */
+    select_atlas_index(0); /* default project: one atlas, no sources added */
     build_rows();
+    tp_id128 stale_id = tp_id128_nil();
+    stale_id.bytes[0] = 1U;
+    gui_rows_select_primary_ref(stale_id, "", true);
     build_view();
     TEST_ASSERT_EQUAL_INT(0, s_row_count);
     TEST_ASSERT_EQUAL_INT(0, s_view_count);
-
-    /* Arm a stale primary + focus, then revalidate against the empty view: focus_sync must scan the
-     * empty s_view without dereferencing anything and settle on -1. */
-    s_sel_src = 0;
-    s_sel_child = -1;
-    s_focus_view = 5;
-    s_reselect_pending = true;
-    s_reselect_source_id = tp_id128_nil();
-    s_reselect_key[0] = '\0';
-    gui_selection_revalidate();
-    TEST_ASSERT_FALSE(s_reselect_pending);
-    TEST_ASSERT_EQUAL_INT(-1, s_focus_view);
+    TEST_ASSERT_NULL(gui_rows_primary());
+    TEST_ASSERT_FALSE(gui_rows_primary_is_set());
+    TEST_ASSERT_EQUAL_INT(-1, gui_rows_focus_view_index());
+    TEST_ASSERT_FALSE(gui_rows_focus_is_set());
 }
 
 /* 13. collapsed_prune_missing: a collapse entry for a folder source that is later REMOVED from the
@@ -716,7 +697,7 @@ void test_view_collapse_pruned_when_folder_source_removed(void) {
 
 /* 14. A missing file source selected as the primary keeps its missing state
  * through revalidation. */
-void test_selection_revalidate_keeps_missing_state_on_source_reselect(void) {
+void test_view_reconcile_keeps_missing_source_primary(void) {
     add_sources_and_build(NULL, NULL);
 
     TEST_ASSERT_EQUAL_INT(0, remove(s_solo)); /* solo.png gone -> its file source goes missing */
@@ -735,22 +716,20 @@ void test_selection_revalidate_keeps_missing_state_on_source_reselect(void) {
     const tp_id128 missing_id = s_rows[mi].source_id;
 
     /* primary = the missing source row (no leaf ref -> captured by stable id with an empty key). */
-    s_sel_src = s_rows[mi].src;
-    s_sel_child = -1;
-    gui_selection_capture_reselect();
-    TEST_ASSERT_TRUE(s_reselect_pending);
-    TEST_ASSERT_EQUAL_INT('\0', s_reselect_key[0]);
-    TEST_ASSERT_TRUE(tp_id128_eq(s_reselect_source_id, missing_id));
+    gui_rows_select_primary(&s_rows[mi]);
+    TEST_ASSERT_TRUE(gui_rows_primary_matches(missing_id, "", true));
 
-    s_sel_missing = false; /* stand in for the spurious clear the source branch used to hardcode */
-    gui_selection_revalidate();
-    TEST_ASSERT_FALSE(s_reselect_pending);
-    TEST_ASSERT_EQUAL_INT(-1, s_sel_child);
-    TEST_ASSERT_TRUE(s_sel_missing); /* Missing state survives source reselect. */
+    gui_project_invalidate_sources();
+    build_rows();
+    build_view();
+    const sprite_row *primary = gui_rows_primary();
+    TEST_ASSERT_NOT_NULL(primary);
+    TEST_ASSERT_EQUAL_INT(-1, primary->child);
+    TEST_ASSERT_TRUE(primary->missing); /* Missing state survives re-resolution. */
 
     int mi2 = -1;
     for (int i = 0; i < s_row_count; ++i) {
-        if (s_rows[i].is_source && s_rows[i].src == s_sel_src) {
+        if (s_rows[i].is_source && s_rows[i].src == primary->src) {
             mi2 = i;
             break;
         }
@@ -771,27 +750,29 @@ void test_view_focus_cleared_when_focused_row_filtered_out(void) {
     TEST_ASSERT_GREATER_OR_EQUAL_INT(0, alpha);
     const int alpha_view = view_pos_of_row(alpha);
     TEST_ASSERT_GREATER_OR_EQUAL_INT(0, alpha_view);
-    s_focus_view = alpha_view;      /* focus + anchor both pinned on a folder child */
-    s_sel_anchor_row = alpha_view;
+    gui_rows_set_focus_view_index(alpha_view);
+    gui_rows_set_anchor_view_index(alpha_view);
 
     gui_rows_set_filter("solo"); /* only the solo file source survives; the whole folder span drops */
     build_view();
     TEST_ASSERT_EQUAL_INT(-1, view_pos_of_row(alpha)); /* alpha gone from the view */
-    TEST_ASSERT_EQUAL_INT(-1, s_focus_view);           /* Stale focus cannot alias another row. */
-    TEST_ASSERT_EQUAL_INT(-1, s_sel_anchor_row);       /* The range anchor is cleared too. */
+    TEST_ASSERT_EQUAL_INT(-1, gui_rows_focus_view_index());
+    TEST_ASSERT_TRUE(gui_rows_focus_is_set()); /* hidden focus remains canonical */
+    TEST_ASSERT_EQUAL_INT(-1, gui_rows_anchor_view_index());
+    TEST_ASSERT_FALSE(gui_rows_anchor_is_set());
 
     /* Positive control: a SURVIVING focused row re-pins to its new position under the filter. */
     gui_rows_set_filter("");
     build_view();
     const int solo = find_row_by_name("solo");
     TEST_ASSERT_GREATER_OR_EQUAL_INT(0, solo);
-    s_focus_view = view_pos_of_row(solo);
-    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, s_focus_view);
+    gui_rows_set_focus_view_index(view_pos_of_row(solo));
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, gui_rows_focus_view_index());
     gui_rows_set_filter("solo");
     build_view();
     const int solo_view = view_pos_of_row(solo);
     TEST_ASSERT_GREATER_OR_EQUAL_INT(0, solo_view);
-    TEST_ASSERT_EQUAL_INT(solo_view, s_focus_view); /* focus followed the surviving row */
+    TEST_ASSERT_EQUAL_INT(solo_view, gui_rows_focus_view_index());
 }
 
 /* 16. Folder collapse is keyed by stable source id and must survive an atlas round-trip. Two
@@ -813,7 +794,7 @@ void test_view_collapse_survives_atlas_switch(void) {
     gui_project_invalidate_sources();
 
     /* View A0, collapse its folder. */
-    s_sel_atlas = 0;
+    select_atlas_index(0);
     build_rows();
     build_view();
     gui_rows_toggle_collapsed(folder0);
@@ -822,13 +803,13 @@ void test_view_collapse_survives_atlas_switch(void) {
     TEST_ASSERT_EQUAL_INT(2, s_view_count); /* folder (collapsed) + solo */
 
     /* Switch to A1 (B). Building B must NOT prune A0's collapse id. */
-    s_sel_atlas = 1;
+    gui_view_select_atlas(a1->id);
     build_rows();
     build_view();
     TEST_ASSERT_TRUE(gui_rows_is_collapsed(folder0)); /* Survives the switch. */
 
     /* Back to A0: still collapsed, children still hidden. */
-    s_sel_atlas = 0;
+    select_atlas_index(0);
     build_rows();
     build_view();
     TEST_ASSERT_TRUE(gui_rows_is_collapsed(folder0));
@@ -837,8 +818,8 @@ void test_view_collapse_survives_atlas_switch(void) {
 
 /* 17. The viewed atlas is preserved by stable id across an Undo that re-inserts an atlas before it.
  *     Two atlases; view A1 with a sprite selected; remove A0 (A1 shifts 1->0); Undo re-inserts A0 (A1
- *     back to 1). do_undo's settle must re-resolve s_sel_atlas onto A1 by id (not leave the positional
- *     index on the now-different atlas), so the sprite selection re-resolves in the correct atlas. */
+ *     back to 1). The retained stable atlas id must still resolve A1 rather
+ *     than the now-different atlas at its former positional index. */
 void test_undo_preserves_selected_atlas_by_stable_id(void) {
     const tp_session_snapshot *snap = gui_project_snapshot();
     const tp_snapshot_atlas *a0 = tp_session_snapshot_atlas_at(snap, 0);
@@ -862,13 +843,12 @@ void test_undo_preserves_selected_atlas_by_stable_id(void) {
     gui_project_invalidate_sources();
 
     /* View A1 (index 1); select the beta leaf in it. */
-    s_sel_atlas = 1;
+    gui_view_select_atlas(a1_id);
     build_rows();
     build_view();
     int bi = find_row_by_name("beta");
     TEST_ASSERT_GREATER_OR_EQUAL_INT(0, bi);
-    s_sel_src = s_rows[bi].src;
-    s_sel_child = s_rows[bi].child;
+    gui_rows_select_primary(&s_rows[bi]);
 
     /* Remove A0 (the op we will undo): A1 shifts index 1 -> 0. */
     snap = gui_project_snapshot();
@@ -877,32 +857,31 @@ void test_undo_preserves_selected_atlas_by_stable_id(void) {
     TEST_ASSERT_TRUE(tp_id128_eq(
         tp_session_snapshot_atlas_at(gui_project_snapshot(), 0)->id, a1_id));
     /* Re-establish a clean selection while viewing A1 at its new index 0. */
-    s_sel_atlas = 0;
     build_rows();
     build_view();
+    TEST_ASSERT_EQUAL_INT(0, gui_view_atlas_index(gui_project_snapshot()));
     bi = find_row_by_name("beta");
     TEST_ASSERT_GREATER_OR_EQUAL_INT(0, bi);
-    s_sel_src = s_rows[bi].src;
-    s_sel_child = s_rows[bi].child;
+    gui_rows_select_primary(&s_rows[bi]);
 
     /* Undo the removal: A0 re-inserted at 0, A1 shifts back to 1. */
     do_undo();
-    TEST_ASSERT_TRUE(s_reselect_pending);
-    /* Complete the frame loop that follows an undo: rebuild + revalidate the preserved selection. */
+    /* Complete the frame loop that follows an undo. */
     build_rows();
     build_view();
-    gui_selection_revalidate();
 
     /* The viewed atlas is A1 again, not the positional neighbor A0. */
     TEST_ASSERT_EQUAL_INT(2, tp_session_snapshot_atlas_count(gui_project_snapshot()));
-    TEST_ASSERT_EQUAL_INT(1, s_sel_atlas);
+    TEST_ASSERT_EQUAL_INT(1, gui_view_atlas_index(gui_project_snapshot()));
     TEST_ASSERT_TRUE(tp_id128_eq(
         tp_session_snapshot_atlas_at(gui_project_snapshot(), 1)->id, a1_id));
     /* and the beta selection survived, re-resolved in the correct atlas (not cleared). */
     const int bi2 = find_row_by_name("beta");
     TEST_ASSERT_GREATER_OR_EQUAL_INT(0, bi2);
-    TEST_ASSERT_EQUAL_INT(s_rows[bi2].src, s_sel_src);
-    TEST_ASSERT_EQUAL_INT(s_rows[bi2].child, s_sel_child);
+    const sprite_row *primary = gui_rows_primary();
+    TEST_ASSERT_NOT_NULL(primary);
+    TEST_ASSERT_EQUAL_INT(s_rows[bi2].src, primary->src);
+    TEST_ASSERT_EQUAL_INT(s_rows[bi2].child, primary->child);
 }
 
 /* 18. SIZE sort (§61.1): run the real blocking pack, then force the row cache
@@ -1072,11 +1051,10 @@ void test_view_focus_follows_selection_across_model_rebuild(void) {
 
     int gi = find_row_by_name("gamma");
     TEST_ASSERT_GREATER_OR_EQUAL_INT(0, gi);
-    s_sel_src = s_rows[gi].src; /* primary selection = gamma */
-    s_sel_child = s_rows[gi].child;
+    gui_rows_select_primary(&s_rows[gi]);
     const int gview = view_pos_of_row(gi);
     TEST_ASSERT_GREATER_OR_EQUAL_INT(0, gview);
-    s_focus_view = gview; /* focus pinned on gamma's current (natural-last) view slot */
+    gui_rows_set_focus_view_index(gview);
 
     /* Rename gamma -> "aaa": bumps the model generation (rebuild) and makes it sort first. */
     const tp_session_snapshot *snapshot = gui_project_snapshot();
@@ -1096,7 +1074,10 @@ void test_view_focus_follows_selection_across_model_rebuild(void) {
     const int gview2 = view_pos_of_row(gi);
     TEST_ASSERT_EQUAL_INT(pos + 1, gview2);      /* renamed gamma now leads its siblings */
     TEST_ASSERT_TRUE(gview2 != gview);           /* its view slot genuinely moved */
-    TEST_ASSERT_EQUAL_INT(gview2, s_focus_view); /* Focus followed gamma. */
+    TEST_ASSERT_EQUAL_INT(gview2, gui_rows_focus_view_index());
+    TEST_ASSERT_TRUE(gui_rows_primary_matches(
+        s_rows[gi].source_id, s_rows[gi].source_key,
+        s_rows[gi].is_source));
 }
 
 /* A model rebuild can reorder rows while the Shift-range anchor is stored as
@@ -1111,7 +1092,7 @@ void test_view_anchor_follows_sprite_across_model_rebuild(void) {
     TEST_ASSERT_GREATER_OR_EQUAL_INT(0, gi);
     const int gview = view_pos_of_row(gi);
     TEST_ASSERT_GREATER_OR_EQUAL_INT(0, gview);
-    s_sel_anchor_row = gview;
+    gui_rows_set_anchor_view_index(gview);
 
     const tp_session_snapshot *snapshot = gui_project_snapshot();
     const tp_snapshot_atlas *atlas =
@@ -1130,7 +1111,7 @@ void test_view_anchor_follows_sprite_across_model_rebuild(void) {
     const int gview2 = view_pos_of_row(gi);
     TEST_ASSERT_GREATER_OR_EQUAL_INT(0, gview2);
     TEST_ASSERT_TRUE(gview2 != gview);
-    TEST_ASSERT_EQUAL_INT(gview2, s_sel_anchor_row);
+    TEST_ASSERT_EQUAL_INT(gview2, gui_rows_anchor_view_index());
 }
 
 /* Right-clicking a leaf already inside a multi-selection keeps the set, but
@@ -1155,10 +1136,9 @@ void test_context_refocus_updates_anchor_without_collapsing_multi_selection(void
 
     multi_sel_add_ref(s_rows[ai].source_id, s_rows[ai].source_key);
     multi_sel_add_ref(s_rows[gi].source_id, s_rows[gi].source_key);
-    s_sel_src = s_rows[ai].src;
-    s_sel_child = s_rows[ai].child;
-    s_sel_anchor_row = bv; /* stale anchor from the previous primary */
-    s_focus_view = av;
+    gui_rows_select_primary(&s_rows[ai]);
+    gui_rows_set_anchor_view_index(bv); /* stale anchor from previous primary */
+    gui_rows_set_focus_view_index(av);
     s_focus_follow = false;
 
     gui_rows_context_refocus(gv);
@@ -1168,11 +1148,13 @@ void test_context_refocus_updates_anchor_without_collapsing_multi_selection(void
         multi_sel_contains_ref(s_rows[ai].source_id, s_rows[ai].source_key));
     TEST_ASSERT_TRUE(
         multi_sel_contains_ref(s_rows[gi].source_id, s_rows[gi].source_key));
-    TEST_ASSERT_EQUAL_INT(s_rows[gi].src, s_sel_src);
-    TEST_ASSERT_EQUAL_INT(s_rows[gi].child, s_sel_child);
-    TEST_ASSERT_EQUAL_STRING(s_rows[gi].abs, s_sel_abs);
-    TEST_ASSERT_EQUAL_INT(gv, s_focus_view);
-    TEST_ASSERT_EQUAL_INT(gv, s_sel_anchor_row);
+    const sprite_row *primary = gui_rows_primary();
+    TEST_ASSERT_NOT_NULL(primary);
+    TEST_ASSERT_EQUAL_INT(s_rows[gi].src, primary->src);
+    TEST_ASSERT_EQUAL_INT(s_rows[gi].child, primary->child);
+    TEST_ASSERT_EQUAL_STRING(s_rows[gi].abs, primary->abs);
+    TEST_ASSERT_EQUAL_INT(gv, gui_rows_focus_view_index());
+    TEST_ASSERT_EQUAL_INT(gv, gui_rows_anchor_view_index());
     TEST_ASSERT_TRUE(s_focus_follow);
 }
 
@@ -1250,6 +1232,9 @@ void test_shift_range_oom_keeps_previous_selection_atomically(void) {
 
 static void install_large_synthetic_selection(void) {
     gui_rows_shutdown();
+    /* Advance the row generation without material rows so the public
+     * reconciliation seam observes this synthetic replacement exactly once. */
+    build_rows();
     s_rows = calloc(LARGE_SELECTION_COUNT, sizeof *s_rows);
     s_view = calloc(LARGE_SELECTION_COUNT, sizeof *s_view);
     TEST_ASSERT_NOT_NULL(s_rows);
@@ -1276,19 +1261,13 @@ static void install_large_synthetic_selection(void) {
     }
     multi_sel_set_view_range(0, LARGE_SELECTION_COUNT - 1);
     TEST_ASSERT_EQUAL_INT(LARGE_SELECTION_COUNT, s_multi_sel_count);
-    s_sel_src = 0;
-    s_sel_child = 0;
-    s_sel_missing = false;
 }
 
-void test_selection_revalidate_5000_present_refs_has_linear_identity_work(void) {
+void test_view_reconcile_5000_present_refs_has_linear_identity_work(void) {
     install_large_synthetic_selection();
-    s_reselect_pending = true;
-    s_reselect_source_id = tp_id128_nil();
-    s_reselect_key[0] = '\0';
     gui_rows_test_reset_selection_identity_comparisons();
 
-    gui_selection_revalidate();
+    gui_rows_reconcile_view_state();
 
     TEST_ASSERT_EQUAL_INT(LARGE_SELECTION_COUNT, s_multi_sel_count);
     TEST_ASSERT_LESS_OR_EQUAL_UINT64(
@@ -1299,15 +1278,12 @@ void test_selection_revalidate_5000_present_refs_has_linear_identity_work(void) 
         gui_rows_test_selection_compaction_moves());
 }
 
-void test_selection_revalidate_5000_deleted_refs_compacts_linearly(void) {
+void test_view_reconcile_5000_deleted_refs_compacts_linearly(void) {
     install_large_synthetic_selection();
-    s_reselect_pending = true;
-    s_reselect_source_id = tp_id128_nil();
-    s_reselect_key[0] = '\0';
     gui_rows_test_reset_selection_identity_comparisons();
     s_row_count = 0;
 
-    gui_selection_revalidate();
+    gui_rows_reconcile_view_state();
 
     s_row_count = LARGE_SELECTION_COUNT; /* let tearDown release synthetic rows */
     TEST_ASSERT_EQUAL_INT(0, s_multi_sel_count);
@@ -1316,12 +1292,14 @@ void test_selection_revalidate_5000_deleted_refs_compacts_linearly(void) {
         gui_rows_test_selection_compaction_moves());
 }
 
-/* The OOM identity projection is a different row ordering. Numeric interaction
- * indices from the abandoned projection must not survive into it. */
-void test_view_oom_fallback_clears_focus_and_anchor(void) {
+/* The OOM identity projection is a different row ordering. Stable interaction
+ * identities must resolve against that fallback rather than aliasing slots. */
+void test_view_oom_fallback_preserves_stable_focus_and_anchor(void) {
     add_sources_and_build(NULL, NULL);
-    s_focus_view = 1;
-    s_sel_anchor_row = 2;
+    build_view();
+    TEST_ASSERT_GREATER_THAN(2, s_row_count);
+    gui_rows_set_focus_view_index(view_pos_of_row(1));
+    gui_rows_set_anchor_view_index(view_pos_of_row(2));
 
     gui_rows_test_fail_next_view_alloc();
     build_view();
@@ -1330,8 +1308,70 @@ void test_view_oom_fallback_clears_focus_and_anchor(void) {
     for (int i = 0; i < s_view_count; ++i) {
         TEST_ASSERT_EQUAL_INT(i, s_view[i]);
     }
-    TEST_ASSERT_EQUAL_INT(-1, s_focus_view);
-    TEST_ASSERT_EQUAL_INT(-1, s_sel_anchor_row);
+    TEST_ASSERT_EQUAL_INT(1, gui_rows_focus_view_index());
+    TEST_ASSERT_EQUAL_INT(2, gui_rows_anchor_view_index());
+}
+
+/* A failed row-model projection is not an authoritative empty model. Canonical
+ * selection identities must survive it and resolve again on the next
+ * successful retry. */
+void test_row_projection_oom_preserves_selection_until_retry(void) {
+    add_sources_and_build(NULL, NULL);
+    build_view();
+
+    const int alpha = find_row_by_name("alpha");
+    const int beta = find_row_by_name("beta");
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, alpha);
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, beta);
+    const int alpha_view = view_pos_of_row(alpha);
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, alpha_view);
+
+    const tp_id128 alpha_id = s_rows[alpha].source_id;
+    const bool alpha_source_row = s_rows[alpha].is_source;
+    char alpha_key[TP_SRCKEY_MAX];
+    TEST_ASSERT_LESS_THAN_INT(
+        (int)sizeof alpha_key,
+        snprintf(alpha_key, sizeof alpha_key, "%s",
+                 s_rows[alpha].source_key));
+    const tp_id128 beta_id = s_rows[beta].source_id;
+    char beta_key[TP_SRCKEY_MAX];
+    TEST_ASSERT_LESS_THAN_INT(
+        (int)sizeof beta_key,
+        snprintf(beta_key, sizeof beta_key, "%s",
+                 s_rows[beta].source_key));
+
+    gui_rows_select_primary(&s_rows[alpha]);
+    gui_rows_set_focus_view_index(alpha_view);
+    multi_sel_add_ref(alpha_id, alpha_key);
+    multi_sel_add_ref(beta_id, beta_key);
+    TEST_ASSERT_EQUAL_INT(2, s_multi_sel_count);
+
+    gui_project_invalidate_sources();
+    gui_rows_test_fail_rows_strdup_after(0);
+    build_rows();
+    build_view();
+
+    TEST_ASSERT_EQUAL_INT(0, s_row_count);
+    TEST_ASSERT_TRUE(gui_rows_primary_is_set());
+    TEST_ASSERT_TRUE(gui_rows_primary_matches(
+        alpha_id, alpha_key, alpha_source_row));
+    TEST_ASSERT_TRUE(gui_rows_focus_is_set());
+    TEST_ASSERT_EQUAL_INT(2, s_multi_sel_count);
+    TEST_ASSERT_TRUE(multi_sel_contains_ref(alpha_id, alpha_key));
+    TEST_ASSERT_TRUE(multi_sel_contains_ref(beta_id, beta_key));
+
+    build_rows();
+    build_view();
+
+    TEST_ASSERT_GREATER_THAN(0, s_row_count);
+    TEST_ASSERT_TRUE(gui_rows_primary_matches(
+        alpha_id, alpha_key, alpha_source_row));
+    TEST_ASSERT_TRUE(gui_rows_focus_matches(
+        alpha_id, alpha_key, alpha_source_row));
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, gui_rows_focus_view_index());
+    TEST_ASSERT_EQUAL_INT(2, s_multi_sel_count);
+    TEST_ASSERT_TRUE(multi_sel_contains_ref(alpha_id, alpha_key));
+    TEST_ASSERT_TRUE(multi_sel_contains_ref(beta_id, beta_key));
 }
 
 /* 23. Ctrl+F must find a sprite by a long rename whose searchable tail is truncated out of the
@@ -1487,24 +1527,27 @@ void test_view_focus_returns_when_selected_row_is_revealed(void) {
 
     const int alpha = find_row_by_name("alpha");
     TEST_ASSERT_GREATER_OR_EQUAL_INT(0, alpha);
-    s_sel_src = s_rows[alpha].src;
-    s_sel_child = s_rows[alpha].child;
-    s_focus_view = view_pos_of_row(alpha);
-    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, s_focus_view);
+    gui_rows_select_primary(&s_rows[alpha]);
+    gui_rows_set_focus_view_index(view_pos_of_row(alpha));
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, gui_rows_focus_view_index());
 
     gui_rows_set_filter("solo");
     build_view();
-    TEST_ASSERT_EQUAL_INT(-1, s_focus_view);
+    TEST_ASSERT_EQUAL_INT(-1, gui_rows_focus_view_index());
+    TEST_ASSERT_TRUE(gui_rows_focus_is_set());
     gui_rows_set_filter("");
     build_view();
-    TEST_ASSERT_EQUAL_INT(view_pos_of_row(alpha), s_focus_view);
+    TEST_ASSERT_EQUAL_INT(
+        view_pos_of_row(alpha), gui_rows_focus_view_index());
 
     gui_rows_toggle_collapsed(folder_id);
     build_view();
-    TEST_ASSERT_EQUAL_INT(-1, s_focus_view);
+    TEST_ASSERT_EQUAL_INT(-1, gui_rows_focus_view_index());
+    TEST_ASSERT_TRUE(gui_rows_focus_is_set());
     gui_rows_toggle_collapsed(folder_id);
     build_view();
-    TEST_ASSERT_EQUAL_INT(view_pos_of_row(alpha), s_focus_view);
+    TEST_ASSERT_EQUAL_INT(
+        view_pos_of_row(alpha), gui_rows_focus_view_index());
 }
 
 /* 28. Collapse state is session-global across atlases, so pruning must compare
@@ -1524,7 +1567,7 @@ void test_view_collapse_prunes_sources_owned_by_deleted_atlas(void) {
         tp_session_snapshot_atlas_at(snapshot, 1);
     TEST_ASSERT_NOT_NULL(kept_atlas);
     const tp_id128 kept_atlas_id = kept_atlas->id;
-    s_sel_atlas = 1;
+    gui_view_select_atlas(kept_atlas_id);
     build_rows();
     build_view();
 
@@ -1538,7 +1581,6 @@ void test_view_collapse_prunes_sources_owned_by_deleted_atlas(void) {
         tp_session_snapshot_atlas_at(gui_project_snapshot(), 0)->id,
         kept_atlas_id));
 
-    s_sel_atlas = 0;
     build_rows();
     build_view();
     TEST_ASSERT_FALSE(gui_rows_is_collapsed(deleted_folder_id));
@@ -1603,11 +1645,12 @@ void test_result_region_selection_uses_provided_result(void) {
         .sprite_count = 2,
     };
 
-    s_sel_src = -1;
-    s_sel_child = -1;
+    gui_rows_select_primary(NULL);
     select_row_for_result_region(&displayed, 0);
-    TEST_ASSERT_EQUAL_INT(s_rows[beta].src, s_sel_src);
-    TEST_ASSERT_EQUAL_INT(s_rows[beta].child, s_sel_child);
+    const sprite_row *primary = gui_rows_primary();
+    TEST_ASSERT_NOT_NULL(primary);
+    TEST_ASSERT_EQUAL_INT(s_rows[beta].src, primary->src);
+    TEST_ASSERT_EQUAL_INT(s_rows[beta].child, primary->child);
 }
 
 /* 32. Primary tree selection maps against the displayed result, while a
@@ -1716,25 +1759,24 @@ void test_canvas_zoom_to_sprite_centers_transformed_region(void) {
 
     gui_canvas_double_click_ref click_ref = {0};
     TEST_ASSERT_FALSE(gui_canvas_double_click_press(
-        &click_ref, &result, 0, false));
+        &click_ref, 1U, 0, false));
     TEST_ASSERT_TRUE(gui_canvas_double_click_press(
-        &click_ref, &result, 0, true));
+        &click_ref, 1U, 0, true));
     gui_canvas_double_click_reset(&click_ref);
     TEST_ASSERT_FALSE(gui_canvas_double_click_press(
-        &click_ref, &result, 0, false));
+        &click_ref, 1U, 0, false));
     TEST_ASSERT_FALSE(gui_canvas_double_click_press(
-        &click_ref, &result, 1, true));
+        &click_ref, 1U, 1, true));
     TEST_ASSERT_FALSE(gui_canvas_double_click_press(
-        &click_ref, &result, 1, false));
+        &click_ref, 1U, 1, false));
     TEST_ASSERT_TRUE(gui_canvas_double_click_press(
-        &click_ref, &result, 1, true));
+        &click_ref, 1U, 1, true));
 
-    tp_result replacement = result;
     gui_canvas_double_click_reset(&click_ref);
     TEST_ASSERT_FALSE(gui_canvas_double_click_press(
-        &click_ref, &result, 0, false));
+        &click_ref, 1U, 0, false));
     TEST_ASSERT_FALSE(gui_canvas_double_click_press(
-        &click_ref, &replacement, 0, true));
+        &click_ref, 2U, 0, true));
 }
 
 void test_recycled_click_identity_rejects_remapped_rows(void) {
@@ -1857,14 +1899,13 @@ void test_missing_folder_retains_folder_kind_and_missing_state(void) {
 }
 
 void test_canvas_menu_owner_cancels_raw_gesture_and_double_click(void) {
-    tp_result result = {0};
     gui_canvas_input_state input = {
         .lmb_armed = true,
         .lmb_panning = true,
         .mmb_panning = true,
         .lmb_zoomed = true,
         .double_click = {
-            .result = &result,
+            .result_generation = 1U,
             .sprite_index = 3,
             .valid = true,
         },
@@ -1889,13 +1930,10 @@ void test_empty_canvas_hit_clears_shared_sprite_selection(void) {
     build_view();
     TEST_ASSERT_GREATER_THAN(1, s_row_count);
 
-    s_sel_src = s_rows[1].src;
-    s_sel_child = s_rows[1].child;
-    s_sel_missing = true;
-    (void)snprintf(s_sel_abs, sizeof s_sel_abs, "%s", s_rows[1].abs);
+    gui_rows_select_primary(&s_rows[1]);
     multi_sel_add_ref(s_rows[1].source_id, s_rows[1].source_key);
-    s_sel_anchor_row = 1;
-    s_focus_view = 1;
+    gui_rows_set_anchor_view_index(1);
+    gui_rows_set_focus_view_index(1);
 
     gui_canvas canvas = {0};
     canvas.sel_sprite = 4;
@@ -1904,13 +1942,13 @@ void test_empty_canvas_hit_clears_shared_sprite_selection(void) {
     TEST_ASSERT_EQUAL_INT(GUI_CANVAS_HIT_CLEAR_SELECTION, action);
 
     TEST_ASSERT_EQUAL_INT(-1, canvas.sel_sprite);
-    TEST_ASSERT_EQUAL_INT(-1, s_sel_src);
-    TEST_ASSERT_EQUAL_INT(-1, s_sel_child);
-    TEST_ASSERT_EQUAL_STRING("", s_sel_abs);
-    TEST_ASSERT_FALSE(s_sel_missing);
+    TEST_ASSERT_NULL(gui_rows_primary());
+    TEST_ASSERT_FALSE(gui_rows_primary_is_set());
     TEST_ASSERT_EQUAL_INT(0, s_multi_sel_count);
-    TEST_ASSERT_EQUAL_INT(-1, s_sel_anchor_row);
-    TEST_ASSERT_EQUAL_INT(-1, s_focus_view);
+    TEST_ASSERT_EQUAL_INT(-1, gui_rows_anchor_view_index());
+    TEST_ASSERT_FALSE(gui_rows_anchor_is_set());
+    TEST_ASSERT_EQUAL_INT(-1, gui_rows_focus_view_index());
+    TEST_ASSERT_FALSE(gui_rows_focus_is_set());
 }
 
 int main(int argc, char **argv) {
@@ -1925,14 +1963,14 @@ int main(int argc, char **argv) {
     RUN_TEST(test_view_name_sort_ignores_source_status_decorations);
     RUN_TEST(test_view_warn_first_pins_missing_regardless_of_direction);
     RUN_TEST(test_view_collapse_hides_children_and_filter_overrides);
-    RUN_TEST(test_selection_revalidate_reresolves_primary_and_prunes_multi);
-    RUN_TEST(test_selection_revalidate_clears_primary_when_it_is_deleted);
-    RUN_TEST(test_selection_revalidate_resyncs_focus_to_shifted_row);
-    RUN_TEST(test_selection_revalidate_folder_primary_follows_stable_id);
+    RUN_TEST(test_view_reconcile_preserves_primary_and_prunes_multi);
+    RUN_TEST(test_view_reconcile_clears_removed_primary);
+    RUN_TEST(test_view_reconcile_resolves_focus_after_row_shift);
+    RUN_TEST(test_view_reconcile_folder_primary_follows_stable_id);
     RUN_TEST(test_view_sort_added_orders_by_add_order);
     RUN_TEST(test_view_empty_state_is_safe);
     RUN_TEST(test_view_collapse_pruned_when_folder_source_removed);
-    RUN_TEST(test_selection_revalidate_keeps_missing_state_on_source_reselect);
+    RUN_TEST(test_view_reconcile_keeps_missing_source_primary);
     RUN_TEST(test_view_focus_cleared_when_focused_row_filtered_out);
     RUN_TEST(test_view_collapse_survives_atlas_switch);
     RUN_TEST(test_undo_preserves_selected_atlas_by_stable_id);
@@ -1947,10 +1985,11 @@ int main(int argc, char **argv) {
     RUN_TEST(test_shift_range_selection_identity_work_is_linear);
     RUN_TEST(test_shift_range_oom_keeps_previous_selection_atomically);
     RUN_TEST(
-        test_selection_revalidate_5000_present_refs_has_linear_identity_work);
+        test_view_reconcile_5000_present_refs_has_linear_identity_work);
     RUN_TEST(
-        test_selection_revalidate_5000_deleted_refs_compacts_linearly);
-    RUN_TEST(test_view_oom_fallback_clears_focus_and_anchor);
+        test_view_reconcile_5000_deleted_refs_compacts_linearly);
+    RUN_TEST(test_view_oom_fallback_preserves_stable_focus_and_anchor);
+    RUN_TEST(test_row_projection_oom_preserves_selection_until_retry);
     RUN_TEST(test_view_filter_finds_long_rename_beyond_label);
     RUN_TEST(test_left_section_caps_preserve_sprite_vlist_at_short_heights);
     RUN_TEST(test_left_panel_room_gate_rejects_zero_height_scrollers);

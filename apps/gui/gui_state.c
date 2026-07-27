@@ -6,6 +6,7 @@
 
 #include <stdarg.h>
 #include <stdio.h>
+#include <string.h>
 
 /* --- global UI scale --- */
 float g_ui_scale = 1.0F;
@@ -71,29 +72,27 @@ uint32_t s_id_recovery;
 uint32_t s_id_mb_file, s_id_mb_edit, s_id_mb_atlas, s_id_mb_view, s_id_mb_help;
 uint32_t s_id_menu_file, s_id_menu_edit, s_id_menu_atlas, s_id_menu_view, s_id_menu_help;
 
-/* --- primary selection --- */
-int s_sel_atlas;
-int s_sel_src = -1;
-int s_sel_child = -1;
-char s_sel_abs[TP_IDENTITY_PATH_MAX];
-bool s_sel_missing;
-
-/* --- multi-select set (growable; grown by multi_sel_add in gui_rows.c) --- */
-gui_selected_sprite *s_multi_sel;
-int s_multi_sel_count;
-int s_multi_sel_cap;
-int s_sel_anchor_row = -1;
-int s_focus_view = -1;
-bool s_focus_follow = false;
-bool s_filter_active = false;
-bool s_reselect_pending = false;
-tp_id128 s_reselect_source_id;
-char s_reselect_key[TP_SRCKEY_MAX];
-tp_id128 s_reselect_atlas_id; /* F2: viewed-atlas stable id captured for undo/redo re-resolution */
-
-/* --- animation selection --- */
-int s_sel_anim = -1;
-int s_sel_anim_frame = -1;
+uint32_t gui_stable_entity_ui_id(const char *scope,
+                                 tp_id128 entity_id) {
+    static const char hex[] = "0123456789abcdef";
+    char key[128];
+    const int prefix = snprintf(
+        key, sizeof key, "%s/",
+        scope ? scope : "ntpacker/entity");
+    if (prefix < 0 ||
+        (size_t)prefix + 32U >= sizeof key) {
+        return 0U;
+    }
+    for (size_t index = 0;
+         index < sizeof entity_id.bytes; ++index) {
+        key[(size_t)prefix + index * 2U] =
+            hex[entity_id.bytes[index] >> 4U];
+        key[(size_t)prefix + index * 2U + 1U] =
+            hex[entity_id.bytes[index] & 0x0fU];
+    }
+    key[(size_t)prefix + 32U] = '\0';
+    return nt_ui_id(key);
+}
 
 /* --- export-target preview (EXP-PREVIEW): 0 = Native (default) --- */
 int s_preview_target;

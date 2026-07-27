@@ -290,6 +290,9 @@ gui_pack_done gui_pack_poll(gui_pack_result_info *out) {
             result.status == TP_STATUS_OK && result.pack.result) {
             const int atlas_index = current_atlas_index(result.pack.atlas_id);
             NT_ASSERT(atlas_index >= 0);
+            if (out) {
+                out->atlas_id = result.pack.atlas_id;
+            }
             if (cancelled) {
                 done = preview ? GUI_PACK_DONE_PREVIEW_CANCELLED
                                : GUI_PACK_DONE_PACK_CANCELLED;

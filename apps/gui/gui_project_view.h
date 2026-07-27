@@ -78,10 +78,6 @@ typedef struct gui_recovery_notice {
     char message[256];
 } gui_recovery_notice;
 
-bool gui_project_animation_ref_at(int atlas_index, int animation_index,
-                                  gui_animation_ref *out);
-bool gui_project_target_ref_at(int atlas_index, int target_index,
-                               gui_target_ref *out);
 const tp_session_snapshot *gui_project_snapshot(void);
 uint64_t gui_project_snapshot_model_generation(void);
 const char *gui_project_path(void);

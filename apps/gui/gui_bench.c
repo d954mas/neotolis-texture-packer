@@ -32,7 +32,7 @@
 #include "gui_pack.h"    /* gui_pack_result / gui_pack_async_start / gui_pack_worker_active + GUI_PACK_ASYNC_* */
 #include "gui_project.h" /* gui_project_* (snapshot / edit / undo / redo / refresh / dirty) */
 #include "gui_rows.h"    /* build_rows / select_row_for_region */
-#include "gui_state.h"   /* s_sel_atlas + GUI_PRINTF (printf-format attribute) */
+#include "gui_state.h"   /* stable view selection + GUI_PRINTF */
 
 /* Default owner-scale fixture (37 atlases / 5481 memberships, incl. one folder source). Relative to the CWD, like a CLI project
  * arg; the verify commands run from the repo root, where this resolves. */
@@ -216,7 +216,10 @@ static void bench_run_probes(void) {
     gui_bench_samples build;
     bench_samples_init(&build);
     for (int i = 0; i < GUI_BENCH_REPEATS; i++) {
-        s_sel_atlas = i % atlas_count; /* distinct id vs the cached one -> forced rebuild */
+        const tp_snapshot_atlas *atlas =
+            tp_session_snapshot_atlas_at(
+                snap, i % atlas_count);
+        gui_view_select_atlas(atlas->id);
         const double t0 = bench_now_ms();
         build_rows();
         const double t1 = bench_now_ms();
@@ -227,7 +230,10 @@ static void bench_run_probes(void) {
     gui_bench_samples filter;
     bench_samples_init(&filter);
     for (int i = 0; i < GUI_BENCH_REPEATS; ++i) {
-        s_sel_atlas = i % atlas_count;
+        const tp_snapshot_atlas *atlas =
+            tp_session_snapshot_atlas_at(
+                snap, i % atlas_count);
+        gui_view_select_atlas(atlas->id);
         build_rows();
         gui_rows_set_filter((i & 1) != 0 ? "a" : "e");
         const double t0 = bench_now_ms();
@@ -239,10 +245,14 @@ static void bench_run_probes(void) {
     gui_rows_set_filter("");
 
     /* Prepare atlas 0 for the selection probe: a blocking pack gives region -> row mapping real data. */
-    s_sel_atlas = 0;
+    const tp_snapshot_atlas *first_atlas =
+        tp_session_snapshot_atlas_at(snap, 0);
+    gui_view_select_atlas(first_atlas->id);
+    int atlas_index = gui_view_atlas_index(snap);
     build_rows();
     do_pack_blocking();
-    const tp_result *packed = gui_pack_result(0);
+    const tp_result *packed =
+        gui_pack_result(atlas_index);
     build_rows(); /* row cache still keyed to atlas 0; ensure rows are present for the scan */
     build_view();
     const int regions = packed ? packed->sprite_count : 0;
@@ -353,18 +363,34 @@ static void bench_run_probes(void) {
 
     /* 6. A Pack request is non-blocking: it must hand off to the async worker, not produce the result
      *    synchronously on the calling thread. Assert the request returns AND a worker is in flight. */
-    s_sel_atlas = 0;
-    const uint64_t pack_ver_before = gui_pack_result_version(0);
+    snap = gui_project_snapshot();
+    first_atlas =
+        snap ? tp_session_snapshot_atlas_at(snap, 0) : NULL;
+    if (!first_atlas) {
+        s_bench_fail = true;
+        bench_emit(
+            "bench_perf invariant=pack_async ok=0 "
+            "error=atlas_missing");
+        return;
+    }
+    gui_view_select_atlas(first_atlas->id);
+    atlas_index = gui_view_atlas_index(snap);
+    const uint64_t pack_ver_before =
+        gui_pack_result_version(atlas_index);
     char err[256] = {0};
     const double p0 = bench_now_ms();
-    const bool started = gui_pack_async_start(0, err, sizeof err);
+    const bool started =
+        gui_pack_async_start(
+            atlas_index, err, sizeof err);
     const double p1 = bench_now_ms();
     const bool worker = gui_pack_worker_active() || gui_pack_async_busy();
     /* A genuinely async start hands off to the worker WITHOUT producing+publishing a result
      * on this thread, so atlas 0's result-slot version is unchanged the instant start returns.
      * A synchronous pack -- the UI-blocking regression this guards -- would have bumped it here.
      * (worker_active alone can't tell "still running" from "finished but not yet taken".) */
-    const bool no_sync_publish = gui_pack_result_version(0) == pack_ver_before;
+    const bool no_sync_publish =
+        gui_pack_result_version(atlas_index) ==
+        pack_ver_before;
     const bool pack_ok = started && worker && no_sync_publish;
     if (pack_ok) {
         bench_emit("bench_perf invariant=pack_async ok=1 started=1 worker_active=1 "
