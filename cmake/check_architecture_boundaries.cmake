@@ -25,6 +25,68 @@ foreach(_rule IN LISTS _arch_rules)
     set_property(GLOBAL PROPERTY "ARCH_HITS_${_rule}" "")
 endforeach()
 
+# Role classification is DECLARED, never inferred from a filename prefix.
+# Under the old prefix rule the role was a side effect of a name: renaming a
+# view TU out of `gui_view_*` silently dropped every view rule, and a GUI file
+# that never carried the prefix was scanned as a non-view no matter what it
+# did. The list below IS the role. Two guards keep the declaration honest:
+# every declared file must exist (a rename cannot unclassify a view), and
+# every `gui_view_*` file on disk must be declared (a new view cannot arrive
+# unclassified). A view TU that is neither declared nor named `gui_view_*`
+# still needs a human to declare it — that is the cost of an explicit role,
+# and it is paid once per file instead of silently every day.
+set(_arch_view_files
+    apps/gui/gui_view_canvas.c
+    apps/gui/gui_view_canvas.h
+    apps/gui/gui_view_chrome.c
+    apps/gui/gui_view_chrome.h
+    apps/gui/gui_view_lists.c
+    apps/gui/gui_view_lists.h
+    apps/gui/gui_view_settings.c
+    apps/gui/gui_view_settings.h)
+# gui_rows.c owns gui_view_adopt_default_atlas but is a projection module,
+# not a view TU: it is deliberately NOT declared as a view.
+
+# Files that are absent on purpose. `_arch_assert_absent` treats a missing
+# guarded path as a checker bug (fail-closed) unless the path is registered
+# here, and a registered path that comes back is a deletion regression.
+set(_arch_deleted_files
+    apps/gui/gui_project_pending.c)
+
+if(NOT DEFINED ARCH_EXPECT_RULE)
+    foreach(_view IN LISTS _arch_view_files)
+        if(NOT EXISTS "${_arch_root}/${_view}")
+            message(FATAL_ERROR
+                "declared view TU is missing: ${_view}. A view file was "
+                "renamed or deleted without updating the checker's view "
+                "role list; classification must stay explicit.")
+        endif()
+    endforeach()
+    foreach(_deleted IN LISTS _arch_deleted_files)
+        if(EXISTS "${_arch_root}/${_deleted}")
+            message(FATAL_ERROR
+                "deletion regressed: ${_deleted} returned")
+        endif()
+    endforeach()
+endif()
+
+# Any `gui_view_*` file on disk must be classified. Adding a view TU without
+# declaring its role fails here instead of shipping unchecked.
+file(GLOB _arch_view_candidates LIST_DIRECTORIES false
+    "${_arch_scan_root}/apps/gui/gui_view_*.c"
+    "${_arch_scan_root}/apps/gui/gui_view_*.h")
+foreach(_candidate IN LISTS _arch_view_candidates)
+    cmake_path(RELATIVE_PATH _candidate BASE_DIRECTORY "${_arch_scan_root}"
+               OUTPUT_VARIABLE _relative)
+    cmake_path(CONVERT "${_relative}" TO_CMAKE_PATH_LIST _relative NORMALIZE)
+    if(NOT "${_relative}" IN_LIST _arch_view_files)
+        message(FATAL_ERROR
+            "unclassified view TU: ${_relative} matches gui_view_* but is "
+            "not declared in the checker's view role list. Declare it (or "
+            "give it a non-view name) so the view rules apply to it.")
+    endif()
+endforeach()
+
 function(_arch_hit rule relative_path line_number)
     get_property(_hits GLOBAL PROPERTY "ARCH_HITS_${rule}")
     list(APPEND _hits "${relative_path}:${line_number}")
@@ -58,7 +120,7 @@ foreach(_source IN LISTS _arch_sources)
     endif()
 
     set(_is_view false)
-    if(_relative MATCHES "^apps/gui/gui_view_[^/]*\\.(c|h)$")
+    if("${_relative}" IN_LIST _arch_view_files)
         set(_is_view true)
     endif()
 
@@ -67,13 +129,20 @@ foreach(_source IN LISTS _arch_sources)
         set(_is_core true)
     endif()
 
+    # The async family is code that runs off the host/UI thread: job workers,
+    # transports, and out-of-process clients. Its rule forbids retaining or
+    # calling a raw `tp_session *`, because that session belongs to another
+    # thread. gui_host_queue is deliberately NOT in this family: it runs ON
+    # the host thread and legitimately passes `tp_session *` through its
+    # drain/admission functions, which is why the old `host_queue` token had
+    # to be exempted line-for-line the moment it was added. The two things
+    # that must actually be true of the queue are expressed directly instead:
+    # HOST_QUEUE_RAW_SESSION_STORAGE (it never RETAINS a session) and the
+    # gui_host_queue_* containment sweep below (its symbols never leak past
+    # the host owner).
     set(_is_async false)
-    if(_relative MATCHES "(^|/)[^/]*(worker|transport|dev[_-]?api|mcp|host_queue)[^/]*\\.(c|h)$")
+    if(_relative MATCHES "(^|/)[^/]*(worker|transport|dev[_-]?api|mcp)[^/]*\\.(c|h)$")
         set(_is_async true)
-    endif()
-    # gui_host_queue borrows the active session only during host-thread drain.
-    if(_relative MATCHES "^apps/gui/gui_host_queue\\.(c|h)$")
-        set(_is_async false)
     endif()
 
     file(STRINGS "${_source}" _lines)
@@ -203,13 +272,69 @@ function(_arch_assert_rule rule remove_in)
     endforeach()
 endfunction()
 
+# Non-gating debt report (AGENTS.md Simplification Policy: inventory, not a
+# gate). Every file listed as exempt below has pre-existing debt with a named
+# rationale, so the rule as written can never fail on it — gating it would be
+# a rule that neutralizes itself. Its hits are printed instead. Deleting debt
+# stays green because nothing is compared against a baseline: there are no
+# occurrence counts in any exemption, only in the printed report.
+#
+# The rule is NOT dead, though: a view TU that is not on the exemption list
+# must have zero hits, so a new view cannot accrue this debt silently.
+function(_arch_report_debt rule note)
+    get_property(_hits GLOBAL PROPERTY "ARCH_HITS_${rule}")
+    set(_exempt_paths ${ARGN})
+    set(_files "")
+    foreach(_hit IN LISTS _hits)
+        string(REGEX REPLACE ":[0-9]+$" "" _file "${_hit}")
+        set(_allowed false)
+        foreach(_exempt_path IN LISTS _exempt_paths)
+            if(_file MATCHES "^${_exempt_path}$")
+                set(_allowed true)
+                break()
+            endif()
+        endforeach()
+        if(NOT _allowed)
+            message(FATAL_ERROR
+                "${rule} violation in a file with no ${note} debt "
+                "exemption: ${_hit}")
+        endif()
+        list(APPEND _files "${_file}")
+    endforeach()
+    if(NOT _files)
+        message(STATUS "debt ${rule}: none")
+        return()
+    endif()
+    set(_unique ${_files})
+    list(SORT _unique)
+    list(REMOVE_DUPLICATES _unique)
+    foreach(_file IN LISTS _unique)
+        set(_count 0)
+        foreach(_entry IN LISTS _files)
+            if(_entry STREQUAL _file)
+                math(EXPR _count "${_count} + 1")
+            endif()
+        endforeach()
+        message(STATUS "debt ${rule}: ${_file} (${_count})")
+    endforeach()
+endfunction()
+
 _arch_assert_rule(VIEW_ADMISSION "R2c/R2d")
 _arch_assert_rule(VIEW_IO "SR-BASE/PV-tree-list")
-_arch_assert_rule(VIEW_PLATFORM "PLATFORM-SEAM/PV-chrome"
+_arch_report_debt(VIEW_PLATFORM "PLATFORM-SEAM/PV-chrome"
+                  # pre-SR-BASE debt: the chrome view owns the menu/dialog
+                  # seam and calls the platform file dialog and clipboard
+                  # directly; the seam moves behind the host owner later.
                   "apps/gui/gui_view_chrome\\.c")
-_arch_assert_rule(VIEW_MODEL_POLICY "PV-settings/RESULT-INDEX"
+_arch_report_debt(VIEW_MODEL_POLICY "PV-settings/RESULT-INDEX"
+                  # pre-SR-BASE debt: the canvas view reads pack/result model
+                  # data (gui_pack_result, sprite-ref lookup) to draw.
                   "apps/gui/gui_view_canvas\\.c"
+                  # pre-SR-BASE debt: the chrome view reads project/model
+                  # state for its title and status affordances.
                   "apps/gui/gui_view_chrome\\.c"
+                  # pre-SR-BASE debt: tp_validate/tp_exporter reads over the
+                  # pending PV-settings slice live in the settings view.
                   "apps/gui/gui_view_settings\\.c")
 _arch_assert_rule(CORE_FRONTEND "R1a/R1b")
 _arch_assert_rule(ASYNC_RAW_SESSION "R1c/R2b")
@@ -222,7 +347,17 @@ _arch_assert_rule(
 function(_arch_assert_absent relative_path symbol remove_in)
     set(_path "${_arch_root}/${relative_path}")
     if(NOT EXISTS "${_path}")
-        return()
+        # Fail closed. A guarded file that vanished used to make its rule
+        # pass silently; now the only way a guarded path may be absent is to
+        # be registered as intentionally deleted.
+        if("${relative_path}" IN_LIST _arch_deleted_files)
+            return()
+        endif()
+        message(FATAL_ERROR
+            "${remove_in} guard lost its file: ${relative_path} does not "
+            "exist, so the guard against ${symbol} no longer proves "
+            "anything. Retarget the rule, or register the path in "
+            "_arch_deleted_files if the deletion is intentional.")
     endif()
     file(READ "${_path}" _source)
     string(REGEX REPLACE "/\\*([^*]|\\*+[^*/])*\\*+/" " " _source "${_source}")
@@ -472,6 +607,49 @@ foreach(_source IN LISTS _gui_shipping_sources)
     endforeach()
 endforeach()
 
+# The host queue is the host owner's private ingress, not a GUI-wide API.
+# This containment sweep replaces the old async-family carve-out: instead of
+# pretending the queue is async and then exempting it, the queue keeps its
+# host-thread session calls and its symbols stay inside the owner set.
+# P5 shrinks this list: gui_project.c's direct queue calls become
+# gui_host_binding_* ingress functions.
+set(_arch_host_queue_owners
+    apps/gui/gui_host_queue.c
+    apps/gui/gui_host_queue.h
+    apps/gui/gui_host_binding.c
+    apps/gui/gui_host_binding.h
+    apps/gui/gui_project.c)
+
+# The active session is borrowed, never held. P5 shrinks this list as the
+# lifecycle/mutation owners consolidate.
+set(_arch_borrow_session_owners
+    apps/gui/gui_project.c
+    apps/gui/gui_project_internal.h
+    apps/gui/gui_project_file.c
+    apps/gui/gui_project_recovery.c
+    apps/gui/gui_project_mutations.c)
+
+foreach(_source IN LISTS _gui_observation_sources)
+    cmake_path(RELATIVE_PATH _source BASE_DIRECTORY "${_arch_root}"
+               OUTPUT_VARIABLE _relative)
+    cmake_path(CONVERT "${_relative}" TO_CMAKE_PATH_LIST _relative NORMALIZE)
+    # Tests may drive either owner directly.
+    if(_relative MATCHES
+       "^apps/gui/(test_[^/]*|tp_bench_[^/]*|client_parity_[^/]*)\\.(c|h)$")
+        continue()
+    endif()
+    if(NOT "${_relative}" IN_LIST _arch_host_queue_owners)
+        _arch_assert_absent(
+            "${_relative}" "gui_host_queue_[A-Za-z0-9_]*"
+            "R2d host queue stays inside the host owner")
+    endif()
+    if(NOT "${_relative}" IN_LIST _arch_borrow_session_owners)
+        _arch_assert_absent(
+            "${_relative}" "gui_project__borrow_active_session"
+            "R2d single session storage borrows in one place")
+    endif()
+endforeach()
+
 # R3a atlas scalar drafts have one view-local reducer owner. The former action
 # array and broad ready-operation route must not return.
 _arch_assert_absent(
@@ -547,10 +725,8 @@ foreach(_source IN LISTS _gui_shipping_sources)
         "R3c shipping legacy edit route deletion")
 endforeach()
 
-if(EXISTS "${_arch_root}/apps/gui/gui_project_pending.c")
-    message(FATAL_ERROR
-        "R5 deletion regressed: gui_project_pending.c returned")
-endif()
+# gui_project_pending.c's return is caught by the _arch_deleted_files registry
+# at the top of this file (one place owns "intentionally absent").
 
 # R4/R5 cutover hardening. Stable ids are the only cross-frame identity;
 # indices remain frame-local projections. Exact old names are guarded instead

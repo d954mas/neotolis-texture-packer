@@ -160,4 +160,18 @@ foreach(TP_ARCH_CALL_FIXTURE IN ITEMS
         PROPERTIES LABELS "architecture")
 endforeach()
 
+# Role classification is not a hit-counted rule: an undeclared gui_view_* file
+# must abort the checker instead of being scanned as a non-view (the bypass
+# the P1 review demonstrated). The fixture asserts the abort message, so a
+# silent pass fails this test.
+add_test(NAME tp_architecture_negative_unclassified_view
+    COMMAND "${CMAKE_COMMAND}"
+        "-DARCH_ROOT=${CMAKE_SOURCE_DIR}"
+        "-DARCH_SCAN_ROOT=${CMAKE_SOURCE_DIR}/cmake/fixtures/architecture_boundaries/unclassified_view"
+        "-DARCH_EXPECT_RULE=VIEW_ADMISSION"
+        -P "${TP_ARCHITECTURE_CHECK}")
+set_tests_properties(tp_architecture_negative_unclassified_view PROPERTIES
+    LABELS "architecture"
+    PASS_REGULAR_EXPRESSION "unclassified view TU: apps/gui/gui_view_ghost\\.c")
+
 add_subdirectory(tests)
