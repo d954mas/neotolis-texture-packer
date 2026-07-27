@@ -118,6 +118,10 @@ bool gui_host_queue__test_has_staged(
     const gui_host_queue *queue);
 void gui_host_queue__test_retag_staged_request(
     gui_host_queue *queue, uint64_t request_id);
+/* Positions the monotonic request-id counter so the exhaustion branch in start
+ * admission is reachable in a test without submitting 2^64 jobs. */
+void gui_host_queue__test_set_next_request_id(
+    gui_host_queue *queue, uint64_t next_request_id);
 void gui_host_queue__test_fail_next_poll(void);
 void gui_host_queue__test_fail_next_take(void);
 /* Makes the next `count` cancel admissions fail with a TRANSIENT rejection

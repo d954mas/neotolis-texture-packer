@@ -2,7 +2,7 @@
 #define TP_RECOVERY_STATE_INTERNAL_H
 
 #include "tp_core/tp_journal.h"
-#include "tp_core/tp_project_lease.h"
+#include "tp_project_lease.h"
 #include "tp_core/tp_recovery.h"
 #include "tp_core/tp_session.h"
 #include "tp_core/tp_transaction.h"

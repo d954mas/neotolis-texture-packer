@@ -5,8 +5,8 @@
 #include <string.h>
 
 #include "core/nt_assert.h"
-#include "tp_core/tp_diff.h"
-#include "tp_core/tp_project_lease.h"
+#include "tp_diff.h"
+#include "tp_project_lease.h"
 #include "tp_core/tp_recovery.h"
 #include "tp_core/tp_journal.h"
 #include "tp_core/tp_sprite_index.h"

@@ -361,6 +361,10 @@ void gui_crash_report_prompt(void) {
     gui_crash_clear_marker();
 }
 
+#ifdef NTPACKER_GUI_DEV_SEAMS
+/* Dev seam: reachable only through main()'s --selftest-crash argv branch, which is
+ * gated on the same flag, so both halves leave the shipped binary together. The
+ * NTPACKER_GUI_HEADLESS self-guard below is unchanged. */
 void gui_crash_selftest(void) {
     if (getenv("NTPACKER_GUI_HEADLESS") != NULL) {
         return; /* never fault under headless/CI, even if the hidden arg leaks in */
@@ -372,4 +376,5 @@ void gui_crash_selftest(void) {
     *p = 0xC0FFEE;
     _Exit(3); /* unreachable in practice; makes the "must fault" intent explicit */
 }
+#endif /* NTPACKER_GUI_DEV_SEAMS */
 // #endregion

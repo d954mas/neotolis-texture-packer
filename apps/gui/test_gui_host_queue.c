@@ -18,14 +18,9 @@ static tp_session *make_session(void) {
     return session;
 }
 
-static void stage_export_completion(
+static void drain_until_staged(
     gui_host_queue *queue, tp_session *session) {
     tp_error error = {{0}};
-    TEST_ASSERT_EQUAL_INT(
-        TP_STATUS_OK,
-        gui_host_queue_enqueue_export(
-            queue, tp_id128_nil(),
-            TP_GUI_HOST_QUEUE_TEST_DIR, &error));
     for (int attempt = 0; attempt < 10000; ++attempt) {
         TEST_ASSERT_EQUAL_INT(
             TP_STATUS_OK,
@@ -38,6 +33,17 @@ static void stage_export_completion(
     }
     TEST_FAIL_MESSAGE(
         "host queue did not stage export completion");
+}
+
+static void stage_export_completion(
+    gui_host_queue *queue, tp_session *session) {
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_host_queue_enqueue_export(
+            queue, tp_id128_nil(),
+            TP_GUI_HOST_QUEUE_TEST_DIR, &error));
+    drain_until_staged(queue, session);
 }
 
 static void reduce_current_observation(
@@ -732,6 +738,73 @@ void test_nonfallible_close_clears_ready_owner(void) {
         queue.session_instance_generation);
 }
 
+/* Request-id exhaustion is a structured rejection, not a wedge: the admission
+ * refuses the start, nothing is staged, and the queue stays a drainable OPEN host
+ * that admits work again as soon as the counter has room. */
+void test_exhausted_request_id_space_rejects_start_without_wedging_queue(
+    void) {
+    tp_session *session = make_session();
+    gui_host_queue queue;
+    tp_error error = {{0}};
+    gui_host_queue_init(&queue);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_host_queue_open(&queue, 71U, &error));
+    gui_host_queue__test_set_next_request_id(
+        &queue, UINT64_MAX);
+
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_INVALID_ARGUMENT,
+        gui_host_queue_enqueue_export(
+            &queue, tp_id128_nil(),
+            TP_GUI_HOST_QUEUE_TEST_DIR, &error));
+    TEST_ASSERT_NOT_EQUAL_INT(
+        0, (int)strlen(error.msg));
+    /* Structured refusal only: no queued start, no active lease, no staged
+     * completion, and the host is still OPEN. */
+    gui_host_command rejected = {0};
+    TEST_ASSERT_FALSE(
+        gui_host_queue__test_peek_start(
+            &queue, &rejected));
+    TEST_ASSERT_FALSE(
+        gui_host_queue__test_active(&queue));
+    TEST_ASSERT_FALSE(
+        gui_host_queue__test_has_staged(&queue));
+    TEST_ASSERT_FALSE(
+        gui_host_queue_busy(&queue));
+    TEST_ASSERT_EQUAL_INT(
+        GUI_HOST_OPEN,
+        gui_host_queue_lifecycle(&queue));
+    TEST_ASSERT_EQUAL_UINT64(
+        UINT64_MAX, queue.next_request_id);
+
+    /* Still drainable, and still able to admit work once ids are available. */
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_host_queue_drain(
+            &queue, session, &error));
+    gui_host_queue__test_set_next_request_id(
+        &queue, UINT64_MAX - 1U);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_host_queue_enqueue_export(
+            &queue, tp_id128_nil(),
+            TP_GUI_HOST_QUEUE_TEST_DIR, &error));
+    drain_until_staged(&queue, session);
+    reduce_current_observation(
+        &queue, session, 71U);
+    gui_host_completion completion = {0};
+    TEST_ASSERT_TRUE(
+        gui_host_queue_take_completion(
+            &queue, &completion));
+    TEST_ASSERT_EQUAL_UINT64(
+        UINT64_MAX,
+        completion.envelope.request_id);
+    gui_host_completion_destroy(&completion);
+    gui_host_queue_force_close(&queue);
+    tp_session_destroy(session);
+}
+
 int main(int argc, char **argv) {
     if (tp_build_is_worker_invocation(
             argc, argv)) {
@@ -766,5 +839,7 @@ int main(int argc, char **argv) {
         test_nonfallible_cutover_reopens_with_only_new_generation);
     RUN_TEST(
         test_nonfallible_close_clears_ready_owner);
+    RUN_TEST(
+        test_exhausted_request_id_space_rejects_start_without_wedging_queue);
     return UNITY_END();
 }

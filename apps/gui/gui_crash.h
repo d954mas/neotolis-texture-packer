@@ -44,8 +44,11 @@ void gui_crash_report_prompt(void);
 
 /* Deliberately fault (deref a volatile null) to exercise the handler end-to-end. Behind the hidden
  * --selftest-crash dev arg ONLY -- never a shipped/live path. Self-guards to a no-op under
- * NTPACKER_GUI_HEADLESS so it can never fire in CI. */
+ * NTPACKER_GUI_HEADLESS so it can never fire in CI. Dev seam: declared and defined only
+ * under NTPACKER_GUI_DEV_SEAMS, like the argv branch that is its sole caller. */
+#ifdef NTPACKER_GUI_DEV_SEAMS
 void gui_crash_selftest(void);
+#endif
 
 #ifdef __cplusplus
 }

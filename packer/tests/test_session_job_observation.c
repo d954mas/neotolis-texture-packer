@@ -513,6 +513,60 @@ void test_observe_does_not_admit_job_progress(void) {
     tp_session_job_release_internal(&job.owner);
 }
 
+/* Request-id exhaustion is a structured refusal, not a broken session: the
+ * admission is rejected with a message, nothing is published (no observed job,
+ * no observation delta, no reservation left on the refused job), and the very
+ * same session admits and observes the job again once ids are available. */
+void test_exhausted_request_id_space_rejects_admission_without_breaking_session(
+    void) {
+    tp_session *session = make_session();
+    const tp_id128 atlas_id = first_atlas_id(session);
+    fake_job blocked;
+    /* request_id 0 == "not reserved yet", the only shape that reaches the
+     * reservation (and therefore the exhaustion) branch. */
+    fake_job_init(&blocked, 9U, 0U, atlas_id, TP_SESSION_JOB_PACK);
+    tp_error err = {{0}};
+
+    tp_session_job_observation__test_set_next_request_id(
+        session, UINT64_MAX);
+    const tp_session_observation_token before = initial_token(session);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_INVALID_ARGUMENT,
+        tp_session_job_observation_begin_internal(
+            session, &blocked.owner, &err));
+    TEST_ASSERT_TRUE(err.msg[0] != '\0');
+    TEST_ASSERT_EQUAL_UINT64(
+        0U, blocked.owner.observation_descriptor.request_id);
+    TEST_ASSERT_EQUAL_INT(0, blocked.destroy_count);
+
+    tp_session_observation *unchanged =
+        (tp_session_observation *)(uintptr_t)1U;
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_session_observe(session, &before, &unchanged, &err), err.msg);
+    TEST_ASSERT_NULL(unchanged);
+
+    /* Same session, ids available again: admission succeeds and publishes. */
+    tp_session_job_observation__test_set_next_request_id(
+        session, UINT64_MAX - 1U);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_session_job_observation_begin_internal(
+            session, &blocked.owner, &err), err.msg);
+    tp_session_observation *delta = NULL;
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_session_observe(session, &before, &delta, &err), err.msg);
+    TEST_ASSERT_NOT_NULL(delta);
+    TEST_ASSERT_EQUAL_UINT64(
+        UINT64_MAX,
+        tp_session_observation_job_state(delta).request_id);
+
+    tp_session_observation_destroy(delta);
+    tp_session_destroy(session);
+    tp_session_job_release_internal(&blocked.owner);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_reverse_completion_accepts_only_latest_request);
@@ -526,5 +580,7 @@ int main(void) {
     RUN_TEST(
         test_progress_burst_is_coalesced_without_event_or_project_snapshot);
     RUN_TEST(test_observe_does_not_admit_job_progress);
+    RUN_TEST(
+        test_exhausted_request_id_space_rejects_admission_without_breaking_session);
     return UNITY_END();
 }

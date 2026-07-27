@@ -32,7 +32,7 @@ if(WIN32)
     target_link_libraries(tinyfiledialogs PUBLIC comdlg32 ole32 shell32 user32)
 endif()
 
-add_executable(ntpacker-gui main.c gui_state.c gui_widgets.c gui_actions.c gui_actions_dialogs.c gui_actions_edits.c gui_actions_structural.c gui_actions_pack.c gui_actions_preview.c gui_actions_recovery.c gui_rows.c gui_selftest.c gui_shot.c gui_bench.c gui_startup.c gui_paths.c gui_log_file.c gui_crash.c gui_bootstrap.c gui_project.c gui_project_file.c gui_project_mutations.c gui_project_recovery.c gui_session_adapter.c gui_session_client.c gui_edit_state.c gui_host_queue.c gui_host_binding.c gui_scan.c gui_canvas.c gui_canvas_resources.c gui_pack.c gui_pack_jobs.c gui_pack_preview.c gui_view_settings.c gui_view_lists.c gui_view_canvas.c gui_view_chrome.c
+add_executable(ntpacker-gui main.c gui_state.c gui_widgets.c gui_actions.c gui_actions_dialogs.c gui_actions_edits.c gui_actions_structural.c gui_actions_pack.c gui_actions_preview.c gui_actions_recovery.c gui_rows.c gui_selftest.c gui_startup.c gui_paths.c gui_log_file.c gui_crash.c gui_bootstrap.c gui_project.c gui_project_file.c gui_project_mutations.c gui_project_recovery.c gui_session_adapter.c gui_session_client.c gui_edit_state.c gui_host_queue.c gui_host_binding.c gui_scan.c gui_canvas.c gui_canvas_resources.c gui_pack.c gui_pack_jobs.c gui_pack_preview.c gui_view_settings.c gui_view_lists.c gui_view_canvas.c gui_view_chrome.c
     "${CMAKE_SOURCE_DIR}/apps/common/nt_utf8_fs.c")
 if(WIN32)
     target_sources(ntpacker-gui PRIVATE "${CMAKE_SOURCE_DIR}/apps/common/nt_utf8_argv.c")
@@ -54,7 +54,6 @@ target_link_libraries(ntpacker-gui PRIVATE
     nt_sprite_renderer nt_text_renderer nt_font nt_ui
     nt_render nt_hash nt_mem_scratch nt_shape_renderer
     nt_gfx nt_http_stub nt_fs nt_clipboard
-    nt_fpng # dev screenshot mode (--shot): PNG-encode the framebuffer readback
     tp_build tinyfiledialogs
     tinycthread # thread-safe GUI log sink; already in-closure via nt_builder
 )
@@ -72,9 +71,30 @@ target_compile_definitions(ntpacker-gui PRIVATE
     ${_tp_gui_introspect_defines}
 )
 
+# Dev-only seams that must NOT ship in the interactive binary: the --shot screenshot
+# capture (gui_shot.c), the --bench-perf headless perf probe (gui_bench.c), main()'s
+# --auto-pack / --selftest-crash argv branches, and gui_pack_debug_force_busy. OFF by
+# default so the shipped exe carries none of that code (nor its argv strings); the
+# native-debug / native-tests-debug presets turn it ON, and CI's perf-probes job
+# configures native-release with -DNTPACKER_GUI_DEV_SEAMS=ON for its --bench-perf leg.
+# Same shape as NTPACKER_GUI_SELFTEST below: option + gated sources + gated call sites.
+option(NTPACKER_GUI_DEV_SEAMS "Compile the --shot / --bench-perf / --auto-pack dev seams into ntpacker-gui" OFF)
+
 # Headless smoke of the project ops (create/add/decode+upload/save/reload) + a timed
 # auto-quit, for CI/verification only. OFF by default -- the shipped app is interactive.
 option(NTPACKER_GUI_SELFTEST "Run the startup project-ops self-test then auto-quit" OFF)
+
+# The self-test oracle drives gui_pack_debug_force_busy, so a self-test build implies the
+# dev seams. One derived variable, so the two flags cannot drift out of step.
+if(NTPACKER_GUI_DEV_SEAMS OR NTPACKER_GUI_SELFTEST)
+    # Whole-TU gating: the shipped build never compiles the seam sources at all, which is
+    # what keeps their argv strings and fixture paths out of the binary. nt_fpng is the
+    # --shot framebuffer PNG encoder and is linked only with them.
+    target_sources(ntpacker-gui PRIVATE gui_shot.c gui_bench.c)
+    target_link_libraries(ntpacker-gui PRIVATE nt_fpng)
+    target_compile_definitions(ntpacker-gui PRIVATE NTPACKER_GUI_DEV_SEAMS=1)
+endif()
+
 if(NTPACKER_GUI_SELFTEST)
     target_compile_definitions(ntpacker-gui PRIVATE NTPACKER_GUI_SELFTEST=1)
     # The selftest's recovery-degradation regression drives the journal's memory-io fault seams

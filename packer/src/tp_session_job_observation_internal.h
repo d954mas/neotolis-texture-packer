@@ -60,6 +60,12 @@ tp_session_job_admission tp_session_job_observation_admit_internal(
  * cmake/check_architecture_boundaries.cmake). */
 tp_status tp_session_job_observation_begin_internal(
     tp_session *session, tp_session_owned_job *job, tp_error *err);
+
+/* TEST SEAM, compiled out of every shipping build. Positions the monotonic
+ * request-id counter so __reserve_request_id_locked's exhaustion rejection is
+ * reachable without reserving 2^64 ids. */
+void tp_session_job_observation__test_set_next_request_id(
+    tp_session *session, uint64_t next_request_id);
 #endif
 
 /* Session-family locked helpers. */

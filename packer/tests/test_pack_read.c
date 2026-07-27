@@ -27,8 +27,8 @@
 
 #include "tp_core/tp_arena.h"
 #include "tp_core/tp_model.h"
-#include "tp_core/tp_name_map.h"
-#include "tp_core/tp_pack_read.h"
+#include "tp_name_map.h"
+#include "tp_pack_read.h"
 #include "../src/tp_fs_internal.h"
 #include "../src/tp_pack_read_internal.h"
 #include "unity.h"

@@ -528,9 +528,14 @@ bool gui_pack_async_cancelling(void) {
            state.cancellation_requested;
 }
 
+#ifdef NTPACKER_GUI_DEV_SEAMS
+/* Dev seam (--shot-packing / the self-test's busy-strip oracle): the ONLY writer of
+ * s_adapter.debug_busy. Compiled out of the shipped binary, so the field stays zero
+ * there and the synthetic busy presentation can never be reached at runtime. */
 void gui_pack_debug_force_busy(gui_pack_async_kind kind) {
     s_adapter.debug_busy = kind;
 }
+#endif
 
 bool gui_pack_preview_blocking(int atlas_index, const char *exporter_id,
                                char *err, size_t err_cap) {

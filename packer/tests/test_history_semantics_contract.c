@@ -2,7 +2,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "tp_core/tp_diff.h"
+#include "tp_diff.h"
 #include "tp_core/tp_export.h"
 #include "tp_core/tp_journal.h"
 #include "tp_core/tp_operation.h"

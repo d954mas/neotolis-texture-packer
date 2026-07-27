@@ -791,6 +791,15 @@ void gui_host_queue__test_retag_staged_request(
     }
 }
 
+void gui_host_queue__test_set_next_request_id(
+    gui_host_queue *queue,
+    uint64_t next_request_id) {
+    if (queue) {
+        queue->next_request_id =
+            next_request_id;
+    }
+}
+
 void gui_host_queue__test_fail_next_poll(void) {
     s_test_fail_next_poll = true;
 }

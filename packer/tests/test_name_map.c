@@ -4,7 +4,7 @@
  * must call nt_hash_init(NULL) first. */
 
 #include "tp_core/tp_error.h"
-#include "tp_core/tp_name_map.h"
+#include "tp_name_map.h"
 #include "unity.h"
 
 #include "hash/nt_hash.h"

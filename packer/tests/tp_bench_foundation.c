@@ -5,7 +5,7 @@
 #include "tp_bench_support.h"
 #include "tp_bench_project_load.h"
 
-#include "tp_core/tp_diff.h"
+#include "tp_diff.h"
 #include "tp_core/tp_job.h"
 #include "tp_core/tp_journal.h"
 #include "tp_core/tp_operation.h"

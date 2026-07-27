@@ -3,14 +3,18 @@
 
 /* Dev seam: the `--shot` screenshot mode -- render the real UI at a requested size/scale, pack +
  * select so the panels populate, dump ONE full-frame PNG at the pre-swap point, and quit. Compiled
- * into EVERY build (unlike the selftest) -- it doubles as the byte-reproducible refactor gate. The
- * prototypes below are the only entry points main()/frame() call. */
+ * only when NTPACKER_GUI_DEV_SEAMS is on (gui_shot.c is not compiled otherwise), so the shipped
+ * binary carries neither the capture code nor its argv strings -- the #else fallbacks below make
+ * every call site in main()/frame() fold away. It doubles as the byte-reproducible refactor gate.
+ * The prototypes below are the only entry points main()/frame() call. */
 
 #include <stdbool.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+#ifdef NTPACKER_GUI_DEV_SEAMS
 
 /* main() arg loop: consume one dev screenshot flag (--shot=/--size=/--scale=/--shot-stale/
  * --shot-packing). Returns true if `arg` was a screenshot flag (so main() skips its project-arg
@@ -46,6 +50,19 @@ void gui_shot_tick(void);
 
 /* frame(), at the pre-swap point: full-frame PNG capture + SHOT-BOUNDS logging, then quit. */
 void gui_shot_post_draw(void);
+
+#else /* !NTPACKER_GUI_DEV_SEAMS -- shipped build: every entry point is a compile-time no-op. */
+
+static inline bool gui_shot_parse_arg(const char *arg) { (void)arg; return false; }
+static inline void gui_shot_apply_window_size(void) {}
+static inline void gui_shot_apply_scale(void) {}
+static inline bool gui_shot_active(void) { return false; }
+static inline void gui_shot_pre_pin_tick(void) {}
+static inline void gui_shot_note_rendered(void) {}
+static inline void gui_shot_tick(void) {}
+static inline void gui_shot_post_draw(void) {}
+
+#endif /* NTPACKER_GUI_DEV_SEAMS */
 
 #ifdef __cplusplus
 }

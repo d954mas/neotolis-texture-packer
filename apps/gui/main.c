@@ -20,7 +20,6 @@
 #include "core/nt_assert.h"
 #include "core/nt_core.h"
 #include "font/nt_font.h"
-#include "fpng/nt_fpng.h"
 #include "fs/nt_fs.h"
 #include "graphics/nt_gfx.h"
 #include "hash/nt_hash.h"
@@ -479,8 +478,10 @@ static void handle_list_nav(void) {
 // #endregion
 
 // #region frame
+#ifdef NTPACKER_GUI_DEV_SEAMS
 /* DEV (--auto-pack): after resources bind, start ONE async pack of atlas 0 and quit when it lands.
- * Headless driver for the heartbeat proof (an interactive Pack is otherwise human-driven). */
+ * Headless driver for the heartbeat proof (an interactive Pack is otherwise human-driven).
+ * Dev seam: compiled out (with its argv branch) unless NTPACKER_GUI_DEV_SEAMS is on. */
 static bool s_auto_pack;
 static int s_auto_pack_frame;
 static bool s_auto_pack_started;
@@ -506,6 +507,9 @@ static void auto_pack_tick(void) {
         nt_app_quit();
     }
 }
+#else
+static inline void auto_pack_tick(void) {}
+#endif /* NTPACKER_GUI_DEV_SEAMS */
 
 static void frame(void) {
     nt_window_poll();
@@ -899,16 +903,20 @@ static int gui_main_utf8(int argc, char *argv[]) {
 
     /* dev screenshot flags + optional project path (first non-flag arg; see gui_shot.c) */
     const char *proj_arg = NULL;
+#ifdef NTPACKER_GUI_DEV_SEAMS
     bool selftest_crash = false; /* D2 hidden dev arg: fault after install to exercise the handler */
+#endif
     for (int i = 1; i < argc; i++) {
         if (gui_shot_parse_arg(argv[i])) {
             /* consumed by the dev screenshot seam (--shot/--size/--scale/--shot-stale/--shot-packing) */
         } else if (gui_bench_parse_arg(argv[i])) {
             /* consumed by the dev perf-probe seam (--bench-perf[=out.txt]) */
+#ifdef NTPACKER_GUI_DEV_SEAMS
         } else if (strcmp(argv[i], "--auto-pack") == 0) {
             s_auto_pack = true; /* dev: headless async pack of atlas 0 for the heartbeat proof */
         } else if (strcmp(argv[i], "--selftest-crash") == 0) {
             selftest_crash = true; /* parse here so it's never mistaken for a project path below */
+#endif
         } else if (proj_arg == NULL) {
             proj_arg = argv[i];
         }
@@ -946,9 +954,11 @@ static int gui_main_utf8(int argc, char *argv[]) {
     /* D2 hidden hand-verification hook: fault NOW (the handler is installed + the log sink is live, so
      * a real run produces a dump/backtrace + marker AND proves the log tail survived). Self-guards to a
      * no-op under headless, so it can never fire in CI. */
+#ifdef NTPACKER_GUI_DEV_SEAMS
     if (selftest_crash) {
         gui_crash_selftest();
     }
+#endif
 
     gui_shot_apply_window_size(); /* dev (--shot): request the shot window size before window init */
     nt_window_init();

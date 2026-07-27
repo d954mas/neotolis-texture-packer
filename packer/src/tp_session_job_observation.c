@@ -204,6 +204,16 @@ tp_status tp_session_job_observation__reserve_request_id_locked(
     return TP_STATUS_OK;
 }
 
+#ifdef TP_ENABLE_TEST_SEAMS
+/* Positions the monotonic request-id counter so the exhaustion rejection above is
+ * reachable without reserving 2^64 ids. Compiled out of the shipped library. */
+void tp_session_job_observation__test_set_next_request_id(
+    tp_session *session, uint64_t next_request_id) {
+    NT_ASSERT(session != NULL);
+    session->next_job_request_id = next_request_id;
+}
+#endif
+
 tp_status tp_session_job_observation__begin_locked(
     tp_session *session, tp_session_owned_job *job,
     tp_session_owned_job **out_retired, tp_error *err) {

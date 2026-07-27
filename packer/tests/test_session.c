@@ -14,7 +14,7 @@
 
 #include "tp_core/tp_operation.h"
 #include "tp_core/tp_identity.h"
-#include "tp_core/tp_project_lease.h"
+#include "tp_project_lease.h"
 #include "tp_project_identity_internal.h"
 #include "tp_core/tp_recovery.h"
 #include "tp_core/tp_scan.h"

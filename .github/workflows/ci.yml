@@ -152,8 +152,9 @@ jobs:
 
   # U-01 perf harness (impl-plan §U). Two-tier gate: wall-clock latency is PRINTED (advisory --
   # CI runners are noisy, so timing never fails the build) while the DETERMINISTIC invariants are
-  # hard-gated by each probe's exit code. Runs native-release (NTPACKER_GUI_SELFTEST=OFF, so the GUI
-  # binary honours --bench-perf instead of auto-running the self-test; release also gives realistic,
+  # hard-gated by each probe's exit code. Runs native-release with -DNTPACKER_GUI_DEV_SEAMS=ON
+  # (NTPACKER_GUI_SELFTEST stays OFF, so the GUI binary honours --bench-perf instead of auto-running
+  # the self-test, and the dev-seam override compiles that probe in; release also gives realistic,
   # ASan-free numbers). This is the only job with lfs: true -- the decode probes need the real Kenney
   # bytes; the byte-stable fixture contract (tp_bench_project_contract) stays LFS-independent and runs
   # in the build-test/gui-selftest jobs without it.
@@ -193,8 +194,12 @@ jobs:
           echo "CMAKE_C_COMPILER_LAUNCHER=ccache" >> $GITHUB_ENV
           echo "CMAKE_CXX_COMPILER_LAUNCHER=ccache" >> $GITHUB_ENV
 
-      - name: Configure (native-release, self-test OFF)
-        run: cmake --preset native-release
+      # -DNTPACKER_GUI_DEV_SEAMS=ON is a job-local override, NOT a preset change: the
+      # native-release preset (what release.yml ships) keeps the dev seams OFF so the
+      # shipped exe carries no --shot/--bench-perf code or argv strings. This probe leg
+      # is the one release-configured build that needs --bench-perf compiled in.
+      - name: Configure (native-release, self-test OFF, dev seams ON for --bench-perf)
+        run: cmake --preset native-release -DNTPACKER_GUI_DEV_SEAMS=ON
 
       - name: Build perf targets
         run: cmake --build --preset native-release --target tp_bench_foundation ntpacker-gui

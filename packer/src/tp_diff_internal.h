@@ -16,7 +16,7 @@
 
 #include <stdbool.h>
 
-#include "tp_core/tp_diff.h"
+#include "tp_diff.h"
 #include "tp_core/tp_operation.h"
 #include "tp_core/tp_project.h"
 #include "tp_core/tp_transaction.h"

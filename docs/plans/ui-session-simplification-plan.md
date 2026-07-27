@@ -344,6 +344,44 @@ report (AGENTS.md Simplification Policy) stays visible through the existing
 `report_loc_inventory` build target — `cmake --build --preset <p> --target
 report_loc_inventory`.
 
+**S14 — shipping-binary hygiene + public-surface trim.** New CMake option
+`NTPACKER_GUI_DEV_SEAMS` (default OFF, same shape as `NTPACKER_GUI_SELFTEST`:
+option + gated sources + gated call sites) takes the dev-only seams out of the
+shipped GUI: `gui_shot.c` (`--shot`/`--shot-stale`/`--shot-packing`) and
+`gui_bench.c` (`--bench-perf`) are conditional `target_sources`, `nt_fpng` is
+linked only with them, and `gui_shot.h`/`gui_bench.h` carry `static inline`
+no-op fallbacks so every `main()`/`frame()` call site folds away instead of
+sprouting an `#ifdef`. Also gated: `main()`'s `--auto-pack` (`auto_pack_tick` +
+its argv branch) and `--selftest-crash` branches, `gui_crash_selftest` (the
+branch's sole callee), and `gui_pack_debug_force_busy` (the only writer of the
+synthetic busy state). ~890 LOC and 56 KiB leave the release exe, which now
+contains none of the strings `--shot`, `bench-perf`, `--auto-pack`,
+`--selftest-crash`, `SHOT-BOUNDS`. `NTPACKER_GUI_SELFTEST=ON` implies the dev
+seams (the selftest oracle drives `gui_pack_debug_force_busy`), so the two flags
+cannot drift. `native-debug`/`native-tests-debug` set it ON; `native-release`
+pins it OFF and CI's `perf-probes` job overrides with
+`-DNTPACKER_GUI_DEV_SEAMS=ON` on the command line — a job-local flag, so
+`release.yml`, which uses the bare preset, still ships a seam-free binary.
+`NTPACKER_GUI_HEADLESS` untouched.
+
+Public-surface trim: `tp_diff.h`, `tp_name_map.h`, `tp_pack_read.h`, and
+`tp_project_lease.h` moved `packer/include/tp_core/` → `packer/src/` (content
+byte-identical, names kept — they are not `*_internal.h`, so the R18 registry
+needs no row). Zero `apps/` includers each; the 33 include sites in
+`packer/src`/`packer/tests` drop the `tp_core/` prefix and four test targets
+(`name_map`, `pack_read`, `export_json`, `raw_ownership`) gained `PRIVATE_SRC`.
+`tp_selector.h` (spec §5.4, future MCP/Dev API), `tp_cancel.h` (included by
+public `tp_pack.h`/`tp_input.h`/`tp_scan.h`/`tp_export_run.h`) and
+`tp_pack_result_cache.h` (owner decision pending) stay public.
+
+Reserve landed: request-id exhaustion is now executable on both sides —
+`TP_ENABLE_TEST_SEAMS`-gated `gui_host_queue__test_set_next_request_id` and
+`tp_session_job_observation__test_set_next_request_id` position the monotonic
+counter, and one Unity case each asserts the `UINT64_MAX` branch returns a
+structured rejection without breaking the FSM (the queue stays OPEN, unstaged
+and drainable and admits work again; the session publishes nothing, leaves the
+refused job unreserved, and admits + observes it once ids are available).
+
 ## Decision records
 
 - **Escape after a deferred gesture commit is accepted as-is.** `frame()` runs

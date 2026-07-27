@@ -5,8 +5,8 @@
 
 #include "tp_core/tp_arena.h"
 #include "tp_core/tp_model.h"
-#include "tp_core/tp_name_map.h"
-#include "tp_core/tp_pack_read.h"
+#include "tp_name_map.h"
+#include "tp_pack_read.h"
 
 /* One stored Pack result. INVARIANT: exactly the `active` entry (if any) has a
  * non-NULL `arena`; every other entry is inactive and holds only its retained

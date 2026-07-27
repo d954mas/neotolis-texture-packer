@@ -1,6 +1,6 @@
 tp_add_test(NAME arena LIBS tp_core unity)
 
-tp_add_test(NAME name_map LIBS tp_core unity)
+tp_add_test(NAME name_map LIBS tp_core unity PRIVATE_SRC)
 
 # B1: tp_status_id() stable machine tokens (--json error-id contract), pinned per
 # enum value so a rename can't slip through without failing here.
@@ -254,7 +254,7 @@ tp_add_test(NAME transform_decode LIBS tp_core unity PRIVATE_SRC)
 # dir for the temp .ntpack files. tp_build: fixtures pack via nt_builder.
 tp_add_test(NAME pack_read
     SOURCES test_pack_read.c tp_fixtures.c
-    LIBS tp_build unity
+    LIBS tp_build unity PRIVATE_SRC
     MAKE_DIRS "${CMAKE_BINARY_DIR}/tp_test"
     ARGS "${CMAKE_BINARY_DIR}/tp_test")
 
@@ -383,7 +383,7 @@ tp_add_test(NAME normalize LIBS tp_core unity)
 # nt_builder (tp_build), exports json-neotolis, parses back with cJSON.
 tp_add_test(NAME export_json
     SOURCES test_export_json.c tp_fixtures.c
-    LIBS tp_build unity cjson
+    LIBS tp_build unity cjson PRIVATE_SRC
     MAKE_DIRS "${CMAKE_BINARY_DIR}/tp_export_json_test"
     ARGS "${CMAKE_BINARY_DIR}/tp_export_json_test")
 
@@ -427,7 +427,7 @@ tp_add_test(NAME export_defold
 # add, packs, and asserts the packed page is unaffected -> the builder deep-copies
 # (nt_builder_atlas.c:771-775). Pins a lifetime the public header does not promise
 # (see docs/research/neotolis-engine-raw-rgba-lifetime.md). Needs a scratch dir.
-tp_add_test(NAME raw_ownership LIBS tp_build unity
+tp_add_test(NAME raw_ownership LIBS tp_build unity PRIVATE_SRC
     MAKE_DIRS "${CMAKE_BINARY_DIR}/tp_raw_ownership_test"
     ARGS "${CMAKE_BINARY_DIR}/tp_raw_ownership_test")
 

@@ -187,8 +187,11 @@ void gui_pack_export_progress(int *cur, int *total); /* export "atlas cur/total"
  * structured (duplicate, closed host, or no live job). */
 tp_status gui_pack_async_cancel(tp_error *err);
 bool gui_pack_async_cancelling(void);
-/* DEV (--shot-packing): force the busy strip state without a real worker, for screenshots. */
+/* DEV (--shot-packing): force the busy strip state without a real worker, for screenshots.
+ * Dev seam: declared and defined only under NTPACKER_GUI_DEV_SEAMS. */
+#ifdef NTPACKER_GUI_DEV_SEAMS
 void gui_pack_debug_force_busy(gui_pack_async_kind kind);
+#endif
 
 /* Non-blocking: stops host ingress and releases presentation-owned results.
  * The frame/shutdown host pump owns cancellation and terminal drain. */
