@@ -154,6 +154,25 @@ static void job_cancel_owned(tp_session_owned_job *owned) {
     (void)job_request_cancel((tp_live_job *)owned);
 }
 
+/* The session rejected this job's terminal result (cancelled, or its targets were
+ * deleted), so nothing will ever adopt the packed pages. Free the arena now rather
+ * than at destroy: for a big Pack that is every page's pixels, held for as long as
+ * the host takes to consume the terminal state. The terminal result keeps its
+ * status/error/metadata -- only the released pointers are cleared, so a later
+ * tp_session_job_take_result reads NULL pack pointers, never freed memory. The
+ * descriptor and observation_targets are untouched (the session borrows them). */
+static void job_release_payload_owned(tp_session_owned_job *owned) {
+    tp_live_job *job = (tp_live_job *)owned;
+    if (!job) {
+        return;
+    }
+    tp_arena_destroy(job->arena);
+    job->arena = NULL;
+    job->pack_result = NULL;
+    job->terminal_result.pack.arena = NULL;
+    job->terminal_result.pack.result = NULL;
+}
+
 static void job_destroy_owned(tp_session_owned_job *owned) {
     tp_live_job *job = (tp_live_job *)owned;
     if (!job) {
@@ -181,6 +200,7 @@ static tp_live_job *job_create(tp_session_job_kind kind) {
     tp_session_owned_job_init(&job->owner, job_cancel_owned,
                               job_destroy_owned);
     job->owner.pump = NULL;
+    job->owner.release_payload = job_release_payload_owned;
     job->kind = kind;
     atomic_flag_clear(&job->pump_gate);
     atomic_init(&job->state, TP_SESSION_JOB_RUNNING);

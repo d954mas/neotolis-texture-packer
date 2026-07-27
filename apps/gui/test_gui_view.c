@@ -531,6 +531,41 @@ void test_view_reconcile_clears_removed_primary(void) {
     TEST_ASSERT_FALSE(gui_rows_anchor_is_set());
 }
 
+/* 8b. Removing the SELECTED atlas clears the stable atlas selection instead of
+ *     silently retargeting it to whatever now sits at index 0 (USA-24: preserve
+ *     or explicitly clear). A second atlas exists, so a retarget would be
+ *     invisible in the index alone -- the assertion is on the stable id. */
+void test_view_reconcile_clears_removed_selected_atlas(void) {
+    TEST_ASSERT_EQUAL_INT(
+        1, gui_project_add_atlas().visible_index);
+    const tp_session_snapshot *snapshot = gui_project_snapshot();
+    const tp_snapshot_atlas *survivor =
+        tp_session_snapshot_atlas_at(snapshot, 0);
+    const tp_snapshot_atlas *selected =
+        tp_session_snapshot_atlas_at(snapshot, 1);
+    TEST_ASSERT_NOT_NULL(survivor);
+    TEST_ASSERT_NOT_NULL(selected);
+    const tp_id128 survivor_id = survivor->id;
+    const tp_id128 selected_id = selected->id;
+
+    gui_view_select_atlas(selected_id);
+    TEST_ASSERT_EQUAL_INT(1, gui_view_atlas_index(gui_project_snapshot()));
+
+    /* The removal is foreign to the view: nothing tells it the selection died. */
+    TEST_ASSERT_TRUE(gui_project_remove_atlas(
+        selected_id, tp_session_snapshot_revision(gui_project_snapshot())));
+    gui_view_reconcile_observation(gui_project_snapshot());
+
+    TEST_ASSERT_TRUE(tp_id128_is_nil(gui_view_atlas_id()));
+    TEST_ASSERT_FALSE(
+        tp_id128_eq(survivor_id, gui_view_atlas_id()));
+    TEST_ASSERT_EQUAL_INT(-1, gui_view_atlas_index(gui_project_snapshot()));
+
+    /* Adoption is the separate, explicit decision -- and it is idempotent. */
+    gui_view_adopt_default_atlas(gui_project_snapshot());
+    TEST_ASSERT_TRUE(tp_id128_eq(survivor_id, gui_view_atlas_id()));
+}
+
 /* 9. Stable primary and focus identities resolve onto a shifted row's new
  *    view position. When that row is hidden, the focus has no visible index
  *    but retains its identity for a later reveal. */
@@ -1965,6 +2000,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_view_collapse_hides_children_and_filter_overrides);
     RUN_TEST(test_view_reconcile_preserves_primary_and_prunes_multi);
     RUN_TEST(test_view_reconcile_clears_removed_primary);
+    RUN_TEST(test_view_reconcile_clears_removed_selected_atlas);
     RUN_TEST(test_view_reconcile_resolves_focus_after_row_shift);
     RUN_TEST(test_view_reconcile_folder_primary_follows_stable_id);
     RUN_TEST(test_view_sort_added_orders_by_add_order);

@@ -187,6 +187,7 @@ void setUp(void) {
     gui_project_init();
     gui_view_reset();
     gui_view_reconcile_observation(gui_project_snapshot());
+    gui_view_adopt_default_atlas(gui_project_snapshot());
     reset_public_action_state();
     reset_selection();
     cancel_edit();
@@ -973,6 +974,57 @@ void test_one_draft_owner_rejects_text_begin_while_atlas_scalar_is_active(void) 
     gui_draft_discard();
     TEST_ASSERT_EQUAL_INT(
         GUI_EDIT_IDLE, gui_draft_phase());
+}
+
+/* Spec §12.4 "Blur": moving to a sibling field submits the active draft instead
+ * of demanding an explicit Enter/Escape first. The new field then owns the one
+ * draft, and the first field's value is committed -- not lost. */
+void test_sibling_field_blur_submits_the_active_draft(void) {
+    const tp_session_snapshot *snapshot = gui_project_snapshot();
+    const tp_snapshot_atlas *atlas =
+        tp_session_snapshot_atlas_at(snapshot, 0);
+    TEST_ASSERT_NOT_NULL(atlas);
+    const tp_id128 atlas_id = atlas->id;
+    const int64_t revision =
+        tp_session_snapshot_revision(snapshot);
+    const int draft_padding = atlas->padding + 3;
+    const int draft_margin = atlas->margin + 5;
+
+    gui_edit_atlas_setting(
+        atlas_id, revision, GUI_ATLAS_PADDING,
+        draft_padding, 0.0F);
+    TEST_ASSERT_EQUAL_INT(
+        GUI_EDIT_EDITING, gui_draft_phase());
+
+    /* The sibling field: no Enter, no Escape, no discard in between. */
+    gui_edit_atlas_setting(
+        atlas_id, tp_session_snapshot_revision(gui_project_snapshot()),
+        GUI_ATLAS_MARGIN, draft_margin, 0.0F);
+
+    /* Padding committed; margin is now the one active draft. */
+    TEST_ASSERT_EQUAL_INT64(
+        revision + 1,
+        tp_session_snapshot_revision(gui_project_snapshot()));
+    TEST_ASSERT_EQUAL_INT(
+        draft_padding,
+        tp_session_snapshot_atlas_by_id(
+            gui_project_snapshot(), atlas_id)->padding);
+    TEST_ASSERT_EQUAL_INT(
+        GUI_EDIT_EDITING, gui_draft_phase());
+    int effective_margin = 0;
+    TEST_ASSERT_TRUE(gui_atlas_edit_value(
+        atlas_id, GUI_ATLAS_MARGIN, &effective_margin, NULL));
+    TEST_ASSERT_EQUAL_INT(draft_margin, effective_margin);
+    TEST_ASSERT_FALSE(gui_atlas_edit_value(
+        atlas_id, GUI_ATLAS_PADDING, NULL, NULL));
+
+    gui_request_gesture_commit();
+    apply_pending();
+    TEST_ASSERT_EQUAL_INT(GUI_EDIT_IDLE, gui_draft_phase());
+    TEST_ASSERT_EQUAL_INT(
+        draft_margin,
+        tp_session_snapshot_atlas_by_id(
+            gui_project_snapshot(), atlas_id)->margin);
 }
 
 void test_failed_target_path_submit_blocks_dependent_actions_and_preserves_text(void) {
@@ -2806,6 +2858,8 @@ int main(int argc, char **argv) {
         test_pack_request_submits_active_draft_before_starting_job);
     RUN_TEST(
         test_one_draft_owner_rejects_text_begin_while_atlas_scalar_is_active);
+    RUN_TEST(
+        test_sibling_field_blur_submits_the_active_draft);
     RUN_TEST(
         test_failed_target_path_submit_blocks_dependent_actions_and_preserves_text);
     RUN_TEST(

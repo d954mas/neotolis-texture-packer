@@ -883,6 +883,9 @@ static void declare_export_targets(nt_ui_context_t *ctx,
             /* row 2: out path + browse */
             CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(BASE_ROW_H))}, .childGap = Su(6), .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
                 CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}, .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
+                    /* A path longer than the GUI buffer is displayed but not editable
+                     * (the note below says so): the project file format does not cap
+                     * out_path, so this is reachable, not a dead branch. */
                     const bool path_editable =
                         strlen(t->out_path) <
                         TP_IDENTITY_PATH_MAX;
@@ -893,25 +896,30 @@ static void declare_export_targets(nt_ui_context_t *ctx,
                         editing_path
                             ? gui_text_edit_value()
                             : t->out_path;
-                    char inactive_scratch[
-                        TP_IDENTITY_PATH_MAX];
-                    char *path_scratch =
-                        editing_path
-                            ? s_target_path_scratch
-                            : inactive_scratch;
-                    if (ui_text_field(ctx, nt_ui_child_id(row_id, "path"), path_scratch, TP_IDENTITY_PATH_MAX,
+                    /* ONE shared field buffer: at most one target-path draft exists by
+                     * construction, and every row re-seeds the buffer from its own
+                     * effective value before declaring the field. For the editing row
+                     * that value IS the draft (so the reseed is content-preserving and
+                     * the caret survives); for every other row it keeps a later row from
+                     * stranding an earlier row's text -- and it removes the uninitialized
+                     * buffer the field used to receive while focused with no draft yet
+                     * (ui_text_field only seeds an UNFOCUSED field). */
+                    const size_t effective_len =
+                        effective_path ? strlen(effective_path) : 0U;
+                    if (effective_path &&
+                        effective_len < TP_IDENTITY_PATH_MAX) {
+                        memcpy(s_target_path_scratch, effective_path,
+                               effective_len + 1U);
+                    } else {
+                        s_target_path_scratch[0] = '\0';
+                    }
+                    if (ui_text_field(ctx, nt_ui_child_id(row_id, "path"), s_target_path_scratch, TP_IDENTITY_PATH_MAX,
                                       effective_path, path_editable, "out/atlas.json")) {
                         if ((editing_path ||
                              gui_text_edit_begin_target_out_path(
                                  &target, t->out_path))) {
                             (void)gui_text_edit_update(
-                                path_scratch);
-                            if (!editing_path) {
-                                (void)snprintf(
-                                    s_target_path_scratch,
-                                    sizeof s_target_path_scratch,
-                                    "%s", path_scratch);
-                            }
+                                s_target_path_scratch);
                         }
                     }
                 }

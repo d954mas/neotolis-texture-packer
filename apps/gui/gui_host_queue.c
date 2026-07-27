@@ -508,9 +508,16 @@ tp_status gui_host_queue_drain(
         }
     }
     if (queue->cancel_queued) {
-        queue->cancel_queued = false;
         const tp_status cancel_status =
             admit_cancel(queue, session, err);
+        /* The queued cancel is consumed only once it is RESOLVED: admitted (OK), or
+         * permanently moot because there is no job left to cancel (NOT_FOUND). Any
+         * other rejection is transient, so the request survives for the next pump
+         * instead of being silently dropped and leaving the job running. */
+        if (cancel_status == TP_STATUS_OK ||
+            cancel_status == TP_STATUS_NOT_FOUND) {
+            queue->cancel_queued = false;
+        }
         if (cancel_status != TP_STATUS_OK) {
             return cancel_status;
         }

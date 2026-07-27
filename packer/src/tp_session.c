@@ -580,16 +580,16 @@ tp_status tp_session_job_start_internal(
         return start_status;
     }
     tp_session_owned_job *retired = NULL;
+    /* Cannot fail here, and that is enforced, not hoped for: __validate_begin_locked
+     * above checked both of its rejections under this same gate hold, and the
+     * request-id reservation just made the id non-zero. The start callback only
+     * spawns; it never touches the descriptor. So this is an invariant, not a
+     * recoverable branch -- there is no half-started job to roll back. */
     const tp_status observation_status =
         tp_session_job_observation__begin_locked(
             session, job, &retired, err);
     NT_ASSERT(observation_status == TP_STATUS_OK);
-    if (observation_status != TP_STATUS_OK) {
-        gate_unlock(session);
-        job->cancel(job);
-        tp_session_job_release_internal(retired);
-        return observation_status;
-    }
+    (void)observation_status;
     session->active_job = job;
     gate_unlock(session);
     tp_session_job_release_internal(retired);
@@ -1100,6 +1100,13 @@ tp_status tp_session_save_detached_recovery(
             if (file_durability_degraded && err) {
                 err->msg[0] = '\0';
             }
+            /* The adopted project + mark_saved + model_generation bump are only
+             * VISIBLE to observers once an event moves the observation token --
+             * mirror tp_session_save. Without it every observer keeps serving the
+             * pre-save dirty/freshness state until some unrelated event lands. */
+            const int64_t revision = tp_model_revision(session->model);
+            publish_event(session, TP_SESSION_EVENT_SAVED, NULL, revision,
+                          revision, NULL, NULL);
         }
         tp_project_destroy(candidate);
     }

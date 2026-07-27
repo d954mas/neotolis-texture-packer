@@ -340,6 +340,13 @@ void open_preview_ref(const gui_animation_ref *ref) {
         tp_id128_is_nil(ref->animation_id)) {
         return;
     }
+    /* Opening the preview is an outer action, so the active draft is SUBMITTED
+     * first and the action continues only on a terminal success -- it must never
+     * silently discard the user's edit (same ordering class as
+     * gui_actions__browse_target). The snapshot is read after the submit. */
+    if (!gui_actions__submit_draft()) {
+        return;
+    }
     const tp_session_snapshot *snapshot = gui_project_snapshot();
     const int atlas_index =
         gui_actions__snapshot_atlas_index_by_id(
@@ -353,7 +360,6 @@ void open_preview_ref(const gui_animation_ref *ref) {
     if (atlas_index < 0 || !animation) {
         return;
     }
-    cancel_edit();
     preview_target_reset(); /* the anim player owns the canvas -> never leave an export preview bound under it */
     gui_view_select_atlas(ref->atlas_id);
     gui_view_select_animation(ref->animation_id);

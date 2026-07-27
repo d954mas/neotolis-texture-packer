@@ -195,7 +195,14 @@ void gui_view_select_animation_frame(
     const tp_session_snapshot *snapshot, int frame_index);
 int gui_view_animation_frame(const tp_session_snapshot *snapshot);
 uint64_t gui_view_animation_frame_generation(void);
+/* Revalidates the stable selection against a new observation: a selection whose
+ * entity is gone is CLEARED, never retargeted (USA-24). */
 void gui_view_reconcile_observation(
+    const tp_session_snapshot *snapshot);
+/* Selects the first atlas when nothing is selected. Explicit initial selection
+ * for "a project just became current" (startup, Open, New); never part of
+ * reconciliation, so a deleted selection stays cleared. */
+void gui_view_adopt_default_atlas(
     const tp_session_snapshot *snapshot);
 
 const sprite_row *gui_rows_primary(void);

@@ -524,6 +524,9 @@ static void frame(void) {
      * Run it at the same between-frame semantic ingress boundary, never after
      * the immutable observation has been pinned for declaration. */
     gui_bench_tick();
+    /* --shot: dead-stick input, advance the shot frame counter, and run the blocking
+     * pack at the same pre-pin ingress boundary the bench suite uses. */
+    gui_shot_pre_pin_tick();
 
     gui_actions_pump_lifecycle();
     if (gui_project_lifecycle_state_query() ==
@@ -683,7 +686,7 @@ static void frame(void) {
         handle_list_nav();
         s_content_w = scale.logical_w; /* for caption/status truncation */
         compute_panel_widths(scale.logical_w); /* clamp side-panel widths so they never leave the screen */
-        gui_shot_tick(); /* screenshot mode: pack + select + (post-draw) capture; no-op unless --shot */
+        gui_shot_tick(); /* screenshot mode: select the packed region; no-op unless --shot */
 
         /* Blur focused text fields when a press/scroll lands outside the settings panel (desktop UX).
          * The engine exposes no programmatic blur, so we declare the inputs disabled for one frame,
@@ -1128,42 +1131,71 @@ static int gui_main_utf8(int argc, char *argv[]) {
 #endif
 
     gui_view_reconcile_observation(gui_project_snapshot());
+    gui_view_adopt_default_atlas(gui_project_snapshot());
     nt_log_info("ntpacker-gui: starting (typed session jobs + atlas-page canvas)");
 
     nt_app_run(frame);
 
     /* Finish any accepted replacement first, then close the session through
-     * the same non-blocking lifecycle owner. */
+     * the same non-blocking lifecycle owner. A persistently failing request or
+     * pump must not spin the exit path at 100% CPU with a log line per iteration:
+     * every iteration pumps the window, the failure log is rate-limited, and a
+     * bounded retry budget falls through to forced teardown. */
+    int shutdown_failures = 0;
+    static const int k_shutdown_failure_budget = 600;
+    static const int k_shutdown_log_every = 60;
     while (gui_project_lifecycle_state_query() !=
            GUI_PROJECT_LIFECYCLE_CLOSED) {
         tp_error shutdown_error = {{0}};
+        nt_window_poll();
         if (gui_project_lifecycle_state_query() ==
             GUI_PROJECT_LIFECYCLE_OPEN_IDLE) {
             const tp_status begin_status =
                 gui_project_lifecycle_begin_shutdown(
                     false, &shutdown_error);
             if (begin_status != TP_STATUS_OK) {
-                nt_log_error(
-                    "GUI host shutdown request failed: %s",
-                    shutdown_error.msg[0]
-                        ? shutdown_error.msg
-                        : tp_status_str(
-                              begin_status));
+                if (shutdown_failures %
+                        k_shutdown_log_every ==
+                    0) {
+                    nt_log_error(
+                        "GUI host shutdown request failed: %s",
+                        shutdown_error.msg[0]
+                            ? shutdown_error.msg
+                            : tp_status_str(
+                                  begin_status));
+                }
+                if (++shutdown_failures >=
+                    k_shutdown_failure_budget) {
+                    nt_log_error(
+                        "GUI host shutdown gave up after %d failed requests; forcing teardown",
+                        shutdown_failures);
+                    break;
+                }
             }
             continue;
         }
 
-        nt_window_poll();
         const tp_status pump_status =
             gui_project_lifecycle_pump(
                 NULL, &shutdown_error);
         if (pump_status != TP_STATUS_OK) {
-            nt_log_error(
-                "GUI host shutdown pump failed: %s",
-                shutdown_error.msg[0]
-                    ? shutdown_error.msg
-                    : tp_status_str(
-                          pump_status));
+            if (shutdown_failures %
+                    k_shutdown_log_every ==
+                0) {
+                nt_log_error(
+                    "GUI host shutdown pump failed: %s",
+                    shutdown_error.msg[0]
+                        ? shutdown_error.msg
+                        : tp_status_str(
+                              pump_status));
+            }
+            if (++shutdown_failures >=
+                k_shutdown_failure_budget) {
+                nt_log_error(
+                    "GUI host shutdown gave up after %d failed pumps; forcing teardown",
+                    shutdown_failures);
+                break;
+            }
             continue;
         }
         if (gui_project_lifecycle_state_query() ==

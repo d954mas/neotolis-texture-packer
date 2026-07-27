@@ -15,6 +15,13 @@ struct tp_session_owned_job {
      * the session. */
     void (*pump)(tp_session_owned_job *job);
     void (*destroy)(tp_session_owned_job *job);
+    /* Optional (NULL = nothing to release). Called under the session gate the
+     * moment the session REJECTS this job's terminal result (cancelled, or its
+     * targets were deleted): the result will never be adopted, so the job frees
+     * the heavy payload it is still holding -- for a Pack that is the whole page
+     * arena. The descriptor and its `targets` array MUST stay valid: the observed
+     * job state borrows them until the owner pin drops. */
+    void (*release_payload)(tp_session_owned_job *job);
     tp_session_job_descriptor observation_descriptor;
     tp_session_job_observe_fn observe;
 };

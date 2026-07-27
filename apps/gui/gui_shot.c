@@ -40,7 +40,9 @@ static char s_shot_path[TP_IDENTITY_PATH_MAX];
 static int s_shot_w = 1280;
 static int s_shot_h = 800;
 static float s_shot_scale;  /* 0 = keep the DPI-detected scale */
-static int s_shot_frame;    /* counts only frames the UI actually rendered (can_render) */
+static int s_shot_frame;    /* frames since the shot started (advanced by gui_shot_pre_pin_tick only) */
+static bool s_shot_packed;   /* frame-6 blocking pack ran (one-shot) */
+static bool s_shot_selected; /* frame-10 region select/preview ran (one-shot) */
 static bool s_shot_written; /* capture happened; quit on the next frame boundary */
 static bool s_shot_stale;   /* --shot-stale: pack, then re-mark stale so the shot shows the amber Pack + chip */
 static bool s_shot_packing; /* --shot-packing: pack (blocking), then force the busy strip for the shot */
@@ -122,8 +124,11 @@ void gui_shot_apply_scale(void) {
 /* True while a --shot capture is in progress (the shell gates hotkeys on it). */
 bool gui_shot_active(void) { return s_shot_active; }
 
-/* Runs inside the can_render block, after build_rows (selection needs the row model). */
-void gui_shot_tick(void) {
+/* Runs at the between-frame semantic ingress boundary (beside gui_bench_tick), BEFORE the
+ * observation is pinned for declaration: dead-stick input, advance the shot frame counter,
+ * and run the blocking pack. Packing is a model/session mutation, so it belongs here and
+ * never inside the pinned frame. The counter is advanced in this one place only. */
+void gui_shot_pre_pin_tick(void) {
     if (!s_shot_active) {
         return;
     }
@@ -137,7 +142,10 @@ void gui_shot_tick(void) {
         g_nt_input.pointers[i].y = -100000.0F;
     }
     s_shot_frame++;
-    if (s_shot_frame == 6) { /* resources are bound; pack the selected atlas like Ctrl+P would (blocking) */
+    /* One-shot latch, not frame equality: the counter now advances on every frame, including
+     * ones that did not render, so a missed exact frame must not skip the pack forever. */
+    if (s_shot_frame >= 6 && !s_shot_packed) { /* resources are bound; pack the selected atlas like Ctrl+P would (blocking) */
+        s_shot_packed = true;
         const tp_session_snapshot *snapshot =
             gui_project_snapshot();
         int atlas_index = gui_view_atlas_index(snapshot);
@@ -156,7 +164,16 @@ void gui_shot_tick(void) {
             !gui_pack_result(atlas_index)) {
             do_pack_blocking();
         }
-    } else if (s_shot_frame == 10) { /* pages uploaded; mimic a canvas click on region 0 */
+    }
+}
+
+/* Runs inside the can_render block, after build_rows (selection needs the row model). */
+void gui_shot_tick(void) {
+    if (!s_shot_active) {
+        return;
+    }
+    if (s_shot_frame >= 10 && !s_shot_selected) { /* pages uploaded; mimic a canvas click on region 0 */
+        s_shot_selected = true;
         const tp_session_snapshot *snapshot =
             gui_project_snapshot();
         const int atlas_index =

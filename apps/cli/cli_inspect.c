@@ -239,6 +239,9 @@ static void emit_target(cli_sb *sb, int depth, const tp_snapshot_target *t) {
 static tp_status inspect_build_sprite_index(
     const tp_session_snapshot *snapshot, int atlas_index,
     tp_sprite_index *out, tp_error *err) {
+/* Per-BINARY seam, deliberately narrower than TP_ENABLE_TEST_SEAMS: only
+ * ntpacker_inspect_fault defines it, so production ntpacker has no
+ * environment-controlled behavior and no other fault binary picks this up. */
 #ifdef NTPACKER_CLI_INSPECT_FAULT_SEAM
     if (getenv("NTPACKER_TEST_INSPECT_INDEX_FAIL")) {
         memset(out, 0, sizeof *out);

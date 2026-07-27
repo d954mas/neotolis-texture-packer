@@ -690,11 +690,40 @@ void test_detached_recovery_save_publishes_new_model_generation(void) {
                              tp_session_snapshot_model_generation(before));
     TEST_ASSERT_EQUAL_STRING("", tp_session_snapshot_project_dir(before));
 
+    /* The token an observer would be holding across the save. */
+    tp_session_observation *pre_save = NULL;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK, tp_session_observe(session, NULL, &pre_save, &err));
+    TEST_ASSERT_NOT_NULL(pre_save);
+    const tp_session_observation_token pre_save_token =
+        tp_session_observation_token_query(pre_save);
+    tp_session_observation_destroy(pre_save);
+
     tp_session_save_result result = {0};
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
         tp_session_save_detached_recovery(session, path, NULL, &result, &err));
     TEST_ASSERT_TRUE(result.saved);
+
+    /* The swapped project + saved mark are visible to observers only once the
+     * token MOVES. Observing with the pre-save token must yield a fresh SAVED
+     * observation, not the "nothing changed" NULL that would leave every observer
+     * serving stale dirty/freshness state. */
+    tp_session_observation *post_save = NULL;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_session_observe(session, &pre_save_token, &post_save, &err));
+    TEST_ASSERT_NOT_NULL(post_save);
+    TEST_ASSERT_FALSE(tp_session_observation_token_equal(
+        pre_save_token, tp_session_observation_token_query(post_save)));
+    TEST_ASSERT_FALSE(
+        tp_session_observation_resync_required(post_save));
+    TEST_ASSERT_EQUAL_UINT64(
+        1U, (uint64_t)tp_session_observation_event_count(post_save));
+    TEST_ASSERT_EQUAL_INT(
+        TP_SESSION_EVENT_SAVED,
+        tp_session_observation_event_at(post_save, 0)->kind);
+    tp_session_observation_destroy(post_save);
 
     tp_session_snapshot *after = NULL;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,

@@ -28,9 +28,14 @@ void gui_shot_apply_scale(void);
  * may be typing/clicking elsewhere while a headless capture runs -- real input must not leak in). */
 bool gui_shot_active(void);
 
-/* frame(), inside can_render after build_rows: pack + select the first region, then (on the capture
- * frame) drive the PNG dump. No-op unless --shot is active. Also dead-sticks the mouse pointers
- * each frame so the live cursor can't add hover/wheel state to the capture. */
+/* frame(), at the between-frame ingress boundary (beside gui_bench_tick) BEFORE the observation is
+ * pinned: dead-stick the mouse pointers so the live cursor can't add hover/wheel state to the
+ * capture, advance the shot frame counter (the ONLY place it advances), and run the blocking pack --
+ * a model mutation, so it must never run inside the pinned frame. No-op unless --shot is active. */
+void gui_shot_pre_pin_tick(void);
+
+/* frame(), inside can_render after build_rows: select the first packed region and bind the dev
+ * stale/packing/preview states, all of which need the built row model. No-op unless --shot. */
 void gui_shot_tick(void);
 
 /* frame(), at the pre-swap point: full-frame PNG capture + SHOT-BOUNDS logging, then quit. */

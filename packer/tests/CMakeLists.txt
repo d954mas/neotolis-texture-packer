@@ -113,10 +113,16 @@ nt_set_warning_flags(tp_test_session)
 file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/tp_session_test")
 add_test(NAME tp_session COMMAND tp_test_session "${CMAKE_BINARY_DIR}/tp_session_test")
 
-add_executable(tp_test_session_observation test_session_observation.c)
+# The observe-after-cut hook is compiled out of the shipped library, so this
+# target recompiles its TU with TP_ENABLE_TEST_SEAMS (same pattern as
+# tp_test_job_input_token recompiling tp_job.c).
+add_executable(tp_test_session_observation test_session_observation.c
+    ../src/tp_session_observation.c)
 target_link_libraries(tp_test_session_observation PRIVATE tp_core unity)
 target_include_directories(tp_test_session_observation PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../src)
+target_compile_definitions(tp_test_session_observation PRIVATE
+    TP_ENABLE_TEST_SEAMS=1)
 target_compile_options(tp_test_session_observation PRIVATE -U_DLL)
 nt_set_warning_flags(tp_test_session_observation)
 add_test(NAME tp_session_observation COMMAND tp_test_session_observation)

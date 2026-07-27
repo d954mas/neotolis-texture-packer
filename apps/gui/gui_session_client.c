@@ -421,6 +421,33 @@ static tp_status pending_register_before_admission(
     return TP_STATUS_OK;
 }
 
+/* Receipt postcondition: EVERY submit that resolved a transaction id answers
+ * with a typed terminal (id + identity + status + the revision the caller can
+ * still see). The GUI draft owner reads an EMPTY terminal transaction id as "the
+ * session never saw this submit" and returns the draft to EDITING, so a silent
+ * receipt-less rejection is the one answer that must never happen. */
+static tp_status fail_submit_with_receipt(
+    const gui_session_client *client,
+    const gui_session_submit_request *request,
+    const char transaction_id[33],
+    gui_session_submit_result *out,
+    tp_status status) {
+    const tp_session_snapshot *snapshot =
+        gui_session_client_snapshot(client);
+    out->terminal_status = status;
+    (void)snprintf(
+        out->terminal.transaction_id,
+        sizeof out->terminal.transaction_id,
+        "%s", transaction_id);
+    out->terminal.identity = request->identity;
+    out->terminal.status = status;
+    out->terminal.revision =
+        snapshot
+            ? tp_session_snapshot_revision(snapshot)
+            : request->expected_revision;
+    return status;
+}
+
 static tp_status reject_submit(
     const gui_session_client *client,
     const gui_session_submit_request *request,
@@ -431,22 +458,8 @@ static tp_status reject_submit(
     const tp_status status = tp_error_set(
         err, TP_STATUS_INVALID_ARGUMENT, "%s",
         message);
-    out->terminal_status = status;
-    if (transaction_id[0] != '\0') {
-        const tp_session_snapshot *snapshot =
-            gui_session_client_snapshot(client);
-        (void)snprintf(
-            out->terminal.transaction_id,
-            sizeof out->terminal.transaction_id,
-            "%s", transaction_id);
-        out->terminal.identity = request->identity;
-        out->terminal.status = status;
-        out->terminal.revision =
-            snapshot
-                ? tp_session_snapshot_revision(snapshot)
-                : request->expected_revision;
-    }
-    return status;
+    return fail_submit_with_receipt(
+        client, request, transaction_id, out, status);
 }
 
 static void pending_finish(
@@ -708,6 +721,12 @@ tp_status gui_session_client_submit(
             err, TP_STATUS_INVALID_ARGUMENT,
             "GUI submit requires an attached client, operations, semantic label, and output");
     }
+    /* A RETAINED id is resolved before the gates on purpose: it is the identified
+     * (draft) shape, and the draft FSM stays in SUBMITTING until it reads back a
+     * receipt carrying exactly this id -- so an admission/pin rejection must be
+     * able to name it. A GENERATED id is resolved only after the gates: those are
+     * the receipt-free structural intents (see gui_session_adapter.h), and a
+     * rejected submit must not burn an id or a step of the transaction RNG. */
     char transaction_id[33] = {0};
     tp_status status = TP_STATUS_OK;
     if (request->retained_transaction_id) {
@@ -715,6 +734,10 @@ tp_status gui_session_client_submit(
             client, request->retained_transaction_id,
             transaction_id, err);
         if (status != TP_STATUS_OK) {
+            /* A malformed retained id is the one case with no id to report; the
+             * empty terminal transaction id is exactly the "the session never saw
+             * this submit" answer the draft owner recovers from. */
+            out->terminal_status = status;
             return status;
         }
     }
@@ -753,24 +776,30 @@ tp_status gui_session_client_submit(
                 err, TP_STATUS_DUPLICATE_ID,
                 "GUI transaction ID generation collided with retained receipts");
         }
+        if (status != TP_STATUS_OK) {
+            out->terminal_status = status;
+            return status;
+        }
     }
-    if (status != TP_STATUS_OK) {
-        return status;
-    }
+
     gui_session_pending_submit *pending = NULL;
     bool existing = false;
     status = pending_register_before_admission(
         client, transaction_id, request->identity,
         &pending, &existing, err);
     if (status != TP_STATUS_OK) {
-        return status;
+        return fail_submit_with_receipt(
+            client, request, transaction_id, out,
+            status);
     }
     if (existing && pending->result_available) {
         status = transaction_result_copy(
             &pending->result, &out->transaction,
             err);
         if (status != TP_STATUS_OK) {
-            return status;
+            return fail_submit_with_receipt(
+                client, request, transaction_id, out,
+                status);
         }
         out->terminal_status =
             pending->terminal.status;
@@ -808,15 +837,17 @@ tp_status gui_session_client_submit(
         /*
          * Core reports duplicate IDs with its current revision. Do not retain
          * that transient answer: a later retry must ask core again rather than
-         * replaying a stale revision from this client.
+         * replaying a stale revision from this client. The CALLER still gets a
+         * typed receipt for this attempt -- nothing is retained, but the draft
+         * owner must never be left without an answer.
          */
         pending_clear(pending);
-    } else {
-        pending_finish(
-            client, pending, status,
-            &out->transaction);
-        out->terminal = pending->terminal;
+        return fail_submit_with_receipt(
+            client, request, transaction_id, out, status);
     }
+    pending_finish(
+        client, pending, status, &out->transaction);
+    out->terminal = pending->terminal;
 
     if (!out->transaction.committed) {
         return status;

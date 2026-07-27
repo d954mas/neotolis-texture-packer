@@ -529,6 +529,9 @@ void gui_actions_pump_lifecycle(void) {
     cancel_edit();
     gui_view_reconcile_observation(gui_project_snapshot());
     reset_selection();
+    /* A replacement project is "newly current": adopt its first atlas so the
+     * panels open populated (reconciliation itself only clears). */
+    gui_view_adopt_default_atlas(gui_project_snapshot());
     if (completed ==
         GUI_PROJECT_LIFECYCLE_NEW) {
         set_status("New project.");

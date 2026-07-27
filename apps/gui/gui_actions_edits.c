@@ -216,60 +216,42 @@ static bool atlas_field_valid(gui_atlas_field field) {
            field <= GUI_ATLAS_PIXELS_PER_UNIT;
 }
 
+static bool component_draft_begin(
+    gui_draft_family family, tp_id128 target_id,
+    int64_t expected_revision, bool same_component,
+    const char *what, bool *out_fresh);
+
+static bool atlas_edit_matches(
+    tp_id128 atlas_id, gui_atlas_field field) {
+    const gui_draft_owner *draft = &s_actions.draft;
+    return draft->family == GUI_DRAFT_ATLAS_SCALAR &&
+           draft->lifecycle.phase != GUI_EDIT_IDLE &&
+           tp_id128_eq(
+               draft->lifecycle.target_id, atlas_id) &&
+           draft->atlas.component == field;
+}
+
 void gui_edit_atlas_setting(
     tp_id128 atlas_id, int64_t expected_revision,
     gui_atlas_field field, int ivalue, float fvalue) {
-    if (!ensure_draft_owner()) {
-        return;
-    }
     if (!atlas_field_valid(field)) {
         set_status_ex(
             STATUS_WARNING,
             "Atlas edit rejected: unknown scalar field.");
         return;
     }
-    gui_draft_owner *draft = &s_actions.draft;
-    gui_edit_state *edit = &draft->lifecycle;
-    tp_error error = {{0}};
-    tp_status status = TP_STATUS_OK;
-    if (edit->phase == GUI_EDIT_IDLE) {
-        tp_id128 draft_id = tp_id128_nil();
-        if (!edit_id_generate(
-                &draft_id,
-                "Could not create the atlas draft identity")) {
-            return;
-        }
-        status = gui_edit_begin(
-            edit, atlas_id, expected_revision,
-            draft_id, &error);
-        if (status == TP_STATUS_OK) {
-            draft->family = GUI_DRAFT_ATLAS_SCALAR;
-            draft->atlas.component = field;
-        }
-    } else {
-        if (draft->family != GUI_DRAFT_ATLAS_SCALAR ||
-            !tp_id128_eq(
-                edit->target_id, atlas_id) ||
-            draft->atlas.component != field) {
-            set_status_ex(
-                STATUS_WARNING,
-                "Finish or discard the active atlas edit before editing another field.");
-            return;
-        }
-        if (edit->phase != GUI_EDIT_EDITING &&
-            edit->phase != GUI_EDIT_CONFLICTED) {
-            set_status_ex(
-                STATUS_WARNING,
-                "Atlas edit is awaiting its exact session result.");
-            return;
-        }
-    }
-    if (status != TP_STATUS_OK) {
-        set_statusf_ex(
-            STATUS_WARNING, "Atlas edit rejected: %s",
-            error.msg[0] ? error.msg
-                         : tp_status_str(status));
+    bool fresh = false;
+    if (!component_draft_begin(
+            GUI_DRAFT_ATLAS_SCALAR, atlas_id,
+            expected_revision,
+            atlas_edit_matches(atlas_id, field),
+            "Could not create the atlas draft identity",
+            &fresh)) {
         return;
+    }
+    gui_draft_owner *draft = &s_actions.draft;
+    if (fresh) {
+        draft->atlas.component = field;
     }
     if (field == GUI_ATLAS_PIXELS_PER_UNIT) {
         draft->atlas.real = fvalue;
@@ -576,15 +558,69 @@ static bool target_intent_push(target_edit_intent *e) {
     return true;
 }
 
+/* Begins (or continues) the one draft for `family`/`target_id`/component.
+ * `*out_fresh` reports whether a NEW draft was started, so the caller knows when
+ * to stamp its component metadata -- it cannot be derived from the phase before
+ * the call, because a sibling-field blur resolves the previous draft in here. */
 static bool component_draft_begin(
     gui_draft_family family, tp_id128 target_id,
     int64_t expected_revision, bool same_component,
-    const char *what) {
+    const char *what, bool *out_fresh) {
+    if (out_fresh) {
+        *out_fresh = false;
+    }
     if (!ensure_draft_owner()) {
         return false;
     }
     gui_draft_owner *draft = &s_actions.draft;
     gui_edit_state *edit = &draft->lifecycle;
+    if (edit->phase != GUI_EDIT_IDLE &&
+        (draft->family != family ||
+         !tp_id128_eq(edit->target_id, target_id) ||
+         !same_component)) {
+        /* Spec §12.4 "Blur": moving to a SIBLING field is the active draft's
+         * gesture boundary, so the draft submits instead of blocking forever on
+         * an explicit Enter/Escape. Only a draft that cannot reach a terminal
+         * answer (uncertain submit, or a conflict awaiting Apply Mine/Discard)
+         * still blocks the new edit. */
+        if (edit->phase != GUI_EDIT_EDITING) {
+            set_status_ex(
+                STATUS_WARNING,
+                "Finish or discard the active edit before editing another field.");
+            return false;
+        }
+        /* Settings-panel widgets raise these intents while DECLARING, inside the
+         * pinned observation, where no mutation may run. There the blur is
+         * requested as a gesture commit and lands at the next between-frame
+         * boundary -- the same deferral every other in-frame edit uses. A caller
+         * already at a safe boundary submits immediately. */
+        if (gui_project_frame_is_pinned()) {
+            gui_request_gesture_commit();
+            set_status_ex(
+                STATUS_WARNING,
+                "Submitting the previous edit -- repeat this change once it lands.");
+            return false;
+        }
+        if (!gui_actions__submit_draft()) {
+            set_status_ex(
+                STATUS_WARNING,
+                "Finish or discard the active edit before editing another field.");
+            return false;
+        }
+        /* The blur just advanced the model, so the caller's expected_revision --
+         * read from the snapshot BEFORE this call -- is stale by construction.
+         * The new draft's base is the revision the blur itself produced; keeping
+         * the caller's would conflict the new draft against our own commit. */
+        const tp_session_snapshot *after = gui_project_snapshot();
+        if (!after) {
+            set_status_ex(
+                STATUS_WARNING,
+                "No session is available for this edit.");
+            return false;
+        }
+        expected_revision =
+            tp_session_snapshot_revision(after);
+    }
     if (edit->phase == GUI_EDIT_IDLE) {
         tp_id128 draft_id = tp_id128_nil();
         if (!edit_id_generate(&draft_id, what)) {
@@ -602,15 +638,10 @@ static bool component_draft_begin(
             return false;
         }
         draft->family = family;
+        if (out_fresh) {
+            *out_fresh = true;
+        }
         return true;
-    }
-    if (draft->family != family ||
-        !tp_id128_eq(edit->target_id, target_id) ||
-        !same_component) {
-        set_status_ex(
-            STATUS_WARNING,
-            "Finish or discard the active edit before editing another field.");
-        return false;
     }
     if (edit->phase != GUI_EDIT_EDITING &&
         edit->phase != GUI_EDIT_CONFLICTED) {
@@ -658,17 +689,17 @@ static bool edit_sprite_component(
             "Sprite edit rejected: source key exceeds the GUI limit.");
         return false;
     }
-    const bool idle =
-        s_actions.draft.lifecycle.phase == GUI_EDIT_IDLE;
+    bool fresh = false;
     if (!component_draft_begin(
             GUI_DRAFT_SPRITE, sprite->source_id,
             sprite->expected_revision,
             sprite_edit_matches(sprite, kind, component),
-            "Could not create the sprite draft identity")) {
+            "Could not create the sprite draft identity",
+            &fresh)) {
         return false;
     }
     gui_draft_owner *draft = &s_actions.draft;
-    if (idle) {
+    if (fresh) {
         draft->sprite.kind = kind;
         draft->sprite.atlas_id = sprite->atlas_id;
         draft->sprite.source_id = sprite->source_id;
@@ -785,19 +816,19 @@ static bool edit_animation_component(
         tp_id128_is_nil(animation->animation_id)) {
         return false;
     }
-    const bool idle =
-        s_actions.draft.lifecycle.phase == GUI_EDIT_IDLE;
+    bool fresh = false;
     if (!component_draft_begin(
             GUI_DRAFT_ANIMATION,
             animation->animation_id,
             animation->expected_revision,
             animation_edit_matches(
                 animation, kind, component),
-            "Could not create the animation draft identity")) {
+            "Could not create the animation draft identity",
+            &fresh)) {
         return false;
     }
     gui_draft_owner *draft = &s_actions.draft;
-    if (idle) {
+    if (fresh) {
         draft->animation.kind = kind;
         draft->animation.atlas_id =
             animation->atlas_id;
@@ -1282,6 +1313,19 @@ static bool submit_draft(bool apply_mine) {
         return false;
     }
 
+    /* Preflight, BEFORE the FSM leaves EDITING: everything that would reject the
+     * submit before the session ever sees it is checked here, so SUBMITTING is
+     * entered only for a submit that actually reaches the session. A rejection
+     * here leaves the draft EDITING/CONFLICTED -- still visible, still
+     * discardable -- instead of stranding it in the uncertain phase. (The
+     * receipt-postcondition branch below is the backstop for the rest.) */
+    if (!draft_target_present(draft, snapshot)) {
+        set_status_ex(
+            STATUS_WARNING,
+            "The edited item no longer exists -- discard the edit.");
+        return false;
+    }
+
     tp_id128 transaction = tp_id128_nil();
     if (!edit_id_generate(
             &transaction,
@@ -1326,8 +1370,13 @@ static bool submit_draft(bool apply_mine) {
     if (edit->phase == GUI_EDIT_SUBMITTING) {
         const tp_session_snapshot *after =
             gui_project_snapshot();
+        const int64_t current_revision =
+            after
+                ? tp_session_snapshot_revision(after)
+                : edit->base_revision;
         tp_error reduce_error = {{0}};
         const bool exact_owner =
+            terminal.transaction_id[0] != '\0' &&
             strcmp(
                 edit->submitted_transaction_id,
                 terminal.transaction_id) == 0 &&
@@ -1337,17 +1386,28 @@ static bool submit_draft(bool apply_mine) {
             tp_id128_eq(
                 edit->draft_instance_id,
                 terminal.identity.draft_instance_id);
+        /* No receipt for THIS draft: the session never accepted the submit (an
+         * empty transaction id) or answered something else. Either way the draft
+         * is not uncertain, so it must leave SUBMITTING -- back to EDITING, or
+         * CONFLICTED when the model moved under it. Without this it would be
+         * stranded: Escape/Discard refuse, Apply Mine needs CONFLICTED, and every
+         * outer action that requires a terminal draft is blocked forever. */
         const tp_status reduce_status =
-            gui_edit_submit_result(
-                edit, exact_owner, terminal.status,
-                terminal.committed, terminal.no_change,
-                terminal.echo_state ==
-                    GUI_SESSION_SUBMIT_ECHO_OBSERVED,
-                terminal.revision,
-                after
-                    ? tp_session_snapshot_revision(after)
-                    : edit->base_revision,
-                &reduce_error);
+            exact_owner
+                ? gui_edit_submit_result(
+                      edit, true, terminal.status,
+                      terminal.committed, terminal.no_change,
+                      terminal.echo_state ==
+                          GUI_SESSION_SUBMIT_ECHO_OBSERVED,
+                      terminal.revision, current_revision,
+                      &reduce_error)
+                : gui_edit_submit_result(
+                      edit, true,
+                      status != TP_STATUS_OK
+                          ? status
+                          : TP_STATUS_INVALID_ARGUMENT,
+                      false, false, false, 0,
+                      current_revision, &reduce_error);
         if (reduce_status != TP_STATUS_OK) {
             set_statusf_ex(
                 STATUS_ERROR,
@@ -1391,8 +1451,11 @@ void gui_actions__rebase_deferred_edits(
     if (revision_after == revision_before) {
         return;
     }
-    NT_ASSERT(revision_after ==
-              revision_before + 1);
+    /* A submit commits exactly one transaction, but the observation refresh it
+     * performs can also fold in FOREIGN commits (another client on the same live
+     * session). More than one revision therefore means these intents really are
+     * stale -- leave them stale so the session rejects them on expected_revision.
+     * Not an invariant: a concurrent writer must never abort the GUI. */
     if (revision_after != revision_before + 1) {
         return;
     }

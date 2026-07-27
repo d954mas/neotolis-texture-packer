@@ -419,6 +419,7 @@ void setUp(void) {
             0});
     gui_view_reset();
     gui_view_reconcile_observation(gui_project_snapshot());
+    gui_view_adopt_default_atlas(gui_project_snapshot());
     multi_sel_clear();
 }
 

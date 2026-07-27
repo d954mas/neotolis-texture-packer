@@ -186,13 +186,15 @@ uint64_t gui_view_animation_frame_generation(void) {
 
 void gui_view_reconcile_observation(
     const tp_session_snapshot *snapshot) {
-    int atlas_index = gui_view_atlas_index(snapshot);
-    if (atlas_index < 0) {
-        const tp_snapshot_atlas *first =
-            snapshot && tp_session_snapshot_atlas_count(snapshot) > 0
-                ? tp_session_snapshot_atlas_at(snapshot, 0)
-                : NULL;
-        gui_view_select_atlas(first ? first->id : tp_id128_nil());
+    /* USA-24: a structural change either PRESERVES the stable selection or
+     * EXPLICITLY CLEARS it. Retargeting a vanished atlas to whatever now sits at
+     * index 0 does neither -- it silently points the panels, canvas and every
+     * "the selected atlas" action at a different atlas. Adopting a first atlas is
+     * a separate, explicit decision (gui_view_adopt_default_atlas), taken only
+     * where a project becomes current. */
+    if (!tp_id128_is_nil(s_selection.atlas_id) &&
+        gui_view_atlas_index(snapshot) < 0) {
+        gui_view_select_atlas(tp_id128_nil());
     }
     if (!tp_id128_is_nil(s_selection.animation_id) &&
         gui_view_animation_index(snapshot) < 0) {
@@ -200,6 +202,20 @@ void gui_view_reconcile_observation(
     }
     if (gui_view_animation_frame(snapshot) < 0) {
         gui_view_select_animation_frame(snapshot, -1);
+    }
+}
+
+void gui_view_adopt_default_atlas(
+    const tp_session_snapshot *snapshot) {
+    if (!tp_id128_is_nil(s_selection.atlas_id)) {
+        return;
+    }
+    const tp_snapshot_atlas *first =
+        snapshot && tp_session_snapshot_atlas_count(snapshot) > 0
+            ? tp_session_snapshot_atlas_at(snapshot, 0)
+            : NULL;
+    if (first) {
+        gui_view_select_atlas(first->id);
     }
 }
 

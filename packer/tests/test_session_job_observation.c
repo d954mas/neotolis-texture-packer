@@ -63,6 +63,7 @@ typedef struct fake_job {
     tp_session_job_target targets[2];
     int pump_count;
     int destroy_count;
+    int release_payload_count;
 } fake_job;
 
 static void fake_cancel(tp_session_owned_job *owner) {
@@ -80,6 +81,15 @@ static void fake_pump(tp_session_owned_job *owner) {
     job->pump_count++;
 }
 
+/* Stands in for the real Pack payload release (tp_job.c frees the page arena):
+ * counts the calls and drops the sample's result pointer exactly like the job
+ * does, so a second observe cannot resurrect a released result. */
+static void fake_release_payload(tp_session_owned_job *owner) {
+    fake_job *job = (fake_job *)owner;
+    job->release_payload_count++;
+    job->sample.terminal_result = NULL;
+}
+
 static bool fake_observe(tp_session_owned_job *owner,
                          tp_session_job_sample *out) {
     fake_job *job = (fake_job *)owner;
@@ -93,6 +103,7 @@ static void fake_job_init(fake_job *job, uint64_t instance_generation,
     memset(job, 0, sizeof *job);
     tp_session_owned_job_init(&job->owner, fake_cancel, fake_destroy);
     job->owner.pump = fake_pump;
+    job->owner.release_payload = fake_release_payload;
     job->targets[0].kind = TP_SESSION_JOB_TARGET_ATLAS;
     job->targets[0].atlas_id = target;
     job->sample.state = TP_SESSION_JOB_RUNNING;
@@ -191,6 +202,8 @@ void test_reverse_completion_accepts_only_latest_request(void) {
     TEST_ASSERT_NOT_NULL(accepted);
     TEST_ASSERT_EQUAL_UINT64(12U, accepted->request_id);
     TEST_ASSERT_EQUAL_PTR(&b.terminal_result, accepted->result);
+    /* An ACCEPTED result is never released: the session still owns those pages. */
+    TEST_ASSERT_EQUAL_INT(0, b.release_payload_count);
 
     tp_session_observation_destroy(observation);
     tp_session_destroy(session);
@@ -226,6 +239,7 @@ void test_deleted_target_rejects_terminal_result(void) {
     TEST_ASSERT_EQUAL_INT(
         TP_SESSION_JOB_REJECTION_TARGET_DELETED, state.rejection);
     TEST_ASSERT_NULL(tp_session_observation_job_result(observation));
+    TEST_ASSERT_EQUAL_INT(1, job.release_payload_count);
 
     tp_session_observation_destroy(observation);
     tp_session_destroy(session);
@@ -246,6 +260,9 @@ void test_cancel_racing_success_rejects_result(void) {
     TEST_ASSERT_EQUAL_INT(
         TP_SESSION_JOB_ADMISSION_CANCELLED,
         tp_session_job_observation_admit_internal(session, &job.owner));
+    /* The dropped result's payload is released AT rejection -- not held until the
+     * owner pin drops, which for a real Pack keeps every page pixel resident. */
+    TEST_ASSERT_EQUAL_INT(1, job.release_payload_count);
 
     tp_session_observation *observation = NULL;
     TEST_ASSERT_EQUAL_INT(
@@ -258,6 +275,12 @@ void test_cancel_racing_success_rejects_result(void) {
     TEST_ASSERT_EQUAL_INT(
         TP_SESSION_JOB_REJECTION_CANCELLED, state.rejection);
     TEST_ASSERT_NULL(tp_session_observation_job_result(observation));
+    /* Released exactly once: a repeated admit of a terminal job is a DUPLICATE and
+     * must not re-enter the release path. */
+    TEST_ASSERT_EQUAL_INT(
+        TP_SESSION_JOB_ADMISSION_DUPLICATE,
+        tp_session_job_observation_admit_internal(session, &job.owner));
+    TEST_ASSERT_EQUAL_INT(1, job.release_payload_count);
 
     tp_session_observation_destroy(observation);
     tp_session_destroy(session);

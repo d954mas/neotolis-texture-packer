@@ -132,19 +132,23 @@ static tp_session_job_admission admit_locked(
 
     tp_session_job_admission admission =
         TP_SESSION_JOB_ADMISSION_TERMINAL;
+    bool result_rejected = false;
     if (sample.cancellation_requested &&
         sample.state != TP_SESSION_JOB_CANCELLED) {
         session->observed_job_state.rejection =
             TP_SESSION_JOB_REJECTION_CANCELLED;
         admission = TP_SESSION_JOB_ADMISSION_CANCELLED;
+        result_rejected = true;
     } else if (!targets_still_exist(session, incoming)) {
         session->observed_job_state.rejection =
             TP_SESSION_JOB_REJECTION_TARGET_DELETED;
         admission = TP_SESSION_JOB_ADMISSION_TARGET_DELETED;
+        result_rejected = true;
     } else if (sample.state == TP_SESSION_JOB_CANCELLED) {
         session->observed_job_state.rejection =
             TP_SESSION_JOB_REJECTION_CANCELLED;
         admission = TP_SESSION_JOB_ADMISSION_CANCELLED;
+        result_rejected = true;
     } else if (sample.terminal_result) {
         tp_session_job_retain_internal(job);
         *out_retired_result = session->observed_result_owner;
@@ -163,6 +167,15 @@ static tp_session_job_admission admit_locked(
             };
         session->observed_job_state.result_accepted = true;
         bump_generation(&session->result_generation);
+    }
+    /* The rejected terminal result is dropped here, but the job stays pinned by
+     * observed_job_owner until the host consumes the terminal state -- and a
+     * cancelled big Pack would keep every page pixel resident for that whole
+     * window. Tell the job to free its payload now; its descriptor/targets (which
+     * observed_job_state borrows) stay valid. */
+    if (result_rejected && sample.terminal_result &&
+        job->release_payload) {
+        job->release_payload(job);
     }
     bump_generation(&session->job_state_generation);
     return admission;

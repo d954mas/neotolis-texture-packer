@@ -23,6 +23,7 @@ struct tp_session_observation {
     tp_session_snapshot *snapshot;
 };
 
+#ifdef TP_ENABLE_TEST_SEAMS
 static _Thread_local tp_session_test_observe_after_cut_fn
     s_test_after_cut_hook;
 static _Thread_local void *s_test_after_cut_context;
@@ -32,6 +33,7 @@ void tp_session__test_set_observe_after_cut(
     s_test_after_cut_hook = hook;
     s_test_after_cut_context = context;
 }
+#endif
 
 bool tp_session_observation_token_equal(
     tp_session_observation_token left,
@@ -159,6 +161,7 @@ tp_status tp_session_observe(
         return status;
     }
 
+#ifdef TP_ENABLE_TEST_SEAMS
     tp_session_test_observe_after_cut_fn hook = s_test_after_cut_hook;
     void *hook_context = s_test_after_cut_context;
     s_test_after_cut_hook = NULL;
@@ -166,6 +169,7 @@ tp_status tp_session_observe(
     if (hook) {
         hook(hook_context);
     }
+#endif
 
     if (observation->snapshot) {
         status = tp_session_snapshot__materialize_captured(

@@ -589,6 +589,9 @@ int cmd_pack(const char *project_path, const char *opt_atlas, const char *opt_ta
             note = "no enabled targets (skipped)";
             skip_notice_id = "no_enabled_targets";
         } else {
+/* Per-BINARY seam (see cli_inspect.c): only ntpacker_pack_arena_fault defines
+ * it -- it is the only CLI binary that also compiles tp_export_run.c and can
+ * reach the report-alloc seam below. */
 #ifdef NTPACKER_CLI_PACK_ARENA_FAULT_SEAM
             if (!getenv("NTPACKER_TEST_PACK_ARENA_FAIL")) {
                 arena = tp_arena_create(0);
