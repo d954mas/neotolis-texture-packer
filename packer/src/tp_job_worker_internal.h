@@ -24,7 +24,11 @@ extern "C" {
 #define TP_JOB_WORKER_PROTO_REQUEST_MAGIC 0x574A5450u  /* "PTJW" */
 #define TP_JOB_WORKER_PROTO_PROGRESS_MAGIC 0x504A5450u /* "PTJP" */
 #define TP_JOB_WORKER_PROTO_RESPONSE_MAGIC 0x524A5450u /* "PTJR" */
-#define TP_JOB_WORKER_PROTO_VERSION 1u
+/* v2: the Pack terminal carries the artifact PATH + expected size instead of
+ * the artifact bytes. A v1 peer is rejected with TP_STATUS_BAD_VERSION rather
+ * than silently misreading the Pack payload, so parent and child must always be
+ * the same binary (they are: the worker is a re-exec of this executable). */
+#define TP_JOB_WORKER_PROTO_VERSION 2u
 
 /* Exact admission caps. Project JSON uses the same cap as project-file
  * identity. Paths and exporter IDs reserve one byte for the decoded NUL. */
@@ -37,9 +41,14 @@ extern "C" {
 #define TP_JOB_WORKER_PROTO_MAX_RESULT_COUNT 1000000
 #define TP_JOB_WORKER_PROTO_MAX_NAME_ENTRIES 65536U
 #define TP_JOB_WORKER_PROTO_MAX_NAME_BYTES 4096U
-#define TP_JOB_WORKER_PROTO_MAX_ARTIFACT_BYTES ((size_t)256U << 20)
+/* No payload is artifact-sized any more, so the frame cap is the largest field
+ * the codec still admits (the request's project JSON) plus 16 MiB for every
+ * fixed header, path, error and name-map byte around it. A Pack name map that
+ * overshoots this (>= 65536 sprites averaging 1.25 KiB of name) fails closed on
+ * encode as a structured terminal error, never a truncated frame. The stream cap
+ * adds one more 16 MiB window for the progress frames preceding the terminal. */
 #define TP_JOB_WORKER_PROTO_MAX_FRAME_BYTES                                    \
-  (TP_JOB_WORKER_PROTO_MAX_ARTIFACT_BYTES + ((size_t)16U << 20))
+  (TP_JOB_WORKER_PROTO_MAX_PROJECT_JSON_BYTES + ((size_t)16U << 20))
 #define TP_JOB_WORKER_PROTO_MAX_STREAM_BYTES                                   \
   (TP_JOB_WORKER_PROTO_MAX_FRAME_BYTES + ((size_t)16U << 20))
 #define TP_JOB_WORKER_PROTO_MAX_PROGRESS_FRAMES 65536U
@@ -73,14 +82,20 @@ typedef struct tp_job_worker_proto_pack_result {
   tp_error freshness_error;
   char preview_exporter_id[TP_EXPORTER_ID_MAX];
   /* Reverse name map needed for host-side tp_pack_read_memory(). Names are
-   * UTF-8, borrowed for encode, and individually owned after decode. */
+   * UTF-8, borrowed for encode, and individually owned after decode. It stays on
+   * the wire on purpose: `.ntpack` stores hash-only names, so rebuilding the map
+   * from the live model would relabel sprites renamed while the Pack ran. */
   const struct tp_job_worker_proto_name *names;
   uint32_t name_count;
-  /* Complete child-produced .ntpack artifact. Borrowed for encode, owned
-   * after decode. Host parses this with tp_pack_read_memory only after
-   * terminal admission; it never re-reads a child path. */
-  const uint8_t *artifact;
-  size_t artifact_size;
+  /* Exact path of the child-produced `.ntpack` inside the worker's private
+   * per-request directory, plus the byte size the host must observe. Borrowed
+   * for encode, owned after decode; empty unless the Pack SUCCEEDED. The bytes
+   * never cross the wire: the host validates (regular file + exact size + pack
+   * magic), reads them in bounded chunks, and then deletes file and directory.
+   * A private directory per request is what keeps a native Pack, a preview Pack
+   * and a second app instance from colliding on one `<atlas>.ntpack` name. */
+  const char *artifact_path;
+  uint64_t artifact_size;
 } tp_job_worker_proto_pack_result;
 
 typedef struct tp_job_worker_proto_name {

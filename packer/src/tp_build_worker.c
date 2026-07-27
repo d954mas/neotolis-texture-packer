@@ -117,8 +117,6 @@ static bool strip_last_component(char *path) {
     return true;
 }
 
-static void remove_staging_dir(const char *staging);
-
 /* True iff the process that owned a staging dir is gone, so the dir is a safe
  * cross-run leftover to reap. An access-denied / still-running process is treated
  * as ALIVE (kept) -- only a definitively absent pid is reaped. */
@@ -143,12 +141,17 @@ static bool staging_owner_is_dead(unsigned long pid) {
 #endif
 }
 
-/* Best-effort cross-run cleanup: a host killed between make_staging_dir and
- * remove_staging_dir leaves a pkw-<pid>-<serial> dir behind forever. Before each
- * pack, sweep sibling pkw-* dirs whose owning pid (the leading hex field) is no
- * longer live and remove them. Silent and never fails the pack; our own dirs and
- * those of other live hosts are kept because their pid is still alive. */
-static void reap_stale_staging_dirs(const char *parent) {
+/* Best-effort cross-run cleanup: a host killed between creating and removing a
+ * private "<prefix><hexpid>-<serial>" directory leaves it behind forever. Before
+ * each run, sweep siblings with that shape whose owning pid is no longer live and
+ * remove them. Silent and never fails the run; our own dirs and those of other
+ * live owners are kept because their pid is still alive. Shared with the outer
+ * job worker's per-request directories, which use the same naming contract. */
+void tp_worker_reap_stale_dirs(const char *parent, const char *prefix) {
+    if (!parent || !prefix || prefix[0] == '\0') {
+        return;
+    }
+    const size_t prefix_length = strlen(prefix);
     tp_fs_dir *dir = tp_fs_dir_open(parent);
     if (!dir) {
         return;
@@ -161,13 +164,13 @@ static void reap_stale_staging_dirs(const char *parent) {
         if (entry.info.kind != TP_FS_KIND_DIRECTORY || entry.info.reparse) {
             continue;
         }
-        if (strncmp(entry.name, "pkw-", 4) != 0) {
+        if (strncmp(entry.name, prefix, prefix_length) != 0) {
             continue;
         }
         char *end = NULL;
-        unsigned long pid = strtoul(entry.name + 4U, &end, 16);
-        if (end == entry.name + 4U || *end != '-') {
-            continue; /* not our "pkw-<hexpid>-..." shape: leave it alone */
+        unsigned long pid = strtoul(entry.name + prefix_length, &end, 16);
+        if (end == entry.name + prefix_length || *end != '-') {
+            continue; /* not our "<prefix><hexpid>-..." shape: leave it alone */
         }
         if (!staging_owner_is_dead(pid)) {
             continue;
@@ -176,7 +179,7 @@ static void reap_stale_staging_dirs(const char *parent) {
         if ((size_t)snprintf(child, sizeof child, "%s/%s", parent, entry.name) >= sizeof child) {
             continue;
         }
-        remove_staging_dir(child);
+        tp_worker_remove_dir_tree(child);
     }
     tp_fs_dir_close(dir);
 }
@@ -201,7 +204,7 @@ static bool make_staging_dir(const char *work_dir, char *out, size_t out_cap) {
             break;
         }
     }
-    reap_stale_staging_dirs(parent); /* best-effort sweep of dead-owner leftovers */
+    tp_worker_reap_stale_dirs(parent, "pkw-"); /* best-effort sweep of dead-owner leftovers */
     static _Atomic uint64_t counter;
     const unsigned long pid = (unsigned long)tp_getpid();
     for (unsigned int attempt = 0U; attempt < 256U; attempt++) {
@@ -230,7 +233,7 @@ static bool make_staging_dir(const char *work_dir, char *out, size_t out_cap) {
 /* Remove the staging dir and everything under it, best effort, on EVERY exit
  * path. The builder writes a single flat file, but recurse to stay correct if a
  * future builder ever drops a sidecar. */
-static void remove_staging_dir(const char *staging) {
+void tp_worker_remove_dir_tree(const char *staging) {
     tp_fs_dir *dir = tp_fs_dir_open(staging);
     if (dir) {
         tp_fs_dir_entry entry;
@@ -244,7 +247,7 @@ static void remove_staging_dir(const char *staging) {
                 continue;
             }
             if (entry.info.kind == TP_FS_KIND_DIRECTORY && !entry.info.reparse) {
-                remove_staging_dir(child);
+                tp_worker_remove_dir_tree(child);
             } else if (entry.info.kind == TP_FS_KIND_DIRECTORY) {
                 /* Directory junction / dir-symlink (Windows classifies it as
                  * DIRECTORY): remove the link itself, never descend into and delete
@@ -417,7 +420,7 @@ tp_status tp_build_worker_run_opts(const tp_pack_settings *settings, tp_image_rg
     char staged_path[TP_STAGING_PATH_MAX];
     if ((size_t)snprintf(staged_path, sizeof staged_path, "%s/%s", staging, TP_BUILD_WORKER_OUT_NAME) >=
         sizeof staged_path) {
-        remove_staging_dir(staging);
+        tp_worker_remove_dir_tree(staging);
         free_loaded_images(loaded_images, settings->sprite_count);
         return tp_error_set(err, TP_STATUS_BUILDER_CRASHED, "tp_pack: build worker staging path too long");
     }
@@ -429,14 +432,14 @@ tp_status tp_build_worker_run_opts(const tp_pack_settings *settings, tp_image_rg
      * decode buffers (mirrors the driver freeing before encode/assembly). */
     free_loaded_images(loaded_images, settings->sprite_count);
     if (st != TP_STATUS_OK) {
-        remove_staging_dir(staging);
+        tp_worker_remove_dir_tree(staging);
         return st;
     }
 
     tp_proc *proc = tp_proc_spawn(exe, TP_BUILD_WORKER_ARGV1, staging);
     if (!proc) {
         free(req_bytes);
-        remove_staging_dir(staging);
+        tp_worker_remove_dir_tree(staging);
         return tp_error_set(err, TP_STATUS_BUILDER_CRASHED, "tp_pack: could not spawn build worker '%s'", exe);
     }
 
@@ -495,7 +498,7 @@ tp_status tp_build_worker_run_opts(const tp_pack_settings *settings, tp_image_rg
     tp_proc_destroy(proc); /* reaps a killed child; a finished child is already reaped */
 
     if (cancelled) {
-        remove_staging_dir(staging);
+        tp_worker_remove_dir_tree(staging);
         if (opts && opts->out_cancelled) {
             *opts->out_cancelled = true;
         }
@@ -503,7 +506,7 @@ tp_status tp_build_worker_run_opts(const tp_pack_settings *settings, tp_image_rg
         return TP_STATUS_OK; /* nothing published; caller maps this to a cancelled job */
     }
     if (timed_out) {
-        remove_staging_dir(staging);
+        tp_worker_remove_dir_tree(staging);
         free(reply);
         return tp_error_set(err, TP_STATUS_BUILDER_CRASHED,
                             "tp_pack: build worker timed out after %d ms (builder timeout)", timeout_ms);
@@ -519,7 +522,7 @@ tp_status tp_build_worker_run_opts(const tp_pack_settings *settings, tp_image_rg
         st = tp_error_set(err, TP_STATUS_BUILDER_CRASHED,
                           "tp_pack: build worker artifact could not be published to '%s'", out_path);
     }
-    remove_staging_dir(staging);
+    tp_worker_remove_dir_tree(staging);
     free(reply);
     return st;
 }

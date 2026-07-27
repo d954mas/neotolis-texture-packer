@@ -175,13 +175,20 @@ add_test(NAME tp_job_owner COMMAND tp_test_job_owner)
 
 # Architecture foundation job freshness: a result captures both immutable model
 # and source-runtime generations. Generation zero is data, never a stale sentinel.
+# The job transport's seams are compiled out of the shipped library, so the whole
+# worker TU chain is rebuilt here with TP_ENABLE_TEST_SEAMS: tp_job.c needs the
+# host-side worker timeout override, and tp_job_worker_main.c carries the
+# TP_TEST_JOB_WORKER_BLOCK_MS block that makes cancel linearization deterministic.
 add_executable(tp_test_job_input_token test_job_input_token.c
-    ../src/tp_scan.c ../src/tp_export_run.c ../src/tp_job.c)
+    ../src/tp_scan.c ../src/tp_export_run.c ../src/tp_job.c
+    ../src/tp_job_worker.c ../src/tp_job_worker_proto.c
+    ../src/tp_job_worker_main.c)
 # tp_build: F3-03 T2 extension calls tp_session_pack_input_hash (job/pack surface).
 target_link_libraries(tp_test_job_input_token PRIVATE tp_build unity)
 # ../src: single-decode seam (tp_image_internal.h) + scratch teardown (tp_fs_internal.h).
 target_include_directories(tp_test_job_input_token PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
-target_compile_definitions(tp_test_job_input_token PRIVATE TP_ENABLE_TEST_SEAMS=1)
+target_compile_definitions(tp_test_job_input_token PRIVATE
+    TP_ENABLE_TEST_SEAMS=1 _CRT_SECURE_NO_WARNINGS)
 target_compile_options(tp_test_job_input_token PRIVATE -U_DLL)
 nt_set_warning_flags(tp_test_job_input_token)
 add_test(NAME tp_job_input_token COMMAND tp_test_job_input_token)

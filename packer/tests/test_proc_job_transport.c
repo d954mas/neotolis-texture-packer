@@ -486,10 +486,15 @@ void test_reaped_tree_leader_cleans_nested_worker_before_reap(void) {
 }
 #endif
 
+/* Owned-tree spawn on purpose: that is the substrate the non-blocking stdin
+ * writer belongs to (the outer job worker pumps its request from the UI thread).
+ * A plain tp_proc_spawn keeps anonymous pipes, whose writes are synchronous by
+ * construction and therefore have no backpressure to report. */
 void test_nonblocking_stdin_pump_reports_backpressure_and_completes(void) {
     char self[4096];
     TEST_ASSERT_TRUE(tp_proc_self_path(self, sizeof self));
-    tp_proc *proc = tp_proc_spawn(self, TP_PROC_TEST_SLOW_STDIN_ARG, NULL);
+    tp_proc *proc =
+        tp_proc_spawn_owned_tree(self, TP_PROC_TEST_SLOW_STDIN_ARG, NULL);
     TEST_ASSERT_NOT_NULL(proc);
     uint8_t *request = (uint8_t *)malloc(TP_PROC_TEST_PROGRESS_BYTES);
     TEST_ASSERT_NOT_NULL(request);
@@ -633,6 +638,252 @@ void test_real_export_reports_committed_files_before_later_writer_failure(void) 
     remove_tree(root);
 }
 
+/* Drive one real worker request to its terminal frame. */
+static const tp_job_worker_proto_response *run_worker_request(
+    const tp_job_worker_proto_request *request,
+    tp_job_worker_process **out_process) {
+    tp_error error = {{0}};
+    tp_job_worker_process *process = NULL;
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_job_worker_process_start(request, &process, &error),
+        error.msg);
+    TEST_ASSERT_NOT_NULL(process);
+    for (int elapsed = 0;
+         elapsed < 20000 && !tp_job_worker_process_terminal(process);
+         ++elapsed) {
+        tp_job_worker_process_pump(process);
+        sleep_one_ms();
+    }
+    TEST_ASSERT_TRUE_MESSAGE(
+        tp_job_worker_process_terminal(process),
+        "real worker did not reach terminal state");
+    const tp_job_worker_proto_response *response =
+        tp_job_worker_process_response(process);
+    TEST_ASSERT_NOT_NULL(response);
+    *out_process = process;
+    return response;
+}
+
+static char *save_project_json(tp_project *project, size_t *out_length) {
+    /* Advances across calls: re-saving a project after adding a record must not
+     * mint the same structural id twice. */
+    static uint8_t seed = 7U;
+    const tp_rng rng = {deterministic_fill, &seed};
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_project_assign_missing_ids(project, &rng, &error), error.msg);
+    char *json = NULL;
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_project_save_buffer(project, &json, out_length, &error),
+        error.msg);
+    return json;
+}
+
+/* End-to-end freshness: a Pack the project did not change under reports
+ * CURRENT/MATCH with pack_input_hash == current_pack_input_hash, and the hash is
+ * a function of the pack input -- identical inputs repeat it, an added source
+ * moves it. Also pins the artifact contract: the `.ntpack` is published into a
+ * private per-request directory and its announced size is the file's size. */
+void test_real_pack_reports_current_freshness_and_input_bound_hash(void) {
+    char root[1200];
+    char source[1300];
+    char second_source[1300];
+    char work[1300];
+    char cwd[1024];
+#if defined(_WIN32)
+    TEST_ASSERT_NOT_NULL(_getcwd(cwd, (int)sizeof cwd));
+#else
+    TEST_ASSERT_NOT_NULL(getcwd(cwd, sizeof cwd));
+#endif
+    for (char *cursor = cwd; *cursor; ++cursor) {
+        if (*cursor == '\\') {
+            *cursor = '/';
+        }
+    }
+    TEST_ASSERT_TRUE(
+        snprintf(root, sizeof root, "%s/tp_proc_real_pack", cwd) > 0);
+    TEST_ASSERT_TRUE(
+        snprintf(source, sizeof source, "%s/sprite.png", root) > 0);
+    TEST_ASSERT_TRUE(
+        snprintf(second_source, sizeof second_source, "%s/sprite2.png",
+                 root) > 0);
+    TEST_ASSERT_TRUE(snprintf(work, sizeof work, "%s/work", root) > 0);
+    remove_tree(root);
+    tp_mkdirs(root);
+    tp_mkdirs(work);
+    TEST_ASSERT_TRUE(
+        tp_fs_write_file(source, g_png_4x4, sizeof g_png_4x4));
+
+    tp_project *project = tp_project_create();
+    TEST_ASSERT_NOT_NULL(project);
+    tp_project_atlas *atlas = tp_project_get_atlas(project, 0);
+    TEST_ASSERT_NOT_NULL(atlas);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_atlas_add_source_kind(
+            atlas, "sprite.png", TP_SOURCE_KIND_FILE));
+    size_t json_length = 0U;
+    char *json = save_project_json(project, &json_length);
+    const tp_id128 atlas_id = tp_project_get_atlas(project, 0)->id;
+
+    tp_job_worker_proto_request request = {
+        .kind = TP_SESSION_JOB_PACK,
+        .session_instance_generation = 5U,
+        .request_id = 61U,
+        .project_json = (const uint8_t *)json,
+        .project_json_len = json_length,
+        .atlas_id = atlas_id,
+        .project_dir = root,
+        .work_dir = work,
+        .preview_exporter_id = "",
+        .input_token = {.model_generation = 3U, .source_generation = 4U},
+    };
+    tp_job_worker_process *process = NULL;
+    const tp_job_worker_proto_response *response =
+        run_worker_request(&request, &process);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_SESSION_JOB_SUCCEEDED, response->state, response->error.msg);
+    TEST_ASSERT_EQUAL_INT(TP_PACK_FRESHNESS_CURRENT,
+                          response->pack.freshness);
+    TEST_ASSERT_EQUAL_INT(TP_PACK_FRESHNESS_MATCH,
+                          response->pack.freshness_reason);
+    TEST_ASSERT_FALSE(tp_id128_is_nil(response->pack.pack_input_hash));
+    TEST_ASSERT_TRUE(tp_id128_eq(response->pack.pack_input_hash,
+                                 response->pack.current_pack_input_hash));
+    TEST_ASSERT_EQUAL_UINT64(
+        3U, response->pack.input_token_at_start.model_generation);
+    /* Private per-request directory, exact announced size, real file. */
+    TEST_ASSERT_NOT_NULL(response->pack.artifact_path);
+    TEST_ASSERT_NOT_NULL(strstr(response->pack.artifact_path, "/req-"));
+    tp_fs_info info;
+    TEST_ASSERT_TRUE(tp_fs_stat(response->pack.artifact_path, &info));
+    TEST_ASSERT_EQUAL_UINT64(response->pack.artifact_size, info.size);
+    const tp_id128 first_hash = response->pack.pack_input_hash;
+    char first_path[1400];
+    TEST_ASSERT_TRUE(snprintf(first_path, sizeof first_path, "%s",
+                              response->pack.artifact_path) > 0);
+    tp_job_worker_process_destroy(process);
+
+    /* Same inputs, new request: same hash, a DIFFERENT private directory. */
+    request.request_id = 62U;
+    response = run_worker_request(&request, &process);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_SESSION_JOB_SUCCEEDED, response->state, response->error.msg);
+    TEST_ASSERT_TRUE(
+        tp_id128_eq(first_hash, response->pack.pack_input_hash));
+    TEST_ASSERT_TRUE(
+        strcmp(first_path, response->pack.artifact_path) != 0);
+    tp_job_worker_process_destroy(process);
+    free(json);
+
+    /* Pack input changed: the hash must move with it. */
+    TEST_ASSERT_TRUE(
+        tp_fs_write_file(second_source, g_png_4x4, sizeof g_png_4x4));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_atlas_add_source_kind(
+            tp_project_get_atlas(project, 0), "sprite2.png",
+            TP_SOURCE_KIND_FILE));
+    json = save_project_json(project, &json_length);
+    request.project_json = (const uint8_t *)json;
+    request.project_json_len = json_length;
+    request.request_id = 63U;
+    response = run_worker_request(&request, &process);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_SESSION_JOB_SUCCEEDED, response->state, response->error.msg);
+    TEST_ASSERT_EQUAL_INT(TP_PACK_FRESHNESS_CURRENT,
+                          response->pack.freshness);
+    TEST_ASSERT_FALSE(
+        tp_id128_eq(first_hash, response->pack.pack_input_hash));
+    tp_job_worker_process_destroy(process);
+
+    free(json);
+    tp_project_destroy(project);
+    remove_tree(root);
+}
+
+/* An atlas with no usable images is SKIPPED, not failed: the Export succeeds,
+ * counts it as skipped, and writes nothing for it. */
+void test_real_export_skips_an_empty_atlas_and_still_succeeds(void) {
+    char root[1200];
+    char source[1300];
+    char work[1300];
+    char packed_json[1400];
+    char empty_json[1400];
+    export_scratch_dir(root, sizeof root);
+    TEST_ASSERT_TRUE(
+        snprintf(source, sizeof source, "%s/sprite.png", root) > 0);
+    TEST_ASSERT_TRUE(snprintf(work, sizeof work, "%s/work", root) > 0);
+    TEST_ASSERT_TRUE(
+        snprintf(packed_json, sizeof packed_json,
+                 "%s/published/packed.json", root) > 0);
+    TEST_ASSERT_TRUE(
+        snprintf(empty_json, sizeof empty_json, "%s/published/empty.json",
+                 root) > 0);
+    remove_tree(root);
+    tp_mkdirs(root);
+    tp_mkdirs(work);
+    TEST_ASSERT_TRUE(
+        tp_fs_write_file(source, g_png_4x4, sizeof g_png_4x4));
+
+    tp_project *project = tp_project_create();
+    TEST_ASSERT_NOT_NULL(project);
+    tp_project_atlas *packed = tp_project_get_atlas(project, 0);
+    TEST_ASSERT_NOT_NULL(packed);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_atlas_add_source_kind(
+            packed, "sprite.png", TP_SOURCE_KIND_FILE));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_atlas_add_target(
+            packed, TP_EXPORTER_ID_JSON_NEOTOLIS, "published/packed",
+            NULL));
+    int empty_index = -1;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_add_atlas(project, "empty", &empty_index));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_atlas_add_target(
+            tp_project_get_atlas(project, empty_index),
+            TP_EXPORTER_ID_JSON_NEOTOLIS, "published/empty", NULL));
+    size_t json_length = 0U;
+    char *json = save_project_json(project, &json_length);
+    tp_project_destroy(project);
+
+    const tp_job_worker_proto_request request = {
+        .kind = TP_SESSION_JOB_EXPORT,
+        .session_instance_generation = 12U,
+        .request_id = 71U,
+        .project_json = (const uint8_t *)json,
+        .project_json_len = json_length,
+        .project_dir = root,
+        .work_dir = work,
+        .preview_exporter_id = "",
+    };
+    tp_job_worker_process *process = NULL;
+    const tp_job_worker_proto_response *response =
+        run_worker_request(&request, &process);
+    free(json);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_SESSION_JOB_SUCCEEDED, response->state, response->error.msg);
+    TEST_ASSERT_EQUAL_INT(1, response->export_result.atlases_ok);
+    TEST_ASSERT_EQUAL_INT(1, response->export_result.atlases_skipped);
+    TEST_ASSERT_EQUAL_INT(0, response->export_result.atlases_failed);
+    TEST_ASSERT_EQUAL_INT(1, response->export_result.targets);
+    TEST_ASSERT_FALSE(response->export_result.partial_publication);
+    TEST_ASSERT_TRUE(tp_fs_exists(packed_json));
+    TEST_ASSERT_FALSE_MESSAGE(
+        tp_fs_exists(empty_json),
+        "a skipped empty atlas must not publish an export file");
+    tp_job_worker_process_destroy(process);
+    remove_tree(root);
+}
+
 int main(int argc, char **argv) {
     if (tp_build_is_worker_invocation(argc, argv)) {
         return tp_build_worker_main();
@@ -671,5 +922,8 @@ int main(int argc, char **argv) {
     RUN_TEST(test_nonblocking_stdin_pump_reports_backpressure_and_completes);
     RUN_TEST(
         test_real_export_reports_committed_files_before_later_writer_failure);
+    RUN_TEST(test_real_export_skips_an_empty_atlas_and_still_succeeds);
+    RUN_TEST(
+        test_real_pack_reports_current_freshness_and_input_bound_hash);
     return UNITY_END();
 }

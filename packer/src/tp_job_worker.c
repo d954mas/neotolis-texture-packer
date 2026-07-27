@@ -14,7 +14,12 @@
 
 #define TP_JOB_WORKER_IO_BUDGET (64U * 1024U)
 #define TP_JOB_WORKER_TIMEOUT_MS (5 * 60 * 1000)
-#define TP_JOB_WORKER_CANCEL_GRACE_MS 250
+/* A cancelled worker must still finish the phase it is in before it can write a
+ * terminal frame: the longest such phase is a full source decode, which a large
+ * atlas can hold for most of a second. 250 ms made the host kill an obedient
+ * worker mid-shutdown and report a grace-period failure instead of its real
+ * cancelled terminal. */
+#define TP_JOB_WORKER_CANCEL_GRACE_MS 1000
 
 struct tp_job_worker_process {
     tp_proc *proc;
@@ -42,7 +47,9 @@ struct tp_job_worker_process {
     bool terminal;
 };
 
+#ifdef TP_ENABLE_TEST_SEAMS
 static int s_test_timeout_ms;
+#endif
 
 static double process_now_ms(void) {
 #if defined(_WIN32)
@@ -66,9 +73,11 @@ static double process_now_ms(void) {
 }
 
 static int process_timeout_ms(void) {
+#ifdef TP_ENABLE_TEST_SEAMS
     if (s_test_timeout_ms > 0) {
         return s_test_timeout_ms;
     }
+#endif
     return TP_JOB_WORKER_TIMEOUT_MS;
 }
 
@@ -123,31 +132,13 @@ static void admit_terminal(tp_job_worker_process *process,
             "job worker terminal identity does not match the request");
         return;
     }
+    /* The terminal frame is admitted verbatim. A worker that observed the cancel
+     * byte already folds CANCELLED into its own terminal state, and the host
+     * owner (tp_job.c job_publish_response) is the ONE place that decides whether
+     * an accepted host cancellation outranks a terminal that raced it. Relabelling
+     * here as well produced two competing cancel decisions over one outcome. */
     process->response = *terminal;
     memset(terminal, 0, sizeof *terminal);
-    if (process->cancel_requested) {
-        const double elapsed_ms = process->response.elapsed_ms;
-        tp_session_export_job_result export_result = {0};
-        if (process->kind == TP_SESSION_JOB_EXPORT) {
-            export_result = process->response.export_result;
-        }
-        tp_job_worker_proto_response_free(&process->response);
-        process->response.kind = process->kind;
-        process->response.session_instance_generation =
-            process->session_instance_generation;
-        process->response.request_id = process->request_id;
-        process->response.state = TP_SESSION_JOB_CANCELLED;
-        process->response.status = TP_STATUS_CANCELLED;
-        process->response.elapsed_ms = elapsed_ms;
-        (void)tp_error_set(
-            &process->response.error, TP_STATUS_CANCELLED,
-            "job cancellation was admitted before terminal completion");
-        if (process->kind == TP_SESSION_JOB_EXPORT) {
-            process->response.export_result = export_result;
-            process->response.export_result.partial_publication =
-                process->response.export_result.targets > 0;
-        }
-    }
     process->response_ready = true;
 }
 
@@ -425,6 +416,7 @@ void tp_job_worker_process_destroy(tp_job_worker_process *process) {
     free(process);
 }
 
+#ifdef TP_ENABLE_TEST_SEAMS
 void tp_job_worker__test_set_timeout_ms(int timeout_ms) {
     s_test_timeout_ms = timeout_ms;
 }
@@ -437,3 +429,4 @@ bool tp_job_worker__test_request_backpressured(
 void tp_job_worker__test_reset(void) {
     s_test_timeout_ms = 0;
 }
+#endif

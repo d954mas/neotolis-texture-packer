@@ -1,4 +1,5 @@
-#define _CRT_SECURE_NO_WARNINGS
+/* _CRT_SECURE_NO_WARNINGS comes from the target (the seam-enabled worker TUs
+ * compiled into this executable need it too). */
 
 #include <stdint.h>
 #include <stdio.h>
@@ -324,6 +325,41 @@ void test_process_pack_terminal_is_published_after_host_poll(void) {
     remove_tree(work_dir);
 }
 
+static void set_worker_env(const char *name, const char *value) {
+#ifdef _WIN32
+    TEST_ASSERT_EQUAL_INT(0, _putenv_s(name, value ? value : ""));
+#else
+    if (value) {
+        TEST_ASSERT_EQUAL_INT(0, setenv(name, value, 1));
+    } else {
+        (void)unsetenv(name);
+    }
+#endif
+}
+
+/* Count the worker's private per-request directories left under work_dir. */
+static int count_request_dirs(const char *work_dir) {
+    tp_fs_dir *dir = tp_fs_dir_open(work_dir);
+    if (!dir) {
+        return 0;
+    }
+    int count = 0;
+    tp_fs_dir_entry entry;
+    while (tp_fs_dir_next(dir, &entry) == TP_FS_DIR_ENTRY) {
+        if (entry.info.kind == TP_FS_KIND_DIRECTORY &&
+            strncmp(entry.name, "req-", 4U) == 0) {
+            count++;
+        }
+    }
+    tp_fs_dir_close(dir);
+    return count;
+}
+
+/* Cancel linearization without a race: the worker is held in its pre-work block
+ * for far longer than the host's cancellation grace, so the cancel is provably
+ * issued while the worker has done nothing. The terminal is CANCELLED, no result
+ * is adopted, no private directory is left behind, and the host does not wait out
+ * the block. */
 void test_host_cancel_owns_process_terminal_result(void) {
     tp_session *session = make_session();
     char work_dir[1024];
@@ -338,19 +374,127 @@ void test_host_cancel_owns_process_terminal_result(void) {
         .work_dir = work_dir,
     };
     tp_error error = {{0}};
+    set_worker_env("TP_TEST_JOB_WORKER_BLOCK_MS", "8000");
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
         tp_session_pack_job_start(session, &request, &error));
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK, tp_session_job_cancel(session, &error));
     tp_session_job_result result = wait_for_result(session);
+    set_worker_env("TP_TEST_JOB_WORKER_BLOCK_MS", "");
     TEST_ASSERT_EQUAL_INT(TP_SESSION_JOB_CANCELLED, result.state);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_CANCELLED, result.status);
     TEST_ASSERT_NULL(result.pack.arena);
     TEST_ASSERT_NULL(result.pack.result);
+    TEST_ASSERT_TRUE_MESSAGE(
+        result.elapsed_ms < 6000.0,
+        "cancel waited out the blocked worker instead of linearizing");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        0, count_request_dirs(work_dir),
+        "a cancelled Pack must leave no private request directory");
     tp_session_job_result_destroy(&result);
     tp_session_destroy(session);
     remove_tree(work_dir);
+}
+
+/* The UTF-8 name table is load-bearing on the wire: `.ntpack` stores hash-only
+ * names, so a host that rebuilt the map from the LIVE model would relabel every
+ * sprite of a Pack that was renamed while it ran. Rename the atlas after the job
+ * snapshot is taken and assert the adopted result still carries the packed name. */
+void test_rename_during_pack_keeps_the_packed_labels(void) {
+    tp_session *session = make_session();
+    char work_dir[1024];
+    scratch_dir(work_dir, sizeof work_dir);
+    remove_tree(work_dir);
+    tp_mkdirs(work_dir);
+    const tp_id128 atlas_id = default_atlas_id(session);
+    add_file_source(session, atlas_id, work_dir);
+
+    const tp_pack_job_request request = {
+        .atlas_id = atlas_id,
+        .work_dir = work_dir,
+    };
+    tp_error error = {{0}};
+    set_worker_env("TP_TEST_JOB_WORKER_BLOCK_MS", "250");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_session_pack_job_start(session, &request, &error),
+        error.msg);
+
+    tp_operation operation = {0};
+    operation.kind = TP_OP_ATLAS_RENAME;
+    operation.atlas_id = atlas_id;
+    operation.u.atlas_rename.name = (char *)"renamed-mid-pack";
+    tp_txn_request rename_request = {0};
+    rename_request.schema = TP_TXN_SCHEMA;
+    memcpy(rename_request.id_hex, "efefefefefefefefefefefefefefefef",
+           sizeof rename_request.id_hex);
+    rename_request.expected_revision = tp_session_revision(session);
+    rename_request.ops = &operation;
+    rename_request.op_count = 1U;
+    tp_txn_result rename_result = {0};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_session_apply(session, &rename_request, &rename_result, &error),
+        error.msg);
+    TEST_ASSERT_TRUE(rename_result.committed);
+    tp_txn_result_free(&rename_result);
+
+    tp_session_job_result result = wait_for_result(session);
+    set_worker_env("TP_TEST_JOB_WORKER_BLOCK_MS", "");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_SESSION_JOB_SUCCEEDED, result.state, result.error.msg);
+    TEST_ASSERT_NOT_NULL(result.pack.result);
+    TEST_ASSERT_EQUAL_STRING_MESSAGE(
+        "atlas1", result.pack.result->atlas_name,
+        "the adopted result must carry the names the worker packed");
+    tp_session_job_result_destroy(&result);
+    tp_session_destroy(session);
+    remove_tree(work_dir);
+}
+
+/* Digestless artifact validation. The host trusts an exact size + the pack magic
+ * (never a full-file hash), so both failures must surface as structured terminal
+ * errors that leave no result behind -- the caller's previous Pack stands. */
+static void assert_artifact_fault_is_structured(const char *fault,
+                                                tp_status expected) {
+    tp_session *session = make_session();
+    char work_dir[1024];
+    scratch_dir(work_dir, sizeof work_dir);
+    remove_tree(work_dir);
+    tp_mkdirs(work_dir);
+    const tp_id128 atlas_id = default_atlas_id(session);
+    add_file_source(session, atlas_id, work_dir);
+
+    const tp_pack_job_request request = {
+        .atlas_id = atlas_id,
+        .work_dir = work_dir,
+    };
+    tp_error error = {{0}};
+    set_worker_env("TP_TEST_JOB_WORKER_ARTIFACT_FAULT", fault);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_session_pack_job_start(session, &request, &error),
+        error.msg);
+    tp_session_job_result result = wait_for_result(session);
+    set_worker_env("TP_TEST_JOB_WORKER_ARTIFACT_FAULT", "");
+    TEST_ASSERT_EQUAL_INT(TP_SESSION_JOB_FAILED, result.state);
+    TEST_ASSERT_EQUAL_INT(expected, result.status);
+    TEST_ASSERT_TRUE(result.error.msg[0] != '\0');
+    TEST_ASSERT_NULL(result.pack.arena);
+    TEST_ASSERT_NULL(result.pack.result);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        0, count_request_dirs(work_dir),
+        "a rejected artifact must not leave its private directory behind");
+    tp_session_job_result_destroy(&result);
+    tp_session_destroy(session);
+    remove_tree(work_dir);
+}
+
+void test_damaged_pack_artifact_is_a_structured_terminal_failure(void) {
+    assert_artifact_fault_is_structured("truncate",
+                                        TP_STATUS_BUILDER_FAILED);
+    assert_artifact_fault_is_structured("magic", TP_STATUS_BAD_MAGIC);
 }
 
 void test_worker_timeout_is_a_structured_terminal_failure(void) {
@@ -439,6 +583,8 @@ int main(int argc, char **argv) {
     RUN_TEST(
         test_process_pack_terminal_is_published_after_host_poll);
     RUN_TEST(test_host_cancel_owns_process_terminal_result);
+    RUN_TEST(test_rename_during_pack_keeps_the_packed_labels);
+    RUN_TEST(test_damaged_pack_artifact_is_a_structured_terminal_failure);
     RUN_TEST(test_worker_timeout_is_a_structured_terminal_failure);
     RUN_TEST(test_export_target_allocation_failure_is_fail_atomic);
     return UNITY_END();

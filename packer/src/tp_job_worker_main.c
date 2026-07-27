@@ -8,8 +8,14 @@
 #if defined(_WIN32)
 #include <fcntl.h>
 #include <io.h>
+#include <process.h>
 #include <windows.h>
-#elif defined(TP_ENABLE_TEST_SEAMS)
+#define tp_worker_getpid _getpid
+#else
+#include <unistd.h>
+#define tp_worker_getpid getpid
+#endif
+#if !defined(_WIN32) && defined(TP_ENABLE_TEST_SEAMS)
 #include <errno.h>
 #endif
 
@@ -22,6 +28,7 @@
 #include "tp_core/tp_pack_hash.h"
 #include "tp_core/tp_project.h"
 #include "tp_core/tp_scan.h"
+#include "tp_build_worker_internal.h"
 #include "tp_fs_internal.h"
 #include "tp_pack_priv.h"
 #include "tp_proc_internal.h"
@@ -34,6 +41,7 @@ typedef struct worker_cancel {
 typedef struct pack_hash_collect {
     tp_id128 *hashes;
     int count;
+    worker_cancel *cancel;
 } pack_hash_collect;
 
 static char *worker_strdup(const char *text) {
@@ -112,6 +120,26 @@ static void test_block_before_job_work(void) {
 }
 #endif
 
+#ifdef TP_ENABLE_TEST_SEAMS
+/* Damage the published artifact AFTER its size was announced, so the host's
+ * digestless validation (regular file + exact size + pack magic) can be driven
+ * end to end without a real disk fault. "truncate" moves the size away from the
+ * announced one; "magic" keeps the size and destroys the header. */
+static void test_fault_artifact(const char *path) {
+    const char *mode = getenv("TP_TEST_JOB_WORKER_ARTIFACT_FAULT");
+    if (!mode || mode[0] == '\0') {
+        return;
+    }
+    FILE *file = tp_fs_fopen(
+        path, strcmp(mode, "magic") == 0 ? "r+b" : "wb");
+    if (!file) {
+        return;
+    }
+    (void)fwrite("XXXX", 1U, 4U, file);
+    (void)fclose(file);
+}
+#endif
+
 static bool worker_cancel_requested(void *context) {
     worker_cancel *cancel = context;
     if (cancel->requested || cancel->transport_failed) {
@@ -161,48 +189,36 @@ static void collect_image_hash(void *context, int sprite_index,
     }
     collect->hashes[sprite_index] =
         tp_pack_semantic_image_hash(width, height, rgba);
+    /* Decoding is the long uninterruptible stretch of a Pack, so drain the
+     * cancellation byte here, between images: tp_pack's own per-image poll then
+     * abandons the decode instead of running it to completion. */
+    (void)worker_cancel_requested(collect->cancel);
 }
 
-static tp_status read_artifact(const char *path, uint8_t **out,
-                               size_t *out_size, tp_error *err) {
-    *out = NULL;
-    *out_size = 0U;
-    FILE *file = tp_fs_fopen(path, "rb");
-    if (!file) {
-        return tp_error_set(err, TP_STATUS_BUILDER_FAILED,
-                            "job worker Pack artifact is missing");
+/* One private directory per Pack request under the host-chosen work_dir. It is
+ * what keeps a native Pack, a preview Pack and a second app instance from
+ * colliding on the single `<atlas_name>.ntpack` name, and it gives the host an
+ * exact path to adopt. Named with the WORKER pid so tp_worker_reap_stale_dirs
+ * heals whatever a killed worker left behind on the next run. */
+static bool make_request_dir(const char *work_dir, uint64_t request_id,
+                             char *out, size_t out_cap) {
+    tp_worker_reap_stale_dirs(work_dir, "req-");
+    const int length = snprintf(
+        out, out_cap, "%s/req-%08lx-%016llx", work_dir,
+        (unsigned long)((unsigned long)tp_worker_getpid() & 0xffffffffUL),
+        (unsigned long long)request_id);
+    if (length <= 0 || (size_t)length >= out_cap) {
+        out[0] = '\0';
+        return false;
     }
-    if (fseek(file, 0, SEEK_END) != 0) {
-        (void)fclose(file);
-        return tp_error_set(err, TP_STATUS_BUILDER_FAILED,
-                            "job worker Pack artifact cannot be sized");
+    if (tp_fs_exists(out)) {
+        tp_worker_remove_dir_tree(out); /* our own pid: a leftover, never a peer */
     }
-    const long end = ftell(file);
-    if (end <= 0 ||
-        (uint64_t)end >
-            (uint64_t)TP_JOB_WORKER_PROTO_MAX_ARTIFACT_BYTES ||
-        fseek(file, 0, SEEK_SET) != 0) {
-        (void)fclose(file);
-        return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
-                            "job worker Pack artifact exceeds protocol cap");
+    if (tp_fs_create_dir(out)) {
+        return true;
     }
-    uint8_t *bytes = malloc((size_t)end);
-    if (!bytes) {
-        (void)fclose(file);
-        return tp_error_set(err, TP_STATUS_OOM,
-                            "job worker Pack artifact allocation failed");
-    }
-    const bool complete =
-        fread(bytes, 1U, (size_t)end, file) == (size_t)end &&
-        fclose(file) == 0;
-    if (!complete) {
-        free(bytes);
-        return tp_error_set(err, TP_STATUS_BUILDER_FAILED,
-                            "job worker Pack artifact read failed");
-    }
-    *out = bytes;
-    *out_size = (size_t)end;
-    return TP_STATUS_OK;
+    out[0] = '\0';
+    return false;
 }
 
 static tp_status run_pack(const tp_job_worker_proto_request *request,
@@ -261,7 +277,15 @@ static tp_status run_pack(const tp_job_worker_proto_request *request,
         }
         settings = effective;
     }
-    settings.work_dir = request->work_dir;
+    char request_dir[512];
+    if (!make_request_dir(request->work_dir, request->request_id, request_dir,
+                          sizeof request_dir)) {
+        tp_pack_input_free(&input);
+        return tp_error_set(
+            err, TP_STATUS_FILE_IO_FAILED,
+            "job worker could not create its private Pack directory");
+    }
+    settings.work_dir = request_dir;
     settings.sprites = input.descs;
     settings.sprite_count = input.count;
 
@@ -272,6 +296,7 @@ static tp_status run_pack(const tp_job_worker_proto_request *request,
     if (!names || !image_hashes) {
         free(names);
         free(image_hashes);
+        tp_worker_remove_dir_tree(request_dir);
         tp_pack_input_free(&input);
         return tp_error_set(err, TP_STATUS_OOM,
                             "job worker Pack metadata allocation failed");
@@ -283,6 +308,7 @@ static tp_status run_pack(const tp_job_worker_proto_request *request,
     if (!atlas_name) {
         free(names);
         free(image_hashes);
+        tp_worker_remove_dir_tree(request_dir);
         tp_pack_input_free(&input);
         return tp_error_set(
             err, TP_STATUS_OOM,
@@ -301,6 +327,7 @@ static tp_status run_pack(const tp_job_worker_proto_request *request,
         if (!name) {
             free_pack_names(names, owned_name_count);
             free(image_hashes);
+            tp_worker_remove_dir_tree(request_dir);
             tp_pack_input_free(&input);
             return tp_error_set(
                 err, TP_STATUS_OOM,
@@ -312,21 +339,42 @@ static tp_status run_pack(const tp_job_worker_proto_request *request,
             nt_hash64_str(input.descs[i].name).value;
         owned_name_count++;
     }
-    pack_hash_collect collect = {image_hashes, input.count};
-    tp_arena *arena = tp_arena_create(0);
-    tp_result *result = NULL;
-    if (!arena) {
-        status = TP_STATUS_OOM;
-    } else {
-        (void)publish_progress(request->request_id, 0, 1,
-                               TP_JOB_WORKER_PHASE_BUILD);
-        status = tp_pack_cancellable_observed(
-            &settings, arena, &result, worker_cancel_requested, cancel,
-            collect_image_hash, &collect, err);
+
+    /* Produce only: this process never reads the artifact back. The host owns
+     * the single parse, so a tp_pack_read here would cost a second full decode
+     * of every page for a tp_result nobody in this process looks at. */
+    pack_hash_collect collect = {image_hashes, input.count, cancel};
+    char artifact_path[512];
+    bool cancelled = false;
+    (void)publish_progress(request->request_id, 0, 1,
+                           TP_JOB_WORKER_PHASE_BUILD);
+    status = tp_pack_produce_observed(
+        &settings, artifact_path, sizeof artifact_path, &cancelled,
+        worker_cancel_requested, cancel, collect_image_hash, &collect, err);
+    if (status == TP_STATUS_OK && cancelled) {
+        status = tp_error_set(err, TP_STATUS_CANCELLED,
+                              "Pack was cancelled before publication");
+    }
+
+    uint64_t artifact_size = 0U;
+    if (status == TP_STATUS_OK) {
+        tp_fs_info info;
+        if (!tp_fs_stat(artifact_path, &info) ||
+            info.kind != TP_FS_KIND_REGULAR || info.reparse ||
+            info.size == 0U) {
+            status = tp_error_set(
+                err, TP_STATUS_BUILDER_FAILED,
+                "job worker Pack artifact is missing or unreadable");
+        } else {
+            artifact_size = info.size;
+#ifdef TP_ENABLE_TEST_SEAMS
+            test_fault_artifact(artifact_path);
+#endif
+        }
     }
 
     tp_id128 input_hash = tp_id128_nil();
-    if (status == TP_STATUS_OK && result) {
+    if (status == TP_STATUS_OK) {
         tp_error hash_error = {{0}};
         if (tp_pack_input_hash_from_images(
                 &settings,
@@ -341,24 +389,23 @@ static tp_status run_pack(const tp_job_worker_proto_request *request,
     }
     free(image_hashes);
 
-    uint8_t *artifact = NULL;
-    size_t artifact_size = 0U;
-    if (status == TP_STATUS_OK && result) {
-        char path[512];
-        const int length = snprintf(
-            path, sizeof path, "%s/%s.ntpack",
-            settings.work_dir, settings.atlas_name);
-        if (length < 0 || (size_t)length >= sizeof path) {
-            status = tp_error_set(
-                err, TP_STATUS_OUT_OF_BOUNDS,
-                "job worker Pack artifact path is too long");
-        } else {
-            status = read_artifact(
-                path, &artifact, &artifact_size, err);
-        }
+    char *owned_artifact_path =
+        status == TP_STATUS_OK ? worker_strdup(artifact_path) : NULL;
+    if (status == TP_STATUS_OK && !owned_artifact_path) {
+        status = tp_error_set(err, TP_STATUS_OOM,
+                              "job worker Pack artifact path allocation failed");
+    }
+    /* A cancellation admitted while the artifact was produced or hashed outranks
+     * success. Fold it HERE, where the private directory can still be removed,
+     * not at the terminal-frame boundary where its path is already gone. */
+    if (status == TP_STATUS_OK &&
+        (cancel->requested || cancel->transport_failed)) {
+        status = tp_error_set(
+            err, TP_STATUS_CANCELLED,
+            "Pack was cancelled before its result was published");
     }
 
-    if (status == TP_STATUS_OK && result) {
+    if (status == TP_STATUS_OK) {
         tp_id128 current_hash = tp_id128_nil();
         tp_error freshness_error = {{0}};
         const tp_status freshness_status =
@@ -411,13 +458,16 @@ static tp_status run_pack(const tp_job_worker_proto_request *request,
                 : "");
         response->pack.names = names;
         response->pack.name_count = owned_name_count;
-        response->pack.artifact = artifact;
+        response->pack.artifact_path = owned_artifact_path;
         response->pack.artifact_size = artifact_size;
     } else {
+        /* Nothing will be adopted: take the private directory (and whatever the
+         * builder published into it) with us rather than leaving it for the
+         * cross-run reaper. */
+        free(owned_artifact_path);
         free_pack_names(names, owned_name_count);
-        free(artifact);
+        tp_worker_remove_dir_tree(request_dir);
     }
-    tp_arena_destroy(arena);
     tp_pack_input_free(&input);
     return status;
 }
@@ -584,10 +634,12 @@ static tp_status run_export(const tp_job_worker_proto_request *request,
             break;
         }
     }
+    const bool cancelled =
+        cancel->requested || cancel->transport_failed;
     response->export_result.partial_publication =
         response->export_result.targets > 0 &&
-        (cancel->requested || first_status != TP_STATUS_OK);
-    return cancel->requested ? TP_STATUS_CANCELLED : first_status;
+        (cancelled || first_status != TP_STATUS_OK);
+    return cancelled ? TP_STATUS_CANCELLED : first_status;
 }
 
 int tp_job_worker_main_request(const uint8_t *bytes, size_t length) {
@@ -642,6 +694,21 @@ int tp_job_worker_main_request(const uint8_t *bytes, size_t length) {
             "job worker request kind is invalid");
     }
     response.elapsed_ms = worker_now_ms() - start;
+    /* One terminal decision for BOTH kinds. An observed cancellation -- the
+     * cancel byte or a broken control channel -- outranks whatever the run
+     * returned, and the STATUS is folded with the state so the encoder's
+     * consistency rule admits the frame. Before this fold a cancelled Pack
+     * encoded SUCCEEDED+CANCELLED, was rejected, the worker exited with no frame
+     * at all, and the host reported "job worker process crashed"; a Pack or
+     * Export whose control channel died reported a silently truncated success. */
+    if ((cancel.requested || cancel.transport_failed) &&
+        status != TP_STATUS_CANCELLED) {
+        status = tp_error_set(
+            &error, TP_STATUS_CANCELLED, "%s",
+            cancel.transport_failed
+                ? "job worker control channel failed"
+                : "job was cancelled");
+    }
     response.status = status;
     response.error = error;
     response.error.file_io.path = worker_strdup(error.file_io.path);
@@ -652,7 +719,7 @@ int tp_job_worker_main_request(const uint8_t *bytes, size_t length) {
             "job worker error path allocation failed");
     }
     response.state =
-        response.status == TP_STATUS_CANCELLED || cancel.requested
+        response.status == TP_STATUS_CANCELLED
             ? TP_SESSION_JOB_CANCELLED
             : response.status == TP_STATUS_OK
                   ? TP_SESSION_JOB_SUCCEEDED
@@ -673,7 +740,7 @@ int tp_job_worker_main_request(const uint8_t *bytes, size_t length) {
         free_pack_names(
             (tp_job_worker_proto_name *)response.pack.names,
             response.pack.name_count);
-        free((void *)response.pack.artifact);
+        free((void *)response.pack.artifact_path);
     }
     tp_project_destroy(project);
     tp_job_worker_proto_request_free(&request);

@@ -10,7 +10,7 @@ enum {
   FRAME_HEADER_BYTES = 12,
   REQUEST_FIXED_BYTES = 72,
   RESPONSE_COMMON_BYTES = 52,
-  RESPONSE_PACK_BYTES = 124,
+  RESPONSE_PACK_BYTES = 132,
   RESPONSE_EXPORT_BYTES = 36,
   PROGRESS_PAYLOAD_BYTES = 24
 };
@@ -587,7 +587,7 @@ void tp_job_worker_proto_response_free(tp_job_worker_proto_response *response) {
       }
       free((void *)response->pack.names);
     }
-    free((void *)response->pack.artifact);
+    free((void *)response->pack.artifact_path);
   }
   memset(response, 0, sizeof *response);
 }
@@ -623,6 +623,7 @@ tp_status tp_job_worker_proto_encode_response(
   size_t preview_len = 0U;
   size_t freshness_message_len = 0U;
   size_t freshness_path_len = 0U;
+  size_t artifact_path_len = 0U;
   size_t first_error_len = 0U;
   if (!add_size(&payload, error_message_len) ||
       !add_size(&payload, error_path_len)) {
@@ -639,16 +640,21 @@ tp_status tp_job_worker_proto_encode_response(
         !valid_status((int32_t)pack->freshness_status) ||
         pack->name_count > TP_JOB_WORKER_PROTO_MAX_NAME_ENTRIES ||
         (pack->name_count > 0U && !pack->names) ||
-        pack->artifact_size > TP_JOB_WORKER_PROTO_MAX_ARTIFACT_BYTES ||
-        (pack->artifact_size > 0U && !pack->artifact) ||
+        pack->artifact_size > (uint64_t)SIZE_MAX ||
         (response->state == TP_SESSION_JOB_SUCCEEDED &&
-         pack->artifact_size == 0U)) {
+         (pack->artifact_size == 0U || !pack->artifact_path ||
+          pack->artifact_path[0] == '\0'))) {
       return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
                           "tp_job_worker_proto: invalid Pack response");
     }
     status = validate_text(pack->preview_exporter_id,
                            TP_JOB_WORKER_PROTO_MAX_EXPORTER_ID_BYTES, true,
                            "Pack preview exporter", &preview_len, err);
+    if (status == TP_STATUS_OK) {
+      status = validate_text(pack->artifact_path ? pack->artifact_path : "",
+                             TP_JOB_WORKER_PROTO_MAX_PATH_BYTES, true,
+                             "Pack artifact path", &artifact_path_len, err);
+    }
     if (status == TP_STATUS_OK) {
       status =
           error_wire_lengths(&pack->freshness_error, &freshness_message_len,
@@ -661,7 +667,7 @@ tp_status tp_job_worker_proto_encode_response(
         !add_size(&payload, preview_len) ||
         !add_size(&payload, freshness_message_len) ||
         !add_size(&payload, freshness_path_len) ||
-        !add_size(&payload, pack->artifact_size)) {
+        !add_size(&payload, artifact_path_len)) {
       return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
                           "tp_job_worker_proto: Pack response size overflow");
     }
@@ -744,7 +750,8 @@ tp_status tp_job_worker_proto_encode_response(
     wr_i32(&writer, (int32_t)pack->freshness_error.file_io.phase);
     wr_i32(&writer, pack->freshness_error.file_io.native_code);
     wr_u32(&writer, pack->name_count);
-    wr_u32(&writer, (uint32_t)pack->artifact_size);
+    wr_u32(&writer, (uint32_t)artifact_path_len);
+    wr_u64(&writer, pack->artifact_size);
     write_error_bytes(&writer, &response->error, error_message_len,
                       error_path_len);
     wr_bytes(&writer, pack->preview_exporter_id, preview_len);
@@ -758,7 +765,7 @@ tp_status tp_job_worker_proto_encode_response(
       wr_u32(&writer, (uint32_t)name_len);
       wr_bytes(&writer, pack->names[i].name, name_len);
     }
-    wr_bytes(&writer, pack->artifact, pack->artifact_size);
+    wr_bytes(&writer, pack->artifact_path, artifact_path_len);
   } else {
     const tp_session_export_job_result *export_result =
         &response->export_result;
@@ -836,7 +843,8 @@ tp_status tp_job_worker_proto_decode_response(const uint8_t *bytes, size_t len,
     uint32_t fresh_path_len = 0U;
     int32_t fresh_phase = 0;
     int32_t fresh_native = 0;
-    uint32_t artifact_size = 0U;
+    uint32_t artifact_path_len = 0U;
+    uint64_t artifact_size = 0U;
     if (reader.length - reader.offset < RESPONSE_PACK_BYTES ||
         !rd_bytes(&reader, pack->atlas_id.bytes, sizeof pack->atlas_id.bytes) ||
         !rd_i32(&reader, &missing_sources) ||
@@ -854,7 +862,8 @@ tp_status tp_job_worker_proto_decode_response(const uint8_t *bytes, size_t len,
         !rd_u32(&reader, &fresh_path_len) || !rd_i32(&reader, &fresh_phase) ||
         !rd_i32(&reader, &fresh_native) ||
         !rd_u32(&reader, &pack->name_count) ||
-        !rd_u32(&reader, &artifact_size)) {
+        !rd_u32(&reader, &artifact_path_len) ||
+        !rd_u64(&reader, &artifact_size)) {
       status = tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
                             "tp_job_worker_proto: truncated Pack response");
       goto fail;
@@ -875,8 +884,10 @@ tp_status tp_job_worker_proto_decode_response(const uint8_t *bytes, size_t len,
         fresh_path_len > TP_JOB_WORKER_PROTO_MAX_PATH_BYTES ||
         !valid_file_phase(fresh_phase) ||
         pack->name_count > TP_JOB_WORKER_PROTO_MAX_NAME_ENTRIES ||
-        pack->artifact_size > TP_JOB_WORKER_PROTO_MAX_ARTIFACT_BYTES ||
-        (out->state == TP_SESSION_JOB_SUCCEEDED && pack->artifact_size == 0U)) {
+        (size_t)artifact_path_len > TP_JOB_WORKER_PROTO_MAX_PATH_BYTES ||
+        pack->artifact_size > (uint64_t)SIZE_MAX ||
+        (out->state == TP_SESSION_JOB_SUCCEEDED &&
+         (pack->artifact_size == 0U || artifact_path_len == 0U))) {
       status = tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
                             "tp_job_worker_proto: invalid Pack fields");
       goto fail;
@@ -926,22 +937,11 @@ tp_status tp_job_worker_proto_decode_response(const uint8_t *bytes, size_t len,
         }
       }
     }
-    const uint8_t *artifact = NULL;
-    if (!rd_ref(&reader, &artifact, pack->artifact_size)) {
-      status = tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
-                            "tp_job_worker_proto: truncated artifact");
+    status = copy_text(&reader, artifact_path_len,
+                       TP_JOB_WORKER_PROTO_MAX_PATH_BYTES, true,
+                       "Pack artifact path", &pack->artifact_path, err);
+    if (status != TP_STATUS_OK) {
       goto fail;
-    }
-    if (pack->artifact_size > 0U) {
-      uint8_t *artifact_copy = (uint8_t *)malloc(pack->artifact_size);
-      if (!artifact_copy) {
-        status =
-            tp_error_set(err, TP_STATUS_OOM,
-                         "tp_job_worker_proto: artifact allocation failed");
-        goto fail;
-      }
-      memcpy(artifact_copy, artifact, pack->artifact_size);
-      pack->artifact = artifact_copy;
     }
   } else {
     tp_session_export_job_result *export_result = &out->export_result;

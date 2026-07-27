@@ -6,6 +6,7 @@ static unsigned int s_test_destroy_blocking_wait_calls;
 static bool s_test_fail_next_kill;
 #endif
 
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -23,6 +24,7 @@ struct tp_proc {
     HANDLE job;      /* KILL_ON_JOB_CLOSE tree-kill container; NULL if unavailable */
     HANDLE stdin_w;  /* parent writes the request here; NULL once closed */
     HANDLE stdout_r; /* parent reads the reply here; NULL once closed */
+    bool stdin_overlapped_io; /* false = anonymous pipe, synchronous writes */
     HANDLE stdin_event;
     OVERLAPPED stdin_overlapped;
     const void *stdin_pending_data;
@@ -155,17 +157,42 @@ static HANDLE create_kill_on_close_job(void) {
     return job;
 }
 
+/* Unpredictable per-instance pipe name. The name lives in the machine-wide
+ * `\\.\pipe` namespace, so a guessable one lets any local process pre-create it
+ * (denying our FIRST_PIPE_INSTANCE) or race the child's open. pid + a serial was
+ * both guessable and repeatable across runs; fold in the performance counter,
+ * the tick count and a stack address (ASLR) so an attacker cannot precompute it.
+ * This is unpredictability, not a secret: FIRST_PIPE_INSTANCE + the connect
+ * handshake below remain the actual correctness guarantee. */
+static bool make_stdin_pipe_name(wchar_t *out, size_t cap) {
+    static volatile LONG serial = 0;
+    LARGE_INTEGER counter;
+    if (!QueryPerformanceCounter(&counter)) {
+        counter.QuadPart = (LONGLONG)GetTickCount64();
+    }
+    const unsigned long long entropy =
+        (unsigned long long)counter.QuadPart ^
+        ((unsigned long long)GetTickCount64() << 17U) ^
+        ((unsigned long long)(uintptr_t)&counter << 3U) ^
+        ((unsigned long long)(unsigned long)InterlockedIncrement(&serial) *
+         0x9E3779B97F4A7C15ULL);
+    return _snwprintf_s(out, cap, _TRUNCATE,
+                        L"\\\\.\\pipe\\ntpacker-proc-%08lx-%016llx",
+                        (unsigned long)GetCurrentProcessId(), entropy) >= 0;
+}
+
 /* Create the stdin half with an overlapped parent writer. CreatePipe cannot
  * request FILE_FLAG_OVERLAPPED, so use the documented named-pipe substrate
- * behind anonymous pipes. The unique name is never exposed outside this call. */
-static bool create_overlapped_stdin_pipe(HANDLE *out_child_read,
-                                         HANDLE *out_parent_write) {
-    static volatile LONG serial = 0;
+ * behind anonymous pipes. Used ONLY for owned-tree spawns (the outer job
+ * worker), whose host pumps stdin without blocking; the nested build worker
+ * keeps plain anonymous pipes and never enters the machine-wide namespace.
+ * The unique name is never exposed outside this call. */
+static bool create_overlapped_stdin_pipe_once(HANDLE *out_child_read,
+                                              HANDLE *out_parent_write,
+                                              bool *out_retryable) {
+    *out_retryable = false;
     wchar_t name[128];
-    const LONG id = InterlockedIncrement(&serial);
-    if (_snwprintf_s(name, _countof(name), _TRUNCATE,
-                     L"\\\\.\\pipe\\ntpacker-proc-%lu-%ld",
-                     (unsigned long)GetCurrentProcessId(), (long)id) < 0) {
+    if (!make_stdin_pipe_name(name, _countof(name))) {
         return false;
     }
 
@@ -174,6 +201,10 @@ static bool create_overlapped_stdin_pipe(HANDLE *out_child_read,
         PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT, 1U, 1U << 16, 1U << 16,
         0U, NULL);
     if (writer == INVALID_HANDLE_VALUE) {
+        /* Name already owned by someone else: a fresh name is worth one retry. */
+        const DWORD error = GetLastError();
+        *out_retryable =
+            error == ERROR_ACCESS_DENIED || error == ERROR_PIPE_BUSY;
         return false;
     }
 
@@ -184,6 +215,7 @@ static bool create_overlapped_stdin_pipe(HANDLE *out_child_read,
     HANDLE reader = CreateFileW(name, GENERIC_READ, 0U, &child_sa, OPEN_EXISTING,
                                 FILE_ATTRIBUTE_NORMAL, NULL);
     if (reader == INVALID_HANDLE_VALUE) {
+        *out_retryable = GetLastError() == ERROR_PIPE_BUSY;
         (void)CloseHandle(writer);
         return false;
     }
@@ -212,6 +244,17 @@ static bool create_overlapped_stdin_pipe(HANDLE *out_child_read,
     *out_child_read = reader;
     *out_parent_write = writer;
     return true;
+}
+
+static bool create_overlapped_stdin_pipe(HANDLE *out_child_read,
+                                         HANDLE *out_parent_write) {
+    bool retryable = false;
+    if (create_overlapped_stdin_pipe_once(out_child_read, out_parent_write,
+                                          &retryable)) {
+        return true;
+    }
+    return retryable && create_overlapped_stdin_pipe_once(
+                            out_child_read, out_parent_write, &retryable);
 }
 
 static tp_proc *tp_proc_spawn_impl(const char *exe_utf8, const char *arg1,
@@ -246,7 +289,13 @@ static tp_proc *tp_proc_spawn_impl(const char *exe_utf8, const char *arg1,
      * blocking a read on a hung child. A reply larger than this buffer would block
      * the child and be caught by the safety timeout (builder_crashed), not the
      * over-cap read branch. */
-    if (!create_overlapped_stdin_pipe(&stdin_r, &stdin_w) ||
+    /* Only the owned-tree spawn (the outer job worker) needs a non-blocking
+     * parent writer, and only it pays the machine-wide named-pipe namespace for
+     * it. The nested build worker stays on plain anonymous pipes. */
+    const bool overlapped_stdin = require_tree;
+    if (!(overlapped_stdin
+              ? create_overlapped_stdin_pipe(&stdin_r, &stdin_w)
+              : CreatePipe(&stdin_r, &stdin_w, &sa, 1u << 16) != 0) ||
         !CreatePipe(&stdout_r, &stdout_w, &sa, 1u << 16)) {
         if (stdin_r) {
             (void)CloseHandle(stdin_r);
@@ -393,6 +442,7 @@ static tp_proc *tp_proc_spawn_impl(const char *exe_utf8, const char *arg1,
     proc->stdin_overlapped.hEvent = proc->stdin_event;
     proc->process = pi.hProcess;
     proc->job = job;
+    proc->stdin_overlapped_io = overlapped_stdin;
     proc->stdin_w = stdin_w;
     proc->stdout_r = stdout_r;
     proc->waited = false;
@@ -478,6 +528,22 @@ bool tp_proc_try_write_stdin(tp_proc *proc, const void *data, size_t size,
     }
     if (size == 0U) {
         return true;
+    }
+
+    if (!proc->stdin_overlapped_io) {
+        /* Anonymous pipe: WriteFile is synchronous, so a full pipe blocks here
+         * instead of reporting backpressure. The only user of this substrate is
+         * the nested build worker, which writes its request through the blocking
+         * tp_proc_write_stdin wrapper and never polls for would_block. */
+        const DWORD sync_chunk = size > 0x40000000U ? 0x40000000U : (DWORD)size;
+        DWORD sync_written = 0U;
+        if (!WriteFile(proc->stdin_w, data, sync_chunk, &sync_written, NULL)) {
+            return false;
+        }
+        if (out_consumed) {
+            *out_consumed = (size_t)sync_written;
+        }
+        return sync_written != 0U;
     }
 
     const DWORD chunk = size > 0x40000000U ? 0x40000000U : (DWORD)size;

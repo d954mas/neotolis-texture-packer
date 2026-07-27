@@ -257,9 +257,13 @@ endif()
 # Canonical GUI identity regression: two distinct sources may expose the same
 # source-local key.  The headless target exercises the production row,
 # selection/action and project/session adapters without creating a window.
+# tp_job.c is rebuilt here with TP_ENABLE_TEST_SEAMS, and its worker-timeout
+# seam lives in tp_job_worker.c, which the shipped library compiles seam-free.
 add_executable(tp_test_gui_canonical_identity
     test_gui_canonical_identity.c
     "${CMAKE_SOURCE_DIR}/packer/src/tp_job.c"
+    "${CMAKE_SOURCE_DIR}/packer/src/tp_job_worker.c"
+    "${CMAKE_SOURCE_DIR}/packer/src/tp_job_worker_proto.c"
     ${_tp_gui_headless_sources}
 )
 target_link_libraries(tp_test_gui_canonical_identity PRIVATE
@@ -327,6 +331,8 @@ add_executable(tp_test_gui_action_trace
     test_gui_action_trace.c
     "${CMAKE_SOURCE_DIR}/packer/src/tp_scan.c"
     "${CMAKE_SOURCE_DIR}/packer/src/tp_job.c"
+    "${CMAKE_SOURCE_DIR}/packer/src/tp_job_worker.c"
+    "${CMAKE_SOURCE_DIR}/packer/src/tp_job_worker_proto.c"
     ${_tp_gui_headless_sources}
 )
 target_link_libraries(tp_test_gui_action_trace PRIVATE

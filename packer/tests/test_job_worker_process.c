@@ -182,13 +182,17 @@ static int wait_for_cancel(
         if (event != TP_PROC_STDIN_EVENT_CANCEL) {
             return 5;
         }
-        if (!partial) {
-            return write_terminal(request, false, false, false);
-        }
+        /* A real worker folds an observed cancellation into its OWN terminal
+         * frame (tp_job_worker_main.c), so the fake does the same: the process
+         * layer admits the terminal verbatim and never relabels it. */
         tp_job_worker_proto_response response = {0};
-        response.state = TP_SESSION_JOB_SUCCEEDED;
-        response.status = TP_STATUS_OK;
+        response.kind = request->kind;
+        response.state = TP_SESSION_JOB_CANCELLED;
+        response.status = TP_STATUS_CANCELLED;
         response.elapsed_ms = 3.0;
+        if (!partial) {
+            return write_response(request, &response, false, false, false);
+        }
         response.export_result.atlases_ok = 1;
         response.export_result.atlases_failed = 1;
         response.export_result.targets = 2;
@@ -249,7 +253,8 @@ static int run_fake_worker(const char *mode) {
         result = fwrite("not-a-frame", 1U, 11U, stdout) == 11U ? 0 : 4;
     } else if (strcmp(mode, "oversized") == 0) {
         uint8_t header[12] = {
-            'P', 'T', 'J', 'R', 1U, 0U, 0U, 0U,
+            'P', 'T', 'J', 'R',
+            (uint8_t)TP_JOB_WORKER_PROTO_VERSION, 0U, 0U, 0U,
             1U, 0U, 0U, 0U,
         };
         const uint32_t oversized =

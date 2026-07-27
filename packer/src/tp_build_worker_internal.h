@@ -66,6 +66,18 @@ tp_status tp_build_worker_run_opts(const tp_pack_settings *settings,
                                    const char *out_path,
                                    const tp_build_worker_opts *opts, tp_error *err);
 
+/* Private-directory hygiene, shared with the outer job worker (which stages one
+ * `.ntpack` per Pack request in its own `req-<hexpid>-<id>` directory under
+ * work_dir). Both owners follow one naming contract so one reaper heals both.
+ *
+ * tp_worker_remove_dir_tree: best-effort recursive removal that never descends
+ * into a junction / directory symlink (it unlinks the link itself).
+ * tp_worker_reap_stale_dirs: best-effort sweep of `<parent>/<prefix><hexpid>-*`
+ * directories whose owning pid is definitively gone. An access-denied or live
+ * pid is treated as alive and kept. */
+void tp_worker_remove_dir_tree(const char *path);
+void tp_worker_reap_stale_dirs(const char *parent, const char *prefix);
+
 #ifdef __cplusplus
 }
 #endif

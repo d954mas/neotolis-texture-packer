@@ -12,6 +12,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h> /* clock() -- bounded wait for the async pack equivalence check */
 
 #ifdef _WIN32
 #include <windows.h>
@@ -2843,6 +2844,55 @@ void run_selftest(void) {
             nt_log_info("SELFTEST: export-dialog toggle atlas=%d target0 %d->%d (restored=%d)", e_atlas, was, now, was);
         }
         s_export_open = true;
+    }
+
+    /* Async == blocking equivalence (spec req 4). Promoted out of visual phase 9
+     * so headless CI actually runs it: phase 9 needs a GL context and is skipped
+     * under NTPACKER_GUI_HEADLESS, which left the whole worker-process Pack path
+     * unverified on CI. Needs no GL -- only the job transport and the result
+     * metadata. Phase 9 keeps its copy for local GPU runs. */
+    {
+        NT_ASSERT(selftest_select_atlas(0));
+        char async_error[256] = {0};
+        NT_ASSERT(gui_pack_async_start(0, async_error, sizeof async_error) &&
+                  "SELFTEST: async pack must start");
+        const clock_t async_deadline = clock() + (clock_t)(60 * CLOCKS_PER_SEC);
+        while (gui_pack_async_busy()) {
+            /* Same order the frame loop uses: drain the host queue (which pumps
+             * the worker process), observe, then land the receipt. */
+            tp_error pump_error = {{0}};
+            NT_ASSERT(gui_project_lifecycle_pump(NULL, &pump_error) ==
+                      TP_STATUS_OK);
+            selftest_observe_session();
+            gui_actions_poll_host_completion();
+            NT_ASSERT(clock() < async_deadline &&
+                      "SELFTEST: async pack did not finish within 60s");
+        }
+        const tp_result *async_result = gui_pack_result(0);
+        NT_ASSERT(async_result && async_result->sprite_count > 0 &&
+                  async_result->page_count > 0 &&
+                  "SELFTEST: async pack produced no result");
+        const int async_sprites = async_result->sprite_count;
+        const int async_pages = async_result->page_count;
+        const int async_w = async_result->pages[0].w;
+        const int async_h = async_result->pages[0].h;
+        double blocking_ms = 0.0;
+        char blocking_error[256] = {0};
+        char blocking_note[128] = {0};
+        NT_ASSERT(gui_pack_atlas(0, &blocking_ms, blocking_error,
+                                 sizeof blocking_error, blocking_note,
+                                 sizeof blocking_note) &&
+                  "SELFTEST: blocking reference pack failed");
+        const tp_result *blocking_result = gui_pack_result(0);
+        NT_ASSERT(blocking_result &&
+                  blocking_result->sprite_count == async_sprites &&
+                  blocking_result->page_count == async_pages &&
+                  blocking_result->pages[0].w == async_w &&
+                  blocking_result->pages[0].h == async_h &&
+                  "SELFTEST: async vs blocking result mismatch (non-deterministic)");
+        nt_log_info(
+            "SELFTEST: async==blocking OK (sprites=%d pages=%d page0=%dx%d)",
+            async_sprites, async_pages, async_w, async_h);
     }
 
     /* Leave a live selection so the auto-quit frames draw the decoded image. */

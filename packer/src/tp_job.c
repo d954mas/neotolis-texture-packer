@@ -2,6 +2,7 @@
 
 #include <stdatomic.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -12,17 +13,24 @@
 #endif
 
 #include "core/nt_assert.h"
+#include "nt_pack_format.h"
 #include "tp_core/tp_export.h"
 #include "tp_core/tp_input.h"
 #include "tp_core/tp_name_map.h"
 #include "tp_core/tp_pack_hash.h"
 #include "tp_core/tp_pack_read.h"
 #include "tp_core/tp_project.h"
+#include "tp_fs_internal.h"
 #include "tp_job_owner_internal.h"
 #include "tp_job_worker_process_internal.h"
 #include "tp_pack_hash_priv.h"
 #include "tp_project_internal.h"
 #include "tp_session_snapshot_internal.h"
+
+/* Bytes the host lifts out of the worker's artifact file per pump call. The pump
+ * runs on the UI thread, so a 256 MiB multi-page atlas is spread over ~16 frames
+ * instead of stalling one. */
+#define TP_JOB_ARTIFACT_READ_BUDGET ((size_t)16U << 20)
 
 typedef enum tp_job_terminal_claim {
     TP_JOB_TERMINAL_OPEN = 0,
@@ -58,6 +66,18 @@ typedef struct tp_live_job {
     tp_arena *arena;
     tp_result *pack_result;
     tp_session_job_result terminal_result;
+
+    /* Chunked adoption of the worker's Pack artifact (job_adopt_artifact). The
+     * file is a transient private handoff: it is read in budgeted slices, parsed
+     * once, and then deleted along with its per-request directory. */
+    char *artifact_path;
+    FILE *artifact_file;
+    uint8_t *artifact_bytes;
+    size_t artifact_expected;
+    size_t artifact_read;
+    tp_status artifact_status;
+    tp_error artifact_error;
+    bool artifact_settled;
 } tp_live_job;
 
 #ifdef TP_ENABLE_TEST_SEAMS
@@ -76,6 +96,8 @@ void tp_job__test_reset_all(void) {
     tp_job_worker__test_reset();
 }
 #endif
+
+static void job_discard_artifact(tp_live_job *job);
 
 static void *job_observation_target_calloc(size_t count, size_t size) {
 #ifdef TP_ENABLE_TEST_SEAMS
@@ -183,6 +205,7 @@ static void job_destroy_owned(tp_session_owned_job *owned) {
         tp_job_worker_process_request_cancel(job->process);
     }
     tp_job_worker_process_destroy(job->process);
+    job_discard_artifact(job);
     tp_arena_destroy(job->arena);
     free(job->project_json);
     free(job->project_dir);
@@ -252,9 +275,158 @@ static tp_status job_build_name_map(
     return TP_STATUS_OK;
 }
 
+/* Remove the worker's private per-request directory once its artifact is gone.
+ * Only a "req-" basename is ever removed, so a malformed or hostile path can
+ * never make the host delete a directory it did not hand out. */
+static void job_remove_request_dir(const char *artifact_path) {
+    const char *separator = NULL;
+    for (const char *cursor = artifact_path; *cursor; ++cursor) {
+        if (*cursor == '/' || *cursor == '\\') {
+            separator = cursor;
+        }
+    }
+    if (!separator) {
+        return;
+    }
+    const size_t length = (size_t)(separator - artifact_path);
+    if (length == 0U || length >= TP_IDENTITY_PATH_MAX) {
+        return;
+    }
+    char directory[TP_IDENTITY_PATH_MAX];
+    memcpy(directory, artifact_path, length);
+    directory[length] = '\0';
+    const char *base = directory;
+    for (const char *cursor = directory; *cursor; ++cursor) {
+        if (*cursor == '/' || *cursor == '\\') {
+            base = cursor + 1;
+        }
+    }
+    if (strncmp(base, "req-", 4U) != 0) {
+        return;
+    }
+    (void)tp_fs_remove_dir(directory);
+}
+
+/* The artifact is a transient private handoff, never a cache: release it as soon
+ * as its bytes are in this process or can never be. Whatever a killed host leaves
+ * behind is swept by the worker-pid reaper on the next Pack. */
+static void job_discard_artifact(tp_live_job *job) {
+    if (job->artifact_file) {
+        (void)fclose(job->artifact_file);
+        job->artifact_file = NULL;
+    }
+    free(job->artifact_bytes);
+    job->artifact_bytes = NULL;
+    if (job->artifact_path) {
+        (void)tp_fs_remove_file(job->artifact_path);
+        job_remove_request_dir(job->artifact_path);
+        free(job->artifact_path);
+        job->artifact_path = NULL;
+    }
+}
+
+static tp_status job_artifact_fail(tp_live_job *job, tp_status status,
+                                   const char *message) {
+    job->artifact_status =
+        tp_error_set(&job->artifact_error, status, "%s", message);
+    job->artifact_settled = true;
+    job_discard_artifact(job);
+    return job->artifact_status;
+}
+
+/* Open + validate the artifact the worker published. Digestless by design: the
+ * file is ours, produced moments ago in a directory only this request's worker
+ * wrote to, so a real regular file of exactly the announced size whose first
+ * bytes are the pack magic is proof enough -- a full-file hash would cost
+ * seconds on a large atlas and prove nothing extra. */
+static bool job_artifact_open(tp_live_job *job,
+                              const tp_job_worker_proto_pack_result *pack) {
+    if (!pack->artifact_path || pack->artifact_path[0] == '\0' ||
+        pack->artifact_size == 0U ||
+        pack->artifact_size > (uint64_t)SIZE_MAX) {
+        (void)job_artifact_fail(job, TP_STATUS_BUILDER_FAILED,
+                                "Pack worker returned no artifact path");
+        return false;
+    }
+    job->artifact_path = job_strdup(pack->artifact_path);
+    if (!job->artifact_path) {
+        (void)job_artifact_fail(job, TP_STATUS_OOM,
+                                "Pack artifact path allocation failed");
+        return false;
+    }
+    tp_fs_info info;
+    if (!tp_fs_stat(job->artifact_path, &info) ||
+        info.kind != TP_FS_KIND_REGULAR || info.reparse ||
+        info.size != pack->artifact_size) {
+        (void)job_artifact_fail(
+            job, TP_STATUS_BUILDER_FAILED,
+            "Pack artifact is missing, is not a regular file, or changed size");
+        return false;
+    }
+    job->artifact_expected = (size_t)pack->artifact_size;
+    job->artifact_bytes = malloc(job->artifact_expected);
+    if (!job->artifact_bytes) {
+        (void)job_artifact_fail(job, TP_STATUS_OOM,
+                                "Pack artifact allocation failed");
+        return false;
+    }
+    job->artifact_file = tp_fs_fopen(job->artifact_path, "rb");
+    if (!job->artifact_file) {
+        (void)job_artifact_fail(job, TP_STATUS_BUILDER_FAILED,
+                                "Pack artifact could not be opened");
+        return false;
+    }
+    return true;
+}
+
+/* Lift at most TP_JOB_ARTIFACT_READ_BUDGET bytes per call. Returns true once the
+ * artifact is settled -- fully read, or failed with a structured error the
+ * terminal will carry (the previous Pack result is left untouched either way). */
+static bool job_adopt_artifact(tp_live_job *job,
+                               const tp_job_worker_proto_pack_result *pack) {
+    if (job->artifact_settled) {
+        return true;
+    }
+    if (!job->artifact_file && !job_artifact_open(job, pack)) {
+        return true;
+    }
+    const size_t remaining = job->artifact_expected - job->artifact_read;
+    const size_t budget = remaining < TP_JOB_ARTIFACT_READ_BUDGET
+                              ? remaining
+                              : TP_JOB_ARTIFACT_READ_BUDGET;
+    const size_t got = fread(job->artifact_bytes + job->artifact_read, 1U,
+                             budget, job->artifact_file);
+    job->artifact_read += got;
+    if (got != budget) {
+        (void)job_artifact_fail(job, TP_STATUS_BUILDER_FAILED,
+                                "Pack artifact ended before its declared size");
+        return true;
+    }
+    if (job->artifact_read >= 4U) {
+        uint32_t magic = 0U;
+        memcpy(&magic, job->artifact_bytes, sizeof magic);
+        if (magic != NT_PACK_MAGIC) {
+            (void)job_artifact_fail(job, TP_STATUS_BAD_MAGIC,
+                                    "Pack artifact is not a pack file");
+            return true;
+        }
+    }
+    if (job->artifact_read < job->artifact_expected) {
+        return false; /* more budget next pump; the job stays RUNNING */
+    }
+    (void)fclose(job->artifact_file);
+    job->artifact_file = NULL;
+    job->artifact_settled = true;
+    return true;
+}
+
 static tp_status job_inflate_pack(
     tp_live_job *job, const tp_job_worker_proto_pack_result *pack,
     tp_error *err) {
+    if (job->artifact_status != TP_STATUS_OK) {
+        *err = job->artifact_error;
+        return job->artifact_status;
+    }
     tp_name_map *names = NULL;
     tp_status status = job_build_name_map(pack, &names, err);
     if (status != TP_STATUS_OK) {
@@ -269,9 +441,12 @@ static tp_status job_inflate_pack(
     tp_result **results = NULL;
     int result_count = 0;
     status = tp_pack_read_memory(
-        pack->artifact, pack->artifact_size, names, job->arena,
+        job->artifact_bytes, job->artifact_read, names, job->arena,
         &results, &result_count, err);
     tp_name_map_destroy(names);
+    /* The reader copies every name and page into the arena, so the staged bytes
+     * and the file itself are dead the moment it returns. */
+    job_discard_artifact(job);
     if (status == TP_STATUS_OK && result_count != 1) {
         status = tp_error_set(
             err, TP_STATUS_BUILDER_FAILED,
@@ -317,6 +492,10 @@ static void job_publish_response(
         result->export_result = response->export_result;
     }
     if (cancelled) {
+        /* The single cancel decision point: an accepted host cancellation
+         * outranks whatever terminal raced it, and nothing will adopt the
+         * worker's artifact, so drop it here rather than at job destruction. */
+        job_discard_artifact(job);
         result->state = TP_SESSION_JOB_CANCELLED;
         result->status = tp_error_set(
             &result->error, TP_STATUS_CANCELLED, "%s cancelled",
@@ -402,8 +581,22 @@ static void job_pump_owned(tp_session_owned_job *owned) {
                               memory_order_relaxed);
     }
     if (tp_job_worker_process_terminal(job->process)) {
-        job_publish_response(
-            job, tp_job_worker_process_response(job->process));
+        const tp_job_worker_proto_response *response =
+            tp_job_worker_process_response(job->process);
+        /* A successful Pack terminal only announces its artifact; the bytes are
+         * adopted over the following pumps, so the job stays RUNNING until the
+         * file is in hand. A cancelled job skips the read entirely -- its result
+         * is going to be discarded. */
+        if (response && job->kind == TP_SESSION_JOB_PACK &&
+            response->state == TP_SESSION_JOB_SUCCEEDED &&
+            !atomic_load_explicit(&job->cancellation_accepted,
+                                  memory_order_acquire) &&
+            !job_adopt_artifact(job, &response->pack)) {
+            atomic_flag_clear_explicit(&job->pump_gate,
+                                       memory_order_release);
+            return;
+        }
+        job_publish_response(job, response);
     }
     atomic_flag_clear_explicit(&job->pump_gate, memory_order_release);
 }

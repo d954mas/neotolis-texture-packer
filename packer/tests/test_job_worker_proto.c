@@ -55,7 +55,6 @@ static tp_job_worker_proto_request sample_request(tp_session_job_kind kind) {
 }
 
 static tp_job_worker_proto_response sample_pack_response(void) {
-  static const uint8_t artifact[] = {0x4e, 0x54, 0x50, 0x4b, 1, 2, 3, 4};
   static const tp_job_worker_proto_name names[] = {
       {UINT64_C(0x1122334455667788), "atlas"},
       {UINT64_C(0x8877665544332211), "héros"}};
@@ -81,8 +80,8 @@ static tp_job_worker_proto_response sample_pack_response(void) {
   memcpy(response.pack.preview_exporter_id, "defold", 7U);
   response.pack.names = names;
   response.pack.name_count = 2U;
-  response.pack.artifact = artifact;
-  response.pack.artifact_size = sizeof artifact;
+  response.pack.artifact_path = "C:/work/req-0000002a-0000000000000001/atlas.ntpack";
+  response.pack.artifact_size = 8192U;
   return response;
 }
 
@@ -136,7 +135,7 @@ void test_request_roundtrip_pack_and_export(void) {
   }
 }
 
-void test_pack_terminal_roundtrip_owns_artifact_and_utf8_name_map(void) {
+void test_pack_terminal_roundtrip_owns_artifact_path_and_utf8_name_map(void) {
   tp_job_worker_proto_response input = sample_pack_response();
   input.error.file_io.phase = TP_FILE_IO_PHASE_TEMP_OPEN;
   input.error.file_io.path = "C:/source/a.png";
@@ -167,9 +166,34 @@ void test_pack_terminal_roundtrip_owns_artifact_and_utf8_name_map(void) {
   TEST_ASSERT_EQUAL_STRING("héros", output.pack.names[1].name);
   TEST_ASSERT_EQUAL_UINT64((uint64_t)input.pack.artifact_size,
                            (uint64_t)output.pack.artifact_size);
-  TEST_ASSERT_EQUAL_MEMORY(input.pack.artifact, output.pack.artifact,
-                           input.pack.artifact_size);
-  TEST_ASSERT_NOT_EQUAL(input.pack.artifact, output.pack.artifact);
+  TEST_ASSERT_EQUAL_STRING(input.pack.artifact_path, output.pack.artifact_path);
+  TEST_ASSERT_NOT_EQUAL(input.pack.artifact_path, output.pack.artifact_path);
+  tp_job_worker_proto_response_free(&output);
+  free(bytes);
+}
+
+/* The 256 MiB artifact cap is gone with the artifact bytes: a multi-page atlas
+ * larger than any old frame cap is now just a u64 size beside a path, so the
+ * terminal frame stays small and the size survives the round trip untouched. */
+void test_multi_page_artifact_beyond_the_old_cap_roundtrips(void) {
+  tp_job_worker_proto_response input = sample_pack_response();
+  input.pack.artifact_size = UINT64_C(300) << 20; /* 300 MiB */
+  uint8_t *bytes = NULL;
+  size_t length = 0U;
+  tp_error err = {{0}};
+  TEST_ASSERT_EQUAL_INT_MESSAGE(
+      TP_STATUS_OK,
+      tp_job_worker_proto_encode_response(&input, &bytes, &length, &err),
+      err.msg);
+  TEST_ASSERT_LESS_THAN_size_t(4096U, length);
+  tp_job_worker_proto_response output;
+  TEST_ASSERT_EQUAL_INT_MESSAGE(
+      TP_STATUS_OK,
+      tp_job_worker_proto_decode_response(bytes, length, &output, &err),
+      err.msg);
+  TEST_ASSERT_EQUAL_UINT64(UINT64_C(300) << 20, output.pack.artifact_size);
+  TEST_ASSERT_EQUAL_STRING(input.pack.artifact_path,
+                           output.pack.artifact_path);
   tp_job_worker_proto_response_free(&output);
   free(bytes);
 }
@@ -271,7 +295,8 @@ void test_stream_parser_accepts_fragmented_progress_then_terminal(void) {
                                           &stream, &message, &ready, &err));
   TEST_ASSERT_TRUE(ready);
   TEST_ASSERT_EQUAL_INT(TP_JOB_WORKER_STREAM_TERMINAL, message.kind);
-  TEST_ASSERT_EQUAL_UINT64(8U, (uint64_t)message.terminal.pack.artifact_size);
+  TEST_ASSERT_EQUAL_UINT64(8192U,
+                           (uint64_t)message.terminal.pack.artifact_size);
   tp_job_worker_proto_stream_message_free(&message);
   tp_job_worker_proto_stream_destroy(&stream);
   free(progress_bytes);
@@ -341,7 +366,10 @@ void test_bad_magic_version_and_oversized_fields_fail_closed(void) {
   free(bytes);
 
   bytes = encode_pack(&length);
-  /* Pack name_count: frame(12) + common(52) + offset 116. */
+  /* Pack name_count. frame(12) + common(52) = 64 starts the Pack block, whose
+   * fixed fields are atlas_id(16) missing(4) token(16) hash(16) hash(16)
+   * token(16) freshness/reason/status(12) preview_len(4) fresh_msg_len(4)
+   * fresh_path_len(4) fresh_phase(4) fresh_native(4) -> name_count at 64+116. */
   put_u32_le(bytes + 180U, TP_JOB_WORKER_PROTO_MAX_NAME_ENTRIES + 1U);
   TEST_ASSERT_EQUAL_INT(
       TP_STATUS_INVALID_ARGUMENT,
@@ -349,9 +377,19 @@ void test_bad_magic_version_and_oversized_fields_fail_closed(void) {
   free(bytes);
 
   bytes = encode_pack(&length);
-  /* Pack artifact_size immediately follows name_count. */
+  /* artifact_path_len immediately follows name_count (artifact_size, a u64, is
+   * next and no longer bounds any allocation the decoder makes). */
   put_u32_le(bytes + 184U,
-             (uint32_t)(TP_JOB_WORKER_PROTO_MAX_ARTIFACT_BYTES + 1U));
+             (uint32_t)(TP_JOB_WORKER_PROTO_MAX_PATH_BYTES + 1U));
+  TEST_ASSERT_EQUAL_INT(
+      TP_STATUS_INVALID_ARGUMENT,
+      tp_job_worker_proto_decode_response(bytes, length, &out, &err));
+  free(bytes);
+
+  /* A SUCCEEDED Pack terminal with no artifact path is structurally invalid:
+   * the host would have nothing to adopt. */
+  bytes = encode_pack(&length);
+  put_u32_le(bytes + 184U, 0U);
   TEST_ASSERT_EQUAL_INT(
       TP_STATUS_INVALID_ARGUMENT,
       tp_job_worker_proto_decode_response(bytes, length, &out, &err));
@@ -373,7 +411,7 @@ void test_invalid_utf8_name_is_rejected_on_encode(void) {
   TEST_ASSERT_NULL(bytes);
 }
 
-void test_encode_caps_reject_oversized_project_names_counts_and_artifact(void) {
+void test_encode_caps_reject_oversized_project_names_counts_and_path(void) {
   tp_job_worker_proto_request request = sample_request(TP_SESSION_JOB_PACK);
   request.project_json_len = TP_JOB_WORKER_PROTO_MAX_PROJECT_JSON_BYTES + 1U;
   uint8_t *bytes = NULL;
@@ -389,8 +427,16 @@ void test_encode_caps_reject_oversized_project_names_counts_and_artifact(void) {
   TEST_ASSERT_EQUAL_INT(
       TP_STATUS_INVALID_ARGUMENT,
       tp_job_worker_proto_encode_response(&response, &bytes, &length, &err));
+  static char oversized_path[TP_JOB_WORKER_PROTO_MAX_PATH_BYTES + 2U];
+  memset(oversized_path, 'a', sizeof oversized_path - 1U);
   response = sample_pack_response();
-  response.pack.artifact_size = TP_JOB_WORKER_PROTO_MAX_ARTIFACT_BYTES + 1U;
+  response.pack.artifact_path = oversized_path;
+  TEST_ASSERT_EQUAL_INT(
+      TP_STATUS_INVALID_ARGUMENT,
+      tp_job_worker_proto_encode_response(&response, &bytes, &length, &err));
+
+  response = sample_pack_response();
+  response.pack.artifact_path = "";
   TEST_ASSERT_EQUAL_INT(
       TP_STATUS_INVALID_ARGUMENT,
       tp_job_worker_proto_encode_response(&response, &bytes, &length, &err));
@@ -430,14 +476,15 @@ void test_stream_cumulative_and_progress_count_caps_fail_closed(void) {
 int main(void) {
   UNITY_BEGIN();
   RUN_TEST(test_request_roundtrip_pack_and_export);
-  RUN_TEST(test_pack_terminal_roundtrip_owns_artifact_and_utf8_name_map);
+  RUN_TEST(test_pack_terminal_roundtrip_owns_artifact_path_and_utf8_name_map);
+  RUN_TEST(test_multi_page_artifact_beyond_the_old_cap_roundtrips);
   RUN_TEST(test_export_terminal_roundtrip_counts_and_flags);
   RUN_TEST(test_progress_roundtrip_is_fixed_and_bounded);
   RUN_TEST(test_stream_parser_accepts_fragmented_progress_then_terminal);
   RUN_TEST(test_every_truncated_request_and_terminal_is_rejected);
   RUN_TEST(test_bad_magic_version_and_oversized_fields_fail_closed);
   RUN_TEST(test_invalid_utf8_name_is_rejected_on_encode);
-  RUN_TEST(test_encode_caps_reject_oversized_project_names_counts_and_artifact);
+  RUN_TEST(test_encode_caps_reject_oversized_project_names_counts_and_path);
   RUN_TEST(test_stream_cumulative_and_progress_count_caps_fail_closed);
   return UNITY_END();
 }
