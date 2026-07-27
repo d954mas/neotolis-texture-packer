@@ -52,7 +52,7 @@ void test_first_refresh_stat_failure_invalidates_runtime_and_preview(void) {
         gui_project_source_runtime_generation();
 
     tp_scan__test_set_stat_error(EACCES);
-    s_pending_refresh = true;
+    gui_request_refresh();
     apply_pending();
     tp_scan__test_set_stat_error(0);
 
@@ -92,7 +92,7 @@ void test_refresh_modified_file_reports_changed_from_last_success(void) {
     TEST_ASSERT_NOT_NULL(source);
     TEST_ASSERT_EQUAL_size_t(7U, fwrite("changed", 1U, 7U, source));
     TEST_ASSERT_EQUAL_INT(0, fclose(source));
-    s_pending_refresh = true;
+    gui_request_refresh();
     apply_pending();
 
     TEST_ASSERT_EQUAL_INT(STATUS_INFO, s_status_sev);
@@ -130,7 +130,7 @@ void test_refresh_deleted_file_invalidates_preview_without_model_mutation(void) 
     const bool dirty_before = gui_project_is_dirty();
     TEST_ASSERT_EQUAL_INT(0, remove(source_path));
 
-    s_pending_refresh = true;
+    gui_request_refresh();
     apply_pending();
 
     TEST_ASSERT_TRUE(gui_project_is_stale());
@@ -169,7 +169,7 @@ void test_refresh_unreadable_source_warns_without_model_mutation(void) {
         tp_session_snapshot_revision(gui_project_snapshot());
     const bool dirty_before = gui_project_is_dirty();
     tp_scan__test_set_stat_error(EACCES);
-    s_pending_refresh = true;
+    gui_request_refresh();
     apply_pending();
     tp_scan__test_set_stat_error(0);
 

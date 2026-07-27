@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.25)
 
 # Rule-id namespace: `A<n>` (A1a..A5 structural cuts, A6 the job-owner test-seam
-# fence). Both boundary checkers now launch the same way (ctest), so their ids may
+# fence, A7 the view/action-state fence). Both boundary checkers now launch the same way (ctest), so their ids may
 # not collide: `R<n>` belongs to scripts/check_boundaries.sh (R1..R22) and nothing
 # here. The A-ids trace to the packet ids of the ui-session refactor plan whose cut
 # each rule pins (plan R1a -> A1a, ... plan R5 -> A5, plan P6 -> A6); the letter is
@@ -21,6 +21,7 @@ endif()
 
 set(_arch_rules
     VIEW_ADMISSION
+    VIEW_ACTION_STATE
     VIEW_IO
     VIEW_PLATFORM
     VIEW_MODEL_POLICY
@@ -171,6 +172,17 @@ foreach(_source IN LISTS _arch_sources)
             # multiline call cannot bypass the boundary.
             if(_trimmed MATCHES "(^|[^A-Za-z0-9_])(tp_session_(apply|undo|redo|save|save_as|save_new|discard|invalidate_sources|require_recovery|pack_job_start|export_start|job_cancel|job_take_result)|gui_project_(new|open|save|save_as|discard|undo|redo|invalidate_sources)|gui_project_submit_[A-Za-z0-9_]*|gui_session_client_[A-Za-z0-9_]*)([^A-Za-z0-9_]|$)")
                 _arch_hit(VIEW_ADMISSION "${_relative}" "${_line_number}"
+                          "${CMAKE_MATCH_2}")
+            endif()
+
+            # Deferred action state belongs to the actions layer alone. A view
+            # DECLARES an intent through gui_request_*(); it never writes the
+            # queue, a pending flag, or the actions state struct. This used to
+            # be unenforceable because the pending flags were extern globals
+            # any view TU could assign -- S16 folded all of them into ONE
+            # private queue, which is what makes the token rule real.
+            if(_trimmed MATCHES "(^|[^A-Za-z0-9_])(s_pending_[A-Za-z0-9_]*|s_actions)([^A-Za-z0-9_]|$)")
+                _arch_hit(VIEW_ACTION_STATE "${_relative}" "${_line_number}"
                           "${CMAKE_MATCH_2}")
             endif()
 
@@ -372,6 +384,10 @@ endfunction()
 # behavioural companion (no source decode on the UI thread), but a companion is
 # not an owner. scripts/check_boundaries.sh R22 reads this line.
 _arch_assert_rule(VIEW_ADMISSION "A2c/A2d")
+# A7: zero debt by construction. The deferred-intent queue is private to the
+# actions layer, so the names this rule forbids have no external linkage at
+# all -- a view that trips it could not link even if the rule were removed.
+_arch_assert_rule(VIEW_ACTION_STATE "A7 one deferred-intent queue")
 _arch_assert_rule(VIEW_IO "SR-BASE/PV-tree-list")
 # pre-SR-BASE debt: the chrome view owns the menu/dialog seam and reaches the
 # OS shell and clipboard directly; the seam moves behind the host owner later.

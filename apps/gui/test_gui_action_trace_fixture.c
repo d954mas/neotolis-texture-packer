@@ -131,18 +131,8 @@ void apply_foreign_operation(tp_operation *operation,
 void reset_public_action_state(void) {
     s_actions.pending_lifecycle_request =
         GUI_LIFECYCLE_REQUEST_NONE;
-    s_pending_open = false;
-    s_pending_save = false;
-    s_pending_save_as = false;
-    s_pending_add_files = false;
-    s_pending_add_folder = false;
-    s_pending_add_atlas = false;
-    s_pending_refresh = false;
-    s_pending_pack = false;
-    s_pending_export = false;
-    s_pending_remove_atlas = false;
-    s_pending_remove_source = false;
-    s_pending_preview_target = -1;
+    gui_actions__clear_pending();
+    gui_actions__discard_deferred_edits();
     s_after_confirm = GUI_LIFECYCLE_REQUEST_NONE;
     s_confirm_open = false;
     s_confirm_draft = false;

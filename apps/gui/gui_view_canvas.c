@@ -85,7 +85,7 @@ static void strip_group_actions(nt_ui_context_t *ctx, bool accent, bool labels, 
             }
         }
         if (ui_icon_btn(ctx, s_id_btn_refresh, &s_ic_refresh, 16.0F, NULL, &g_btn_ghost, true, 0.0F, h, &g_caption)) {
-            s_pending_refresh = true;
+            gui_request_refresh();
         }
         return;
     }
@@ -96,14 +96,14 @@ static void strip_group_actions(nt_ui_context_t *ctx, bool accent, bool labels, 
     const nt_ui_label_style_t *pack_lbl = accent ? &g_onwarn : &g_onaccent;
     if (ui_icon_btn(ctx, s_id_btn_pack, pack_ic, 16.0F, labels ? "Pack" : NULL, pack_st, s_pack_has_sources,
                     0.0F, h, pack_lbl)) {
-        s_pending_pack = true;
+        gui_request_pack();
     }
     if (ui_icon_btn(ctx, s_id_btn_export, &s_ic_download, 16.0F, labels ? "Export" : NULL, &g_btn,
                     s_pack_has_sources, 0.0F, h, &g_body)) {
         s_export_open = true;
     }
     if (ui_icon_btn(ctx, s_id_btn_refresh, &s_ic_refresh, 16.0F, NULL, &g_btn_ghost, true, 0.0F, h, &g_caption)) {
-        s_pending_refresh = true;
+        gui_request_refresh();
     }
 }
 
@@ -165,7 +165,7 @@ static void preview_target_short(int combo_index, char *out, size_t cap) {
 }
 
 /* The [Native | <exporters...>] combo. Trigger shows the short label; the open list shows Native + each
- * exporter's full display_name. A pick queues s_pending_preview_target (applied next frame). Disabled to a
+ * exporter's full display_name. A pick queues a preview-target intent (applied next frame). Disabled to a
  * static label while a pack/export/preview is in flight (only one worker op at a time). */
 static void strip_preview_selector(nt_ui_context_t *ctx, float h) {
     const int ne = tp_exporter_count();
@@ -184,13 +184,13 @@ static void strip_preview_selector(nt_ui_context_t *ctx, float h) {
             if (nt_ui_combo_begin(ctx, NT_UI_DATA_LAYER(LAYER_IMG), LAYER_TEXT, nt_ui_id("ntpacker/strip_preview"),
                                   trig, &s_dd_style, &s_dd_preview_open)) {
                 if (nt_ui_combo_selectable(ctx, 0U, "Native", s_preview_target == 0)) {
-                    s_pending_preview_target = 0;
+                    gui_request_preview_target(0);
                 }
                 for (int i = 0; i < ne; i++) {
                     const tp_exporter *e = tp_exporter_at(i);
                     const char *lbl = (e && e->display_name) ? e->display_name : (e ? e->id : "?");
                     if (nt_ui_combo_selectable(ctx, (uint32_t)(i + 1), lbl, s_preview_target == i + 1)) {
-                        s_pending_preview_target = i + 1;
+                        gui_request_preview_target(i + 1);
                     }
                 }
                 nt_ui_combo_end(ctx);
@@ -332,7 +332,7 @@ static void declare_canvas_strip(nt_ui_context_t *ctx, bool atlas) {
         if (accent && s_preview_target == 0 && s_canvas_w >= S(STRIP_CHIP_MIN_W)) {
             if (ui_icon_btn(ctx, nt_ui_id("ntpacker/stale_chip"), &s_ic_triangle_alert, 14.0F, "outdated",
                             &g_btn_stale, true, 0.0F, 24.0F, &g_onwarn)) {
-                s_pending_pack = true;
+                gui_request_pack();
             }
         }
     }
@@ -520,7 +520,7 @@ void declare_canvas(nt_ui_context_t *ctx) {
                         nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), "Add a smart folder to start", &g_canvas_hint);
                         if (ui_icon_btn(ctx, nt_ui_id("ntpacker/empty_add_folder"), &s_ic_folder_plus, 16.0F,
                                         "Add smart folder", &g_btn_primary, true, 0.0F, 28.0F, &g_onaccent)) {
-                            s_pending_add_folder = true;
+                            gui_request_add_folder();
                         }
                     }
                 } else {

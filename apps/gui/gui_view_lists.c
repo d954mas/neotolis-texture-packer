@@ -122,9 +122,7 @@ static void declare_atlas_list(nt_ui_context_t *ctx, const tp_session_snapshot *
             gui_rows_entity_double_click_press(
                 &s_atlas_double_click, atlas->id, ev.double_clicked);
         if (x_clicked) {
-            s_pending_remove_atlas = true;
-            s_pending_remove_atlas_id = atlas->id;
-            s_pending_remove_atlas_revision = revision;
+            gui_request_remove_atlas(atlas->id, revision);
         } else if (stable_double) {
             start_atlas_edit_ref(atlas->id, revision);
         } else if (row_clicked && !selected) {
@@ -177,7 +175,7 @@ static void declare_atlas_list(nt_ui_context_t *ctx, const tp_session_snapshot *
         nt_ui_scroll_end(ctx);
     }
     if (ui_icon_btn(ctx, nt_ui_id("ntpacker/add_atlas"), &s_ic_plus, 16.0F, "Atlas", &g_btn_ghost, true, 0.0F, GUI_LEFT_ADD_ATLAS_H, &g_caption)) {
-        s_pending_add_atlas = true;
+        gui_request_add_atlas();
     }
 }
 
@@ -467,14 +465,14 @@ static void declare_sprite_list(nt_ui_context_t *ctx) {
          * Files button is icon-only (tooltip in declare_tooltips) -- this also keeps the header on one line at
          * the owner's 450px panel where two labelled buttons overran and wrapped "Smart folder". */
         if (ui_icon_btn(ctx, nt_ui_id("ntpacker/add_files"), &s_ic_file_plus, 16.0F, NULL, &g_btn_ghost, true, 0.0F, 24.0F, &g_caption)) {
-            s_pending_add_files = true;
+            gui_request_add_files();
         }
         /* Drop the label to icon-only on a heavily-clamped panel (narrow window / high DPI) so it never
          * wraps or bleeds; the tooltip carries the meaning either way (mouse-complete). >= 240 design px keeps
          * the label at the owner's 1920/1366 @1.5 (450px panels) and every unclamped base-300 panel. */
         const char *folder_lbl = (s_left_panel_w >= S(240.0F)) ? "Smart folder" : NULL;
         if (ui_icon_btn(ctx, nt_ui_id("ntpacker/add_folder"), &s_ic_folder_plus, 16.0F, folder_lbl, &g_btn_ghost, true, 0.0F, 24.0F, &g_caption)) {
-            s_pending_add_folder = true;
+            gui_request_add_folder();
         }
     }
 
@@ -609,11 +607,9 @@ static void declare_sprite_list(nt_ui_context_t *ctx) {
                                                                  snapshot, atlas->id, row->src)
                                                            : NULL;
                     if (source) {
-                        s_pending_remove_source = true;
-                        s_pending_remove_source_atlas_id = atlas->id;
-                        s_pending_remove_source_id = source->id;
-                        s_pending_remove_source_revision =
-                            tp_session_snapshot_revision(snapshot);
+                        gui_request_remove_source(
+                            atlas->id, source->id,
+                            tp_session_snapshot_revision(snapshot));
                     }
                 }
             }

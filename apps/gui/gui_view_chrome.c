@@ -202,10 +202,10 @@ static void file_items(nt_ui_menu_ctx_t *m) {
         request_open();
     }
     if (nt_ui_menu_item_ex(m, MK_SAVE, "Save", (nt_ui_menu_item_opts_t){.shortcut = "Ctrl+S"})) {
-        s_pending_save = true;
+        gui_request_save();
     }
     if (nt_ui_menu_item_ex(m, MK_SAVEAS, "Save As...", (nt_ui_menu_item_opts_t){.shortcut = "Ctrl+Shift+S"})) {
-        s_pending_save_as = true;
+        gui_request_save_as();
     }
     nt_ui_menu_separator(m);
     if (nt_ui_menu_item_ex(m, MK_EXPORT, "Export\xE2\x80\xA6", (nt_ui_menu_item_opts_t){.shortcut = "Ctrl+E"})) {
@@ -213,7 +213,7 @@ static void file_items(nt_ui_menu_ctx_t *m) {
     }
     nt_ui_menu_separator(m);
     if (nt_ui_menu_item_ex(m, MK_REFRESH, "Refresh", (nt_ui_menu_item_opts_t){.shortcut = "F5"})) {
-        s_pending_refresh = true;
+        gui_request_refresh();
     }
     nt_ui_menu_separator(m);
     if (nt_ui_menu_item(m, MK_EXIT, "Exit")) {
@@ -234,11 +234,11 @@ static void edit_items(nt_ui_menu_ctx_t *m) {
 static void atlas_items(nt_ui_menu_ctx_t *m) {
     nt_ui_menu_item_opts_t p = {.shortcut = "Ctrl+P", .disabled = !s_pack_has_sources || gui_pack_async_busy()};
     if (nt_ui_menu_item_ex(m, MK_PACK, "Pack", p)) {
-        s_pending_pack = true;
+        gui_request_pack();
     }
     nt_ui_menu_separator(m);
     if (nt_ui_menu_item(m, MK_ADD_ATLAS, "Add atlas")) {
-        s_pending_add_atlas = true;
+        gui_request_add_atlas();
     }
 }
 /* Radio-style UI-scale item; the active one is marked with a check glyph (baked in the DejaVu font). */
@@ -378,9 +378,8 @@ void declare_context_menu(nt_ui_context_t *ctx) {
         nt_ui_menu_item_opts_t rm = {.disabled = (atlas_count <= 1)};
         if (nt_ui_menu_item_ex(&s_ctx_menu, MK_CTX_REMOVE, "Remove", rm)) {
             if (!tp_id128_is_nil(s_ctx_atlas_id)) {
-                s_pending_remove_atlas = true;
-                s_pending_remove_atlas_id = s_ctx_atlas_id;
-                s_pending_remove_atlas_revision = s_ctx_atlas_revision;
+                gui_request_remove_atlas(s_ctx_atlas_id,
+                                         s_ctx_atlas_revision);
             }
         }
     } else if (s_ctx_kind == CTX_SPRITE) {
@@ -422,11 +421,9 @@ void declare_context_menu(nt_ui_context_t *ctx) {
             if (nt_ui_menu_item(&s_ctx_menu, MK_CTX_REMOVE, "Remove")) {
                 if (!tp_id128_is_nil(s_ctx_sprite_atlas_id) &&
                     !tp_id128_is_nil(s_ctx_sprite_source_id)) {
-                    s_pending_remove_source = true;
-                    s_pending_remove_source_atlas_id =
-                        s_ctx_sprite_atlas_id;
-                    s_pending_remove_source_id = s_ctx_sprite_source_id;
-                    s_pending_remove_source_revision = s_ctx_sprite_revision;
+                    gui_request_remove_source(s_ctx_sprite_atlas_id,
+                                              s_ctx_sprite_source_id,
+                                              s_ctx_sprite_revision);
                 }
             }
         }
@@ -632,7 +629,7 @@ void declare_export_modal(nt_ui_context_t *ctx) {
         CLAY({.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT, .childGap = Su(12), .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
             if (ui_btn(ctx, nt_ui_id("export/run"), gui_pack_async_busy() ? "Exporting\xE2\x80\xA6" : "Export", &g_btn_primary,
                        enabled_targets > 0 && !gui_pack_async_busy(), 120.0F, 34.0F, &g_onaccent)) {
-                s_pending_export = true;
+                gui_request_export();
                 s_export_open = false;
             }
             if (ui_btn(ctx, nt_ui_id("export/cancel"), "Cancel", &g_btn, true, 100.0F, 34.0F, &g_body)) {

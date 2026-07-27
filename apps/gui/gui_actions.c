@@ -30,10 +30,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* deferred side effects (dialogs + model mutations), applied at the top of the next frame */
-bool s_pending_open, s_pending_save, s_pending_save_as, s_pending_add_files, s_pending_add_folder, s_pending_add_atlas, s_pending_refresh;
-bool s_pending_pack, s_pending_export;
-
 typedef enum gui_pending_history_action {
     GUI_PENDING_HISTORY_NONE = 0,
     GUI_PENDING_HISTORY_UNDO,
@@ -44,14 +40,6 @@ static gui_pending_history_action s_pending_history_action;
 
 /* Presentation-only mapping from the active stable animation to one Pack result. */
 
-bool s_pending_remove_atlas;
-tp_id128 s_pending_remove_atlas_id;
-int64_t s_pending_remove_atlas_revision;
-bool s_pending_remove_source;
-tp_id128 s_pending_remove_source_atlas_id;
-tp_id128 s_pending_remove_source_id;
-int64_t s_pending_remove_source_revision;
-int s_pending_preview_target = -1; /* boundary-ok: exporter option, not a target entity index */
 gui_lifecycle_request s_after_confirm;
 bool s_confirm_open;
 bool s_confirm_draft;
@@ -648,7 +636,7 @@ bool gui_actions_refresh_should_mark_stale(tp_status status,
 }
 
 /* Rescan sources and mark derived preview data stale without dirtying the model. */
-static void do_refresh(void) {
+void gui_actions__refresh(void) {
     int added = 0;
     int removed = 0;
     int changed = 0;
@@ -706,12 +694,12 @@ void apply_pending(void) {
     }
     const bool save_as_requires_preflight =
         gui_draft_phase() != GUI_EDIT_IDLE &&
-        (s_pending_save_as ||
-         (s_pending_save &&
+        (gui_actions__intent_queued(GUI_INTENT_SAVE_AS) ||
+         (gui_actions__intent_queued(GUI_INTENT_SAVE) &&
           !gui_project_has_path()));
     if (save_as_requires_preflight) {
         s_actions.gesture_commit = false;
-        (void)gui_actions__apply_file_dialogs();
+        (void)gui_actions__intent_drain(GUI_INTENT_PHASE_DIALOG);
         gui_actions__clear_pending();
         return;
     }
@@ -757,7 +745,7 @@ void apply_pending(void) {
     /* The atlas draft is the prerequisite for the remaining edits in this
      * frame. Only after it reaches a terminal success may dependent edit
      * queues mutate the session. */
-    gui_actions__drain_edits();
+    (void)gui_actions__intent_drain(GUI_INTENT_PHASE_EDIT);
 
     s_actions.gesture_commit = false;
 
@@ -777,15 +765,13 @@ void apply_pending(void) {
 
     gui_actions__apply_recovery();
 
-    if (gui_actions__apply_file_dialogs()) {
+    if (gui_actions__intent_drain(GUI_INTENT_PHASE_DIALOG)) {
         gui_actions__clear_pending();
         return;
     }
-    gui_actions__apply_structural_edits();
-    if (s_pending_refresh) {
-        do_refresh();
-    }
-    gui_actions__apply_pack_requests();
+    (void)gui_actions__intent_drain(GUI_INTENT_PHASE_STRUCTURAL);
+    (void)gui_actions__intent_drain(GUI_INTENT_PHASE_REFRESH);
+    (void)gui_actions__intent_drain(GUI_INTENT_PHASE_PACK);
 
     gui_actions__clear_pending();
 }

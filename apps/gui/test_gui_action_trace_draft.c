@@ -880,7 +880,7 @@ void test_failed_target_path_submit_blocks_dependent_actions_and_preserves_text(
         gui_text_edit_update(invalid_utf8));
     gui_edit_target_enabled(
         &target, !enabled_before);
-    s_pending_pack = true;
+    gui_request_pack();
     gui_request_gesture_commit();
     apply_pending();
 
@@ -895,9 +895,9 @@ void test_failed_target_path_submit_blocks_dependent_actions_and_preserves_text(
     TEST_ASSERT_NOT_NULL(after);
     TEST_ASSERT_EQUAL_INT(
         enabled_before, after->enabled);
-    TEST_ASSERT_FALSE(s_pending_pack);
+    TEST_ASSERT_FALSE(gui_actions__intent_queued(GUI_INTENT_PACK));
     TEST_ASSERT_EQUAL_INT(
-        0, s_actions.target_intent_count);
+        0, s_actions.intent_count);
     TEST_ASSERT_EQUAL_INT(
         GUI_EDIT_EDITING, gui_draft_phase());
     TEST_ASSERT_EQUAL_MEMORY(
@@ -1333,7 +1333,7 @@ void test_deferred_action_mutates_before_publishing_success_status(void) {
     TEST_ASSERT_EQUAL_INT(1, tp_session_snapshot_atlas_count(
                                  gui_project_snapshot()));
     set_status("atlas queued");
-    s_pending_add_atlas = true;
+    gui_request_add_atlas();
 
     TEST_ASSERT_EQUAL_INT(1, tp_session_snapshot_atlas_count(
                                  gui_project_snapshot()));
@@ -1346,7 +1346,7 @@ void test_deferred_action_mutates_before_publishing_success_status(void) {
                                  gui_project_snapshot()));
     TEST_ASSERT_EQUAL_INT(
         1, gui_view_atlas_index(gui_project_snapshot()));
-    TEST_ASSERT_FALSE(s_pending_add_atlas);
+    TEST_ASSERT_FALSE(gui_actions__intent_queued(GUI_INTENT_ADD_ATLAS));
     TEST_ASSERT_EQUAL_STRING("Added atlas 'atlas2'", s_status);
 }
 

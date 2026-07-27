@@ -23,24 +23,30 @@
 extern "C" {
 #endif
 
-/* --- deferred side-effect queue (set by views, consumed by apply_pending) --- */
-extern bool s_pending_open, s_pending_save, s_pending_save_as, s_pending_add_files, s_pending_add_folder, s_pending_add_atlas, s_pending_refresh;
-extern bool s_pending_pack, s_pending_export;
+/* --- deferred side-effect queue (enqueued by views, consumed by apply_pending) ---
+ * There is ONE queue and it is private to the actions layer. A view declares an
+ * intent through the functions below and can neither read nor reorder what is
+ * queued; the drain order is the actions layer's contract, not a view's. */
+void gui_request_save(void);
+void gui_request_save_as(void);
+void gui_request_add_files(void);
+void gui_request_add_folder(void);
+void gui_request_add_atlas(void);
+void gui_request_refresh(void);
+void gui_request_pack(void);
+void gui_request_export(void);
 void gui_request_add_animation(tp_id128 atlas_id, int64_t expected_revision);
 void gui_request_create_animation_from_selection(void);
 void gui_request_open_preview(const gui_animation_ref *animation);
-extern bool s_pending_remove_atlas;
-extern tp_id128 s_pending_remove_atlas_id;
-extern int64_t s_pending_remove_atlas_revision;
-extern bool s_pending_remove_source;
-extern tp_id128 s_pending_remove_source_atlas_id;
-extern tp_id128 s_pending_remove_source_id;
-extern int64_t s_pending_remove_source_revision;
+void gui_request_remove_atlas(tp_id128 atlas_id, int64_t expected_revision);
+void gui_request_remove_source(tp_id128 atlas_id, tp_id128 source_id,
+                               int64_t expected_revision);
 void gui_request_remove_animation_ref(const gui_animation_ref *animation);
 void gui_request_add_target(tp_id128 atlas_id, int64_t expected_revision);
 void gui_request_remove_target_ref(const gui_target_ref *target);
 void gui_request_browse_target_ref(const gui_target_ref *target);
-extern int s_pending_preview_target; /* boundary-ok: exporter option, not a target entity index */
+/* boundary-ok: an exporter option slot, not a target entity index */
+void gui_request_preview_target(int exporter_slot);
 
 /* --- new/open/exit draft resolution + unsaved-changes confirm flow --- */
 typedef enum gui_lifecycle_request {

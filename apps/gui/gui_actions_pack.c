@@ -79,7 +79,7 @@ void do_pack(void) {
 /* Ctrl+E / Export: starts an async export of every atlas with sources + >=1 enabled target on a
  * owned worker process (per-atlas failures non-fatal, ux.md §3.5).
  * Completion is reported through the classified host receipt. */
-static void do_export(void) {
+void gui_actions__export(void) {
     if (!gui_actions__submit_draft()) {
         return;
     }
@@ -139,7 +139,7 @@ uint64_t preview_target_result_version(void) {
 }
 
 /* Starts the preview pack for a strip-selector pick. combo 0 (or a bad index) -> Native. */
-static void preview_target_start(int combo_index) {
+void gui_actions__preview_target_start(int combo_index) {
     if (combo_index <= 0) {
         preview_target_reset();
         return;
@@ -306,14 +306,3 @@ void gui_actions__poll_pack(void) {
     preview_target_sync();
 }
 
-void gui_actions__apply_pack_requests(void) {
-    if (s_pending_pack) {
-        do_pack();
-    }
-    if (s_pending_export) {
-        do_export();
-    }
-    if (s_pending_preview_target >= 0) {
-        preview_target_start(s_pending_preview_target);
-    }
-}

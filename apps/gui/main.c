@@ -140,7 +140,7 @@ static const nt_ui_events_cfg_t s_canvas_dbl_cfg = {
 };
 #define CANVAS_DRAG_THRESHOLD 4.0F
 
-/* The deferred side-effect queue (s_pending_*), the new/open/exit confirm-flow flags (s_after_confirm/
+/* The deferred-intent queue (enqueued through gui_request_*), the new/open/exit confirm-flow flags (s_after_confirm/
  * s_confirm_open/s_modal_action) and the last-pack timing (s_last_pack_*) live in gui_actions. The
  * modal open flags (s_about_open / s_export_open) live in gui_state (shared with the selftest); so
  * does s_blur_inputs -- set here by frame(), read by the settings-panel field widgets in the view TU. */
@@ -407,7 +407,7 @@ static void handle_shortcuts(void) {
             &animation, selected_frame);
     }
     if (nt_input_key_is_pressed(NT_KEY_F5)) {
-        s_pending_refresh = true;
+        gui_request_refresh();
     }
     const bool ctrl = nt_input_key_is_down(NT_KEY_LCTRL) || nt_input_key_is_down(NT_KEY_RCTRL);
     if (!ctrl) {
@@ -420,9 +420,9 @@ static void handle_shortcuts(void) {
         request_open();
     } else if (nt_input_key_is_pressed(NT_KEY_S)) {
         if (shift) {
-            s_pending_save_as = true;
+            gui_request_save_as();
         } else {
-            s_pending_save = true;
+            gui_request_save();
         }
     } else if (nt_input_key_is_pressed(NT_KEY_Z)) {
         if (shift) {
@@ -433,7 +433,7 @@ static void handle_shortcuts(void) {
     } else if (nt_input_key_is_pressed(NT_KEY_Y)) {
         gui_request_redo();
     } else if (nt_input_key_is_pressed(NT_KEY_P)) {
-        s_pending_pack = true;
+        gui_request_pack();
     } else if (nt_input_key_is_pressed(NT_KEY_E)) {
         s_export_open = true;
     } else if (nt_input_key_is_pressed(NT_KEY_F)) {

@@ -148,6 +148,7 @@ set_tests_properties(tp_architecture_boundaries PROPERTIES
 
 foreach(TP_ARCH_RULE IN ITEMS
         VIEW_ADMISSION
+        VIEW_ACTION_STATE
         VIEW_IO
         VIEW_PLATFORM
         VIEW_MODEL_POLICY

@@ -382,6 +382,57 @@ structured rejection without breaking the FSM (the queue stays OPEN, unstaged
 and drainable and admits work again; the session publishes nothing, leaves the
 refused job unreserved, and admits + observes it once ids are available).
 
+**S16 — one deferred-intent queue.** The GUI stored "do this at the next
+between-frame boundary" FOUR ways: 17 mutable extern globals in
+`gui_actions.h`, 17 `s_actions.pending_*` fields, a `target_edit_intent[]`
+array and an `animation_edit_intent[]` array. All four are now one
+`gui_intent {kind; union payload;}` in one growable queue with one
+`gui_actions__intent_push()`, one default-less `intent_execute()` switch
+(-Wswitch exhaustiveness where ten independent `if(flag)` blocks used to be),
+and one exhaustive `intent_payload_dispose()` that owns every heap payload.
+`gui_actions_structural.c` became `gui_actions_intents.c` — the queue's sole
+owner; `gui_actions__apply_structural_edits`, `__apply_file_dialogs`,
+`__apply_pack_requests` and `__drain_edits` collapse into
+`gui_actions__intent_drain(phase)`.
+
+Drain order is preserved exactly and is now written down once: the
+`gui_intent_kind` enum IS the order, declared as a transcription of the legacy
+sequence (animation array → target array → dialog if-sequence → structural
+if-sequence → refresh → pack if-sequence). The two families that were arrays
+share one drain step each, because inside those arrays the legacy drain ran in
+ENQUEUE order across kinds; every other kind was a single boolean slot, so kind
+order is the legacy order and a repeat request coalesces into the one slot the
+way setting a bool twice did. `gui_actions__rebase_deferred_edits` still bumps
+`expected_revision` N→N+1 for those two families only.
+
+Extern globals 17 → 0: every view writes through a `gui_request_*()` function
+(`save`, `save_as`, `add_files`, `add_folder`, `add_atlas`, `refresh`, `pack`,
+`export`, `remove_atlas`, `remove_source`, `preview_target` join the seven that
+already existed). That is what makes the boundary enforceable, so the CMake
+checker gains rule **A7 `VIEW_ACTION_STATE`**: no `s_pending_`/`s_actions`
+token in any `gui_view_*.c`, zero debt paths, with a negative fixture
+(`cmake/fixtures/architecture_boundaries/view_action_state`) and a
+falsification test on both halves of the token set.
+
+Modal-vs-intent split: `pending_lifecycle_request` and
+`recovery_pending_row`/`_action` stayed OUT of the queue. They are not "run
+this later" requests but modal FSM state — each is consumed and re-armed by its
+own modal (the unsaved-changes confirm flow re-arms the lifecycle request
+through `confirm_continue`; the recovery modal's row index is only meaningful
+while its list is open), each carries a NONE/-1 sentinel, and neither was part
+of the `clear_pending` reset set. Browse-target IS an intent: the dialog is the
+executor, not the state.
+
+ctest 152 → **153** debug / 151 → **152** release (+1 = the new negative
+fixture). Deviation: production LOC went **+199**, not the −150..−250 the packet
+projected. The mechanisms it replaced were terser than an explicit tagged union
+because they were untyped: the queue costs one 24-line enum with its 18-line
+order contract, a 45-line union, and a 20-case exhaustive destroy switch, and it
+absorbs ~376 lines from five TUs into 507. Per AGENTS.md the measurement is
+inventory, not a gate; the structural result (4 mechanisms → 1, 17 globals → 0,
+10 sequential ifs → 1 exhaustive switch, one new enforceable checker rule) is
+the deliverable.
+
 ## Decision records
 
 - **Escape after a deferred gesture commit is accepted as-is.** `frame()` runs

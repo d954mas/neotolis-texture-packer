@@ -201,16 +201,6 @@ static int build_sorted_selection(void) {
     return n;
 }
 
-void gui_actions__pending_create_animation_dispose(
-    pending_create_animation *request) {
-    if (!request) {
-        return;
-    }
-    free(request->name);
-    gui_actions__frame_refs_dispose(request->frames, request->frame_count);
-    memset(request, 0, sizeof *request);
-}
-
 void gui_request_create_animation_from_selection(void) {
     if (s_multi_sel_count <= 0) {
         return;
@@ -229,30 +219,30 @@ void gui_request_create_animation_from_selection(void) {
         return;
     }
 
-    pending_create_animation request = {0};
-    request.frames = gui_actions__frame_refs_copy(s_sel_sort_refs, frame_count);
-    if (!request.frames) {
+    gui_intent intent = {.kind = GUI_INTENT_CREATE_ANIMATION};
+    intent.payload.create_animation.frames =
+        gui_actions__frame_refs_copy(s_sel_sort_refs, frame_count);
+    if (!intent.payload.create_animation.frames) {
         set_status_ex(STATUS_ERROR,
                       "Out of memory: animation creation could not be queued.");
         return;
     }
-    request.frame_count = frame_count;
+    intent.payload.create_animation.frame_count = frame_count;
 
     char base[192];
     tp_names_common_prefix(s_sel_sort_ptr, frame_count, base, sizeof base);
-    request.name = gui_actions__strdup(base);
-    if (!request.name) {
-        gui_actions__pending_create_animation_dispose(&request);
+    intent.payload.create_animation.name = gui_actions__strdup(base);
+    if (!intent.payload.create_animation.name) {
+        gui_actions__frame_refs_dispose(intent.payload.create_animation.frames,
+                                        frame_count);
         set_status_ex(STATUS_ERROR,
                       "Out of memory: animation creation could not be queued.");
         return;
     }
-    request.active = true;
-    request.atlas_id = atlas->id;
-    request.expected_revision = tp_session_snapshot_revision(snapshot);
-
-    gui_actions__pending_create_animation_dispose(&s_actions.pending_create_anim);
-    s_actions.pending_create_anim = request;
+    intent.payload.create_animation.atlas_id = atlas->id;
+    intent.payload.create_animation.expected_revision =
+        tp_session_snapshot_revision(snapshot);
+    (void)gui_actions__intent_push(&intent);
 }
 
 void gui_request_open_preview(const gui_animation_ref *animation) {
@@ -260,8 +250,9 @@ void gui_request_open_preview(const gui_animation_ref *animation) {
         tp_id128_is_nil(animation->animation_id)) {
         return;
     }
-    s_actions.pending_open_preview = true;
-    s_actions.pending_open_preview_ref = *animation;
+    const gui_intent intent = {.kind = GUI_INTENT_OPEN_PREVIEW,
+                               .payload.animation = *animation};
+    (void)gui_actions__intent_push(&intent);
 }
 
 /* Creates an animation from the current multi-selection: frames natural-sorted, id from the common

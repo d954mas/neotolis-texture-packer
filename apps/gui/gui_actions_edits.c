@@ -911,22 +911,6 @@ tp_op_sprite_ref *gui_actions__frame_refs_copy(const tp_op_sprite_ref *frames,
     return copy;
 }
 
-static bool target_intent_push(target_edit_intent *e) {
-    if (s_actions.target_intent_count == s_actions.target_intent_cap) {
-        int nc = s_actions.target_intent_cap ? s_actions.target_intent_cap * 2 : 8;
-        target_edit_intent *ne = (target_edit_intent *)realloc(
-            s_actions.target_intents, (size_t)nc * sizeof *ne);
-        if (!ne) {
-            set_status_ex(STATUS_ERROR, "Out of memory: this edit could not be queued (change not applied).");
-            return false;
-        }
-        s_actions.target_intents = ne;
-        s_actions.target_intent_cap = nc;
-    }
-    s_actions.target_intents[s_actions.target_intent_count++] = *e;
-    return true;
-}
-
 /* Begins (or continues) the one draft for `family`/`target_id`/component.
  * `*out_fresh` reports whether a NEW draft was started, so the caller knows when
  * to stamp its component metadata -- it cannot be derived from the phase before
@@ -1127,26 +1111,18 @@ bool gui_sprite_edit_value(
     return true;
 }
 
-static bool animation_intent_push(animation_edit_intent *intent) {
-    if (!intent || tp_id128_is_nil(intent->animation.atlas_id) ||
-        tp_id128_is_nil(intent->animation.animation_id)) {
+/* An animation edit without a stable identity is rejected before it can reach
+ * the one queue: the drain has no way to name its target. */
+static bool animation_intent_push(gui_intent *intent) {
+    if (tp_id128_is_nil(intent->payload.animation_edit.animation.atlas_id) ||
+        tp_id128_is_nil(
+            intent->payload.animation_edit.animation.animation_id)) {
+        gui_actions__frame_refs_dispose(
+            intent->payload.animation_edit.frames,
+            intent->payload.animation_edit.frame_count);
         return false;
     }
-    if (s_actions.animation_intent_count == s_actions.animation_intent_cap) {
-        const int capacity = s_actions.animation_intent_cap ? s_actions.animation_intent_cap * 2 : 8;
-        animation_edit_intent *intents = (animation_edit_intent *)realloc(
-            s_actions.animation_intents, (size_t)capacity * sizeof *intents);
-        if (!intents) {
-            gui_actions__frame_refs_dispose(intent->frames, intent->frame_count);
-            set_status_ex(STATUS_ERROR,
-                          "Out of memory: this animation edit could not be queued (change not applied).");
-            return false;
-        }
-        s_actions.animation_intents = intents;
-        s_actions.animation_intent_cap = capacity;
-    }
-    s_actions.animation_intents[s_actions.animation_intent_count++] = *intent;
-    return true;
+    return gui_actions__intent_push(intent);
 }
 
 static bool animation_edit_matches(
@@ -1241,32 +1217,30 @@ bool gui_animation_edit_value(
     return true;
 }
 void gui_edit_anim_frame_remove(const gui_animation_ref *animation, int frame_index) {
-    animation_edit_intent intent = {0};
-    intent.kind = ANIMATION_INTENT_FRAME_REMOVE;
-    if (animation) intent.animation = *animation;
-    intent.first = frame_index;
+    gui_intent intent = {.kind = GUI_INTENT_ANIM_FRAME_REMOVE};
+    if (animation) intent.payload.animation_edit.animation = *animation;
+    intent.payload.animation_edit.first = frame_index;
     (void)animation_intent_push(&intent);
 }
 void gui_edit_anim_frame_move(const gui_animation_ref *animation, int frame_index, int delta) {
-    animation_edit_intent intent = {0};
-    intent.kind = ANIMATION_INTENT_FRAME_MOVE;
+    gui_intent intent = {.kind = GUI_INTENT_ANIM_FRAME_MOVE};
     if (animation) {
-        intent.animation = *animation;
-        intent.follow_selection =
+        intent.payload.animation_edit.animation = *animation;
+        intent.payload.animation_edit.follow_selection =
             gui_view_animation_frame(gui_project_snapshot()) == frame_index &&
             tp_id128_eq(gui_view_atlas_id(), animation->atlas_id) &&
             tp_id128_eq(gui_view_animation_id(), animation->animation_id);
     }
-    intent.first = frame_index;
-    intent.second = delta;
+    intent.payload.animation_edit.first = frame_index;
+    intent.payload.animation_edit.second = delta;
     (void)animation_intent_push(&intent);
 }
-static void edit_capture_target(target_edit_intent *edit,
+static void edit_capture_target(gui_intent *edit,
                                  const gui_target_ref *target) {
     if (target) {
-        edit->atlas_id = target->atlas_id;
-        edit->target_id = target->target_id;
-        edit->expected_revision = target->expected_revision;
+        edit->payload.target_edit.atlas_id = target->atlas_id;
+        edit->payload.target_edit.target_id = target->target_id;
+        edit->payload.target_edit.expected_revision = target->expected_revision;
     }
 }
 
@@ -1284,23 +1258,21 @@ static bool edit_copy_exporter_id(char out[TP_EXPORTER_ID_MAX],
 }
 
 void gui_edit_target_enabled(const gui_target_ref *target, bool enabled) {
-    target_edit_intent e = {0};
-    e.kind = TARGET_INTENT_ENABLED;
+    gui_intent e = {.kind = GUI_INTENT_TARGET_ENABLED};
     edit_capture_target(&e, target);
-    e.enabled = enabled;
-    (void)target_intent_push(&e);
+    e.payload.target_edit.enabled = enabled;
+    (void)gui_actions__intent_push(&e);
 }
 
 void gui_edit_target_exporter(const gui_target_ref *target,
                               const char *exporter_id) {
-    target_edit_intent e = {0};
-    e.kind = TARGET_INTENT_EXPORTER;
+    gui_intent e = {.kind = GUI_INTENT_TARGET_EXPORTER};
     edit_capture_target(&e, target);
     if (!edit_copy_exporter_id(
-            e.exporter_id, exporter_id)) {
+            e.payload.target_edit.exporter_id, exporter_id)) {
         return;
     }
-    (void)target_intent_push(&e);
+    (void)gui_actions__intent_push(&e);
 }
 
 /* Enqueue an "add frames" edit carrying a COPY of canonical selection refs (F1). "Add frames" used to
@@ -1314,15 +1286,15 @@ void gui_edit_anim_add_frames(const gui_animation_ref *animation,
     if (count <= 0) {
         return;
     }
-    animation_edit_intent intent = {0};
-    intent.kind = ANIMATION_INTENT_ADD_FRAMES;
-    if (animation) intent.animation = *animation;
-    intent.frames = gui_actions__frame_refs_copy(frames, count);
-    if (!intent.frames) {
+    gui_intent intent = {.kind = GUI_INTENT_ANIM_ADD_FRAMES};
+    if (animation) intent.payload.animation_edit.animation = *animation;
+    intent.payload.animation_edit.frames =
+        gui_actions__frame_refs_copy(frames, count);
+    if (!intent.payload.animation_edit.frames) {
         set_status_ex(STATUS_ERROR, "Out of memory: add-frames not applied.");
         return;
     }
-    intent.frame_count = count;
+    intent.payload.animation_edit.frame_count = count;
     (void)animation_intent_push(&intent);
 }
 
@@ -1554,126 +1526,6 @@ bool gui_actions__submit_draft(void) {
 
 bool gui_actions__apply_draft_mine(void) {
     return submit_draft(true);
-}
-
-/* Discrete commands captured in the same frame as a successful draft submit
- * advance only from that exact revision. Already-stale commands stay stale. */
-void gui_actions__rebase_deferred_edits(
-    int64_t revision_before,
-    int64_t revision_after) {
-    if (revision_after == revision_before) {
-        return;
-    }
-    /* A submit commits exactly one transaction, but the observation refresh it
-     * performs can also fold in FOREIGN commits (another client on the same live
-     * session). More than one revision therefore means these intents really are
-     * stale -- leave them stale so the session rejects them on expected_revision.
-     * Not an invariant: a concurrent writer must never abort the GUI. */
-    if (revision_after != revision_before + 1) {
-        return;
-    }
-    for (int i = 0;
-         i < s_actions.animation_intent_count;
-         ++i) {
-        if (s_actions.animation_intents[i]
-                .animation.expected_revision ==
-            revision_before) {
-            s_actions.animation_intents[i]
-                .animation.expected_revision =
-                revision_after;
-        }
-    }
-    for (int i = 0;
-         i < s_actions.target_intent_count;
-         ++i) {
-        if (s_actions.target_intents[i]
-                .expected_revision ==
-            revision_before) {
-            s_actions.target_intents[i]
-                .expected_revision =
-                revision_after;
-        }
-    }
-}
-
-/* Replays discrete structural/target commands after any draft prerequisite. */
-void gui_actions__drain_edits(void) {
-    for (int i = 0; i < s_actions.animation_intent_count; i++) {
-        animation_edit_intent *intent = &s_actions.animation_intents[i];
-        switch (intent->kind) {
-            case ANIMATION_INTENT_FRAME_REMOVE:
-                {
-                    const bool removes_selection =
-                        gui_view_animation_frame(
-                            gui_project_snapshot()) ==
-                            intent->first &&
-                        tp_id128_eq(
-                            gui_view_atlas_id(),
-                            intent->animation.atlas_id) &&
-                        tp_id128_eq(
-                            gui_view_animation_id(),
-                            intent->animation.animation_id);
-                    if (gui_project_anim_remove_frame(
-                            &intent->animation,
-                            intent->first) &&
-                        removes_selection) {
-                        gui_view_select_animation_frame(
-                            gui_project_snapshot(), -1);
-                    }
-                }
-                break;
-            case ANIMATION_INTENT_FRAME_MOVE:
-                if (gui_project_anim_move_frame(&intent->animation,
-                                                intent->first,
-                                                intent->second) &&
-                    intent->follow_selection) {
-                    gui_view_select_animation_frame(
-                        gui_project_snapshot(),
-                        intent->first + intent->second);
-                }
-                break;
-            case ANIMATION_INTENT_ADD_FRAMES:
-                (void)gui_project_anim_add_frames(
-                    &intent->animation, intent->frames,
-                    intent->frame_count);
-                break;
-        }
-        gui_actions__frame_refs_dispose(intent->frames, intent->frame_count);
-        intent->frames = NULL;
-    }
-    s_actions.animation_intent_count = 0;
-    for (int i = 0; i < s_actions.target_intent_count; i++) {
-        target_edit_intent *e = &s_actions.target_intents[i];
-        const gui_target_ref target = {e->atlas_id, e->target_id,
-                                       e->expected_revision};
-        switch (e->kind) {
-            case TARGET_INTENT_ENABLED:
-                (void)gui_project_set_target_enabled(
-                    &target, e->enabled);
-                break;
-            case TARGET_INTENT_EXPORTER:
-                (void)gui_project_set_target_exporter(
-                    &target, e->exporter_id);
-                break;
-        }
-    }
-    s_actions.target_intent_count = 0;
-}
-
-void gui_actions__discard_deferred_edits(void) {
-    for (int i = 0;
-         i < s_actions.animation_intent_count;
-         ++i) {
-        gui_actions__frame_refs_dispose(
-            s_actions.animation_intents[i]
-                .frames,
-            s_actions.animation_intents[i]
-                .frame_count);
-        s_actions.animation_intents[i].frames =
-            NULL;
-    }
-    s_actions.animation_intent_count = 0;
-    s_actions.target_intent_count = 0;
 }
 
 void gui_actions__discard_edits(void) {

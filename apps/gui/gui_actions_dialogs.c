@@ -15,7 +15,7 @@
 
 #include "app/nt_app.h"
 // #region file dialogs (tinyfiledialogs)
-static bool do_open(void) {
+bool gui_actions__open_dialog(void) {
     static const char *filt[] = {"*.ntpacker_project"};
     const char *path = tinyfd_openFileDialog("Open Project", "", 1, filt, "ntpacker project", 0);
     if (!path) {
@@ -40,7 +40,7 @@ static bool do_open(void) {
     return true;
 }
 
-static bool do_save_as(void) {
+bool gui_actions__save_as(void) {
     static const char *filt[] = {"*.ntpacker_project"};
     const char *def = gui_project_has_path() ? gui_project_path() : "untitled.ntpacker_project";
     const char *path = tinyfd_saveFileDialog("Save Project As", def, 1, filt, "ntpacker project");
@@ -83,7 +83,7 @@ static bool do_save_as(void) {
         gui_actions__rebase_deferred_edits(
             revision_before, revision_after);
     }
-    gui_actions__drain_edits();
+    (void)gui_actions__intent_drain(GUI_INTENT_PHASE_EDIT);
     if (gui_project_save_as(full, err, sizeof err) == TP_STATUS_OK) {
         char notice[256];
         if (gui_project_take_save_notice(notice, sizeof notice)) {
@@ -98,9 +98,9 @@ static bool do_save_as(void) {
     }
 }
 
-static bool do_save(void) {
+bool gui_actions__save(void) {
     if (!gui_project_has_path()) {
-        return do_save_as();
+        return gui_actions__save_as();
     }
     if (!gui_actions__submit_draft()) {
         return false;
@@ -123,16 +123,18 @@ static bool do_save(void) {
 void gui_request_remove_animation_ref(const gui_animation_ref *animation) {
     if (animation && !tp_id128_is_nil(animation->atlas_id) &&
         !tp_id128_is_nil(animation->animation_id)) {
-        s_actions.pending_remove_anim = true;
-        s_actions.pending_remove_anim_ref = *animation;
+        const gui_intent intent = {.kind = GUI_INTENT_REMOVE_ANIMATION,
+                                   .payload.animation = *animation};
+        (void)gui_actions__intent_push(&intent);
     }
 }
 
 void gui_request_remove_target_ref(const gui_target_ref *target) {
     if (target && !tp_id128_is_nil(target->atlas_id) &&
         !tp_id128_is_nil(target->target_id)) {
-        s_actions.pending_remove_target = true;
-        s_actions.pending_remove_target_ref = *target;
+        const gui_intent intent = {.kind = GUI_INTENT_REMOVE_TARGET,
+                                   .payload.target = *target};
+        (void)gui_actions__intent_push(&intent);
     }
 }
 
@@ -150,7 +152,7 @@ static bool selected_atlas_intent(tp_id128 *atlas_id, int64_t *revision) {
     return true;
 }
 
-static void do_add_files(void) {
+void gui_actions__add_files(void) {
     static const char *filt[] = {"*.png", "*.jpg", "*.jpeg", "*.bmp", "*.tga"};
     const char *res = tinyfd_openFileDialog("Add Image Files", "", 5, filt, "image files", 1);
     if (!res) {
@@ -261,29 +263,32 @@ void gui_actions__browse_target(const gui_target_ref *queued) {
 void gui_request_browse_target_ref(const gui_target_ref *target) {
     if (target && !tp_id128_is_nil(target->atlas_id) &&
         !tp_id128_is_nil(target->target_id)) {
-        s_actions.pending_browse_target = true;
-        s_actions.pending_browse_target_ref = *target;
+        const gui_intent intent = {.kind = GUI_INTENT_BROWSE_TARGET,
+                                   .payload.target = *target};
+        (void)gui_actions__intent_push(&intent);
     }
 }
 
 void gui_request_add_target(tp_id128 atlas_id, int64_t expected_revision) {
     if (!tp_id128_is_nil(atlas_id)) {
-        s_actions.pending_add_target = true;
-        s_actions.pending_add_target_atlas_id = atlas_id;
-        s_actions.pending_add_target_revision = expected_revision;
+        const gui_intent intent = {
+            .kind = GUI_INTENT_ADD_TARGET,
+            .payload.scope = {atlas_id, expected_revision}};
+        (void)gui_actions__intent_push(&intent);
     }
 }
 
 void gui_request_add_animation(tp_id128 atlas_id,
                                int64_t expected_revision) {
     if (!tp_id128_is_nil(atlas_id)) {
-        s_actions.pending_add_anim = true;
-        s_actions.pending_add_anim_atlas_id = atlas_id;
-        s_actions.pending_add_anim_revision = expected_revision;
+        const gui_intent intent = {
+            .kind = GUI_INTENT_ADD_ANIMATION,
+            .payload.scope = {atlas_id, expected_revision}};
+        (void)gui_actions__intent_push(&intent);
     }
 }
 
-static void do_add_folder(void) {
+void gui_actions__add_folder(void) {
     const char *dir = tinyfd_selectFolderDialog("Add Folder", "");
     if (!dir) {
         return;
@@ -321,7 +326,7 @@ void request_exit(void) {
         GUI_LIFECYCLE_REQUEST_EXIT;
 }
 /* Open routes through the same unsaved-changes confirm as New/Exit (no silent discard). The actual
- * OS open dialog runs via s_pending_open, either now (clean) or after the modal resolves. */
+ * OS open dialog runs as a GUI_INTENT_OPEN, either now (clean) or after the modal resolves. */
 void request_open(void) {
     s_actions.pending_lifecycle_request =
         GUI_LIFECYCLE_REQUEST_OPEN;
@@ -397,7 +402,7 @@ bool gui_actions__apply_lifecycle_request(void) {
         GUI_LIFECYCLE_REQUEST_EXIT) {
         return begin_exit();
     }
-    s_pending_open = true;
+    gui_actions__request_open_dialog();
     return false;
 }
 static void confirm_perform(void) {
@@ -406,7 +411,7 @@ static void confirm_perform(void) {
     } else if (s_after_confirm == GUI_LIFECYCLE_REQUEST_EXIT) {
         (void)begin_exit();
     } else if (s_after_confirm == GUI_LIFECYCLE_REQUEST_OPEN) {
-        s_pending_open = true; /* runs the open dialog next frame */
+        gui_actions__request_open_dialog(); /* runs the open dialog next frame */
     }
     s_after_confirm = GUI_LIFECYCLE_REQUEST_NONE;
 }
@@ -461,7 +466,7 @@ void gui_actions__apply_confirm(void) {
         return;
     }
     if (s_modal_action == MODAL_SAVE) {
-        const bool saved = do_save();
+        const bool saved = gui_actions__save();
         s_confirm_open = false;
         if (saved) {
             confirm_perform();
@@ -476,26 +481,6 @@ void gui_actions__apply_confirm(void) {
         s_after_confirm = GUI_LIFECYCLE_REQUEST_NONE;
     }
     s_modal_action = MODAL_NONE;
-}
-
-bool gui_actions__apply_file_dialogs(void) {
-    bool lifecycle_started = false;
-    if (s_pending_open) {
-        lifecycle_started = do_open();
-    }
-    if (s_pending_save) {
-        (void)do_save();
-    }
-    if (s_pending_save_as) {
-        (void)do_save_as();
-    }
-    if (s_pending_add_files) {
-        do_add_files();
-    }
-    if (s_pending_add_folder) {
-        do_add_folder();
-    }
-    return lifecycle_started;
 }
 
 void gui_actions_pump_lifecycle(void) {

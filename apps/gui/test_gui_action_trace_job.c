@@ -138,7 +138,7 @@ void test_pack_request_submits_active_draft_before_starting_job(void) {
         atlas->id, revision,
         GUI_ATLAS_PADDING, new_padding, 0.0F);
 
-    s_pending_pack = true;
+    gui_request_pack();
     apply_pending();
 
     TEST_ASSERT_EQUAL_INT(
@@ -301,7 +301,7 @@ static void assert_declaration_only_request(
         expected,
         s_actions.pending_lifecycle_request);
     TEST_ASSERT_FALSE(s_confirm_open);
-    TEST_ASSERT_FALSE(s_pending_open);
+    TEST_ASSERT_FALSE(gui_actions__intent_queued(GUI_INTENT_OPEN));
     TEST_ASSERT_EQUAL_INT(
         GUI_PROJECT_LIFECYCLE_OPEN_IDLE,
         gui_project_lifecycle_state_query());
@@ -466,7 +466,7 @@ void test_failed_atlas_gesture_aborts_dependent_action_batch(void) {
     gui_edit_target_enabled(
         &target, !target_enabled);
     gui_request_gesture_commit();
-    s_pending_add_atlas = true;
+    gui_request_add_atlas();
 
     apply_pending();
     TEST_ASSERT_EQUAL_INT64(
@@ -484,8 +484,8 @@ void test_failed_atlas_gesture_aborts_dependent_action_batch(void) {
     TEST_ASSERT_EQUAL_INT(
         target_enabled, target_after->enabled);
     TEST_ASSERT_EQUAL_INT(
-        0, s_actions.target_intent_count);
-    TEST_ASSERT_FALSE(s_pending_add_atlas);
+        0, s_actions.intent_count);
+    TEST_ASSERT_FALSE(gui_actions__intent_queued(GUI_INTENT_ADD_ATLAS));
     TEST_ASSERT_EQUAL_INT(
         GUI_EDIT_EDITING, gui_draft_phase());
     apply_pending();
@@ -644,7 +644,7 @@ void test_busy_new_enters_drain_and_resets_only_after_completion(void) {
         gui_project_session_instance_generation();
     set_status("old session remains visible");
     request_new();
-    s_pending_refresh = true;
+    gui_request_refresh();
     TEST_ASSERT_EQUAL_INT(
         GUI_PROJECT_LIFECYCLE_OPEN_IDLE,
         gui_project_lifecycle_state_query());
@@ -659,7 +659,7 @@ void test_busy_new_enters_drain_and_resets_only_after_completion(void) {
         gui_project_session_instance_generation());
     TEST_ASSERT_EQUAL_STRING(
         "old session remains visible", s_status);
-    TEST_ASSERT_TRUE(s_pending_refresh);
+    TEST_ASSERT_TRUE(gui_actions__intent_queued(GUI_INTENT_REFRESH));
     for (int attempt = 0;
          attempt < 5000 &&
          gui_project_lifecycle_state_query() ==
@@ -684,7 +684,7 @@ void test_busy_new_enters_drain_and_resets_only_after_completion(void) {
         gui_project_session_instance_generation());
     TEST_ASSERT_EQUAL_STRING(
         "New project.", s_status);
-    TEST_ASSERT_FALSE(s_pending_refresh);
+    TEST_ASSERT_FALSE(gui_actions__intent_queued(GUI_INTENT_REFRESH));
 }
 
 void test_external_save_is_visible_through_the_observation_reducer(void) {
