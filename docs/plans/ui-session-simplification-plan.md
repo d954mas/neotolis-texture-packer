@@ -218,7 +218,7 @@ the ingress cost **+244 LOC, not ~40** — re-homing Undo/Redo/Save/SaveAs/
 invalidate onto the host owner needs nine command functions plus four
 capability queries (`can_undo`/`can_redo`/`undo_depth`/`redo_depth`), because
 the depth/capability reads borrow the session exactly like the commands do; the
-P2 rule alone did not express this, so a new **`R2d single host command owner`
+P2 rule alone did not express this, so a new **`A2d single host command owner`
 sweep** was added (`cmake/check_architecture_boundaries.cmake`) banning
 `tp_session_undo|redo|save|save_as|invalidate_sources|can_undo|can_redo|
 undo_depth|redo_depth` in every GUI TU except `gui_host_binding.c`. The
@@ -329,6 +329,20 @@ Reserves: pending-map capacity derived from
 (`tp_fs_write_file_atomic`, three exporter sites, old file survives a
 failed replace). Production net +124 (+94 is the named `tp_cancel_source`
 module; the unification proper is −40).
+
+**S13 — one checker launch mechanism + CMake target boilerplate.** Both boundary
+gates are now ctests: `scripts/check_boundaries.sh` is registered as
+`tp_boundaries_grep` (labelled `architecture`, skipped with a STATUS notice where
+`bash` is absent) and its bespoke CI step is gone, so `ctest --preset <p>` is the
+single entry point on all three platforms. The CMake checker's rule ids moved to
+the `A` namespace (`A1a`..`A5`, `A6` for the job-owner seam fence) so `R1..R22`
+means the grep gate and nothing else. `tp_add_test()` / `tp_add_gui_test()` own
+the per-target boilerplate (executable, links, `-U_DLL`, warning/sanitizer flags,
+include dirs, ctest registration); all 70 packer and 13 GUI test targets are
+declared through them with test names byte-identical to before. The non-gating LOC
+report (AGENTS.md Simplification Policy) stays visible through the existing
+`report_loc_inventory` build target — `cmake --build --preset <p> --target
+report_loc_inventory`.
 
 ## Decision records
 

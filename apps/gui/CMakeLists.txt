@@ -12,6 +12,14 @@ set(GUI_GENERATED_DIR "${CMAKE_CURRENT_SOURCE_DIR}/generated")
 # from the engine root (keeps generated macro names identical to the engine examples).
 set(GUI_ENGINE_ROOT "${CMAKE_SOURCE_DIR}/external/neotolis-engine")
 
+# The engine sets these build-wide via add_compile_definitions in its OWN directory
+# scope; a submodule consumer doesn't inherit that, yet engine public headers
+# (nt_resource.h) test them under our -Wundef/-Werror. Mirror the engine's resolved
+# values so every target that pulls an engine UI header agrees with its libs.
+set(_tp_gui_introspect_defines
+    NT_INTROSPECT_ENABLED=$<BOOL:${NT_INTROSPECT_ENABLED}>
+    NT_INTROSPECT_WRITE_ENABLED=$<BOOL:${NT_INTROSPECT_WRITE_ENABLED}>)
+
 # tinyfiledialogs (vendored in-repo, apps/gui/deps, zlib licence) -- OS-native open/save/
 # folder dialogs (ux.md gap 3). Its own small static lib compiled -w so our -Werror never
 # applies to third-party code; default CRT (matches the GUI). Windows needs comdlg32/ole32/
@@ -59,13 +67,9 @@ endif()
 target_include_directories(ntpacker-gui PRIVATE "${GUI_GENERATED_DIR}")
 # Shared product version header (apps/common/ntpacker_version.h), also used by the CLI.
 target_include_directories(ntpacker-gui PRIVATE "${CMAKE_SOURCE_DIR}/apps/common")
-# The engine sets these build-wide via add_compile_definitions in its OWN directory scope;
-# a submodule consumer doesn't inherit that, yet engine public headers (nt_resource.h) test
-# them under our -Wundef/-Werror. Mirror the engine's resolved values so we agree with its libs.
 target_compile_definitions(ntpacker-gui PRIVATE
     _CRT_SECURE_NO_WARNINGS
-    NT_INTROSPECT_ENABLED=$<BOOL:${NT_INTROSPECT_ENABLED}>
-    NT_INTROSPECT_WRITE_ENABLED=$<BOOL:${NT_INTROSPECT_WRITE_ENABLED}>
+    ${_tp_gui_introspect_defines}
 )
 
 # Headless smoke of the project ops (create/add/decode+upload/save/reload) + a timed
@@ -119,8 +123,7 @@ target_include_directories(tp_bench_gui_rows PRIVATE
 target_compile_definitions(tp_bench_gui_rows PRIVATE
     NTPACKER_GUI_BENCH=1
     _CRT_SECURE_NO_WARNINGS
-    NT_INTROSPECT_ENABLED=$<BOOL:${NT_INTROSPECT_ENABLED}>
-    NT_INTROSPECT_WRITE_ENABLED=$<BOOL:${NT_INTROSPECT_WRITE_ENABLED}>
+    ${_tp_gui_introspect_defines}
 )
 nt_set_warning_flags(tp_bench_gui_rows)
 nt_set_sanitizer_flags(tp_bench_gui_rows)
@@ -134,94 +137,70 @@ set_tests_properties(tp_gui_rows_complexity PROPERTIES
 # Contract probe: the production GUI atlas-rename adapter must admit the
 # canonical transaction through tp_session and read the result from one owned
 # snapshot. Headless: no window, renderer, dialogs, or GUI globals.
-add_executable(tp_test_gui_session_adapter
-    test_gui_session_adapter.c
-    gui_session_adapter.c
-    gui_session_client.c)
-target_link_libraries(tp_test_gui_session_adapter PRIVATE tp_core unity)
-target_compile_options(tp_test_gui_session_adapter PRIVATE -U_DLL)
-nt_set_warning_flags(tp_test_gui_session_adapter)
-nt_set_sanitizer_flags(tp_test_gui_session_adapter)
-add_test(NAME tp_gui_session_adapter COMMAND tp_test_gui_session_adapter)
+tp_add_gui_test(NAME gui_session_adapter
+    SOURCES
+        test_gui_session_adapter.c
+        gui_session_adapter.c
+        gui_session_client.c
+    LIBS tp_core unity)
 
-add_executable(tp_test_gui_session_client
-    test_gui_session_client.c
-    gui_session_client.c)
-target_link_libraries(tp_test_gui_session_client PRIVATE tp_core unity)
-target_compile_options(tp_test_gui_session_client PRIVATE -U_DLL)
-target_compile_definitions(tp_test_gui_session_client PRIVATE
-    TP_ENABLE_TEST_SEAMS=1
-    TP_GUI_SESSION_CLIENT_TEST_DIR="${CMAKE_CURRENT_BINARY_DIR}")
-nt_set_warning_flags(tp_test_gui_session_client)
-nt_set_sanitizer_flags(tp_test_gui_session_client)
-add_test(NAME tp_gui_session_client COMMAND tp_test_gui_session_client)
+tp_add_gui_test(NAME gui_session_client
+    SOURCES
+        test_gui_session_client.c
+        gui_session_client.c
+    LIBS tp_core unity
+    SEAMS
+    DEFINES TP_GUI_SESSION_CLIENT_TEST_DIR="${CMAKE_CURRENT_BINARY_DIR}")
 
-add_executable(tp_test_gui_edit_state
-    test_gui_edit_state.c
-    gui_edit_state.c)
-target_link_libraries(tp_test_gui_edit_state PRIVATE tp_core unity)
-target_compile_options(tp_test_gui_edit_state PRIVATE -U_DLL)
-nt_set_warning_flags(tp_test_gui_edit_state)
-nt_set_sanitizer_flags(tp_test_gui_edit_state)
-add_test(NAME tp_gui_edit_state COMMAND tp_test_gui_edit_state)
+tp_add_gui_test(NAME gui_edit_state
+    SOURCES
+        test_gui_edit_state.c
+        gui_edit_state.c
+    LIBS tp_core unity)
 
-add_executable(tp_test_gui_host_queue
-    test_gui_host_queue.c
-    gui_host_queue.c)
-target_link_libraries(tp_test_gui_host_queue PRIVATE tp_build tp_core unity)
-target_compile_options(tp_test_gui_host_queue PRIVATE -U_DLL)
-target_compile_definitions(tp_test_gui_host_queue PRIVATE
-    TP_ENABLE_TEST_SEAMS=1
-    TP_GUI_HOST_QUEUE_TEST_DIR="${CMAKE_CURRENT_BINARY_DIR}")
-nt_set_warning_flags(tp_test_gui_host_queue)
-nt_set_sanitizer_flags(tp_test_gui_host_queue)
-add_test(NAME tp_gui_host_queue COMMAND tp_test_gui_host_queue)
+tp_add_gui_test(NAME gui_host_queue
+    SOURCES
+        test_gui_host_queue.c
+        gui_host_queue.c
+    LIBS tp_build tp_core unity
+    SEAMS
+    DEFINES TP_GUI_HOST_QUEUE_TEST_DIR="${CMAKE_CURRENT_BINARY_DIR}")
 
-add_executable(tp_test_gui_host_binding
-    test_gui_host_binding.c
-    gui_host_binding.c
-    gui_host_queue.c
-    gui_session_client.c
-    "${CMAKE_SOURCE_DIR}/packer/src/tp_job_worker_main.c")
-target_link_libraries(tp_test_gui_host_binding PRIVATE
-    tp_build tp_core unity)
-target_include_directories(tp_test_gui_host_binding PRIVATE
-    "${CMAKE_SOURCE_DIR}/packer/src")
-target_compile_options(tp_test_gui_host_binding PRIVATE -U_DLL)
-target_compile_definitions(tp_test_gui_host_binding PRIVATE
-    TP_ENABLE_TEST_SEAMS=1
-    _CRT_SECURE_NO_WARNINGS
-    TP_GUI_HOST_BINDING_TEST_DIR="${CMAKE_CURRENT_BINARY_DIR}")
-nt_set_warning_flags(tp_test_gui_host_binding)
-nt_set_sanitizer_flags(tp_test_gui_host_binding)
-add_test(NAME tp_gui_host_binding COMMAND tp_test_gui_host_binding)
-set_tests_properties(tp_gui_host_binding PROPERTIES TIMEOUT 30)
+tp_add_gui_test(NAME gui_host_binding
+    SOURCES
+        test_gui_host_binding.c
+        gui_host_binding.c
+        gui_host_queue.c
+        gui_session_client.c
+        "${CMAKE_SOURCE_DIR}/packer/src/tp_job_worker_main.c"
+    LIBS tp_build tp_core unity
+    INCLUDE_DIRS "${CMAKE_SOURCE_DIR}/packer/src"
+    SEAMS
+    DEFINES
+        _CRT_SECURE_NO_WARNINGS
+        TP_GUI_HOST_BINDING_TEST_DIR="${CMAKE_CURRENT_BINARY_DIR}"
+    TIMEOUT 30)
 
-add_executable(tp_test_gui_paths test_gui_paths.c gui_paths.c)
-target_link_libraries(tp_test_gui_paths PRIVATE tp_core unity)
-target_compile_options(tp_test_gui_paths PRIVATE -U_DLL)
-target_include_directories(tp_test_gui_paths PRIVATE
-    "${CMAKE_SOURCE_DIR}/apps/common")
+# Windows resolves argv through the shared UTF-8 process ingress, which the path
+# helpers under test read back.
+set(_tp_gui_paths_sources test_gui_paths.c gui_paths.c)
+set(_tp_gui_paths_libs tp_core unity)
 if(WIN32)
-    target_sources(tp_test_gui_paths PRIVATE
+    list(APPEND _tp_gui_paths_sources
         "${CMAKE_SOURCE_DIR}/apps/common/nt_utf8_argv.c")
-    target_link_libraries(tp_test_gui_paths PRIVATE shell32)
+    list(APPEND _tp_gui_paths_libs shell32)
 endif()
-nt_set_warning_flags(tp_test_gui_paths)
-nt_set_sanitizer_flags(tp_test_gui_paths)
-add_test(NAME tp_gui_paths COMMAND tp_test_gui_paths)
+tp_add_gui_test(NAME gui_paths
+    SOURCES ${_tp_gui_paths_sources}
+    LIBS ${_tp_gui_paths_libs}
+    INCLUDE_DIRS "${CMAKE_SOURCE_DIR}/apps/common")
 
 # POSIX shell-quote unit test (U-02): gui_shell_quote.h's gui_shell_squote() wraps a user-derived path
 # as ONE single-quoted shell word (apostrophes -> '\''), the single source of truth for the system()-
 # dispatched "open in the OS file manager" helpers. Header-only + POSIX-only, so the test body is
 # #ifndef _WIN32; the local Windows build compiles a trivially-passing stub while Linux CI runs the real
 # assertions under ASan+UBSan. Minimal deps -- only unity (the header pulls in nothing else).
-add_executable(tp_test_gui_shell_quote test_gui_shell_quote.c)
-target_link_libraries(tp_test_gui_shell_quote PRIVATE unity)
-target_compile_options(tp_test_gui_shell_quote PRIVATE -U_DLL)
-nt_set_warning_flags(tp_test_gui_shell_quote)
-nt_set_sanitizer_flags(tp_test_gui_shell_quote)
-add_test(NAME tp_gui_shell_quote COMMAND tp_test_gui_shell_quote)
+tp_add_gui_test(NAME gui_shell_quote LIBS unity)
 
 set(_tp_gui_headless_sources
     gui_state.c
@@ -255,74 +234,56 @@ if(WIN32)
         "${CMAKE_SOURCE_DIR}/apps/common/nt_utf8_argv.c")
 endif()
 
+# The headless harness link set and include path: the production GUI TUs above
+# pull the engine UI stack even without a window, so every headless target links
+# and includes exactly the same thing.
+set(_tp_gui_headless_libs
+    nt_core nt_app nt_window nt_input nt_math nt_log nt_time nt_resource
+    nt_material nt_shared nt_atlas
+    nt_sprite_renderer nt_text_renderer nt_font nt_ui
+    nt_render nt_hash nt_mem_scratch nt_shape_renderer
+    nt_gfx nt_http_stub nt_fs nt_clipboard
+    tp_build stb_image tinyfiledialogs tinycthread unity)
+set(_tp_gui_headless_includes
+    "${CMAKE_SOURCE_DIR}/packer/src"
+    "${CMAKE_SOURCE_DIR}/apps/common")
+
 # Canonical GUI identity regression: two distinct sources may expose the same
 # source-local key.  The headless target exercises the production row,
 # selection/action and project/session adapters without creating a window.
 # tp_job.c is rebuilt here with TP_ENABLE_TEST_SEAMS, and its worker-timeout
 # seam lives in tp_job_worker.c, which the shipped library compiles seam-free.
-add_executable(tp_test_gui_canonical_identity
-    test_gui_canonical_identity.c
-    "${CMAKE_SOURCE_DIR}/packer/src/tp_job.c"
-    "${CMAKE_SOURCE_DIR}/packer/src/tp_job_worker.c"
-    "${CMAKE_SOURCE_DIR}/packer/src/tp_job_worker_proto.c"
-    ${_tp_gui_headless_sources}
-)
-target_link_libraries(tp_test_gui_canonical_identity PRIVATE
-    nt_core nt_app nt_window nt_input nt_math nt_log nt_time nt_resource
-    nt_material nt_shared nt_atlas
-    nt_sprite_renderer nt_text_renderer nt_font nt_ui
-    nt_render nt_hash nt_mem_scratch nt_shape_renderer
-    nt_gfx nt_http_stub nt_fs nt_clipboard
-    tp_build stb_image tinyfiledialogs tinycthread unity
-)
-target_include_directories(tp_test_gui_canonical_identity PRIVATE
-    "${CMAKE_SOURCE_DIR}/packer/src"
-    "${CMAKE_SOURCE_DIR}/apps/common"
-)
-target_compile_definitions(tp_test_gui_canonical_identity PRIVATE
-    TP_ENABLE_TEST_SEAMS=1
-    TP_GUI_IDENTITY_TEST_DIR="${CMAKE_CURRENT_BINARY_DIR}/tp_gui_identity_tmp"
-    TP_TEST_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
-    _CRT_SECURE_NO_WARNINGS
-    NT_INTROSPECT_ENABLED=$<BOOL:${NT_INTROSPECT_ENABLED}>
-    NT_INTROSPECT_WRITE_ENABLED=$<BOOL:${NT_INTROSPECT_WRITE_ENABLED}>
-)
-target_compile_options(tp_test_gui_canonical_identity PRIVATE -U_DLL)
-nt_set_warning_flags(tp_test_gui_canonical_identity)
-nt_set_sanitizer_flags(tp_test_gui_canonical_identity)
-add_test(NAME tp_gui_canonical_identity COMMAND tp_test_gui_canonical_identity)
+tp_add_gui_test(NAME gui_canonical_identity
+    SOURCES
+        test_gui_canonical_identity.c
+        "${CMAKE_SOURCE_DIR}/packer/src/tp_job.c"
+        "${CMAKE_SOURCE_DIR}/packer/src/tp_job_worker.c"
+        "${CMAKE_SOURCE_DIR}/packer/src/tp_job_worker_proto.c"
+        ${_tp_gui_headless_sources}
+    LIBS ${_tp_gui_headless_libs}
+    INCLUDE_DIRS ${_tp_gui_headless_includes}
+    SEAMS
+    DEFINES
+        TP_GUI_IDENTITY_TEST_DIR="${CMAKE_CURRENT_BINARY_DIR}/tp_gui_identity_tmp"
+        TP_TEST_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+        _CRT_SECURE_NO_WARNINGS
+        ${_tp_gui_introspect_defines})
 
 # U-02 sprite-tree VIEW-layer regression: the filter/sort/collapse projection
 # (s_view over s_rows) is a pure function of the cached row model.  Same headless
 # harness + link set as the canonical-identity target -- no window, GL, or pack job.
-add_executable(tp_test_gui_view
-    test_gui_view.c
-    "${CMAKE_SOURCE_DIR}/packer/src/tp_scan.c"
-    ${_tp_gui_headless_sources}
-)
-target_link_libraries(tp_test_gui_view PRIVATE
-    nt_core nt_app nt_window nt_input nt_math nt_log nt_time nt_resource
-    nt_material nt_shared nt_atlas
-    nt_sprite_renderer nt_text_renderer nt_font nt_ui
-    nt_render nt_hash nt_mem_scratch nt_shape_renderer
-    nt_gfx nt_http_stub nt_fs nt_clipboard
-    tp_build stb_image tinyfiledialogs tinycthread unity
-)
-target_include_directories(tp_test_gui_view PRIVATE
-    "${CMAKE_SOURCE_DIR}/packer/src"
-    "${CMAKE_SOURCE_DIR}/apps/common"
-)
-target_compile_definitions(tp_test_gui_view PRIVATE
-    TP_ENABLE_TEST_SEAMS=1
-    TP_GUI_VIEW_TEST_DIR="${CMAKE_CURRENT_BINARY_DIR}/tp_gui_view_tmp"
-    _CRT_SECURE_NO_WARNINGS
-    NT_INTROSPECT_ENABLED=$<BOOL:${NT_INTROSPECT_ENABLED}>
-    NT_INTROSPECT_WRITE_ENABLED=$<BOOL:${NT_INTROSPECT_WRITE_ENABLED}>
-)
-target_compile_options(tp_test_gui_view PRIVATE -U_DLL)
-nt_set_warning_flags(tp_test_gui_view)
-nt_set_sanitizer_flags(tp_test_gui_view)
-add_test(NAME tp_gui_view COMMAND tp_test_gui_view)
+tp_add_gui_test(NAME gui_view
+    SOURCES
+        test_gui_view.c
+        "${CMAKE_SOURCE_DIR}/packer/src/tp_scan.c"
+        ${_tp_gui_headless_sources}
+    LIBS ${_tp_gui_headless_libs}
+    INCLUDE_DIRS ${_tp_gui_headless_includes}
+    SEAMS
+    DEFINES
+        TP_GUI_VIEW_TEST_DIR="${CMAKE_CURRENT_BINARY_DIR}/tp_gui_view_tmp"
+        _CRT_SECURE_NO_WARNINGS
+        ${_tp_gui_introspect_defines})
 
 # P1-10 action/state trace oracle.  Deliberately separate headless targets:
 # decomposition of gui_actions/gui_project must preserve between-frame timing
@@ -333,67 +294,50 @@ add_test(NAME tp_gui_view COMMAND tp_test_gui_view)
 # cases create and delete real files under it, and `ctest -j` runs the three
 # binaries concurrently.
 foreach(_trace_area draft refresh job)
-    add_executable(tp_test_gui_action_trace_${_trace_area}
-        test_gui_action_trace_${_trace_area}.c
-        test_gui_action_trace_fixture.c
-        "${CMAKE_SOURCE_DIR}/packer/src/tp_scan.c"
-        "${CMAKE_SOURCE_DIR}/packer/src/tp_job.c"
-        "${CMAKE_SOURCE_DIR}/packer/src/tp_job_worker.c"
-        "${CMAKE_SOURCE_DIR}/packer/src/tp_job_worker_proto.c"
-        ${_tp_gui_headless_sources}
-    )
-    target_link_libraries(tp_test_gui_action_trace_${_trace_area} PRIVATE
-        nt_core nt_app nt_window nt_input nt_math nt_log nt_time nt_resource
-        nt_material nt_shared nt_atlas
-        nt_sprite_renderer nt_text_renderer nt_font nt_ui
-        nt_render nt_hash nt_mem_scratch nt_shape_renderer
-        nt_gfx nt_http_stub nt_fs nt_clipboard
-        tp_build stb_image tinyfiledialogs tinycthread unity
-    )
-    target_include_directories(tp_test_gui_action_trace_${_trace_area} PRIVATE
-        "${CMAKE_SOURCE_DIR}/packer/src"
-        "${CMAKE_SOURCE_DIR}/apps/common"
-    )
-    target_compile_definitions(tp_test_gui_action_trace_${_trace_area} PRIVATE
-        TP_ENABLE_TEST_SEAMS=1
-        TP_GUI_TRACE_TEST_DIR="${CMAKE_CURRENT_BINARY_DIR}/tp_gui_trace_${_trace_area}_tmp"
-        _CRT_SECURE_NO_WARNINGS
-        NT_INTROSPECT_ENABLED=$<BOOL:${NT_INTROSPECT_ENABLED}>
-        NT_INTROSPECT_WRITE_ENABLED=$<BOOL:${NT_INTROSPECT_WRITE_ENABLED}>
-    )
-    target_compile_options(tp_test_gui_action_trace_${_trace_area} PRIVATE -U_DLL)
-    nt_set_warning_flags(tp_test_gui_action_trace_${_trace_area})
-    nt_set_sanitizer_flags(tp_test_gui_action_trace_${_trace_area})
-    add_test(NAME tp_gui_action_trace_${_trace_area}
-             COMMAND tp_test_gui_action_trace_${_trace_area})
+    tp_add_gui_test(NAME gui_action_trace_${_trace_area}
+        SOURCES
+            test_gui_action_trace_${_trace_area}.c
+            test_gui_action_trace_fixture.c
+            "${CMAKE_SOURCE_DIR}/packer/src/tp_scan.c"
+            "${CMAKE_SOURCE_DIR}/packer/src/tp_job.c"
+            "${CMAKE_SOURCE_DIR}/packer/src/tp_job_worker.c"
+            "${CMAKE_SOURCE_DIR}/packer/src/tp_job_worker_proto.c"
+            ${_tp_gui_headless_sources}
+        LIBS ${_tp_gui_headless_libs}
+        INCLUDE_DIRS ${_tp_gui_headless_includes}
+        SEAMS
+        DEFINES
+            TP_GUI_TRACE_TEST_DIR="${CMAKE_CURRENT_BINARY_DIR}/tp_gui_trace_${_trace_area}_tmp"
+            _CRT_SECURE_NO_WARNINGS
+            ${_tp_gui_introspect_defines})
 endforeach()
 
 # Capability/parity corpus. The second adapter is intentionally test-only:
 # it calls tp_session directly and proves the future transport host needs no
 # duplicate mutable session wrapper.
-add_executable(tp_test_client_parity
-    test_client_parity.c
-    client_parity_manifest.c
-    gui_session_adapter.c
-    gui_session_client.c)
-target_link_libraries(tp_test_client_parity PRIVATE tp_build unity)
-target_compile_options(tp_test_client_parity PRIVATE -U_DLL)
-target_compile_definitions(tp_test_client_parity PRIVATE
-    TP_TEST_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
-    TP_TEST_BINARY_DIR="${CMAKE_CURRENT_BINARY_DIR}/tp_client_parity_tmp")
-nt_set_warning_flags(tp_test_client_parity)
-nt_set_sanitizer_flags(tp_test_client_parity)
-add_test(NAME tp_client_parity COMMAND tp_test_client_parity)
-set_tests_properties(tp_client_parity PROPERTIES TIMEOUT 180)
+tp_add_gui_test(NAME client_parity
+    SOURCES
+        test_client_parity.c
+        client_parity_manifest.c
+        gui_session_adapter.c
+        gui_session_client.c
+    LIBS tp_build unity
+    DEFINES
+        TP_TEST_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+        TP_TEST_BINARY_DIR="${CMAKE_CURRENT_BINARY_DIR}/tp_client_parity_tmp"
+    TIMEOUT 180)
 
-add_executable(tp_client_parity_replay
-    client_parity_replay.c
-    gui_session_adapter.c
-    gui_session_client.c)
-target_link_libraries(tp_client_parity_replay PRIVATE tp_build)
-target_compile_options(tp_client_parity_replay PRIVATE -U_DLL)
-nt_set_warning_flags(tp_client_parity_replay)
-nt_set_sanitizer_flags(tp_client_parity_replay)
+# The replay binary is driven by the tp_client_parity_real ctest below, which is a
+# cmake -P script (it runs the CLI and the replay exe against each other), so the
+# executable registers no test of its own.
+tp_add_gui_test(NAME client_parity_replay TARGET tp_client_parity_replay
+    SOURCES
+        client_parity_replay.c
+        gui_session_adapter.c
+        gui_session_client.c
+    LIBS tp_build
+    NO_CTEST)
+
 add_test(NAME tp_client_parity_real COMMAND ${CMAKE_COMMAND}
     -DNTPACKER=$<TARGET_FILE:ntpacker>
     -DREPLAY=$<TARGET_FILE:tp_client_parity_replay>

@@ -1,5 +1,12 @@
 cmake_minimum_required(VERSION 3.25)
 
+# Rule-id namespace: `A<n>` (A1a..A5 structural cuts, A6 the job-owner test-seam
+# fence). Both boundary checkers now launch the same way (ctest), so their ids may
+# not collide: `R<n>` belongs to scripts/check_boundaries.sh (R1..R22) and nothing
+# here. The A-ids trace to the packet ids of the ui-session refactor plan whose cut
+# each rule pins (plan R1a -> A1a, ... plan R5 -> A5, plan P6 -> A6); the letter is
+# the only thing that changed.
+
 if(NOT DEFINED ARCH_ROOT OR ARCH_ROOT STREQUAL "")
     message(FATAL_ERROR "ARCH_ROOT is required")
 endif()
@@ -364,7 +371,7 @@ endfunction()
 # prove it. apps/gui/test_gui_canonical_identity.c carries the closest
 # behavioural companion (no source decode on the UI thread), but a companion is
 # not an owner. scripts/check_boundaries.sh R22 reads this line.
-_arch_assert_rule(VIEW_ADMISSION "R2c/R2d")
+_arch_assert_rule(VIEW_ADMISSION "A2c/A2d")
 _arch_assert_rule(VIEW_IO "SR-BASE/PV-tree-list")
 # pre-SR-BASE debt: the chrome view owns the menu/dialog seam and reaches the
 # OS shell and clipboard directly; the seam moves behind the host owner later.
@@ -383,11 +390,11 @@ _arch_report_debt(VIEW_MODEL_POLICY "PV-settings/RESULT-INDEX"
                   # effective-shape projection over the pending PV-settings
                   # slice live in the settings view.
                   "apps/gui/gui_view_settings\\.c|#include:tp_core/tp_export.h,#include:tp_core/tp_validate.h,tp_exporter_count,tp_exporter_at,tp_validate_session_snapshot_target,tp_project_sprite_effective_shape,gui_pack_result,gui_pack_find_sprite_ref")
-_arch_assert_rule(CORE_FRONTEND "R1a/R1b")
-_arch_assert_rule(ASYNC_RAW_SESSION "R1c/R2b")
+_arch_assert_rule(CORE_FRONTEND "A1a/A1b")
+_arch_assert_rule(ASYNC_RAW_SESSION "A1c/A2b")
 _arch_assert_rule(
     HOST_QUEUE_RAW_SESSION_STORAGE
-    "R2b no retained raw session")
+    "A2b no retained raw session")
 
 # Zero-only deletion guard. Behavioral tests prove presence and sequencing;
 # this gate only prevents a removed path from returning.
@@ -416,19 +423,19 @@ function(_arch_assert_absent relative_path symbol remove_in)
     endif()
 endfunction()
 
-# Completed R1c/R2b worker and host-admission cuts.
+# Completed A1c/A2b worker and host-admission cuts.
 foreach(_entry IN ITEMS
         "thrd_t" "thrd_create" "thrd_join" "job_join"
         "pack_worker" "export_worker" "job_start_thread"
         "job_thread_start" "job_thread_start_context"
         "fail_next_thread_create")
-    _arch_assert_absent("packer/src/tp_job.c" "${_entry}" "R1c")
+    _arch_assert_absent("packer/src/tp_job.c" "${_entry}" "A1c")
 endforeach()
 _arch_assert_absent("packer/src/tp_job.c"
-                    "tp_session[ \t]*\\*[ \t]*session[ \t]*;" "R1c")
+                    "tp_session[ \t]*\\*[ \t]*session[ \t]*;" "A1c")
 _arch_assert_absent("apps/gui/gui_pack_jobs.c"
-                    "tp_session[ \t]*\\*" "R2b")
-_arch_assert_absent("apps/gui/gui_pack_jobs.c" "wait_for_job" "R2b")
+                    "tp_session[ \t]*\\*" "A2b")
+_arch_assert_absent("apps/gui/gui_pack_jobs.c" "wait_for_job" "A2b")
 foreach(_symbol IN ITEMS
         job_session
         tp_session_job_active
@@ -437,20 +444,20 @@ foreach(_symbol IN ITEMS
         tp_session_job_cancel
         tp_session_pack_job_start
         tp_session_export_start)
-    _arch_assert_absent("apps/gui/gui_pack_jobs.c" "${_symbol}" "R2b")
+    _arch_assert_absent("apps/gui/gui_pack_jobs.c" "${_symbol}" "A2b")
 endforeach()
 foreach(_path IN ITEMS apps/gui/gui_project.c apps/gui/gui_project.h
                        apps/gui/gui_actions.c)
-    _arch_assert_absent("${_path}" "gui_project_session_for_jobs" "R2b")
+    _arch_assert_absent("${_path}" "gui_project_session_for_jobs" "A2b")
 endforeach()
 _arch_assert_absent("apps/gui/gui_actions.c"
-                    "s_refresh_fingerprint_session" "R2b")
-_arch_assert_absent("apps/gui/main.c" "gui_pack_worker_active" "R2b")
-_arch_assert_absent("apps/gui/main.c" "gui_pack_poll" "R2b")
+                    "s_refresh_fingerprint_session" "A2b")
+_arch_assert_absent("apps/gui/main.c" "gui_pack_worker_active" "A2b")
+_arch_assert_absent("apps/gui/main.c" "gui_pack_poll" "A2b")
 _arch_assert_absent(
     "apps/gui/gui_host_queue.h"
     "tp_session[ \t]*\\*[ \t]*[A-Za-z_][A-Za-z0-9_]*[ \t]*;"
-    "R2b no retained raw session")
+    "A2b no retained raw session")
 
 file(GLOB _gui_shipping_sources LIST_DIRECTORIES false
     "${_arch_root}/apps/gui/gui*.c"
@@ -473,11 +480,11 @@ foreach(_source IN LISTS _gui_shipping_sources)
             tp_session_job_cancel)
         _arch_assert_absent(
             "${_relative}" "${_symbol}"
-            "R2b single GUI host admission owner")
+            "A2b single GUI host admission owner")
     endforeach()
 endforeach()
 
-# Completed R2a observation ownership. Recovery may take a temporary immutable
+# Completed A2a observation ownership. Recovery may take a temporary immutable
 # snapshot for candidate preflight and post-Save-As metadata; it never observes.
 foreach(_entry IN ITEMS
         "apps/gui/gui_project.c|tp_session_snapshot_create"
@@ -491,7 +498,7 @@ foreach(_entry IN ITEMS
     string(REPLACE "|" ";" _parts "${_entry}")
     list(GET _parts 0 _path)
     list(GET _parts 1 _symbol)
-    _arch_assert_absent("${_path}" "${_symbol}" "R2a")
+    _arch_assert_absent("${_path}" "${_symbol}" "A2a")
 endforeach()
 
 file(GLOB _gui_observation_sources LIST_DIRECTORIES false
@@ -509,37 +516,37 @@ foreach(_source IN LISTS _gui_observation_sources)
                              tp_session_observation_destroy)
         _arch_assert_absent(
             "${_relative}" "${_symbol}"
-            "R2a single GUI observation owner")
+            "A2a single GUI observation owner")
     endforeach()
     if(NOT _relative STREQUAL "apps/gui/gui_project_recovery.c")
         foreach(_symbol IN ITEMS tp_session_snapshot_create
                                  tp_session_snapshot_destroy)
             _arch_assert_absent(
                 "${_relative}" "${_symbol}"
-                "R2a single GUI snapshot owner")
+                "A2a single GUI snapshot owner")
         endforeach()
     endif()
 endforeach()
 
-# Completed R2c mutation cut.
-_arch_assert_absent("apps/gui/gui_session_adapter.c" "tp_session_apply" "R2c")
-_arch_assert_absent("apps/gui/gui_session_adapter.c" "\"project\\.edit\"" "R2c")
-_arch_assert_absent("apps/gui/gui_session_adapter.h" "tp_session[ \t]*\\*" "R2c")
+# Completed A2c mutation cut.
+_arch_assert_absent("apps/gui/gui_session_adapter.c" "tp_session_apply" "A2c")
+_arch_assert_absent("apps/gui/gui_session_adapter.c" "\"project\\.edit\"" "A2c")
+_arch_assert_absent("apps/gui/gui_session_adapter.h" "tp_session[ \t]*\\*" "A2c")
 foreach(_path IN ITEMS apps/gui/gui_project.c
                        apps/gui/gui_project_mutations.c)
     _arch_assert_absent(
-        "${_path}" "gui_project__refresh_after_session_commit" "R2c")
+        "${_path}" "gui_project__refresh_after_session_commit" "A2c")
     _arch_assert_absent(
-        "${_path}" "gui_project__next_transaction_id" "R2c")
+        "${_path}" "gui_project__next_transaction_id" "A2c")
 endforeach()
-_arch_assert_absent("apps/gui/gui_project_internal.h" "txn_seq" "R2c")
+_arch_assert_absent("apps/gui/gui_project_internal.h" "txn_seq" "A2c")
 foreach(_path IN ITEMS apps/gui/gui_view_chrome.c apps/gui/main.c)
-    _arch_assert_absent("${_path}" "do_undo" "R2c")
-    _arch_assert_absent("${_path}" "do_redo" "R2c")
+    _arch_assert_absent("${_path}" "do_undo" "A2c")
+    _arch_assert_absent("${_path}" "do_redo" "A2c")
 endforeach()
 _arch_assert_absent("apps/gui/main.c"
                     "gui_project_anim_remove_frame"
-                    "R2c frame-pinned view ingress")
+                    "A2c frame-pinned view ingress")
 
 foreach(_source IN LISTS _gui_shipping_sources)
     cmake_path(GET _source FILENAME _filename)
@@ -551,29 +558,29 @@ foreach(_source IN LISTS _gui_shipping_sources)
                OUTPUT_VARIABLE _relative)
     _arch_assert_absent(
         "${_relative}" "tp_session_apply"
-        "R2c single GUI mutation owner")
+        "A2c single GUI mutation owner")
     if(NOT _filename STREQUAL "gui_session_adapter.c"
        AND NOT _filename STREQUAL "gui_session_client.c")
         _arch_assert_absent(
             "${_relative}" "gui_session_client_submit"
-            "R5 single GUI submit owner")
+            "A5 single GUI submit owner")
     endif()
     _arch_assert_absent(
         "${_relative}" "gui_project__refresh_after_session_commit"
-        "R5 observation-owned mutation refresh")
+        "A5 observation-owned mutation refresh")
 endforeach()
 
-# Completed R2d lifecycle cut.
-_arch_assert_absent("apps/gui/gui_project_file.c" "install_session" "R2d")
+# Completed A2d lifecycle cut.
+_arch_assert_absent("apps/gui/gui_project_file.c" "install_session" "A2d")
 foreach(_symbol IN ITEMS
         gui_project__session_client
         gui_project__host_queue)
     _arch_assert_absent(
         "apps/gui/gui_project_internal.h"
-        "${_symbol}" "R2d")
+        "${_symbol}" "A2d")
     _arch_assert_absent(
         "apps/gui/gui_project_file.c"
-        "${_symbol}" "R2d")
+        "${_symbol}" "A2d")
 endforeach()
 foreach(_path IN ITEMS
         apps/gui/gui_project.h
@@ -585,7 +592,7 @@ foreach(_path IN ITEMS
             gui_project_lifecycle_receipt
             gui_project_lifecycle_take_receipt)
         _arch_assert_absent(
-            "${_path}" "${_symbol}" "R2d")
+            "${_path}" "${_symbol}" "A2d")
     endforeach()
 endforeach()
 foreach(_symbol IN ITEMS
@@ -595,23 +602,23 @@ foreach(_symbol IN ITEMS
         drain_cancel_pending)
     _arch_assert_absent(
         "apps/gui/gui_host_queue.h"
-        "${_symbol}" "R2d")
+        "${_symbol}" "A2d")
     _arch_assert_absent(
         "apps/gui/gui_host_binding.h"
-        "${_symbol}" "R2d")
+        "${_symbol}" "A2d")
 endforeach()
 _arch_assert_absent(
     "apps/gui/gui_project_internal.h"
     "tp_session[ \t\r\n]*\\*[ \t\r\n]*session[ \t\r\n]*;"
-    "R2d single session storage")
+    "A2d single session storage")
 _arch_assert_absent(
     "apps/gui/gui_project_internal.h"
     "gui_session_client[ \t\r\n]+client[ \t\r\n]*;"
-    "R2d single client storage")
+    "A2d single client storage")
 _arch_assert_absent(
     "apps/gui/gui_project_internal.h"
     "gui_host_queue[ \t\r\n]+host_queue[ \t\r\n]*;"
-    "R2d single host queue storage")
+    "A2d single host queue storage")
 foreach(_path IN ITEMS
         apps/gui/gui_host_queue.c
         apps/gui/gui_host_queue.h
@@ -621,17 +628,17 @@ foreach(_path IN ITEMS
             gui_host_queue_cancelling
             gui_project_job_cancelling)
         _arch_assert_absent(
-            "${_path}" "${_symbol}" "R2d")
+            "${_path}" "${_symbol}" "A2d")
     endforeach()
 endforeach()
-_arch_assert_absent("apps/gui/gui_project_file.c" "tp_session_discard" "R2d")
-_arch_assert_absent("apps/gui/gui_actions_dialogs.c" "gui_project_new" "R2d")
-_arch_assert_absent("apps/gui/gui_actions_dialogs.c" "gui_project_open" "R2d")
-_arch_assert_absent("apps/gui/main.c" "gui_project_open" "R2d")
+_arch_assert_absent("apps/gui/gui_project_file.c" "tp_session_discard" "A2d")
+_arch_assert_absent("apps/gui/gui_actions_dialogs.c" "gui_project_new" "A2d")
+_arch_assert_absent("apps/gui/gui_actions_dialogs.c" "gui_project_open" "A2d")
+_arch_assert_absent("apps/gui/main.c" "gui_project_open" "A2d")
 _arch_assert_absent("apps/gui/gui_pack_jobs.c"
-                    "gui_project_lifecycle_begin_shutdown" "R2d")
+                    "gui_project_lifecycle_begin_shutdown" "A2d")
 foreach(_path IN ITEMS apps/gui/gui_host_queue.c apps/gui/gui_host_queue.h)
-    _arch_assert_absent("${_path}" "gui_host_queue_can_replace" "R2d")
+    _arch_assert_absent("${_path}" "gui_host_queue_can_replace" "A2d")
 endforeach()
 
 foreach(_source IN LISTS _gui_shipping_sources)
@@ -650,7 +657,7 @@ foreach(_source IN LISTS _gui_shipping_sources)
             gui_session_client_detach)
         _arch_assert_absent(
             "${_relative}" "${_symbol}"
-            "R2d single lifecycle owner")
+            "A2d single lifecycle owner")
     endforeach()
 endforeach()
 
@@ -678,7 +685,7 @@ foreach(_source IN LISTS _gui_shipping_sources)
             tp_session_redo_depth)
         _arch_assert_absent(
             "${_relative}" "${_symbol}"
-            "R2d single host command owner")
+            "A2d single host command owner")
     endforeach()
 endforeach()
 
@@ -718,29 +725,29 @@ foreach(_source IN LISTS _gui_observation_sources)
     if(NOT "${_relative}" IN_LIST _arch_host_queue_owners)
         _arch_assert_absent(
             "${_relative}" "gui_host_queue_[A-Za-z0-9_]*"
-            "R2d host queue stays inside the host owner")
+            "A2d host queue stays inside the host owner")
     endif()
     if(NOT "${_relative}" IN_LIST _arch_borrow_session_owners)
         _arch_assert_absent(
             "${_relative}" "gui_project__borrow_active_session"
-            "R2d single session storage borrows in one place")
+            "A2d single session storage borrows in one place")
     endif()
 endforeach()
 
-# R3a atlas scalar drafts have one view-local reducer owner. The former action
+# A3a atlas scalar drafts have one view-local reducer owner. The former action
 # array and broad ready-operation route must not return.
 _arch_assert_absent(
     "apps/gui/gui_project_internal.h"
     "CK_ATLAS_SETTING"
-    "R3a atlas draft owner")
+    "A3a atlas draft owner")
 _arch_assert_absent(
     "apps/gui/gui_project_mutations.c"
     "make_atlas_key|gui_project_set_atlas_setting"
-    "R3a atlas draft submit")
+    "A3a atlas draft submit")
 _arch_assert_absent(
     "apps/gui/gui_actions_internal.h"
     "atlas_setting_intent"
-    "R3a action mirror deletion")
+    "A3a action mirror deletion")
 foreach(_path IN ITEMS
         apps/gui/gui_actions.h
         apps/gui/gui_actions_edits.c
@@ -754,16 +761,16 @@ foreach(_path IN ITEMS
     _arch_assert_absent(
         "${_path}"
         "gui_queue_atlas_setting|gui_project_set_atlas_setting"
-        "R3a legacy atlas ingress deletion")
+        "A3a legacy atlas ingress deletion")
 endforeach()
 
-# R3c completes the value-edit cutover. The action draft reducer is the sole
+# A3c completes the value-edit cutover. The action draft reducer is the sole
 # retained value owner; project-level broad operations, timers, and mirror
 # queues must not return.
 _arch_assert_absent(
     "apps/gui/CMakeLists.txt"
     "gui_project_pending\\.c"
-    "R3c pending owner deletion")
+    "A3c pending owner deletion")
 foreach(_path IN ITEMS
         apps/gui/gui_project.h
         apps/gui/gui_project.c
@@ -775,12 +782,12 @@ foreach(_path IN ITEMS
     _arch_assert_absent(
         "${_path}"
         "gui_project_(flush_pending|pending_route|pending_offer|pending_discard|peek_pending_slice9|flush_elapsed|tick|flush_error)"
-        "R3c pending API deletion")
+        "A3c pending API deletion")
 endforeach()
 _arch_assert_absent(
     "apps/gui/gui_project_internal.h"
     "gui_coalesce_(kind|key)|pending_(valid|key|op|time|expected_revision|preview_stale_before)"
-    "R3c pending storage deletion")
+    "A3c pending storage deletion")
 foreach(_path IN ITEMS
         apps/gui/gui_actions.h
         apps/gui/gui_actions.c
@@ -797,7 +804,7 @@ foreach(_path IN ITEMS
     _arch_assert_absent(
         "${_path}"
         "gui_actions__flush_failed|gui_edit_target[ \t]*\\(|gui_project_set_(sprite|anim)|gui_project_set_target[ \t]*\\(|SPRITE_INTENT_|ANIMATION_INTENT_(FPS|PLAYBACK|FLIP)|TARGET_INTENT_FULL"
-        "R3c legacy edit route deletion")
+        "A3c legacy edit route deletion")
 endforeach()
 foreach(_source IN LISTS _gui_shipping_sources)
     cmake_path(RELATIVE_PATH _source BASE_DIRECTORY "${_arch_root}"
@@ -805,13 +812,13 @@ foreach(_source IN LISTS _gui_shipping_sources)
     _arch_assert_absent(
         "${_relative}"
         "gui_actions__flush_failed|gui_edit_target[ \t]*\\(|gui_project_(flush_pending|pending_route|pending_offer|pending_discard|peek_pending_slice9|flush_elapsed|tick|flush_error)|gui_project_set_(sprite|anim)|gui_project_set_target[ \t]*\\(|SPRITE_INTENT_|ANIMATION_INTENT_(FPS|PLAYBACK|FLIP)|TARGET_INTENT_FULL"
-        "R3c shipping legacy edit route deletion")
+        "A3c shipping legacy edit route deletion")
 endforeach()
 
 # gui_project_pending.c's return is caught by the _arch_deleted_files registry
 # at the top of this file (one place owns "intentionally absent").
 
-# R4/R5 cutover hardening. Stable ids are the only cross-frame identity;
+# A4/A5 cutover hardening. Stable ids are the only cross-frame identity;
 # indices remain frame-local projections. Exact old names are guarded instead
 # of broad "*_index" patterns so legitimate snapshot/view lookup stays simple.
 foreach(_source IN LISTS _gui_observation_sources)
@@ -841,44 +848,44 @@ foreach(_source IN LISTS _gui_observation_sources)
             gui_project__snapshot_drop)
         _arch_assert_absent(
             "${_relative}" "${_symbol}"
-            "R4/R5 legacy identity and mutation route deletion")
+            "A4/A5 legacy identity and mutation route deletion")
     endforeach()
 endforeach()
 
 _arch_assert_absent(
     "apps/gui/client_parity_replay.c"
     "TP_TF_OUT_PATH"
-    "R5 target path uses the narrow identified endpoint")
+    "A5 target path uses the narrow identified endpoint")
 _arch_assert_absent(
     "apps/gui/gui_session_adapter.c"
     "gui_session_client_snapshot"
-    "R5 submit receipts have one owner")
+    "A5 submit receipts have one owner")
 _arch_assert_absent(
     "apps/gui/main.c"
     "s_shown_result"
-    "R5 result identity uses stable atlas and publication version")
+    "A5 result identity uses stable atlas and publication version")
 _arch_assert_absent(
     "apps/gui/gui_canvas.c"
     "ref[ \t]*->[ \t]*result"
-    "R5 double-click identity uses result generation")
+    "A5 double-click identity uses result generation")
 _arch_assert_absent(
     "apps/gui/gui_canvas.h"
     "typedef[ \t\r\n]+struct[ \t\r\n]+gui_canvas_double_click_ref[ \t\r\n]*\\{[^}]*((const[ \t\r\n]+)?tp_result)[ \t\r\n]*\\*"
-    "R5 no retained result-pointer identity")
+    "A5 no retained result-pointer identity")
 _arch_assert_absent(
     "apps/gui/gui_pack_preview.c"
     "s_preview[ \t]*\\.[ \t]*atlas_index"
-    "R5 preview identity uses stable atlas id")
+    "A5 preview identity uses stable atlas id")
 _arch_assert_absent(
     "packer/src/tp_job.c"
     "typedef[ \t\r\n]+struct[ \t\r\n]+tp_live_job[ \t\r\n]*\\{[^}]*((const[ \t\r\n]+)?tp_session)[ \t\r\n]*\\*"
-    "R5 worker job owns immutable input, never raw session")
+    "A5 worker job owns immutable input, never raw session")
 _arch_assert_absent(
     "packer/src/tp_job.c"
     "tp_arena_destroy[ \t\r\n]*\\([ \t\r\n]*result[ \t\r\n]*->[ \t\r\n]*pack[ \t\r\n]*\\.[ \t\r\n]*arena"
-    "R5 job result lifetime has one retained owner")
+    "A5 job result lifetime has one retained owner")
 
-# P6 job-owner test seams. Two internal entry points exist ONLY for tests:
+# A6 job-owner test seams. Two internal entry points exist ONLY for tests:
 # tp_session_job_attach_internal (adopts the active-job lease for a job it did
 # not start) and tp_session_job_observation_begin_internal (publishes a second
 # live observed owner). Production has no route to either -- the sole production
@@ -953,13 +960,13 @@ foreach(_path IN ITEMS packer/src/tp_session.c
                        packer/src/tp_job_owner_internal.h)
     _arch_assert_seam_fenced(
         "${_path}" "tp_session_job_attach_internal"
-        "P6 job-owner seams stay compiled out of shipping")
+        "A6 job-owner seams stay compiled out of shipping")
 endforeach()
 foreach(_path IN ITEMS packer/src/tp_session_job_observation.c
                        packer/src/tp_session_job_observation_internal.h)
     _arch_assert_seam_fenced(
         "${_path}" "tp_session_job_observation_begin_internal"
-        "P6 job-owner seams stay compiled out of shipping")
+        "A6 job-owner seams stay compiled out of shipping")
 endforeach()
 
 file(GLOB_RECURSE _job_seam_sources LIST_DIRECTORIES false
@@ -980,14 +987,14 @@ foreach(_source IN LISTS _job_seam_sources)
        AND NOT _relative STREQUAL "packer/src/tp_job_owner_internal.h")
         _arch_assert_absent(
             "${_relative}" "tp_session_job_attach_internal"
-            "P6 job attach is a test seam, not a production entry point")
+            "A6 job attach is a test seam, not a production entry point")
     endif()
     if(NOT _relative STREQUAL "packer/src/tp_session_job_observation.c"
        AND NOT _relative STREQUAL
                "packer/src/tp_session_job_observation_internal.h")
         _arch_assert_absent(
             "${_relative}" "tp_session_job_observation_begin_internal"
-            "P6 job observation begin is a test seam, not a production entry point")
+            "A6 job observation begin is a test seam, not a production entry point")
     endif()
 endforeach()
 

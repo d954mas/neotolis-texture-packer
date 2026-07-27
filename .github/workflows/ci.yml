@@ -36,13 +36,6 @@ jobs:
       - name: Pull submodule LFS files
         run: git submodule foreach --recursive 'git lfs pull || true'
 
-      # Boundary gates (see git history: docs/plans/op-layer-and-cli.md §A6, removed 2026-07-20): cheap grep rules
-      # keeping the tp_core/frontend split honest. Runs on every leg -- bash is
-      # available on all three runners, and the script's own detector self-tests
-      # then get exercised under each platform's grep/awk/sed.
-      - name: Check layer boundaries
-        run: bash scripts/check_boundaries.sh
-
       - name: Install dependencies (Linux)
         if: runner.os == 'Linux'
         run: |
@@ -76,6 +69,11 @@ jobs:
       - name: Build
         run: cmake --build --preset native-release
 
+      # This also runs both boundary gates (see git history: docs/plans/op-layer-and-cli.md §A6,
+      # removed 2026-07-20). They have no step of their own any more: tp_boundaries_grep launches
+      # scripts/check_boundaries.sh and tp_architecture* the CMake checker, so both run on every
+      # leg and the shell script's own detector self-tests still get exercised under each
+      # platform's grep/awk/sed.
       - name: Test
         run: ctest --preset native-release
 

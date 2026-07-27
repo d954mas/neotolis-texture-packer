@@ -117,6 +117,26 @@ nt_set_sanitizer_flags(tp_build)
 
 enable_testing()
 
+# --- Boundary checkers: ONE launch mechanism ------------------------------------
+# Both boundary gates are ctests, so `ctest --preset <p>` is the single entry point
+# on every platform and neither gate needs a bespoke CI step. The grep gate
+# (scripts/check_boundaries.sh, rule ids R1..R22) needs a POSIX shell; bash is
+# present on all three CI runners. A machine without bash still configures -- the
+# gate is simply not registered there instead of failing the configure.
+find_program(TP_BASH NAMES bash)
+if(TP_BASH)
+    add_test(NAME tp_boundaries_grep
+        COMMAND "${TP_BASH}" "${CMAKE_SOURCE_DIR}/scripts/check_boundaries.sh")
+    set_tests_properties(tp_boundaries_grep PROPERTIES
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+        LABELS "architecture")
+else()
+    message(STATUS
+        "bash not found: scripts/check_boundaries.sh is NOT registered as a ctest "
+        "in this tree. The gate still runs wherever bash exists (all CI runners).")
+endif()
+
+# The CMake gate (rule ids A1a..A6) owns the view/core/async structural rules.
 set(TP_ARCHITECTURE_CHECK
     "${CMAKE_SOURCE_DIR}/cmake/check_architecture_boundaries.cmake")
 add_test(NAME tp_architecture_boundaries

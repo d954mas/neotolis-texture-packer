@@ -34,6 +34,9 @@ endif()
 add_subdirectory(external/neotolis-engine/tools/builder nt_builder)
 
 enable_testing()
+# Shared tp_add_test()/tp_add_gui_test() so every first-party test target gets the
+# same executable/link/warning/CRT/ctest shape (see the file header).
+include("${CMAKE_CURRENT_LIST_DIR}/cmake/tp_add_test.cmake")
 add_custom_target(report_loc_inventory
     COMMAND ${CMAKE_COMMAND}
         -DROOT=${CMAKE_SOURCE_DIR}
