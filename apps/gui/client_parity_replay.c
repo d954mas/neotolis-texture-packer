@@ -84,6 +84,10 @@ static int64_t revision_of(tp_session *session, tp_error *err) {
 }
 
 static gui_session_client s_replay_client;
+static const gui_session_submit_identity s_replay_identity = {
+    .origin_view_id = {{0xc1U}},
+    .draft_instance_id = {{0xd1U}},
+};
 
 static int replay_client_attach(tp_session *session, tp_error *err) {
     gui_session_client_init(&s_replay_client);
@@ -102,6 +106,33 @@ static const char *next_txn(void) {
     static char id[33];
     (void)snprintf(id, sizeof id, "%032x", next++);
     return id;
+}
+
+static int require_submit_terminal(
+    const char *step, tp_status status, const char *transaction_id,
+    const gui_session_submit_terminal *terminal, bool expect_no_change,
+    const tp_error *err) {
+    if (status != TP_STATUS_OK) {
+        return fail(step, status, err);
+    }
+    if (!terminal ||
+        strcmp(terminal->transaction_id, transaction_id) != 0 ||
+        !tp_id128_eq(
+            terminal->identity.origin_view_id,
+            s_replay_identity.origin_view_id) ||
+        !tp_id128_eq(
+            terminal->identity.draft_instance_id,
+            s_replay_identity.draft_instance_id) ||
+        terminal->status != status ||
+        terminal->no_change != expect_no_change ||
+        terminal->committed == expect_no_change) {
+        (void)fprintf(
+            stderr,
+            "client parity %s returned an invalid submit terminal\n",
+            step);
+        return 1;
+    }
+    return 0;
 }
 
 static int save_replay(tp_session *session, const char *out_path,
@@ -391,15 +422,21 @@ static int outcome_no_op(const char *path) {
         tp_session_destroy(session);
         return 1;
     }
-    const tp_status status = gui_session_rename_atlas(
-        &s_replay_client, atlas_id, revision_before, "atlas1", &err);
+    const char *transaction_id = next_txn();
+    gui_session_submit_terminal terminal = {0};
+    const tp_status status = gui_session_submit_atlas_name(
+        &s_replay_client, atlas_id, revision_before, "atlas1",
+        s_replay_identity, transaction_id, &terminal, &err);
     int64_t revision_after = 0;
     uint64_t events_after = 0U;
     const int snapshot_rc = snapshot_counters(
         session, &revision_after, &events_after, &err);
     replay_client_detach();
     tp_session_destroy(session);
-    if (status != TP_STATUS_OK || snapshot_rc != 0 ||
+    if (require_submit_terminal(
+            "no-op atlas rename", status, transaction_id,
+            &terminal, true, &err) != 0 ||
+        snapshot_rc != 0 ||
         revision_after != revision_before || events_after != events_before) {
         (void)fprintf(stderr,
                       "client parity no-op mismatch: status=%s "
@@ -532,10 +569,14 @@ static int replay_atlas(tp_session *session, const harvest_ids *ids,
         "two", ids->target_exporter, ids->target_out_path,
         ids->target_enabled, NULL, err);
     if (status != TP_STATUS_OK) return fail("atlas create", status, err);
-    status = gui_session_rename_atlas(&s_replay_client, ids->atlas_id,
-                                      revision_of(session, err), "golden",
-                                      err);
-    if (status != TP_STATUS_OK) return fail("atlas rename", status, err);
+    const char *transaction_id = next_txn();
+    gui_session_submit_terminal terminal = {0};
+    status = gui_session_submit_atlas_name(
+        &s_replay_client, ids->atlas_id, revision_of(session, err),
+        "golden", s_replay_identity, transaction_id, &terminal, err);
+    if (require_submit_terminal(
+            "atlas rename", status, transaction_id,
+            &terminal, false, err) != 0) return 1;
     tp_op_atlas_settings settings;
     memset(&settings, 0, sizeof settings);
     settings.mask = TP_AF_PADDING | TP_AF_MARGIN;
@@ -586,10 +627,15 @@ static int replay_sprite(tp_session *session, tp_error *err) {
     if (base_atlas(session, &atlas_id, err) != 0 ||
         resolve_sprite(session, atlas_id, "hero", &source_id, source_key,
                        sizeof source_key, err) != 0) return 1;
-    tp_status status = gui_session_set_sprite_name(
+    const char *transaction_id = next_txn();
+    gui_session_submit_terminal terminal = {0};
+    tp_status status = gui_session_submit_sprite_name(
         &s_replay_client, atlas_id, source_id, source_key,
-        revision_of(session, err), "hero_final", err);
-    if (status != TP_STATUS_OK) return fail("sprite name", status, err);
+        revision_of(session, err), "hero_final", s_replay_identity,
+        transaction_id, &terminal, err);
+    if (require_submit_terminal(
+            "sprite name", status, transaction_id,
+            &terminal, false, err) != 0) return 1;
     tp_op_sprite_set settings;
     memset(&settings, 0, sizeof settings);
     settings.mask = TP_SPF_ALL;
@@ -618,10 +664,15 @@ static int replay_sprite_clear(tp_session *session, tp_error *err) {
     if (base_atlas(session, &atlas_id, err) != 0 ||
         resolve_sprite(session, atlas_id, "hero", &source_id, source_key,
                        sizeof source_key, err) != 0) return 1;
-    tp_status status = gui_session_set_sprite_name(
+    const char *transaction_id = next_txn();
+    gui_session_submit_terminal terminal = {0};
+    tp_status status = gui_session_submit_sprite_name(
         &s_replay_client, atlas_id, source_id, source_key,
-        revision_of(session, err), NULL, err);
-    if (status != TP_STATUS_OK) return fail("sprite name clear", status, err);
+        revision_of(session, err), NULL, s_replay_identity,
+        transaction_id, &terminal, err);
+    if (require_submit_terminal(
+            "sprite name clear", status, transaction_id,
+            &terminal, false, err) != 0) return 1;
     tp_op_sprite_set settings;
     memset(&settings, 0, sizeof settings);
     settings.mask = TP_SPF_ALL;
@@ -681,10 +732,15 @@ static int replay_animation(tp_session *session, const harvest_ids *ids,
         revision_of(session, err), &settings,
         (gui_session_submit_identity){0}, NULL, NULL, err);
     if (status != TP_STATUS_OK) return fail("animation settings", status, err);
-    status = gui_session_rename_animation(
+    const char *transaction_id = next_txn();
+    gui_session_submit_terminal terminal = {0};
+    status = gui_session_submit_animation_name(
         &s_replay_client, atlas_id, ids->animation_id,
-        revision_of(session, err), "stroll", err);
-    return status == TP_STATUS_OK ? 0 : fail("animation rename", status, err);
+        revision_of(session, err), "stroll", s_replay_identity,
+        transaction_id, &terminal, err);
+    return require_submit_terminal(
+        "animation rename", status, transaction_id,
+        &terminal, false, err);
 }
 
 static int replay_target(tp_session *session, const harvest_ids *ids,
@@ -695,15 +751,23 @@ static int replay_target(tp_session *session, const harvest_ids *ids,
         &s_replay_client, atlas_id, ids->target_id,
         revision_of(session, err), "defold", "out/d", true, NULL, err);
     if (status != TP_STATUS_OK) return fail("target create", status, err);
+    const char *transaction_id = next_txn();
+    gui_session_submit_terminal terminal = {0};
+    status = gui_session_submit_target_out_path(
+        &s_replay_client, atlas_id, ids->target_id,
+        revision_of(session, err), "out/d2", s_replay_identity,
+        transaction_id, &terminal, err);
+    if (require_submit_terminal(
+            "target out path", status, transaction_id,
+            &terminal, false, err) != 0) return 1;
     tp_op_target_set settings;
     memset(&settings, 0, sizeof settings);
-    settings.mask = TP_TF_OUT_PATH | TP_TF_ENABLED;
-    settings.out_path = "out/d2";
+    settings.mask = TP_TF_ENABLED;
     settings.enabled = false;
-    status = gui_session_set_target(&s_replay_client, atlas_id, ids->target_id,
-                                    revision_of(session, err), &settings,
-                                    (gui_session_submit_identity){0}, NULL,
-                                    NULL, err);
+    status = gui_session_set_target(
+        &s_replay_client, atlas_id, ids->target_id,
+        revision_of(session, err), &settings,
+        (gui_session_submit_identity){0}, NULL, NULL, err);
     return status == TP_STATUS_OK ? 0 : fail("target settings", status, err);
 }
 

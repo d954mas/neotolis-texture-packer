@@ -105,8 +105,6 @@ double s_preview_time;
 int s_preview_cur;
 int s_preview_frame_count;
 
-/* --- inline rename edit --- */
-
 /* --- runtime column widths --- */
 float s_content_w = 1280.0F;
 float s_left_panel_w = 300.0F;

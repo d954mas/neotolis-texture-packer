@@ -31,7 +31,6 @@ typedef struct gui_project_state {
 
 extern gui_project_state s_project;
 
-void gui_project__snapshot_drop(void);
 tp_status gui_project__client_init(tp_error *err);
 tp_session *gui_project__borrow_active_session(void);
 void gui_project__note_session_reject(tp_status status, const tp_error *err);

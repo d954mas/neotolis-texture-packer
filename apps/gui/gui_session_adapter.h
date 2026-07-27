@@ -8,9 +8,6 @@
 
 /* Thin stable-ID -> typed-operation -> session adapter for GUI mutations.
  * It never owns or exposes a model/project pointer. */
-tp_status gui_session_rename_atlas(gui_session_client *client, tp_id128 atlas_id,
-                                   int64_t expected_revision, const char *name,
-                                   tp_error *err);
 tp_status gui_session_submit_atlas_name(
     gui_session_client *client, tp_id128 atlas_id,
     int64_t expected_revision, const char *name,
@@ -45,10 +42,6 @@ tp_status gui_session_remove_source(gui_session_client *client, tp_id128 atlas_i
                                     tp_id128 source_id,
                                     int64_t expected_revision,
                                     tp_error *err);
-tp_status gui_session_set_sprite_name(gui_session_client *client, tp_id128 atlas_id,
-                                      tp_id128 source_id, const char *source_key,
-                                      int64_t expected_revision, const char *name,
-                                      tp_error *err);
 tp_status gui_session_submit_sprite_name(
     gui_session_client *client, tp_id128 atlas_id,
     tp_id128 source_id, const char *source_key,
@@ -76,10 +69,6 @@ tp_status gui_session_create_animation(gui_session_client *client, tp_id128 atla
 tp_status gui_session_remove_animation(gui_session_client *client, tp_id128 atlas_id,
                                        tp_id128 animation_id,
                                        int64_t expected_revision,
-                                       tp_error *err);
-tp_status gui_session_rename_animation(gui_session_client *client, tp_id128 atlas_id,
-                                       tp_id128 animation_id,
-                                       int64_t expected_revision, const char *name,
                                        tp_error *err);
 tp_status gui_session_submit_animation_name(
     gui_session_client *client, tp_id128 atlas_id,

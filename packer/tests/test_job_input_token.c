@@ -316,6 +316,10 @@ void test_process_pack_terminal_is_published_after_host_poll(void) {
         tp_session_observation_job_result(observation)
             ->result->pack.result);
     tp_session_job_result_destroy(&result);
+    TEST_ASSERT_NULL(result._owner);
+    TEST_ASSERT_NULL(result.pack.arena);
+    TEST_ASSERT_NULL(result.pack.result);
+    tp_session_job_result_destroy(&result);
     tp_session_observation_destroy(observation);
     remove_tree(work_dir);
 }

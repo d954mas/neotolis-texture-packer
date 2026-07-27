@@ -728,6 +728,62 @@ void test_submit_rejects_pinned_frame_before_rng_or_admission(void) {
     tp_session_destroy(session);
 }
 
+void test_identified_submit_returns_exact_terminal_when_admission_is_closed(void) {
+    tp_session *session = make_session();
+    gui_session_client client;
+    tp_error error = {{0}};
+    gui_session_client_init(&client);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_session_client_attach(&client, session, &error));
+    tp_operation operation =
+        make_rename_operation(session, "forbidden");
+    const gui_session_submit_identity identity = {
+        .origin_view_id = {{0x91U}},
+        .draft_instance_id = {{0xa1U}},
+    };
+    static const char transaction_id[] =
+        "ffffffffffffffffffffffffffffffff";
+    const gui_session_submit_request request = {
+        .operations = &operation,
+        .operation_count = 1,
+        .expected_revision = 0,
+        .semantic_label = "atlas.rename",
+        .identity = identity,
+        .retained_transaction_id = transaction_id,
+    };
+    gui_session_submit_result result = {0};
+
+    gui_session_client_close_admission(&client);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_INVALID_ARGUMENT,
+        gui_session_client_submit(
+            &client, &request, &result, &error));
+    TEST_ASSERT_EQUAL_STRING(
+        transaction_id,
+        result.terminal.transaction_id);
+    TEST_ASSERT_EQUAL_MEMORY(
+        &identity, &result.terminal.identity,
+        sizeof identity);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_INVALID_ARGUMENT,
+        result.terminal.status);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_INVALID_ARGUMENT,
+        result.terminal_status);
+    TEST_ASSERT_FALSE(result.terminal.committed);
+    TEST_ASSERT_FALSE(result.terminal.no_change);
+    TEST_ASSERT_EQUAL_INT64(
+        0, result.terminal.revision);
+    TEST_ASSERT_EQUAL_INT64(
+        0, tp_session_revision(session));
+
+    gui_session_submit_result_destroy(&result);
+    tp_operation_free(&operation);
+    gui_session_client_detach(&client);
+    tp_session_destroy(session);
+}
+
 void test_submit_rng_failure_is_structured_and_non_mutating(void) {
     tp_session *session = make_session();
     gui_session_client client;
@@ -1583,6 +1639,8 @@ int main(void) {
     RUN_TEST(test_submit_no_change_is_terminal_without_event);
     RUN_TEST(
         test_submit_rejects_pinned_frame_before_rng_or_admission);
+    RUN_TEST(
+        test_identified_submit_returns_exact_terminal_when_admission_is_closed);
     RUN_TEST(
         test_submit_rng_failure_is_structured_and_non_mutating);
     RUN_TEST(

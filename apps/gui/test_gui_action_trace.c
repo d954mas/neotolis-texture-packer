@@ -50,38 +50,6 @@ static void pump_action_frame(void) {
     gui_project_frame_end();
 }
 
-typedef enum trace_owner_class {
-    TRACE_SESSION_SHARED = 0,
-    TRACE_ACTION_PRIVATE,
-    TRACE_VIEW_LOCAL
-} trace_owner_class;
-
-typedef struct state_owner_entry {
-    const char *group;
-    trace_owner_class owner;
-} state_owner_entry;
-
-/* Ownership inventory keeps session, action, and view state boundaries explicit. */
-static const state_owner_entry k_state_owners[] = {
-    {"selection", TRACE_SESSION_SHARED},
-    {"status", TRACE_SESSION_SHARED},
-    {"animation-preview-projection", TRACE_SESSION_SHARED},
-    {"export-preview-selection", TRACE_SESSION_SHARED},
-    {"confirmation-modal-visibility", TRACE_SESSION_SHARED},
-    {"recovery-modal-visibility", TRACE_SESSION_SHARED},
-    {"input-blur-request", TRACE_SESSION_SHARED},
-    {"draft-reducer", TRACE_ACTION_PRIVATE},
-    {"deferred-structural-edit-queue", TRACE_ACTION_PRIVATE},
-    {"deferred-side-effect-queue", TRACE_ACTION_PRIVATE},
-    {"gesture-boundary", TRACE_ACTION_PRIVATE},
-    {"confirmation-intent", TRACE_ACTION_PRIVATE},
-    {"recovery-decision", TRACE_ACTION_PRIVATE},
-    {"preview-captured-identity", TRACE_ACTION_PRIVATE},
-    {"canvas-preview-dropdown", TRACE_VIEW_LOCAL},
-    {"settings-dropdowns", TRACE_VIEW_LOCAL},
-    {"chrome-menu-contexts", TRACE_VIEW_LOCAL},
-};
-
 static const tp_snapshot_atlas *atlas_at(int index) {
     return tp_session_snapshot_atlas_at(gui_project_snapshot(), index);
 }
@@ -237,36 +205,6 @@ void tearDown(void) {
     (void)test_rmdir(TP_GUI_TRACE_TEST_DIR);
 }
 
-void test_state_ownership_inventory_preserves_three_classes(void) {
-    int counts[3] = {0, 0, 0};
-    for (size_t i = 0; i < sizeof k_state_owners / sizeof k_state_owners[0];
-         ++i) {
-        TEST_ASSERT_NOT_NULL(k_state_owners[i].group);
-        TEST_ASSERT_NOT_EQUAL(0, (int)strlen(k_state_owners[i].group));
-        TEST_ASSERT_TRUE(k_state_owners[i].owner >= TRACE_SESSION_SHARED);
-        TEST_ASSERT_TRUE(k_state_owners[i].owner <= TRACE_VIEW_LOCAL);
-        counts[k_state_owners[i].owner]++;
-        for (size_t j = i + 1U;
-             j < sizeof k_state_owners / sizeof k_state_owners[0]; ++j) {
-            TEST_ASSERT_NOT_EQUAL(0,
-                                  strcmp(k_state_owners[i].group,
-                                         k_state_owners[j].group));
-        }
-    }
-    TEST_ASSERT_EQUAL_INT(7, counts[TRACE_SESSION_SHARED]);
-    TEST_ASSERT_EQUAL_INT(7, counts[TRACE_ACTION_PRIVATE]);
-    TEST_ASSERT_EQUAL_INT(3, counts[TRACE_VIEW_LOCAL]);
-
-    /* Compile-time anchors for the shared representatives that cross modules. */
-    const void *const shared_anchors[] = {
-        gui_rows_primary(), &s_status,    &s_preview_active,
-        &s_preview_target, &s_confirm_open, &s_recovery_open,
-        &s_blur_inputs,
-    };
-    TEST_ASSERT_EQUAL_size_t(7U,
-                             sizeof shared_anchors / sizeof shared_anchors[0]);
-}
-
 void test_atlas_draft_updates_then_undo_redo_trace_is_exact(void) {
     const tp_snapshot_atlas *atlas = atlas_at(0);
     TEST_ASSERT_NOT_NULL(atlas);
@@ -383,63 +321,6 @@ void test_undo_redo_preserves_selected_animation_by_stable_id(void) {
     TEST_ASSERT_TRUE(tp_id128_eq(selected_id, selected->id));
     TEST_ASSERT_TRUE(tp_id128_eq(
         selected_id, gui_view_animation_id()));
-}
-
-void test_stable_view_ids_survive_removal_before_selected_entities(void) {
-    const tp_session_snapshot *snapshot = gui_project_snapshot();
-    const tp_snapshot_atlas *first_atlas =
-        tp_session_snapshot_atlas_at(snapshot, 0);
-    TEST_ASSERT_NOT_NULL(first_atlas);
-    const tp_id128 first_atlas_id = first_atlas->id;
-
-    TEST_ASSERT_EQUAL_INT(
-        1, gui_project_add_atlas().visible_index);
-    snapshot = gui_project_snapshot();
-    const tp_snapshot_atlas *selected_atlas =
-        tp_session_snapshot_atlas_at(snapshot, 1);
-    TEST_ASSERT_NOT_NULL(selected_atlas);
-    const tp_id128 selected_atlas_id = selected_atlas->id;
-    gui_view_select_atlas(selected_atlas_id);
-
-    TEST_ASSERT_TRUE(gui_project_remove_atlas(
-        first_atlas_id,
-        tp_session_snapshot_revision(snapshot)));
-    snapshot = gui_project_snapshot();
-    gui_view_reconcile_observation(snapshot);
-    TEST_ASSERT_EQUAL_INT(0, gui_view_atlas_index(snapshot));
-    TEST_ASSERT_TRUE(tp_id128_eq(
-        selected_atlas_id, gui_view_atlas_id()));
-
-    const gui_project_create_result first_animation =
-        gui_project_create_animation(
-            selected_atlas_id,
-            tp_session_snapshot_revision(snapshot),
-            "first", NULL, 0);
-    TEST_ASSERT_TRUE(first_animation.committed);
-    snapshot = gui_project_snapshot();
-    const gui_project_create_result selected_animation =
-        gui_project_create_animation(
-            selected_atlas_id,
-            tp_session_snapshot_revision(snapshot),
-            "selected", NULL, 0);
-    TEST_ASSERT_TRUE(selected_animation.committed);
-    gui_view_select_animation(selected_animation.created_id);
-    TEST_ASSERT_EQUAL_INT(
-        1, gui_view_animation_index(gui_project_snapshot()));
-
-    gui_animation_ref first_animation_ref = {0};
-    TEST_ASSERT_TRUE(trace_animation_ref_at(
-        0, first_animation.visible_index,
-        &first_animation_ref));
-    TEST_ASSERT_TRUE(
-        gui_project_remove_animation(&first_animation_ref));
-    snapshot = gui_project_snapshot();
-    gui_view_reconcile_observation(snapshot);
-    TEST_ASSERT_EQUAL_INT(
-        0, gui_view_animation_index(snapshot));
-    TEST_ASSERT_TRUE(tp_id128_eq(
-        selected_animation.created_id,
-        gui_view_animation_id()));
 }
 
 void test_atlas_draft_maps_every_scalar_component(void) {
@@ -2880,7 +2761,6 @@ int main(int argc, char **argv) {
         return tp_build_worker_main();
     }
     UNITY_BEGIN();
-    RUN_TEST(test_state_ownership_inventory_preserves_three_classes);
     RUN_TEST(test_pack_result_slots_reject_ownerless_results);
     RUN_TEST(
         test_lifecycle_requests_are_declaration_only);
@@ -2939,8 +2819,6 @@ int main(int argc, char **argv) {
     RUN_TEST(
         test_target_browse_submits_typed_path_before_starting_dialog_gesture);
     RUN_TEST(test_undo_redo_preserves_selected_animation_by_stable_id);
-    RUN_TEST(
-        test_stable_view_ids_survive_removal_before_selected_entities);
     RUN_TEST(
         test_deferred_frame_move_follows_selection_at_post_commit_generation);
     RUN_TEST(

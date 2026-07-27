@@ -90,7 +90,7 @@ foreach(_source IN LISTS _arch_sources)
         if(_is_view)
             # Match the symbol token, not the opening parenthesis, so a
             # multiline call cannot bypass the boundary.
-            if(_trimmed MATCHES "(^|[^A-Za-z0-9_])(tp_session_(apply|undo|redo|save|save_as|save_new|discard|invalidate_sources|require_recovery|pack_job_start|export_start|job_cancel|job_take_result)|gui_project_(new|open|save|save_as|discard|undo|redo|invalidate_sources)|gui_session_client_[A-Za-z0-9_]*)([^A-Za-z0-9_]|$)")
+            if(_trimmed MATCHES "(^|[^A-Za-z0-9_])(tp_session_(apply|undo|redo|save|save_as|save_new|discard|invalidate_sources|require_recovery|pack_job_start|export_start|job_cancel|job_take_result)|gui_project_(new|open|save|save_as|discard|undo|redo|invalidate_sources)|gui_project_submit_[A-Za-z0-9_]*|gui_session_client_[A-Za-z0-9_]*)([^A-Za-z0-9_]|$)")
                 _arch_hit(VIEW_ADMISSION "${_relative}" "${_line_number}")
             endif()
 
@@ -370,6 +370,15 @@ foreach(_source IN LISTS _gui_shipping_sources)
     _arch_assert_absent(
         "${_relative}" "tp_session_apply"
         "R2c single GUI mutation owner")
+    if(NOT _filename STREQUAL "gui_session_adapter.c"
+       AND NOT _filename STREQUAL "gui_session_client.c")
+        _arch_assert_absent(
+            "${_relative}" "gui_session_client_submit"
+            "R5 single GUI submit owner")
+    endif()
+    _arch_assert_absent(
+        "${_relative}" "gui_project__refresh_after_session_commit"
+        "R5 observation-owned mutation refresh")
 endforeach()
 
 # Completed R2d lifecycle cut.
@@ -537,5 +546,77 @@ foreach(_source IN LISTS _gui_shipping_sources)
         "gui_actions__flush_failed|gui_edit_target[ \t]*\\(|gui_project_(flush_pending|pending_route|pending_offer|pending_discard|peek_pending_slice9|flush_elapsed|tick|flush_error)|gui_project_set_(sprite|anim)|gui_project_set_target[ \t]*\\(|SPRITE_INTENT_|ANIMATION_INTENT_(FPS|PLAYBACK|FLIP)|TARGET_INTENT_FULL"
         "R3c shipping legacy edit route deletion")
 endforeach()
+
+if(EXISTS "${_arch_root}/apps/gui/gui_project_pending.c")
+    message(FATAL_ERROR
+        "R5 deletion regressed: gui_project_pending.c returned")
+endif()
+
+# R4/R5 cutover hardening. Stable ids are the only cross-frame identity;
+# indices remain frame-local projections. Exact old names are guarded instead
+# of broad "*_index" patterns so legitimate snapshot/view lookup stays simple.
+foreach(_source IN LISTS _gui_observation_sources)
+    cmake_path(RELATIVE_PATH _source BASE_DIRECTORY "${_arch_root}"
+               OUTPUT_VARIABLE _relative)
+    cmake_path(CONVERT "${_relative}" TO_CMAKE_PATH_LIST _relative NORMALIZE)
+    foreach(_symbol IN ITEMS
+            s_sel_atlas
+            s_sel_src
+            s_sel_child
+            s_sel_anim
+            s_sel_anim_frame
+            s_sel_anchor_row
+            s_focus_view
+            s_sel_abs
+            s_sel_missing
+            s_reselect_pending
+            s_reselect_source_id
+            s_reselect_key
+            s_reselect_atlas_id
+            s_gui_view
+            gui_project_animation_ref_at
+            gui_project_target_ref_at
+            gui_session_rename_atlas
+            gui_session_set_sprite_name
+            gui_session_rename_animation
+            gui_project__snapshot_drop)
+        _arch_assert_absent(
+            "${_relative}" "${_symbol}"
+            "R4/R5 legacy identity and mutation route deletion")
+    endforeach()
+endforeach()
+
+_arch_assert_absent(
+    "apps/gui/client_parity_replay.c"
+    "TP_TF_OUT_PATH"
+    "R5 target path uses the narrow identified endpoint")
+_arch_assert_absent(
+    "apps/gui/gui_session_adapter.c"
+    "gui_session_client_snapshot"
+    "R5 submit receipts have one owner")
+_arch_assert_absent(
+    "apps/gui/main.c"
+    "s_shown_result"
+    "R5 result identity uses stable atlas and publication version")
+_arch_assert_absent(
+    "apps/gui/gui_canvas.c"
+    "ref[ \t]*->[ \t]*result"
+    "R5 double-click identity uses result generation")
+_arch_assert_absent(
+    "apps/gui/gui_canvas.h"
+    "typedef[ \t\r\n]+struct[ \t\r\n]+gui_canvas_double_click_ref[ \t\r\n]*\\{[^}]*((const[ \t\r\n]+)?tp_result)[ \t\r\n]*\\*"
+    "R5 no retained result-pointer identity")
+_arch_assert_absent(
+    "apps/gui/gui_pack_preview.c"
+    "s_preview[ \t]*\\.[ \t]*atlas_index"
+    "R5 preview identity uses stable atlas id")
+_arch_assert_absent(
+    "packer/src/tp_job.c"
+    "typedef[ \t\r\n]+struct[ \t\r\n]+tp_live_job[ \t\r\n]*\\{[^}]*((const[ \t\r\n]+)?tp_session)[ \t\r\n]*\\*"
+    "R5 worker job owns immutable input, never raw session")
+_arch_assert_absent(
+    "packer/src/tp_job.c"
+    "tp_arena_destroy[ \t\r\n]*\\([ \t\r\n]*result[ \t\r\n]*->[ \t\r\n]*pack[ \t\r\n]*\\.[ \t\r\n]*arena"
+    "R5 job result lifetime has one retained owner")
 
 message(STATUS "architecture boundaries hold")

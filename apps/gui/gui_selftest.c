@@ -49,7 +49,7 @@
 #include "gui_scan.h"     /* gui_scan_* */
 #include "gui_shell.h"    /* UI_STATE_SLOTS / UI_STATE_PROBE_MAX / UI_ROW_ID_RING */
 #include "gui_startup.h"  /* H/P1-8: gui_startup_decide + GUI_STARTUP_* (J14 truth table) */
-#include "gui_state.h"    /* s_canvas / s_sel_* / s_sec_* / s_about_open / s_export_open / s_ctx / s_id_* */
+#include "gui_state.h"    /* s_canvas / disclosures / modals / s_ctx / shared UI ids */
 #include "gui_view_chrome.h" /* menu-open keyboard guard */
 
 static tp_journal_io s_test_recovery_io; /* borrowed while the session owns ctx */

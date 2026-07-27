@@ -1,6 +1,7 @@
 # UI/Session Architecture Refactor Plan
 
-**Status:** R0-R2d implemented and under audit; R3-R5 pending
+**Status:** R0-R5 implemented and verified; raw title-bar Close veto remains
+blocked on a public engine seam
 **Baseline:** `d9ff3ff`
 **Normative source:** `docs/ntpacker-master-spec.md`
 **Architecture contract:** `docs/design/ui-session-architecture-spec.md`
@@ -59,7 +60,7 @@ consumers.
 12. LOC is diagnostic. Split code only when ownership or dependency direction
     becomes clearer.
 
-## 3. Current ownership after R2d
+## 3. Ownership after Track A
 
 | Authority | Sole owner | Consumers |
 |---|---|---|
@@ -70,8 +71,8 @@ consumers.
 | Replacement/shutdown | `gui_host_binding` | project lifecycle facade |
 | Blocking job execution | owned worker process | session job owner |
 | Frame read state | pinned immutable observation/snapshot | views |
-| Drafts, until R3 | legacy broad pending owner | must be deleted |
-| Selection, until R4 | legacy global indices/reselect bridge | must be deleted |
+| Draft lifecycle and conflict state | `gui_edit_state` reducer plus concrete action/view owner | views and action integration |
+| Selection and navigation identity | concrete view owner using stable structural IDs | rows/canvas/lists/settings views |
 
 `tp_core` remains below `tp_build`. Core observation stores retained typed
 job/result state through a narrow publication port and never depends on build
@@ -92,6 +93,12 @@ the executable evidence for completed packets.
 | R2b | `gui_host_queue` admission/completion owner | direct GUI job start/poll/session access loops | stale generation, staged completion, reverse job traces | `8090a9b` |
 | R2c | all GUI mutations through typed client receipts | direct GUI `tp_session_apply`, sequential transaction IDs, mutation refresh invalidation | parity, idempotency, exact identity/echo, create visibility | `578f17b` |
 | R2d | fail-atomic prepare/drain/cutover in `gui_host_binding` | direct session replacement/destruction and job-wait teardown | New/Open/shutdown, active-job drain, candidate OOM | `c2c91a3` |
+| R3a | pure `gui_edit_state` reducer and one draft owner per edited scalar | per-widget pending flags and duplicated draft transitions | reducer transition table, no-op, OOM, invalid input, Undo tests | `6b3d97c` |
+| R3b | the same reducer for text, rename, and path drafts | field-specific text/rename compatibility routes | focused draft integration and structured validation tests | `d900fd9` |
+| R3c | explicit grouped read-modify-write draft owners | broad pending queue, timer flush, whole-target setter, fallback paths | ordering, conflict, deletion, retry, and zero-symbol gates | `ac1bc74` |
+| R3d | one action flow per outer ordering class | duplicate integration fixtures and implicit success on failed commit | action traces, two-view conflict, OOM/resync/shutdown acceptance; title-bar Close veto remains an upstream engine blocker | `d42dc99` |
+| R4 | stable structural identity beside each concrete view owner | global index/reselect state and pointer/lifetime identity | removal-before-selection, frame move, external change, and OOM reconciliation tests | `9e5b1c3` |
+| R5 | exact cutover gates and narrow identified submit surface | legacy rename APIs, broad target-path setter, ownerless result-destroy fallback, redundant tests | Debug/Release full suites, GUI self-test, parity, deletion manifest, independent critical review | this commit |
 
 The R0-R2d audit additionally requires:
 

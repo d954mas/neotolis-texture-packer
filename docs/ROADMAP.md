@@ -281,6 +281,16 @@ scope hardening в `scripts/check_boundaries.sh`). GUI-видимые повер
 panel consumption, stale/preview presentation, result-cache feeding) отложены в
 phase U per decision 0020/§54.6 ordering, поэтому полный phase gate F3 закрывается
 вместе с этими U-поверхностями.
+
+Track A of the UI/session ownership refactor is implemented and test-pinned:
+one atomic session observation path, one GUI client, one host
+admission/lifecycle owner, process-owned blocking jobs, one draft reducer, and
+stable structural view identity. Exact deletion gates prevent the replaced
+submit, pending-state, raw-session, and index-identity paths from returning.
+The raw title-bar Close veto still requires a public upstream engine seam;
+visible History, stale-result/result-LRU, and the remaining phase U surfaces
+are still pending, so F3 remains `IN PROGRESS`.
+
 **Prerequisites:** `F2`, `H0`.
 **Основание:** master spec §7.1, §9–§10, §27 A1, §54 Phase 2, §54.6.
 

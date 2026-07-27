@@ -1,10 +1,9 @@
 #ifndef NTPACKER_GUI_STATE_H
 #define NTPACKER_GUI_STATE_H
 
-/* Shared mutable editor/UI state for the ntpacker GUI: selection, multi-select set, inline-edit,
- * disclosure bits, animation preview, runtime panel widths, the nt_ui context + canvas, executable
- * dir, UI ids, per-frame row tooltips, the status line, and the ~30 per-frame-scaled style objects
- * (written by apply_ui_scale in gui_widgets + seeded once in ensure_ids; read everywhere).
+/* Shared shell/presentation state for the ntpacker GUI: status, animation
+ * preview playback, panel widths, the nt_ui context + canvas, executable dir,
+ * shared UI ids, row tooltips, and the per-frame-scaled style objects.
  *
  * Include discipline: this header pulls in ENGINE ui/font/atlas headers (for the style + context
  * types) plus the one MODEL header gui_canvas.h (for the gui_canvas type). It must NEVER include a
@@ -16,8 +15,7 @@
 
 #include "tp_core/tp_id.h"
 #include "tp_core/tp_identity.h"
-#include "tp_core/tp_scan.h"
-#include "tp_core/tp_session_snapshot_query.h"
+#include "tp_core/tp_srckey.h"
 
 #include "font/nt_font.h"        /* nt_font_t (s_font) */
 #include "ui/nt_ui.h"            /* nt_ui_context_t (s_ctx) */
@@ -100,11 +98,6 @@ extern uint32_t s_id_menu_file, s_id_menu_edit, s_id_menu_atlas, s_id_menu_view,
 uint32_t gui_stable_entity_ui_id(const char *scope,
                                  tp_id128 entity_id);
 
-/* Multi-select set over canonical leaf sprite identities (rows rebuild each frame). Drives
- * "Create animation from selection" + the editor's "Add frames" (ux.md §3.7b). Growable storage:
- * the old fixed 4096 cap silently ignored selections past it. Grows
- * geometrically in multi_sel_add_ref (gui_rows.c); see the growth-policy note there. */
-/* Animation selection + editor state (ux.md §3.7b). */
 /* --- export-target preview (packet EXP-PREVIEW): a view-only overlay that shows what a chosen exporter
  * would produce from the CURRENT settings, without touching the native session pack. `s_preview_target`
  * is the strip selector's choice: 0 = Native (session pack, default); k >= 1 selects registered exporter
@@ -121,8 +114,6 @@ extern bool s_preview_finished;
 extern double s_preview_time;
 extern int s_preview_cur;         /* resolved current frame index (0-based) this frame */
 extern int s_preview_frame_count; /* resolved (missing-frame-skipped) frame count this frame */
-
-/* Inline rename edit (F1): one active at a time. kind 0 none / 1 atlas / 2 sprite / 3 animation. */
 
 /* Runtime (already SCALED) column widths. Clamped narrow when the window can't fit both side panels +
  * a minimal canvas, so the panels never get pushed off-screen (recomputed each frame). */

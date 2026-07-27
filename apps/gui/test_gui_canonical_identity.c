@@ -135,6 +135,32 @@ static bool test_animation_ref_at(
     return true;
 }
 
+static bool test_target_ref_at(
+    int atlas_index, int target_index,
+    gui_target_ref *out) {
+    const tp_session_snapshot *snapshot =
+        gui_project_snapshot();
+    const tp_snapshot_atlas *atlas =
+        snapshot
+            ? tp_session_snapshot_atlas_at(
+                  snapshot, atlas_index)
+            : NULL;
+    const tp_snapshot_target *target =
+        atlas
+            ? tp_session_snapshot_target_at(
+                  snapshot, atlas->id, target_index)
+            : NULL;
+    if (!target || !out) {
+        return false;
+    }
+    *out = (gui_target_ref){
+        atlas->id,
+        target->id,
+        tp_session_snapshot_revision(snapshot),
+    };
+    return true;
+}
+
 static bool remove_flat_test_dir(const char *root) {
 #ifdef _WIN32
     char pattern[TP_IDENTITY_PATH_MAX];
@@ -1516,6 +1542,54 @@ void test_delayed_animation_context_ref_never_retargets_after_index_shift(void) 
     TEST_ASSERT_NOT_NULL(strstr(error, "revision"));
 }
 
+void test_delayed_target_context_ref_never_retargets_after_index_shift(void) {
+    const tp_session_snapshot *snapshot =
+        gui_project_snapshot();
+    const tp_snapshot_atlas *atlas =
+        snapshot
+            ? tp_session_snapshot_atlas_at(snapshot, 0)
+            : NULL;
+    TEST_ASSERT_NOT_NULL(atlas);
+    TEST_ASSERT_EQUAL_INT(1, atlas->target_count);
+    const tp_id128 atlas_id = atlas->id;
+
+    const gui_project_create_result second =
+        gui_project_add_target(
+            atlas_id,
+            tp_session_snapshot_revision(snapshot));
+    TEST_ASSERT_TRUE(second.committed);
+    snapshot = gui_project_snapshot();
+    const gui_project_create_result third =
+        gui_project_add_target(
+            atlas_id,
+            tp_session_snapshot_revision(snapshot));
+    TEST_ASSERT_TRUE(third.committed);
+
+    gui_target_ref first;
+    gui_target_ref captured_second;
+    TEST_ASSERT_TRUE(test_target_ref_at(0, 0, &first));
+    TEST_ASSERT_TRUE(test_target_ref_at(0, 1, &captured_second));
+    TEST_ASSERT_TRUE(tp_id128_eq(
+        second.created_id, captured_second.target_id));
+    TEST_ASSERT_TRUE(gui_project_remove_target(&first));
+
+    gui_request_remove_target_ref(&captured_second);
+    apply_pending();
+
+    snapshot = gui_project_snapshot();
+    TEST_ASSERT_NOT_NULL(tp_session_snapshot_target_by_id(
+        snapshot, atlas_id, second.created_id));
+    TEST_ASSERT_NOT_NULL(tp_session_snapshot_target_by_id(
+        snapshot, atlas_id, third.created_id));
+    atlas = tp_session_snapshot_atlas_by_id(snapshot, atlas_id);
+    TEST_ASSERT_NOT_NULL(atlas);
+    TEST_ASSERT_EQUAL_INT(2, atlas->target_count);
+    char error[256] = {0};
+    TEST_ASSERT_TRUE(
+        gui_project_take_op_error(error, sizeof error));
+    TEST_ASSERT_NOT_NULL(strstr(error, "revision"));
+}
+
 void test_required_recovery_without_root_warns_but_allows_edit_undo_redo(void) {
     gui_project_require_recovery();
     tp_error lifecycle_error = {{0}};
@@ -2058,6 +2132,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_sprite_edit_state_uses_canonical_duplicate_identity);
     RUN_TEST(test_sprite_edit_rejects_genuinely_stale_captured_revision);
     RUN_TEST(test_delayed_animation_context_ref_never_retargets_after_index_shift);
+    RUN_TEST(test_delayed_target_context_ref_never_retargets_after_index_shift);
     RUN_TEST(test_preview_result_rejects_source_refresh_after_job_capture);
     RUN_TEST(
         test_preview_after_native_pack_uses_observed_runtime_generation);

@@ -32,10 +32,21 @@ void test_shipping_atlas_rename_uses_session_admission_and_snapshot_read(void) {
     const tp_snapshot_atlas *initial = tp_session_snapshot_atlas_at(before, 0);
     TEST_ASSERT_NOT_NULL(initial);
     const tp_id128 atlas_id = initial->id;
+    const gui_session_submit_identity identity = {
+        .origin_view_id = {{0x11U}},
+        .draft_instance_id = {{0x12U}},
+    };
+    static const char transaction_id[] =
+        "01010101010101010101010101010101";
+    gui_session_submit_terminal terminal = {0};
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
-        gui_session_rename_atlas(&client, atlas_id, tp_session_snapshot_revision(before),
-                                 "gui-session-name", &err));
+        gui_session_submit_atlas_name(
+            &client, atlas_id, tp_session_snapshot_revision(before),
+            "gui-session-name", identity, transaction_id, &terminal, &err));
+    TEST_ASSERT_EQUAL_STRING(transaction_id, terminal.transaction_id);
+    TEST_ASSERT_TRUE(terminal.committed);
+    TEST_ASSERT_FALSE(terminal.no_change);
     tp_session_snapshot_destroy(before);
 
     tp_session_event event;
@@ -160,10 +171,21 @@ void test_source_family_uses_stable_ids_and_atomic_batch_admission(void) {
                                         &sprite_settings,
                                         (gui_session_submit_identity){0},
                                         NULL, NULL, &err));
+    const gui_session_submit_identity rename_identity = {
+        .origin_view_id = {{0x21U}},
+        .draft_instance_id = {{0x22U}},
+    };
+    static const char rename_transaction_id[] =
+        "02020202020202020202020202020202";
+    gui_session_submit_terminal rename_terminal = {0};
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
-        gui_session_set_sprite_name(&client, atlas_id, ids[0], "a.png", 2,
-                                    "hero", &err));
+        gui_session_submit_sprite_name(
+            &client, atlas_id, ids[0], "a.png", 2, "hero",
+            rename_identity, rename_transaction_id, &rename_terminal, &err));
+    TEST_ASSERT_EQUAL_STRING(
+        rename_transaction_id, rename_terminal.transaction_id);
+    TEST_ASSERT_TRUE(rename_terminal.committed);
     tp_session_event rename_event = {0};
     size_t rename_event_count = 0U;
     bool rename_resync = false;
@@ -304,9 +326,36 @@ void test_target_family_uses_stable_ids_revision_and_snapshot_read(void) {
     settings.out_path = "out/final";
     settings.enabled = false;
     TEST_ASSERT_EQUAL_INT(
-        TP_STATUS_OK,
+        TP_STATUS_INVALID_ARGUMENT,
         gui_session_set_target(
             &client, atlas_id, target_id, 1, &settings,
+            (gui_session_submit_identity){0}, NULL, NULL, &err));
+    TEST_ASSERT_EQUAL_STRING(
+        "target out path requires identified path submission", err.msg);
+    TEST_ASSERT_EQUAL_INT64(1, tp_session_revision(session));
+
+    const gui_session_submit_identity path_identity = {
+        .origin_view_id = {{0x31U}},
+        .draft_instance_id = {{0x32U}},
+    };
+    static const char path_transaction_id[] =
+        "03030303030303030303030303030303";
+    gui_session_submit_terminal path_terminal = {0};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_session_submit_target_out_path(
+            &client, atlas_id, target_id, 1, "out/final",
+            path_identity, path_transaction_id, &path_terminal, &err));
+    TEST_ASSERT_EQUAL_STRING(
+        path_transaction_id, path_terminal.transaction_id);
+    TEST_ASSERT_TRUE(path_terminal.committed);
+
+    settings.mask = TP_TF_ENABLED;
+    settings.out_path = NULL;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_session_set_target(
+            &client, atlas_id, target_id, 2, &settings,
             (gui_session_submit_identity){0}, NULL, NULL, &err));
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_REVISION_CONFLICT,
@@ -532,57 +581,6 @@ void test_identified_text_submits_preserve_exact_receipts_and_stable_targets(voi
     tp_session_destroy(session);
 }
 
-void test_identified_submit_returns_exact_terminal_when_admission_is_closed(void) {
-    uint8_t seed = 211U;
-    tp_rng rng = {deterministic_fill, &seed};
-    tp_error err = {{0}};
-    tp_session *session = NULL;
-    TEST_ASSERT_EQUAL_INT(
-        TP_STATUS_OK, tp_session_create(&rng, &session, &err));
-    gui_session_client client;
-    gui_session_client_init(&client);
-    TEST_ASSERT_EQUAL_INT(
-        TP_STATUS_OK,
-        gui_session_client_attach(&client, session, &err));
-
-    const tp_session_snapshot *snapshot =
-        gui_session_client_snapshot(&client);
-    TEST_ASSERT_NOT_NULL(snapshot);
-    const tp_snapshot_atlas *atlas =
-        tp_session_snapshot_atlas_at(snapshot, 0);
-    TEST_ASSERT_NOT_NULL(atlas);
-    const tp_id128 atlas_id = atlas->id;
-    const int64_t revision =
-        tp_session_snapshot_revision(snapshot);
-    const gui_session_submit_identity identity = {
-        .origin_view_id = {{0x91U}},
-        .draft_instance_id = {{0xa1U}},
-    };
-    static const char transaction_id[] =
-        "ffffffffffffffffffffffffffffffff";
-    gui_session_submit_terminal terminal = {0};
-
-    gui_session_client_close_admission(&client);
-    TEST_ASSERT_EQUAL_INT(
-        TP_STATUS_INVALID_ARGUMENT,
-        gui_session_submit_atlas_name(
-            &client, atlas_id, revision, "must-not-land",
-            identity, transaction_id, &terminal, &err));
-    TEST_ASSERT_EQUAL_STRING(
-        transaction_id, terminal.transaction_id);
-    TEST_ASSERT_EQUAL_MEMORY(
-        &identity, &terminal.identity, sizeof identity);
-    TEST_ASSERT_EQUAL_INT(
-        TP_STATUS_INVALID_ARGUMENT, terminal.status);
-    TEST_ASSERT_FALSE(terminal.committed);
-    TEST_ASSERT_FALSE(terminal.no_change);
-    TEST_ASSERT_EQUAL_INT64(revision, terminal.revision);
-    TEST_ASSERT_EQUAL_INT64(revision, tp_session_revision(session));
-
-    gui_session_client_detach(&client);
-    tp_session_destroy(session);
-}
-
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_shipping_atlas_rename_uses_session_admission_and_snapshot_read);
@@ -592,7 +590,5 @@ int main(void) {
     RUN_TEST(test_target_family_uses_stable_ids_revision_and_snapshot_read);
     RUN_TEST(
         test_identified_text_submits_preserve_exact_receipts_and_stable_targets);
-    RUN_TEST(
-        test_identified_submit_returns_exact_terminal_when_admission_is_closed);
     return UNITY_END();
 }

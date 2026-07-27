@@ -745,8 +745,6 @@ void tp_session_job_result_destroy(tp_session_job_result *result) {
     if (result->_owner) {
         tp_session_job_release_internal(
             (tp_session_owned_job *)result->_owner);
-    } else if (result->kind == TP_SESSION_JOB_PACK) {
-        tp_arena_destroy(result->pack.arena);
     }
     memset(result, 0, sizeof *result);
 }

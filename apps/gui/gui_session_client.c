@@ -421,6 +421,34 @@ static tp_status pending_register_before_admission(
     return TP_STATUS_OK;
 }
 
+static tp_status reject_submit(
+    const gui_session_client *client,
+    const gui_session_submit_request *request,
+    const char transaction_id[33],
+    gui_session_submit_result *out,
+    const char *message,
+    tp_error *err) {
+    const tp_status status = tp_error_set(
+        err, TP_STATUS_INVALID_ARGUMENT, "%s",
+        message);
+    out->terminal_status = status;
+    if (transaction_id[0] != '\0') {
+        const tp_session_snapshot *snapshot =
+            gui_session_client_snapshot(client);
+        (void)snprintf(
+            out->terminal.transaction_id,
+            sizeof out->terminal.transaction_id,
+            "%s", transaction_id);
+        out->terminal.identity = request->identity;
+        out->terminal.status = status;
+        out->terminal.revision =
+            snapshot
+                ? tp_session_snapshot_revision(snapshot)
+                : request->expected_revision;
+    }
+    return status;
+}
+
 static void pending_finish(
     gui_session_client *client,
     gui_session_pending_submit *pending,
@@ -680,24 +708,30 @@ tp_status gui_session_client_submit(
             err, TP_STATUS_INVALID_ARGUMENT,
             "GUI submit requires an attached client, operations, semantic label, and output");
     }
-    if (!client->admission_open) {
-        return tp_error_set(
-            err, TP_STATUS_INVALID_ARGUMENT,
-            "GUI session mutation admission is closed while lifecycle work drains");
-    }
-    if (client->frame_pinned) {
-        return tp_error_set(
-            err, TP_STATUS_INVALID_ARGUMENT,
-            "GUI submit is forbidden during a pinned frame");
-    }
-
     char transaction_id[33] = {0};
     tp_status status = TP_STATUS_OK;
     if (request->retained_transaction_id) {
         status = submit_transaction_id(
             client, request->retained_transaction_id,
             transaction_id, err);
-    } else {
+        if (status != TP_STATUS_OK) {
+            return status;
+        }
+    }
+    if (!client->admission_open) {
+        return reject_submit(
+            client, request, transaction_id, out,
+            "GUI session mutation admission is closed while lifecycle work drains",
+            err);
+    }
+    if (client->frame_pinned) {
+        return reject_submit(
+            client, request, transaction_id, out,
+            "GUI submit is forbidden during a pinned frame",
+            err);
+    }
+
+    if (!request->retained_transaction_id) {
         bool unique = false;
         for (size_t attempt = 0U;
              attempt <

@@ -187,7 +187,7 @@ bool gui_project__ingress_is_open(void) {
                GUI_HOST_OPEN;
 }
 
-void gui_project__snapshot_drop(void) {
+static void request_observation(void) {
     if (!s_project.binding_initialized ||
         !gui_project__borrow_active_session()) {
         return;
@@ -409,7 +409,7 @@ void gui_project_invalidate_sources(void) {
         gui_project__note_session_reject(status, &err);
         return;
     }
-    gui_project__snapshot_drop();
+    request_observation();
 }
 
 uint64_t gui_project_snapshot_model_generation(void) {
@@ -446,18 +446,7 @@ void gui_project__note_session_reject(tp_status status, const tp_error *err) {
 }
 
 void gui_project__sync_recovery_notice(void) {
-    if (!s_project.binding_initialized ||
-        !gui_project__borrow_active_session()) {
-        return;
-    }
-    tp_error err = {{0}};
-    const tp_status status =
-        gui_session_client_request_observe(
-            &s_project.binding.client, &err);
-    if (status != TP_STATUS_OK) {
-        gui_project__note_session_reject(
-            status, &err);
-    }
+    request_observation();
 }
 
 // #endregion
