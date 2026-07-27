@@ -38,9 +38,18 @@ tp_status tp_session_job_start_internal(
     tp_session *session, tp_session_owned_job *job,
     tp_session_job_start_fn start, void *start_context,
     tp_error *err);
+#ifdef TP_ENABLE_TEST_SEAMS
+/* TEST SEAM, compiled out of every shipping build. Takes the active-job lease
+ * for an already-created job, i.e. without the fail-atomic spawn callback that
+ * tp_session_job_start_internal owns. Nothing in production may adopt a job it
+ * did not start; the seam exists so the owner refcount/detach table stays
+ * testable against a synthetic job. A production TU naming it is a boundary
+ * violation (JOB_OBSERVATION_TEST_SEAM in
+ * cmake/check_architecture_boundaries.cmake). */
 tp_status tp_session_job_attach_internal(tp_session *session,
                                          tp_session_owned_job *job,
                                          tp_error *err);
+#endif
 tp_session_owned_job *tp_session_job_acquire_internal(
     const tp_session *session);
 void tp_session_job_release_internal(tp_session_owned_job *job);

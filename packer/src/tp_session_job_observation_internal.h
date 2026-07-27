@@ -44,12 +44,23 @@ void tp_session_owned_job_configure_observation(
     const tp_session_job_descriptor *descriptor,
     tp_session_job_observe_fn observe);
 
-/* Host-admission-thread ports. They acquire the session gate; workers only
+/* Host-admission-thread port. It acquires the session gate; workers only
  * update their private atomics/immutable terminal payload. */
-tp_status tp_session_job_observation_begin_internal(
-    tp_session *session, tp_session_owned_job *job, tp_error *err);
 tp_session_job_admission tp_session_job_observation_admit_internal(
     tp_session *session, tp_session_owned_job *job);
+
+#ifdef TP_ENABLE_TEST_SEAMS
+/* TEST SEAM, compiled out of every shipping build. Publishing an observed job
+ * WITHOUT the active-job lease is unreachable from production: the only
+ * production path is tp_session_job_start_internal, which rejects a second live
+ * owner outright. The reverse/superseded admission table (USA-07) therefore has
+ * no production route that can install a second owner, so the coverage lives on
+ * this seam instead of being deleted with the rule it proves. A production TU
+ * naming it is a boundary violation (JOB_OBSERVATION_TEST_SEAM in
+ * cmake/check_architecture_boundaries.cmake). */
+tp_status tp_session_job_observation_begin_internal(
+    tp_session *session, tp_session_owned_job *job, tp_error *err);
+#endif
 
 /* Session-family locked helpers. */
 void tp_session_job_observation__copy_locked(
@@ -65,5 +76,8 @@ tp_session_owned_job *tp_session_job_observation__detach_locked(
 tp_status tp_session_job_observation__begin_locked(
     tp_session *session, tp_session_owned_job *job,
     tp_session_owned_job **out_retired, tp_error *err);
+/* Sole owner of the assign-if-zero / id-space-exhausted rule. */
+tp_status tp_session_job_observation__reserve_request_id_locked(
+    tp_session *session, tp_session_owned_job *job, tp_error *err);
 
 #endif

@@ -380,6 +380,78 @@ void test_terminal_no_change_publishes_no_event(void) {
     tp_session_destroy(session);
 }
 
+/* The observation token carries counters, not a session identity: it is
+ * deliberately comparable only against the session that minted it. This test
+ * pins BOTH halves of that contract.
+ *
+ * 1. A token carried over from a session that did real work is never silently
+ *    accepted by a fresh session. Its counters sit in the fresh session's
+ *    FUTURE, so token_is_future fires and the caller gets a complete
+ *    resync-required observation with a snapshot -- not a no-op.
+ * 2. The residual hazard is documented, not hidden: two sessions that are BOTH
+ *    untouched mint equal (all-zero) tokens, so a token crossed between them
+ *    reads as "nothing changed" and returns *out == NULL. That is safe only
+ *    because the host never crosses instances -- gui_session_client_prepare
+ *    observes every attachment candidate with after == NULL (asserted in
+ *    apps/gui/test_gui_session_client.c). Encoding a session id into the token
+ *    would trade a host-owned rule for a wider DTO and an extra comparison on
+ *    every poll; the rule is cheaper and already enforced. */
+void test_token_from_another_session_never_reads_as_a_stale_no_op(void) {
+    tp_session *donor = make_session();
+    const tp_id128 donor_atlas = first_atlas_id(donor);
+    apply_rename(donor, donor_atlas,
+                 "41000000000000000000000000000004", "donor-edit",
+                 "Donor rename", "human", true);
+    tp_error err = {{0}};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK, tp_session_invalidate_sources(donor, &err));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK, tp_session_require_recovery(donor, &err));
+    tp_session_observation_token donor_token;
+    tp_session_observation *donor_observation =
+        initial_observation(donor, &donor_token);
+    tp_session_observation_destroy(donor_observation);
+    TEST_ASSERT_GREATER_THAN_UINT64(0U, donor_token.event_sequence);
+    tp_session_destroy(donor);
+
+    tp_session *fresh = make_session();
+    tp_session_observation *crossed =
+        (tp_session_observation *)(uintptr_t)1U;
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_session_observe(fresh, &donor_token, &crossed, &err), err.msg);
+    TEST_ASSERT_NOT_NULL(crossed);
+    TEST_ASSERT_TRUE(tp_session_observation_resync_required(crossed));
+    TEST_ASSERT_NOT_NULL(tp_session_observation_snapshot(crossed));
+    TEST_ASSERT_EQUAL_size_t(
+        0U, tp_session_observation_event_count(crossed));
+    /* The published token is the fresh session's own cut, never the donor's. */
+    const tp_session_observation_token adopted =
+        tp_session_observation_token_query(crossed);
+    TEST_ASSERT_EQUAL_UINT64(0U, adopted.event_sequence);
+    TEST_ASSERT_EQUAL_UINT64(0U, adopted.recovery_owner_generation);
+    tp_session_observation_destroy(crossed);
+
+    /* Documented residual: untouched-to-untouched is indistinguishable. */
+    tp_session *untouched_donor = make_session();
+    tp_session_observation_token untouched_token;
+    tp_session_observation *untouched_observation =
+        initial_observation(untouched_donor, &untouched_token);
+    tp_session_observation_destroy(untouched_observation);
+    tp_session_destroy(untouched_donor);
+    tp_session *untouched_fresh = make_session();
+    tp_session_observation *silent =
+        (tp_session_observation *)(uintptr_t)1U;
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_session_observe(untouched_fresh, &untouched_token, &silent, &err),
+        err.msg);
+    TEST_ASSERT_NULL(silent);
+
+    tp_session_destroy(untouched_fresh);
+    tp_session_destroy(fresh);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(
@@ -392,5 +464,6 @@ int main(void) {
     RUN_TEST(
         test_recovery_only_change_advances_token_without_project_materialization);
     RUN_TEST(test_terminal_no_change_publishes_no_event);
+    RUN_TEST(test_token_from_another_session_never_reads_as_a_stale_no_op);
     return UNITY_END();
 }

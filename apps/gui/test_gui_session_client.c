@@ -544,6 +544,54 @@ void test_attach_replaces_binding_only_after_initial_observation(void) {
     tp_session_destroy(second);
 }
 
+/* The host half of the core's "a token is a counter cut, not a session
+ * identity" contract (see the sibling core test in
+ * packer/tests/test_session_observation.c). Every attachment candidate is
+ * observed with after == NULL, so a token minted by the OUTGOING session is
+ * never compared against the incoming one. The hazard this closes is exact:
+ * two untouched sessions mint EQUAL (all-zero) token cuts, so a prepare that
+ * forwarded the retained token would read "nothing changed", receive a NULL
+ * observation, and reject a perfectly valid attachment. */
+void test_attach_observes_every_candidate_from_scratch(void) {
+    tp_session *first = make_session();
+    tp_session *second = make_session();
+    gui_session_client client;
+    tp_error error = {{0}};
+    gui_session_client_init(&client);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_session_client_attach(&client, first, &error));
+    const tp_session_observation_token retained =
+        gui_session_client_observed_token(&client);
+
+    /* The collision is real, not hypothetical: the candidate's own cut is
+     * equal to the token the client still holds for the outgoing session. */
+    tp_session_observation *candidate_cut = NULL;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_session_observe(second, NULL, &candidate_cut, &error));
+    TEST_ASSERT_NOT_NULL(candidate_cut);
+    TEST_ASSERT_TRUE(tp_session_observation_token_equal(
+        retained, tp_session_observation_token_query(candidate_cut)));
+    tp_session_observation_destroy(candidate_cut);
+
+    gui_session_client_prepared prepared = {0};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_session_client_prepare(&client, second, &prepared, &error));
+    tp_session *retired =
+        gui_session_client_commit_prepared(&client, &prepared);
+    TEST_ASSERT_EQUAL_PTR(first, retired);
+    TEST_ASSERT_NOT_NULL(gui_session_client_snapshot(&client));
+    TEST_ASSERT_EQUAL_INT64(
+        0,
+        tp_session_snapshot_revision(
+            gui_session_client_snapshot(&client)));
+    gui_session_client_detach(&client);
+    tp_session_destroy(first);
+    tp_session_destroy(second);
+}
+
 void test_failed_reattach_keeps_old_binding_and_generation(void) {
     tp_session *first = make_session();
     tp_session *second = make_session();
@@ -1560,6 +1608,7 @@ int main(void) {
         test_runtime_only_delta_keeps_the_model_snapshot_owner);
     RUN_TEST(
         test_attach_replaces_binding_only_after_initial_observation);
+    RUN_TEST(test_attach_observes_every_candidate_from_scratch);
     RUN_TEST(
         test_failed_reattach_keeps_old_binding_and_generation);
     RUN_TEST(

@@ -121,8 +121,6 @@ tp_status tp_session_snapshot__capture_locked(
     snapshot->source_generation = session->source_generation;
     snapshot->event_sequence = session->event_sequence;
     snapshot->dirty = tp_model_dirty(session->model);
-    snapshot->recovery_health =
-        tp_session__recovery_health_locked(session);
     snapshot->identity = session->identity;
     snapshot->saved_file_fingerprint = session->saved_file_fingerprint;
     snapshot->has_saved_file_fingerprint =
@@ -307,10 +305,6 @@ tp_status tp_session_snapshot_load(const char *path,
     }
     snapshot->project = tp_project_generation_project(snapshot->generation);
     snapshot->atlas_count = snapshot->project->atlas_count;
-    snapshot->recovery_health.notice_id =
-        TP_SESSION_NOTICE_RECOVERY_DEGRADED;
-    snapshot->recovery_health.available = true;
-    snapshot->recovery_health.first_cause = TP_STATUS_OK;
     snapshot->identity.kind = TP_IDENTITY_SAVED;
     (void)snprintf(snapshot->identity.canonical_path,
                    sizeof snapshot->identity.canonical_path, "%s", canonical);

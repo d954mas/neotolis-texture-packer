@@ -27,7 +27,6 @@ struct tp_session_snapshot {
     uint64_t source_generation;
     uint64_t event_sequence;
     bool dirty;
-    tp_session_recovery_health recovery_health;
     tp_session_identity identity;
     tp_id128 saved_file_fingerprint;
     bool has_saved_file_fingerprint;

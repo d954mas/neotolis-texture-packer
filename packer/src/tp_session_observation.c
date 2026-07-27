@@ -187,8 +187,11 @@ tp_status tp_session_observe(
     }
     NT_ASSERT(observation->event_count <=
               TP_SESSION_OBSERVATION_EVENT_CAPACITY);
-    NT_ASSERT(observation->recovery_health.generation ==
-              observation->token.recovery_health_generation);
+    /* No assert relating recovery_health.generation to the token halves: the
+     * token keeps the model and owner counters SEPARATE (each half must be
+     * comparable on its own for staleness/future detection), while the DTO
+     * publishes their composition. Re-deriving the composition here would only
+     * restate tp_session__recovery_health_locked, not check it. */
     *out = observation;
     return TP_STATUS_OK;
 }

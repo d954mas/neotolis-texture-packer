@@ -1964,6 +1964,20 @@ void test_recovery_health_dto_tracks_durable_prefix_and_heal_transition(void) {
     TEST_ASSERT_FALSE(health.has_last_durable_revision);
     TEST_ASSERT_FALSE(health.has_last_durable_time);
 
+    /* Owner-only transition. require_recovery touches no model counter at all,
+     * so a `generation` composed from the model half alone would report the
+     * flipped `available` under an UNCHANGED generation -- a consumer polling
+     * the counter would never refetch. The DTO counter is the composition of
+     * both halves precisely so this case moves it. */
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_require_recovery(session, &err));
+    tp_session_recovery_health required =
+        tp_session_recovery_health_query(session);
+    TEST_ASSERT_FALSE(required.available);
+    TEST_ASSERT_FALSE(required.degraded);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, required.first_cause);
+    TEST_ASSERT_GREATER_THAN_UINT64(health.generation, required.generation);
+
     tp_session_snapshot *snapshot = NULL;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
                           tp_session_snapshot_create(session, &snapshot, &err));
@@ -1983,7 +1997,9 @@ void test_recovery_health_dto_tracks_durable_prefix_and_heal_transition(void) {
     TEST_ASSERT_TRUE(attached.has_last_durable_revision);
     TEST_ASSERT_EQUAL_INT64(0, attached.last_durable_revision);
     TEST_ASSERT_FALSE(attached.has_last_durable_time);
-    TEST_ASSERT_GREATER_THAN_UINT64(health.generation, attached.generation);
+    /* attach_journal moves BOTH halves (owner attachment + the first durable
+     * revision), so the composed counter still advances monotonically. */
+    TEST_ASSERT_GREATER_THAN_UINT64(required.generation, attached.generation);
 
     tp_txn_result txn_result;
     session_apply_rename(session, "63000000000000000000000000000001",
@@ -2027,17 +2043,6 @@ void test_recovery_health_dto_tracks_durable_prefix_and_heal_transition(void) {
     TEST_ASSERT_EQUAL_INT64(2, suppressed.last_durable_revision);
     TEST_ASSERT_EQUAL_UINT64(degraded.generation, suppressed.generation);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_JOURNAL_FAILED, suppressed.first_cause);
-
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
-                          tp_session_snapshot_create(session, &snapshot, &err));
-    tp_session_recovery_health snap_health =
-        tp_session_snapshot_recovery_health_query(snapshot);
-    TEST_ASSERT_EQUAL_UINT64(suppressed.generation, snap_health.generation);
-    TEST_ASSERT_EQUAL_INT64(suppressed.last_durable_revision,
-                            snap_health.last_durable_revision);
-    TEST_ASSERT_EQUAL_INT(suppressed.first_cause, snap_health.first_cause);
-    TEST_ASSERT_TRUE(snap_health.degraded);
-    tp_session_snapshot_destroy(snapshot);
 
     tp_session_save_result save_result = {0};
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,

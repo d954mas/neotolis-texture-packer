@@ -34,6 +34,26 @@ bool recovery_is_healthy(const tp_session *session) {
     return !session->recovery_required && session->recovery_healthy;
 }
 
+/* Recovery health has TWO independent authorities: the model counts durability
+ * and degradation, the session counts owner attachment/requirement. The DTO
+ * exposes ONE `generation`, so it must move when either half moves -- reporting
+ * only the model half made owner-side transitions (attach_journal,
+ * attach_recovery_live, require_recovery) change `available`/`degraded` while
+ * `generation` stayed put, which is exactly the staleness the counter exists to
+ * rule out. Both halves are monotonic and saturate at UINT64_MAX, so the sum is
+ * monotonic too; it saturates rather than wrapping. */
+static uint64_t recovery_health_generation_locked(
+    const tp_session *session) {
+    NT_ASSERT(session != NULL);
+    const uint64_t model_half =
+        tp_model__recovery_health_generation(session->model);
+    const uint64_t owner_half = session->recovery_owner_generation;
+    if (model_half > UINT64_MAX - owner_half) {
+        return UINT64_MAX;
+    }
+    return model_half + owner_half;
+}
+
 tp_session_recovery_health tp_session__recovery_health_locked(
     const tp_session *session) {
     tp_session_recovery_health health = {
@@ -64,8 +84,7 @@ tp_session_recovery_health tp_session__recovery_health_locked(
      * Keep the time explicitly unknown instead of sampling a global clock. */
     health.has_last_durable_time = false;
     health.last_durable_time = 0;
-    health.generation =
-        tp_model__recovery_health_generation(session->model);
+    health.generation = recovery_health_generation_locked(session);
     return health;
 }
 
@@ -566,11 +585,15 @@ tp_status tp_session_job_start_internal(
     }
     /* Reserve the request identity before process creation so the exact
      * admitted identity is encoded into the child request. A failed spawn may
-     * consume an id, but publishes no job/result state. */
-    if (job->observation_descriptor.request_id == 0U) {
-        NT_ASSERT(session->next_job_request_id < UINT64_MAX);
-        job->observation_descriptor.request_id =
-            ++session->next_job_request_id;
+     * consume an id, but publishes no job/result state. Cannot fail twice:
+     * __begin_locked below re-enters the same reservation helper and finds the
+     * id already non-zero. */
+    const tp_status reservation_status =
+        tp_session_job_observation__reserve_request_id_locked(
+            session, job, err);
+    if (reservation_status != TP_STATUS_OK) {
+        gate_unlock(session);
+        return reservation_status;
     }
     /* Process creation is fail-atomic with observable publication. The start
      * callback only spawns/encodes; it never pumps or calls the session. */
@@ -596,6 +619,8 @@ tp_status tp_session_job_start_internal(
     return TP_STATUS_OK;
 }
 
+#ifdef TP_ENABLE_TEST_SEAMS
+/* See tp_job_owner_internal.h: test-only lease adoption, no shipping caller. */
 tp_status tp_session_job_attach_internal(tp_session *session,
                                          tp_session_owned_job *job,
                                          tp_error *err) {
@@ -629,6 +654,7 @@ tp_status tp_session_job_attach_internal(tp_session *session,
     tp_session_job_release_internal(retired);
     return TP_STATUS_OK;
 }
+#endif /* TP_ENABLE_TEST_SEAMS */
 
 tp_session_owned_job *tp_session_job_acquire_internal(
     const tp_session *session) {

@@ -825,4 +825,67 @@ _arch_assert_absent(
     "tp_arena_destroy[ \t\r\n]*\\([ \t\r\n]*result[ \t\r\n]*->[ \t\r\n]*pack[ \t\r\n]*\\.[ \t\r\n]*arena"
     "R5 job result lifetime has one retained owner")
 
+# P6 job-owner test seams. Two internal entry points exist ONLY for tests:
+# tp_session_job_attach_internal (adopts the active-job lease for a job it did
+# not start) and tp_session_job_observation_begin_internal (publishes a second
+# live observed owner). Production has no route to either -- the sole production
+# start path, tp_session_job_start_internal, spawns fail-atomically and rejects a
+# second live owner -- but the USA-07 reverse/superseded admission table is only
+# reachable through them, so they are kept and fenced instead of deleted. Both
+# declaration and definition sit behind TP_ENABLE_TEST_SEAMS; this rule is what
+# makes the fence load-bearing.
+#
+# Two halves, because either one alone can be satisfied trivially:
+# 1. the guard still exists in the four files that own the seam, and
+# 2. no other shipping TU names either symbol.
+function(_arch_assert_present relative_path pattern why)
+    set(_path "${_arch_root}/${relative_path}")
+    if(NOT EXISTS "${_path}")
+        message(FATAL_ERROR
+            "${why} guard lost its file: ${relative_path} does not exist.")
+    endif()
+    file(READ "${_path}" _source)
+    if(NOT _source MATCHES "${pattern}")
+        message(FATAL_ERROR
+            "${why}: ${relative_path} no longer contains ${pattern}")
+    endif()
+endfunction()
+
+foreach(_path IN ITEMS packer/src/tp_session.c
+                       packer/src/tp_job_owner_internal.h
+                       packer/src/tp_session_job_observation.c
+                       packer/src/tp_session_job_observation_internal.h)
+    _arch_assert_present("${_path}" "TP_ENABLE_TEST_SEAMS"
+                         "P6 job-owner seams stay compiled out of shipping")
+endforeach()
+
+file(GLOB_RECURSE _job_seam_sources LIST_DIRECTORIES false
+    "${_arch_root}/apps/*.c"
+    "${_arch_root}/apps/*.h"
+    "${_arch_root}/packer/include/tp_core/*.h"
+    "${_arch_root}/packer/src/*.c"
+    "${_arch_root}/packer/src/*.h")
+foreach(_source IN LISTS _job_seam_sources)
+    cmake_path(RELATIVE_PATH _source BASE_DIRECTORY "${_arch_root}"
+               OUTPUT_VARIABLE _relative)
+    cmake_path(CONVERT "${_relative}" TO_CMAKE_PATH_LIST _relative NORMALIZE)
+    if(_relative MATCHES "/(deps|generated)/"
+       OR _relative MATCHES "(^|/)(test_[^/]*|gui_selftest|tp_bench_[^/]*|client_parity_[^/]*)\\.(c|h)$")
+        continue()
+    endif()
+    if(NOT _relative STREQUAL "packer/src/tp_session.c"
+       AND NOT _relative STREQUAL "packer/src/tp_job_owner_internal.h")
+        _arch_assert_absent(
+            "${_relative}" "tp_session_job_attach_internal"
+            "P6 job attach is a test seam, not a production entry point")
+    endif()
+    if(NOT _relative STREQUAL "packer/src/tp_session_job_observation.c"
+       AND NOT _relative STREQUAL
+               "packer/src/tp_session_job_observation_internal.h")
+        _arch_assert_absent(
+            "${_relative}" "tp_session_job_observation_begin_internal"
+            "P6 job observation begin is a test seam, not a production entry point")
+    endif()
+endforeach()
+
 message(STATUS "architecture boundaries hold")

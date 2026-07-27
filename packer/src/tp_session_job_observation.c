@@ -181,6 +181,29 @@ static tp_session_job_admission admit_locked(
     return admission;
 }
 
+/* The single site that turns "no request id yet" into an admitted request id.
+ * Both host entry points route through it -- tp_session_job_start_internal
+ * reserves before it spawns (so the exact admitted identity is encoded into the
+ * child request) and __begin_locked reserves for the attach path -- so the
+ * assign-if-zero rule and the exhaustion rejection cannot drift apart. Calling
+ * it twice for the same job is a no-op: a non-zero id is already reserved. */
+tp_status tp_session_job_observation__reserve_request_id_locked(
+    tp_session *session, tp_session_owned_job *job, tp_error *err) {
+    NT_ASSERT(session != NULL);
+    NT_ASSERT(job != NULL);
+    if (job->observation_descriptor.request_id != 0U) {
+        return TP_STATUS_OK;
+    }
+    if (session->next_job_request_id == UINT64_MAX) {
+        return tp_error_set(
+            err, TP_STATUS_INVALID_ARGUMENT,
+            "session job request id space is exhausted");
+    }
+    job->observation_descriptor.request_id =
+        ++session->next_job_request_id;
+    return TP_STATUS_OK;
+}
+
 tp_status tp_session_job_observation__begin_locked(
     tp_session *session, tp_session_owned_job *job,
     tp_session_owned_job **out_retired, tp_error *err) {
@@ -194,14 +217,11 @@ tp_status tp_session_job_observation__begin_locked(
             err, TP_STATUS_INVALID_ARGUMENT,
             "job observation requires descriptor and observe callback");
     }
-    if (job->observation_descriptor.request_id == 0U) {
-        if (session->next_job_request_id == UINT64_MAX) {
-            return tp_error_set(
-                err, TP_STATUS_INVALID_ARGUMENT,
-                "session job request id space is exhausted");
-        }
-        job->observation_descriptor.request_id =
-            ++session->next_job_request_id;
+    const tp_status reservation_status =
+        tp_session_job_observation__reserve_request_id_locked(
+            session, job, err);
+    if (reservation_status != TP_STATUS_OK) {
+        return reservation_status;
     }
 
     *out_retired = session->observed_job_owner;
@@ -235,6 +255,9 @@ tp_status tp_session_job_observation__begin_locked(
     return TP_STATUS_OK;
 }
 
+/* Pre-flight for the start path only: the shape checks __begin_locked would
+ * repeat, minus the request-id rule (the caller reserves the id explicitly
+ * through __reserve_request_id_locked, which owns that rejection). */
 tp_status tp_session_job_observation__validate_begin_locked(
     const tp_session *session, const tp_session_owned_job *job,
     tp_error *err) {
@@ -246,15 +269,12 @@ tp_status tp_session_job_observation__validate_begin_locked(
             err, TP_STATUS_INVALID_ARGUMENT,
             "job observation requires descriptor and observe callback");
     }
-    if (job->observation_descriptor.request_id == 0U &&
-        session->next_job_request_id == UINT64_MAX) {
-        return tp_error_set(
-            err, TP_STATUS_INVALID_ARGUMENT,
-            "session job request id space is exhausted");
-    }
     return TP_STATUS_OK;
 }
 
+#ifdef TP_ENABLE_TEST_SEAMS
+/* See tp_session_job_observation_internal.h: test-only publication of an
+ * observed job without the active-job lease, no shipping caller. */
 tp_status tp_session_job_observation_begin_internal(
     tp_session *session, tp_session_owned_job *job, tp_error *err) {
     if (!session || !job) {
@@ -276,6 +296,7 @@ tp_status tp_session_job_observation_begin_internal(
     tp_session_job_release_internal(retired);
     return status;
 }
+#endif /* TP_ENABLE_TEST_SEAMS */
 
 tp_session_job_admission tp_session_job_observation_admit_internal(
     tp_session *session, tp_session_owned_job *job) {
