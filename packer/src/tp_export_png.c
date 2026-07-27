@@ -73,7 +73,7 @@ tp_status tp_export_write_pages(const tp_result *result, const char *out_path_ba
             free(png);
             return tp_error_set(err, TP_STATUS_BAD_PROJECT, "tp_export_write_pages: failed encoding page %d", p);
         }
-        bool wrote = tp_fs_write_file(path, png, (size_t)png_size);
+        bool wrote = tp_fs_write_file_atomic(path, png, (size_t)png_size);
         free(png);
         if (!wrote) {
             return tp_error_set(err, TP_STATUS_BAD_PROJECT, "tp_export_write_pages: failed writing '%s'", path);

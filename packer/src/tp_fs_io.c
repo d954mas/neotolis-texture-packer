@@ -1,6 +1,15 @@
 #include "tp_fs_internal.h"
 
 #include <errno.h>
+#include <stdio.h>
+
+#ifdef _WIN32
+#include <process.h>
+#define tp_fs_getpid _getpid
+#else
+#include <unistd.h>
+#define tp_fs_getpid getpid
+#endif
 
 #include "tp_utf8_internal.h"
 
@@ -75,6 +84,34 @@ bool tp_fs_write_file(const char *path_utf8, const void *data, size_t size) {
     bool wrote = tp_fs_write_all(file, data, size);
     bool closed = tp_fs_close(file);
     return wrote && closed;
+}
+
+/* Sibling temp + one replace. The pid keeps two processes exporting to a shared
+ * output directory off each other's temp; within one process the writers are
+ * sequential, so the name is simply reused. */
+bool tp_fs_write_file_atomic(const char *path_utf8, const void *data,
+                             size_t size) {
+    if (!path_utf8) {
+        errno = EINVAL;
+        return false;
+    }
+    char tmp[TP_FS_ATOMIC_TEMP_PATH_MAX];
+    const int length = snprintf(tmp, sizeof tmp, "%s.tp-tmp-%08lx", path_utf8,
+                                (unsigned long)tp_fs_getpid());
+    if (length <= 0 || (size_t)length >= sizeof tmp) {
+        errno = ENAMETOOLONG;
+        return false;
+    }
+    if (!tp_fs_write_file(tmp, data, size)) {
+        (void)tp_fs_remove_file(tmp);
+        return false;
+    }
+    if (!tp_fs_replace(tmp, path_utf8)) {
+        /* The destination is untouched -- everything so far happened in the temp. */
+        (void)tp_fs_remove_file(tmp);
+        return false;
+    }
+    return true;
 }
 
 bool tp_fs_exists(const char *path_utf8) {

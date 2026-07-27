@@ -24,14 +24,10 @@
 #include "tp_core/tp_project.h"
 #include "tp_core/tp_scan.h"
 #include "tp_build_worker_internal.h"
+#include "tp_cancel_source.h"
 #include "tp_fs_internal.h"
 #include "tp_pack_priv.h"
 #include "tp_proc_internal.h"
-
-typedef struct worker_cancel {
-    bool requested;
-    bool transport_failed;
-} worker_cancel;
 
 typedef struct pack_hash_collect {
     tp_id128 *hashes;
@@ -82,8 +78,6 @@ static double worker_now_ms(void) {
 #endif
 }
 
-static bool worker_cancel_requested(void *context);
-
 #ifdef TP_ENABLE_TEST_SEAMS
 static void worker_sleep_ms(unsigned long milliseconds) {
 #if defined(_WIN32)
@@ -126,11 +120,11 @@ static void test_block_before_job_work(void) {
  * exercise a cancel against a Pack that has already taken resources on disk:
  * TP_TEST_JOB_WORKER_BLOCK_MS parks BEFORE any work, where "no directory was
  * left behind" is vacuously true. */
-static void test_block_in_pack_until_cancel(worker_cancel *cancel) {
+static void test_block_in_pack_until_cancel(tp_cancel_source *cancel) {
     const unsigned long milliseconds =
         test_block_ms("TP_TEST_JOB_WORKER_BLOCK_IN_PACK_MS");
     for (unsigned long waited = 0UL; waited < milliseconds; ++waited) {
-        if (worker_cancel_requested(cancel)) {
+        if (tp_cancel_source_poll(cancel)) {
             return;
         }
         worker_sleep_ms(1UL);
@@ -172,23 +166,23 @@ static bool test_ignores_cancel(void) {
 }
 #endif
 
-static bool worker_cancel_requested(void *context) {
-    worker_cancel *cancel = context;
+/* The worker's ONE destructive read of its control channel. tp_cancel_source
+ * owns the latch, so this stays a pure event -> reason mapping. */
+static tp_cancel_reason child_stdin_probe(void *context) {
+    (void)context;
 #ifdef TP_ENABLE_TEST_SEAMS
     if (test_ignores_cancel()) {
-        return false;
+        return TP_CANCEL_REASON_NONE;
     }
 #endif
-    if (cancel->requested || cancel->transport_failed) {
-        return true;
-    }
     const tp_proc_stdin_event event = tp_proc_child_poll_stdin();
     if (event == TP_PROC_STDIN_EVENT_CANCEL) {
-        cancel->requested = true;
-    } else if (event == TP_PROC_STDIN_EVENT_ERROR) {
-        cancel->transport_failed = true;
+        return TP_CANCEL_REASON_REQUESTED;
     }
-    return cancel->requested || cancel->transport_failed;
+    if (event == TP_PROC_STDIN_EVENT_ERROR) {
+        return TP_CANCEL_REASON_CONTROL_LOST;
+    }
+    return TP_CANCEL_REASON_NONE;
 }
 
 static bool write_frame(const uint8_t *bytes, size_t length) {
@@ -299,7 +293,7 @@ static void remove_request_dir_of(const char *artifact_path) {
 }
 
 static tp_status run_pack(const tp_job_worker_proto_request *request,
-                          tp_project *project, worker_cancel *cancel,
+                          tp_project *project, tp_cancel_source *cancel,
                           tp_job_worker_proto_response *response,
                           tp_error *err) {
     const int atlas_index =
@@ -313,8 +307,7 @@ static tp_status run_pack(const tp_job_worker_proto_request *request,
         return tp_error_set(err, TP_STATUS_BUILDER_FAILED,
                             "job worker progress channel failed");
     }
-    const tp_cancel_token cancel_token = {
-        worker_cancel_requested, cancel};
+    const tp_cancel_token cancel_token = tp_cancel_source_token(cancel);
     tp_pack_input input = {0};
     tp_status status = tp_pack_input_build_cancellable(
         project, atlas_index, &input, &cancel_token, err);
@@ -434,16 +427,11 @@ static tp_status run_pack(const tp_job_worker_proto_request *request,
      * of every page for a tp_result nobody in this process looks at. */
     pack_hash_collect collect = {image_hashes, input.count};
     char artifact_path[512];
-    bool cancelled = false;
     (void)publish_progress(request->request_id, 0, 1,
                            TP_JOB_WORKER_PHASE_BUILD);
     status = tp_pack_produce_observed(
-        &settings, artifact_path, sizeof artifact_path, &cancelled,
-        worker_cancel_requested, cancel, collect_image_hash, &collect, err);
-    if (status == TP_STATUS_OK && cancelled) {
-        status = tp_error_set(err, TP_STATUS_CANCELLED,
-                              "Pack was cancelled before publication");
-    }
+        &settings, artifact_path, sizeof artifact_path, &cancel_token,
+        collect_image_hash, &collect, err);
 
     uint64_t artifact_size = 0U;
     if (status == TP_STATUS_OK) {
@@ -510,8 +498,7 @@ static tp_status run_pack(const tp_job_worker_proto_request *request,
      * the freshness probe left a cancel arriving during that probe to the
      * terminal-frame boundary, which publishes an artifact path nobody adopts
      * and a directory nobody deletes. */
-    if (status == TP_STATUS_OK &&
-        (cancel->requested || cancel->transport_failed)) {
+    if (status == TP_STATUS_OK && tp_cancel_source_fired(cancel)) {
         status = tp_error_set(
             err, TP_STATUS_CANCELLED,
             "Pack was cancelled before its result was published");
@@ -575,11 +562,10 @@ static tp_status run_pack(const tp_job_worker_proto_request *request,
 }
 
 static tp_status run_export(const tp_job_worker_proto_request *request,
-                            tp_project *project, worker_cancel *cancel,
+                            tp_project *project, tp_cancel_source *cancel,
                             tp_job_worker_proto_response *response,
                             tp_error *err) {
-    const tp_cancel_token cancel_token = {
-        worker_cancel_requested, cancel};
+    const tp_cancel_token cancel_token = tp_cancel_source_token(cancel);
     int eligible = 0;
     for (int i = 0; i < project->atlas_count; ++i) {
         const tp_project_atlas *atlas = &project->atlases[i];
@@ -614,7 +600,7 @@ static tp_status run_export(const tp_job_worker_proto_request *request,
         if (!enabled) {
             continue;
         }
-        if (worker_cancel_requested(cancel)) {
+        if (tp_cancel_source_poll(cancel)) {
             break;
         }
         current++;
@@ -736,8 +722,7 @@ static tp_status run_export(const tp_job_worker_proto_request *request,
             break;
         }
     }
-    const bool cancelled =
-        cancel->requested || cancel->transport_failed;
+    const bool cancelled = tp_cancel_source_fired(cancel);
     response->export_result.partial_publication =
         response->export_result.targets > 0 &&
         (cancelled || first_status != TP_STATUS_OK);
@@ -763,7 +748,7 @@ int tp_job_worker_main_request(const uint8_t *bytes, size_t length) {
     const double start = worker_now_ms();
 
     tp_project *project = NULL;
-    worker_cancel cancel = {0};
+    tp_cancel_source cancel = {.probe = child_stdin_probe};
     if (status == TP_STATUS_OK) {
         status = tp_project_load_buffer(
             (const char *)request.project_json,
@@ -803,11 +788,10 @@ int tp_job_worker_main_request(const uint8_t *bytes, size_t length) {
      * encoded SUCCEEDED+CANCELLED, was rejected, the worker exited with no frame
      * at all, and the host reported "job worker process crashed"; a Pack or
      * Export whose control channel died reported a silently truncated success. */
-    if ((cancel.requested || cancel.transport_failed) &&
-        status != TP_STATUS_CANCELLED) {
+    if (tp_cancel_source_fired(&cancel) && status != TP_STATUS_CANCELLED) {
         status = tp_error_set(
             &error, TP_STATUS_CANCELLED, "%s",
-            cancel.transport_failed
+            tp_cancel_source_reason(&cancel) == TP_CANCEL_REASON_CONTROL_LOST
                 ? "job worker control channel failed"
                 : "job was cancelled");
     }

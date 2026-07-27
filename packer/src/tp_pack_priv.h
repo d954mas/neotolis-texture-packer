@@ -44,8 +44,7 @@ typedef void (*tp_pack_image_observer)(
 tp_status tp_pack_cancellable_observed(const tp_pack_settings *settings,
                                        struct tp_arena *arena,
                                        struct tp_result **out_result,
-                                       tp_pack_cancel_poll cancel_poll,
-                                       void *cancel_ctx,
+                                       const tp_cancel_token *cancel,
                                        tp_pack_image_observer observer,
                                        void *observer_ctx, tp_error *err);
 
@@ -56,14 +55,12 @@ tp_status tp_pack_cancellable_observed(const tp_pack_settings *settings,
  * process: reading the artifact into a tp_result here would pay a second full
  * decode of every page for a result nobody in this process ever reads.
  *
- * On observed cancellation the return is TP_STATUS_OK, `*out_cancelled` is true,
- * nothing was published, and `out_path` is empty -- identical to the cancel
- * contract of tp_pack_cancellable. `out_cancelled` is required. */
+ * On observed cancellation the return is TP_STATUS_CANCELLED and nothing was
+ * published -- identical to the cancel contract of tp_pack_cancellable. Every
+ * non-OK return (cancellation included) leaves `out_path` empty. */
 tp_status tp_pack_produce_observed(const tp_pack_settings *settings,
                                    char *out_path, size_t out_path_cap,
-                                   bool *out_cancelled,
-                                   tp_pack_cancel_poll cancel_poll,
-                                   void *cancel_ctx,
+                                   const tp_cancel_token *cancel,
                                    tp_pack_image_observer observer,
                                    void *observer_ctx, tp_error *err);
 

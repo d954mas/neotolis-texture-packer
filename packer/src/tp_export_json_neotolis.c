@@ -425,7 +425,7 @@ tp_status tp_export_json_neotolis_write(const tp_export_prepared *prep, const tp
         return tp_error_set(err, TP_STATUS_OOM, "json-neotolis: OOM building JSON");
     }
 
-    if (!tp_fs_write_file(path, sb.buf, sb.len)) { /* binary: keep LF */
+    if (!tp_fs_write_file_atomic(path, sb.buf, sb.len)) { /* binary: keep LF */
         free(sb.buf);
         return tp_error_set(err, TP_STATUS_BAD_PROJECT, "json-neotolis: cannot write '%s'", path);
     }

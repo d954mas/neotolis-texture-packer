@@ -516,7 +516,7 @@ static tp_status write_text(const char *base, const char *ext, const tp_sb *sb, 
     if (st != TP_STATUS_OK) {
         return st;
     }
-    if (!tp_fs_write_file(path, sb->buf, sb->len)) { /* binary: keep LF */
+    if (!tp_fs_write_file_atomic(path, sb->buf, sb->len)) { /* binary: keep LF */
         return tp_error_set(err, TP_STATUS_BAD_PROJECT, "defold: cannot write '%s'", path);
     }
     return TP_STATUS_OK;

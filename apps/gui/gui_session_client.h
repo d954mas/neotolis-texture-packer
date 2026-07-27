@@ -13,7 +13,13 @@ extern "C" {
 #endif
 
 #define GUI_SESSION_CLIENT_MAX_REDUCERS 16U
-#define GUI_SESSION_CLIENT_MAX_PENDING_SUBMITS 64U
+/* A PENDING receipt resolves on the MODEL_COMMITTED event that carries its
+ * transaction, and those events come from the observation ring -- so more PENDING
+ * receipts than the ring holds is structurally impossible, not a tuned bound.
+ * More than a ring's worth of commits between two observations overflows the ring,
+ * which forces a resync that resolves every receipt by revision instead. */
+#define GUI_SESSION_CLIENT_MAX_PENDING_SUBMITS \
+    TP_SESSION_OBSERVATION_EVENT_CAPACITY
 #define GUI_SESSION_CLIENT_MAX_ID_GENERATION_ATTEMPTS 8U
 
 typedef enum gui_session_submit_echo_state {

@@ -304,6 +304,32 @@ packet text: master-spec §14.1 gains the worker mode (argv flag for worker mode
 then frame magic selects job vs build service), and §10.6 records wire v2 with
 the path + u64 size terminal frame.
 
+## Phase 2 ledger (post-review packets)
+
+**S9 — merged fresh-review + Codex findings.** Landed: `c58d21a`. Artifact
+path containment, cancelled-after-success orphan deletion, host-pid `req-`
+keying, 2 GiB artifact cap, `elapsed_ms` on synthesized terminals, real
+cancel tests (falsification-tested), DRAINING wedge, forced shutdown chain,
+observation in the (now consecutive) shutdown budget, `--shot` rendered
+counter, descriptor-row oracle sibling, per-site debt allowances, R22 bound
+to owning tests + gate-owner class, seam fence verifies `#ifdef` placement.
+Deviation: `submitted_revision` kept (spec-normative).
+
+**S10 — cancel unification 9 forms → 5 + two reserves.** `tp_cancel_token`
+is the only library cancel type (`tp_pack_cancel_poll` deleted, adapter
+gone); cancellation is `TP_STATUS_CANCELLED` everywhere (`out_cancelled`
+and the OK+NULL-result convention deleted — this supersedes the
+`tp_pack_produce_observed(..., out_cancelled, ...)` signature in the P3
+packet text above; the cancelled-pack-inside-export latent hole is closed
+and asserted via `report.pack_failed`); `tp_cancel_source` carries the
+latched reason (REQUESTED/CONTROL_LOST) replacing the worker's two bools;
+five physical forms named in `tp_cancel.h` with their forcing boundaries.
+Reserves: pending-map capacity derived from
+`TP_SESSION_OBSERVATION_EVENT_CAPACITY`; atomic export publication
+(`tp_fs_write_file_atomic`, three exporter sites, old file survives a
+failed replace). Production net +124 (+94 is the named `tp_cancel_source`
+module; the unification proper is −40).
+
 ## Decision records
 
 - **Escape after a deferred gesture commit is accepted as-is.** `frame()` runs

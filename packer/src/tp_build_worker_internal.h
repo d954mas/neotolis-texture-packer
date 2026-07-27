@@ -10,6 +10,7 @@
  * every destination (including non-ASCII / long paths) now packs through the
  * worker via an ASCII staging dir + UTF-8 publication (H0.4). */
 
+#include "tp_core/tp_cancel.h"
 #include "tp_core/tp_error.h"
 #include "tp_core/tp_image.h"
 #include "tp_core/tp_pack.h"
@@ -20,17 +21,14 @@ extern "C" {
 
 /* Optional knobs for a worker run. All-zero = production defaults (own module
  * path, 5-minute safety timeout, full 64 KiB reply cap, no cancellation).
- * `worker_exe`, `timeout_ms` and `reply_cap` are test seams;
- * `cancel_poll`/`cancel_ctx` carry cooperative cancellation from
- * tp_pack_cancellable. */
+ * `worker_exe`, `timeout_ms` and `reply_cap` are test seams; `cancel` carries
+ * cooperative cancellation from tp_pack_cancellable. */
 typedef struct tp_build_worker_opts {
-    const char *worker_exe;           /* NULL = this process's own module path */
-    int timeout_ms;                   /* <= 0 = default 5-min safety timeout */
-    size_t reply_cap;                 /* 0 = default 64 KiB; a lowered cap (< pipe buffer)
-                                       * lets a test drive the over-cap fail-closed branch */
-    tp_pack_cancel_poll cancel_poll;  /* NULL = no cancellation */
-    void *cancel_ctx;
-    bool *out_cancelled;              /* set true iff cancellation was observed; may be NULL */
+    const char *worker_exe;         /* NULL = this process's own module path */
+    int timeout_ms;                 /* <= 0 = default 5-min safety timeout */
+    size_t reply_cap;               /* 0 = default 64 KiB; a lowered cap (< pipe buffer)
+                                     * lets a test drive the over-cap fail-closed branch */
+    const tp_cancel_token *cancel;  /* NULL = no cancellation */
 } tp_build_worker_opts;
 
 /* Runs one atlas through the private build worker. Mirrors tp_build_driver_run and
@@ -45,7 +43,7 @@ typedef struct tp_build_worker_opts {
  *   OK reply but no readable artifact, or a valid artifact the host could not
  *     publish (dest locked / parent dir absent / cross-device)  -> TP_STATUS_BUILDER_CRASHED
  *   malformed / truncated / oversized reply, clean exit  -> TP_STATUS_BUILDER_FAILED (fail closed)
- *   cancellation observed                                -> TP_STATUS_OK, *opts->out_cancelled = true, nothing published */
+ *   cancellation observed                                -> TP_STATUS_CANCELLED, nothing published */
 tp_status tp_build_worker_run(const tp_pack_settings *settings,
                               tp_image_rgba8 *loaded_images,
                               const char *out_path, tp_error *err);

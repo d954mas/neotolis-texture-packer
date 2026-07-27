@@ -368,8 +368,9 @@ static bool cancel_after_a_few_polls(void *ctx) {
     return *polls > 3;
 }
 
-/* Cancellation mid-pack: hang worker + a cancel poll -> the child is killed,
- * nothing is published, staging is gone, and NO builder error is surfaced. */
+/* Cancellation mid-pack: hang worker + a cancel token -> the child is killed,
+ * nothing is published, staging is gone, and the outcome is TP_STATUS_CANCELLED
+ * (never a builder failure, and never a success with no artifact). */
 void test_cancel_kills_worker_and_cleans_staging(void) {
     char path[1024];
     TEST_ASSERT_TRUE(snprintf(path, sizeof path, "%s/wrk_cancel.ntpack", g_dir) > 0);
@@ -380,17 +381,16 @@ void test_cancel_kills_worker_and_cleans_staging(void) {
     tp_error err = {{0}};
     const int staging_before = count_staging_dirs(g_dir);
     int polls = 0;
-    bool cancelled = false;
+    const tp_cancel_token cancel = {cancel_after_a_few_polls, &polls};
     tp_build_worker_opts opts;
     memset(&opts, 0, sizeof opts);
     opts.worker_exe = g_worker_hang;
-    opts.cancel_poll = cancel_after_a_few_polls;
-    opts.cancel_ctx = &polls;
-    opts.out_cancelled = &cancelled;
+    opts.cancel = &cancel;
 
     tp_status st = tp_build_worker_run_opts(&s, NULL, path, &opts, &err);
-    TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_OK, st, "cancel must not surface a builder error");
-    TEST_ASSERT_TRUE_MESSAGE(cancelled, "cancel was not observed");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_CANCELLED, st,
+                                  "cancel must report CANCELLED, not a builder error");
+    TEST_ASSERT_TRUE_MESSAGE(polls > 3, "the cancel token was not polled");
     TEST_ASSERT_FALSE_MESSAGE(tp_fs_exists(path), "cancel published an artifact");
     TEST_ASSERT_EQUAL_INT_MESSAGE(staging_before, count_staging_dirs(g_dir), "cancel left staging behind");
 }

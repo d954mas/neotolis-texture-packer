@@ -37,6 +37,14 @@ bool tp_fs_flush(FILE *file); /* checked stdio flush */
 bool tp_fs_sync(FILE *file);  /* checked flush + durable file sync */
 bool tp_fs_close(FILE *file);
 bool tp_fs_write_file(const char *path_utf8, const void *data, size_t size);
+/* Same bytes, but the destination is never observed half-written: the content goes
+ * to a sibling temp and is published with one tp_fs_replace. A failure at any step
+ * removes the temp and leaves an existing destination byte-for-byte intact. Not
+ * durability (no fsync) -- exports are reproducible, so the property that matters
+ * is that a failed write cannot destroy the previous export. */
+#define TP_FS_ATOMIC_TEMP_PATH_MAX 4160 /* TP_IDENTITY_PATH_MAX + ".tp-tmp-<pid>" */
+bool tp_fs_write_file_atomic(const char *path_utf8, const void *data,
+                             size_t size);
 
 bool tp_fs_stat(const char *path_utf8, tp_fs_info *out);
 bool tp_fs_exists(const char *path_utf8);

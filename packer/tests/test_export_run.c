@@ -1022,6 +1022,173 @@ static void test_report_page_oom_leaves_no_partial_runs(void) {
     tp_arena_destroy(arena);
 }
 
+static uint8_t *read_whole_file(const char *path, size_t *out_size) {
+    *out_size = 0U;
+    FILE *file = fopen(path, "rb");
+    if (!file) {
+        return NULL;
+    }
+    (void)fseek(file, 0, SEEK_END);
+    const long size = ftell(file);
+    rewind(file);
+    uint8_t *bytes = (size > 0) ? (uint8_t *)malloc((size_t)size) : NULL;
+    if (bytes && fread(bytes, 1U, (size_t)size, file) == (size_t)size) {
+        *out_size = (size_t)size;
+    } else {
+        free(bytes);
+        bytes = NULL;
+    }
+    (void)fclose(file);
+    return bytes;
+}
+
+/* The exporters publish through tp_fs_write_file_atomic, so a failed write must
+ * leave neither a half-written destination nor its sibling temp behind. */
+static bool any_atomic_temp_left_in(const char *directory) {
+    tp_fs_dir *dir = tp_fs_dir_open(directory);
+    if (!dir) {
+        return false;
+    }
+    bool found = false;
+    tp_fs_dir_entry entry;
+    while (!found && tp_fs_dir_next(dir, &entry) == TP_FS_DIR_ENTRY) {
+        found = strstr(entry.name, ".tp-tmp-") != NULL;
+    }
+    tp_fs_dir_close(dir);
+    return found;
+}
+
+/* One atlas, one json-neotolis target at `base`. Returned project is owned. */
+static tp_project *make_single_target_project(const char *base) {
+    tp_project *project = tp_project_create();
+    if (!project) {
+        return NULL;
+    }
+    tp_project_atlas *atlas = tp_project_get_atlas(project, 0);
+    atlas->shape = 0; /* RECT */
+    atlas->allow_transform = true;
+    atlas->power_of_two = false;
+    atlas->padding = 0;
+    atlas->margin = 0;
+    atlas->alpha_threshold = 1;
+    atlas->max_size = 1024;
+    atlas->pixels_per_unit = 1.0F;
+    if (tp_project_atlas_add_target(atlas, "json-neotolis", base, NULL) !=
+        TP_STATUS_OK) {
+        tp_project_destroy(project);
+        return NULL;
+    }
+    return project;
+}
+
+/* Overwriting an existing page really publishes the new bytes (the atomic path
+ * must not degenerate into "write the temp and forget to promote it"). */
+static void test_atomic_export_overwrite_publishes_the_new_content(void) {
+    char base[1100];
+    char page[1200];
+    TEST_ASSERT_TRUE(snprintf(base, sizeof base, "%s/atomic_ovr", g_dir) > 0);
+    TEST_ASSERT_TRUE(snprintf(page, sizeof page, "%s-0.png", base) > 0);
+    static const char stale[] = "STALE-PAGE-FROM-A-PREVIOUS-EXPORT";
+    TEST_ASSERT_TRUE(tp_fs_write_file(page, stale, sizeof stale - 1U));
+
+    tp_project *project = make_single_target_project(base);
+    TEST_ASSERT_NOT_NULL(project);
+    tp_pack_sprite_desc sprite = {
+        .name = "wide", .rgba = g_wide, .w = 120, .h = 24,
+        .origin_x = 0.5F, .origin_y = 0.5F};
+    tp_arena *arena = tp_arena_create(0);
+    TEST_ASSERT_NOT_NULL(arena);
+    tp_export_notices notices;
+    tp_export_notices_init(&notices);
+    tp_export_report report;
+    memset(&report, 0, sizeof report);
+    const tp_export_run_opts opts = {.report = &report};
+    tp_error error = {{0}};
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_export_run_ex(project, 0, &sprite, 1, g_dir, arena, &notices, NULL,
+                         &opts, &error),
+        error.msg);
+    TEST_ASSERT_EQUAL_INT(1, report.target_count);
+    TEST_ASSERT_TRUE(report.targets[0].ok);
+    TEST_ASSERT_EQUAL_INT(TP_EXPORT_WRITER_SUCCEEDED,
+                          report.targets[0].writer_outcome);
+
+    size_t written = 0U;
+    uint8_t *bytes = read_whole_file(page, &written);
+    TEST_ASSERT_NOT_NULL(bytes);
+    TEST_ASSERT_TRUE_MESSAGE(written > sizeof stale - 1U,
+                             "the stale page survived the overwrite");
+    static const uint8_t png_magic[4] = {0x89U, 0x50U, 0x4EU, 0x47U};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, memcmp(bytes, png_magic, sizeof png_magic),
+                                  "the published page is not a PNG");
+    free(bytes);
+    TEST_ASSERT_FALSE_MESSAGE(any_atomic_temp_left_in(g_dir),
+                              "a successful export left its sibling temp behind");
+
+    tp_export_notices_free(&notices);
+    tp_arena_destroy(arena);
+    tp_project_destroy(project);
+    (void)remove(page);
+}
+
+/* Publication failure: the destination page path is an existing DIRECTORY, so the
+ * temp writes fine and the replace is what fails. The target is classified
+ * WRITER_FAILED, the pre-existing destination is untouched, and no temp is left. */
+static void test_atomic_export_replace_failure_keeps_the_old_file(void) {
+    char base[1100];
+    char page[1200];
+    char sentinel[1300];
+    TEST_ASSERT_TRUE(snprintf(base, sizeof base, "%s/atomic_fail", g_dir) > 0);
+    TEST_ASSERT_TRUE(snprintf(page, sizeof page, "%s-0.png", base) > 0);
+    TEST_ASSERT_TRUE(snprintf(sentinel, sizeof sentinel, "%s/keep.txt", page) > 0);
+    (void)remove(sentinel);
+    (void)tp_fs_remove_dir(page);
+    TEST_ASSERT_TRUE(tp_fs_create_dir(page));
+    static const char keep[] = "OLD";
+    TEST_ASSERT_TRUE(tp_fs_write_file(sentinel, keep, sizeof keep - 1U));
+
+    tp_project *project = make_single_target_project(base);
+    TEST_ASSERT_NOT_NULL(project);
+    tp_pack_sprite_desc sprite = {
+        .name = "wide", .rgba = g_wide, .w = 120, .h = 24,
+        .origin_x = 0.5F, .origin_y = 0.5F};
+    tp_arena *arena = tp_arena_create(0);
+    TEST_ASSERT_NOT_NULL(arena);
+    tp_export_notices notices;
+    tp_export_notices_init(&notices);
+    tp_export_report report;
+    memset(&report, 0, sizeof report);
+    const tp_export_run_opts opts = {.report = &report};
+    tp_error error = {{0}};
+
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_BAD_PROJECT,
+        tp_export_run_ex(project, 0, &sprite, 1, g_dir, arena, &notices, NULL,
+                         &opts, &error));
+    TEST_ASSERT_EQUAL_INT(1, report.target_count);
+    TEST_ASSERT_FALSE(report.targets[0].ok);
+    TEST_ASSERT_EQUAL_INT(TP_EXPORT_WRITER_FAILED,
+                          report.targets[0].writer_outcome);
+    TEST_ASSERT_TRUE_MESSAGE(tp_fs_is_dir(page),
+                             "a failed publish destroyed the destination");
+    size_t kept = 0U;
+    uint8_t *bytes = read_whole_file(sentinel, &kept);
+    TEST_ASSERT_NOT_NULL(bytes);
+    TEST_ASSERT_EQUAL_size_t(sizeof keep - 1U, kept);
+    TEST_ASSERT_EQUAL_INT(0, memcmp(bytes, keep, kept));
+    free(bytes);
+    TEST_ASSERT_FALSE_MESSAGE(any_atomic_temp_left_in(g_dir),
+                              "a failed export left its sibling temp behind");
+
+    tp_export_notices_free(&notices);
+    tp_arena_destroy(arena);
+    tp_project_destroy(project);
+    (void)remove(sentinel);
+    (void)tp_fs_remove_dir(page);
+}
+
 static bool cancel_export_run(void *ctx) {
     (void)ctx;
     return true;
@@ -1078,6 +1245,11 @@ static void test_export_run_cancels_the_pack_worker_before_artifact_publication(
     TEST_ASSERT_FALSE_MESSAGE(
         artifact_exists,
         "accepted Export cancellation during Pack must prevent .ntpack publication");
+    /* A cancelled Pack is not a failed Pack. Before cancellation became a status
+     * the pack returned OK with a NULL result and this branch never ran at all. */
+    TEST_ASSERT_FALSE_MESSAGE(
+        report.pack_failed,
+        "a cancelled Pack must not be reported as a pack failure");
 
     tp_export_notices_free(&notices);
     tp_arena_destroy(arena);
@@ -1206,6 +1378,9 @@ static void test_export_run_honors_cancel_before_safe_pack_phase(void) {
                          &runs, &opts, &error));
     TEST_ASSERT_EQUAL_INT(0, runs);
     TEST_ASSERT_EQUAL_INT(0, report.target_count);
+    TEST_ASSERT_FALSE_MESSAGE(
+        report.pack_failed,
+        "a cancel before the pack phase must not be reported as a pack failure");
     TEST_ASSERT_NOT_NULL(strstr(error.msg, "cancel"));
 
     tp_export_notices_free(&notices);
@@ -1237,6 +1412,8 @@ int main(int argc, char **argv) {
     RUN_TEST(test_snapshot_report_marks_nonempty_input_ready_before_output_resolution);
     RUN_TEST(test_report_marks_pre_target_setup_failure_as_pack_failed);
     RUN_TEST(test_report_page_oom_leaves_no_partial_runs);
+    RUN_TEST(test_atomic_export_overwrite_publishes_the_new_content);
+    RUN_TEST(test_atomic_export_replace_failure_keeps_the_old_file);
     RUN_TEST(test_export_run_honors_cancel_before_safe_pack_phase);
     RUN_TEST(test_export_run_cancels_the_pack_worker_before_artifact_publication);
     RUN_TEST(test_snapshot_export_polls_cancel_before_each_output_directory_creation);

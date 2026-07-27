@@ -453,8 +453,7 @@ static tp_status preflight_sprite_pixels(const tp_pack_settings *settings,
 }
 
 static tp_status load_path_images(const tp_pack_settings *settings,
-                                  tp_pack_cancel_poll cancel_poll,
-                                  void *cancel_ctx,
+                                  const tp_cancel_token *cancel,
                                   tp_pack_image_observer observer,
                                   void *observer_ctx,
                                   tp_image_rgba8 **out_images,
@@ -494,10 +493,11 @@ static tp_status load_path_images(const tp_pack_settings *settings,
         /* Decoding a large atlas is the longest uninterruptible stretch of a
          * pack, so honour cancellation BETWEEN images: without this the caller's
          * cancel could only take effect once every source had been decoded. */
-        if (cancel_poll && cancel_poll(cancel_ctx)) {
+        if (tp_cancel_requested(cancel)) {
             free(area_entries);
             free_loaded_images(images, settings->sprite_count);
-            return TP_STATUS_CANCELLED;
+            return tp_error_set(err, TP_STATUS_CANCELLED,
+                                "tp_pack: cancelled while decoding sources");
         }
         const tp_pack_sprite_desc *sprite = &settings->sprites[i];
         const uint8_t *pixels = sprite->rgba;
@@ -564,34 +564,29 @@ static tp_status load_path_images(const tp_pack_settings *settings,
 
 tp_status tp_pack(const tp_pack_settings *settings, struct tp_arena *arena, struct tp_result **out_result,
                   tp_error *err) {
-    return tp_pack_cancellable(settings, arena, out_result, NULL, NULL, err);
+    return tp_pack_cancellable(settings, arena, out_result, NULL, err);
 }
 
 tp_status tp_pack_cancellable(const tp_pack_settings *settings, struct tp_arena *arena,
-                              struct tp_result **out_result, tp_pack_cancel_poll cancel_poll,
-                              void *cancel_ctx, tp_error *err) {
-    return tp_pack_cancellable_observed(settings, arena, out_result, cancel_poll,
-                                        cancel_ctx, NULL, NULL, err);
+                              struct tp_result **out_result,
+                              const tp_cancel_token *cancel, tp_error *err) {
+    return tp_pack_cancellable_observed(settings, arena, out_result, cancel,
+                                        NULL, NULL, err);
 }
 
 tp_status tp_pack_produce_observed(const tp_pack_settings *settings,
                                    char *out_path, size_t out_path_cap,
-                                   bool *out_cancelled,
-                                   tp_pack_cancel_poll cancel_poll,
-                                   void *cancel_ctx,
+                                   const tp_cancel_token *cancel,
                                    tp_pack_image_observer observer,
                                    void *observer_ctx, tp_error *err) {
     if (out_path && out_path_cap > 0U) {
         out_path[0] = '\0';
     }
-    if (out_cancelled) {
-        *out_cancelled = false;
-    }
     /* 512 mirrors NtBuilderContext.output_path; a smaller buffer could silently
      * truncate a destination the builder would then fail to open. */
-    if (!out_path || out_path_cap < 512U || !out_cancelled) {
+    if (!out_path || out_path_cap < 512U) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
-                            "tp_pack: produce requires a 512-byte path buffer and cancel flag");
+                            "tp_pack: produce requires a 512-byte path buffer");
     }
 
     tp_status st = validate_settings(settings, err);
@@ -609,13 +604,8 @@ tp_status tp_pack_produce_observed(const tp_pack_settings *settings,
      * the parent (the worker boundary owns UTF-8 reads + validation, decision
      * 0018); the driver then packs from raw pixels only. */
     tp_image_rgba8 *path_images = NULL;
-    st = load_path_images(settings, cancel_poll, cancel_ctx, observer, observer_ctx,
+    st = load_path_images(settings, cancel, observer, observer_ctx,
                           &path_images, err);
-    if (st == TP_STATUS_CANCELLED) {
-        out_path[0] = '\0';
-        *out_cancelled = true;
-        return TP_STATUS_OK;
-    }
     if (st != TP_STATUS_OK) {
         out_path[0] = '\0';
         return st;
@@ -624,14 +614,12 @@ tp_status tp_pack_produce_observed(const tp_pack_settings *settings,
     /* The worker consumes `path_images` (frees them on every path). It packs in a
      * private child process, stages an ASCII artifact, and atomically publishes to
      * `out_path` (Unicode / long paths included). Cancellation kills the worker,
-     * cleans staging, publishes nothing, and returns OK with no artifact. */
+     * cleans staging, publishes nothing, and returns TP_STATUS_CANCELLED. */
     tp_build_worker_opts wopts;
     memset(&wopts, 0, sizeof wopts);
-    wopts.cancel_poll = cancel_poll;
-    wopts.cancel_ctx = cancel_ctx;
-    wopts.out_cancelled = out_cancelled;
+    wopts.cancel = cancel;
     st = tp_build_worker_run_opts(settings, path_images, out_path, &wopts, err);
-    if (st != TP_STATUS_OK || *out_cancelled) {
+    if (st != TP_STATUS_OK) {
         out_path[0] = '\0';
     }
     return st;
@@ -640,8 +628,7 @@ tp_status tp_pack_produce_observed(const tp_pack_settings *settings,
 tp_status tp_pack_cancellable_observed(const tp_pack_settings *settings,
                                        struct tp_arena *arena,
                                        struct tp_result **out_result,
-                                       tp_pack_cancel_poll cancel_poll,
-                                       void *cancel_ctx,
+                                       const tp_cancel_token *cancel,
                                        tp_pack_image_observer observer,
                                        void *observer_ctx, tp_error *err) {
     if (out_result) {
@@ -661,13 +648,11 @@ tp_status tp_pack_cancellable_observed(const tp_pack_settings *settings,
     }
 
     char path[512];
-    bool cancelled = false;
-    st = tp_pack_produce_observed(settings, path, sizeof path, &cancelled,
-                                  cancel_poll, cancel_ctx, observer,
+    st = tp_pack_produce_observed(settings, path, sizeof path, cancel, observer,
                                   observer_ctx, err);
-    if (st != TP_STATUS_OK || cancelled) {
+    if (st != TP_STATUS_OK) {
         tp_name_map_destroy(names);
-        return st; /* on cancel st is TP_STATUS_OK and *out_result stays NULL */
+        return st; /* cancellation is TP_STATUS_CANCELLED; *out_result stays NULL */
     }
 
     tp_result **results = NULL;

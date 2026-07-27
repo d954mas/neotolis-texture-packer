@@ -104,10 +104,6 @@ static tp_status export_cancel_poll(const tp_cancel_token *cancel,
                : TP_STATUS_OK;
 }
 
-static bool export_pack_cancel_poll(void *context) {
-    return tp_cancel_requested((const tp_cancel_token *)context);
-}
-
 static void *report_alloc(tp_arena *arena, size_t size) {
 #ifdef TP_ENABLE_TEST_SEAMS
     if (s_report_alloc_fail == 0) {
@@ -583,11 +579,14 @@ tp_status tp_export_run_ex(const tp_project *project, int atlas_index, const tp_
             if (st != TP_STATUS_OK) {
                 return st;
             }
-            st = tp_pack_cancellable(
-                &eff, arena, &groups[g].result,
-                cancel ? export_pack_cancel_poll : NULL, (void *)cancel, err);
+            st = tp_pack_cancellable(&eff, arena, &groups[g].result, cancel, err);
             if (st != TP_STATUS_OK) {
-                if (report) {
+                /* A cancelled Pack is not a failed Pack: it produced no result
+                 * BECAUSE the caller asked to stop, so the report must not blame
+                 * the pack phase. Before cancellation became a status this branch
+                 * was unreachable for cancel (produce returned OK with a NULL
+                 * result) and the run continued on a NULL group result. */
+                if (report && st != TP_STATUS_CANCELLED) {
                     report->pack_failed = true;
                 }
                 return st;

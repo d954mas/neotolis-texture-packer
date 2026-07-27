@@ -20,6 +20,7 @@
 #include <float.h>
 #include <stdint.h>
 
+#include "tp_core/tp_cancel.h"
 #include "tp_core/tp_error.h"
 #include "tp_core/tp_id.h"
 
@@ -168,18 +169,17 @@ tp_status tp_pack_settings_defaults(tp_pack_settings *out);
 tp_status tp_pack(const tp_pack_settings *settings, struct tp_arena *arena, struct tp_result **out_result,
                   tp_error *err);
 
-/* Cooperative cancellation for a long Pack. `poll(ctx)` returns true when the
- * caller has requested cancellation; the build-worker wait loop checks it while
- * the child runs and, on a true return, kills the worker, removes its staging,
- * publishes nothing, and returns TP_STATUS_OK with *out_result == NULL and no
- * builder error (a cancelled Pack is not a failure). A genuine success always
- * sets *out_result, so "OK with a NULL result" uniquely means cancelled. A NULL
- * poll disables cancellation; tp_pack() is exactly this with no poll. */
-typedef bool (*tp_pack_cancel_poll)(void *ctx);
-
+/* Cooperative cancellation for a long Pack, carried by the ONE library cancel
+ * type (tp_cancel_token). The decode loop and the build-worker wait loop poll it
+ * at bounded points; on a requested cancel the worker is killed, its staging is
+ * removed, nothing is published, and the call returns TP_STATUS_CANCELLED with
+ * *out_result == NULL. Cancellation is a status, never a success: *out_result is
+ * non-NULL if and only if the return is TP_STATUS_OK. A NULL token -- or a token
+ * whose callback is NULL -- disables cancellation; tp_pack() is exactly this with
+ * no token. */
 tp_status tp_pack_cancellable(const tp_pack_settings *settings, struct tp_arena *arena,
-                              struct tp_result **out_result, tp_pack_cancel_poll cancel_poll,
-                              void *cancel_ctx, tp_error *err);
+                              struct tp_result **out_result,
+                              const tp_cancel_token *cancel, tp_error *err);
 
 #ifdef __cplusplus
 }

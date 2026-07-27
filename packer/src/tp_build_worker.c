@@ -389,10 +389,6 @@ tp_status tp_build_worker_run_exe(const tp_pack_settings *settings, tp_image_rgb
 tp_status tp_build_worker_run_opts(const tp_pack_settings *settings, tp_image_rgba8 *loaded_images,
                                    const char *out_path, const tp_build_worker_opts *opts,
                                    tp_error *err) {
-    if (opts && opts->out_cancelled) {
-        *opts->out_cancelled = false;
-    }
-
     /* Resolve the worker executable BEFORE consuming loaded_images. A self-path
      * failure is NOT silently downgraded to an in-process build: that would run
      * nt_builder in the host and lose containment, so it fails closed. */
@@ -455,13 +451,14 @@ tp_status tp_build_worker_run_opts(const tp_pack_settings *settings, tp_image_rg
      * longer wedge the parent in a blocking read -- cancel/timeout kills it, which
      * breaks the pipes and lets the subsequent read reach EOF at once. */
     const int timeout_ms = (opts && opts->timeout_ms > 0) ? opts->timeout_ms : TP_BUILD_WORKER_TIMEOUT_MS;
+    const tp_cancel_token *cancel = opts ? opts->cancel : NULL;
     const double start = now_ms();
     tp_proc_result w = {TP_PROC_END_ABNORMAL, -1};
     bool finished = false;
     bool cancelled = false;
     bool timed_out = false;
     for (;;) {
-        if (opts && opts->cancel_poll && opts->cancel_poll(opts->cancel_ctx)) {
+        if (tp_cancel_requested(cancel)) {
             tp_proc_kill(proc);
             cancelled = true;
             break;
@@ -499,11 +496,11 @@ tp_status tp_build_worker_run_opts(const tp_pack_settings *settings, tp_image_rg
 
     if (cancelled) {
         tp_worker_remove_dir_tree(staging);
-        if (opts && opts->out_cancelled) {
-            *opts->out_cancelled = true;
-        }
         free(reply);
-        return TP_STATUS_OK; /* nothing published; caller maps this to a cancelled job */
+        /* Nothing published. CANCELLED is not a builder failure -- it is the one
+         * status meaning "the caller asked to stop". */
+        return tp_error_set(err, TP_STATUS_CANCELLED,
+                            "tp_pack: build worker cancelled before publication");
     }
     if (timed_out) {
         tp_worker_remove_dir_tree(staging);
