@@ -55,34 +55,7 @@ void reset_selection(void) {
 }
 
 void cancel_edit(void) {
-    s_edit_kind = EDIT_NONE;
-    s_edit_atlas = -1;
-    s_actions.edit_atlas_id = tp_id128_nil();
-    s_actions.edit_atlas_revision = 0;
-    s_actions.edit_anim_atlas_id = tp_id128_nil();
-    s_actions.edit_anim_id = tp_id128_nil();
-    s_actions.edit_anim_revision = 0;
-    s_edit_sprite[0] = '\0';
-    s_actions.edit_sprite_atlas_id = tp_id128_nil();
-    s_actions.edit_sprite_source_id = tp_id128_nil();
-    s_actions.edit_sprite_revision = 0;
-    s_actions.edit_sprite_source_key[0] = '\0';
-    s_edit_buf[0] = '\0';
-}
-
-/* --- start-edit entry points: the entry side of the same edit lifecycle as the inline-rename commit
- * path below (commit_active_edit, which inlines the atlas + animation rename and delegates the sprite
- * rename to commit_sprite_rename). They live here (Clay-free) so gui_view_lists and gui_view_settings
- * -- both of which start edits -- share one home. --- */
-static bool edit_text_fits(const char *value, size_t capacity,
-                           const char *entity) {
-    if (value && strlen(value) < capacity) {
-        return true;
-    }
-    set_statusf_ex(STATUS_ERROR,
-                   "%s name exceeds the GUI edit limit; it was not changed.",
-                   entity ? entity : "Item");
-    return false;
+    gui_draft_discard();
 }
 
 void start_atlas_edit(int i) {
@@ -103,24 +76,10 @@ void start_atlas_edit_ref(tp_id128 atlas_id, int64_t expected_revision) {
     if (!atlas) {
         return;
     }
-    if (!edit_text_fits(atlas->name, sizeof s_edit_buf, "Atlas")) {
-        return;
+    if (gui_text_edit_begin_atlas_name(
+            atlas->id, expected_revision, atlas->name)) {
+        set_status("Rename atlas: type, Enter to commit, Esc to discard.");
     }
-    cancel_edit();
-    s_edit_kind = EDIT_ATLAS;
-    s_edit_atlas = -1;
-    for (int i = 0; i < tp_session_snapshot_atlas_count(snapshot); ++i) {
-        const tp_snapshot_atlas *candidate =
-            tp_session_snapshot_atlas_at(snapshot, i);
-        if (candidate && tp_id128_eq(candidate->id, atlas_id)) {
-            s_edit_atlas = i;
-            break;
-        }
-    }
-    s_actions.edit_atlas_id = atlas->id;
-    s_actions.edit_atlas_revision = expected_revision;
-    memcpy(s_edit_buf, atlas->name, strlen(atlas->name) + 1U);
-    set_status("Rename atlas: type, Enter to commit, Esc to cancel.");
 }
 void start_anim_edit(int i) {
     const tp_session_snapshot *snapshot = gui_project_snapshot();
@@ -145,27 +104,10 @@ void start_anim_edit_ref(const gui_animation_ref *ref) {
     if (!animation) {
         return;
     }
-    if (!edit_text_fits(animation->name, sizeof s_edit_buf, "Animation")) {
-        return;
+    if (gui_text_edit_begin_animation_name(
+            ref, animation->name)) {
+        set_status("Rename animation: type, Enter to commit, Esc to discard.");
     }
-    cancel_edit();
-    s_edit_kind = EDIT_ANIM;
-    s_edit_anim = -1;
-    const tp_snapshot_atlas *atlas =
-        tp_session_snapshot_atlas_by_id(snapshot, ref->atlas_id);
-    for (int i = 0; atlas && i < atlas->animation_count; ++i) {
-        const tp_snapshot_animation *candidate =
-            tp_session_snapshot_animation_at(snapshot, atlas->id, i);
-        if (candidate && tp_id128_eq(candidate->id, ref->animation_id)) {
-            s_edit_anim = i;
-            break;
-        }
-    }
-    s_actions.edit_anim_atlas_id = ref->atlas_id;
-    s_actions.edit_anim_id = animation->id;
-    s_actions.edit_anim_revision = ref->expected_revision;
-    memcpy(s_edit_buf, animation->name, strlen(animation->name) + 1U);
-    set_status("Rename animation: type, Enter to commit, Esc to cancel.");
 }
 void start_sprite_edit_ref(const gui_sprite_ref *sprite,
                            const char *display_name) {
@@ -185,22 +127,10 @@ void start_sprite_edit_ref(const gui_sprite_ref *sprite,
     const tp_snapshot_sprite *ov = tp_session_snapshot_sprite_by_key(
         snapshot, sprite->atlas_id, sprite->source_id, sprite->source_key);
     const char *edit_value = (ov && ov->rename) ? ov->rename : display_name;
-    if (!edit_text_fits(sprite->source_key,
-                        sizeof s_actions.edit_sprite_source_key, "Region key") ||
-        !edit_text_fits(display_name, sizeof s_edit_sprite, "Region") ||
-        !edit_text_fits(edit_value, sizeof s_edit_buf, "Region")) {
-        return;
+    if (gui_text_edit_begin_sprite_rename(
+            sprite, edit_value)) {
+        set_status("Rename region: type, Enter to commit, Esc to discard.");
     }
-    cancel_edit();
-    s_edit_kind = EDIT_SPRITE;
-    s_actions.edit_sprite_atlas_id = sprite->atlas_id;
-    s_actions.edit_sprite_source_id = sprite->source_id;
-    s_actions.edit_sprite_revision = sprite->expected_revision;
-    memcpy(s_actions.edit_sprite_source_key, sprite->source_key,
-           strlen(sprite->source_key) + 1U);
-    memcpy(s_edit_sprite, display_name, strlen(display_name) + 1U);
-    memcpy(s_edit_buf, edit_value, strlen(edit_value) + 1U);
-    set_status("Rename region: type, Enter to commit, Esc clears/cancels.");
 }
 void start_sprite_edit(const sprite_row *row) {
     if (!row || row->is_folder || row->missing || !row->sprite_name ||
@@ -222,21 +152,30 @@ void start_sprite_edit(const sprite_row *row) {
 }
 
 bool gui_sprite_edit_matches(const sprite_row *row) {
-    return row && s_edit_kind == EDIT_SPRITE &&
+    const gui_draft_owner *draft = &s_actions.draft;
+    return row && draft->family == GUI_DRAFT_TEXT &&
+           draft->lifecycle.phase != GUI_EDIT_IDLE &&
+           draft->text.kind == GUI_TEXT_EDIT_SPRITE_RENAME &&
            row->source_key &&
-           tp_id128_eq(s_actions.edit_sprite_source_id, row->source_id) &&
-           strcmp(s_actions.edit_sprite_source_key, row->source_key) == 0;
+           tp_id128_eq(draft->text.source_id, row->source_id) &&
+           strcmp(draft->text.source_key, row->source_key) == 0;
 }
 
 bool gui_atlas_edit_matches(tp_id128 atlas_id) {
-    return s_edit_kind == EDIT_ATLAS &&
-           tp_id128_eq(s_actions.edit_atlas_id, atlas_id);
+    const gui_draft_owner *draft = &s_actions.draft;
+    return draft->family == GUI_DRAFT_TEXT &&
+           draft->lifecycle.phase != GUI_EDIT_IDLE &&
+           draft->text.kind == GUI_TEXT_EDIT_ATLAS_NAME &&
+           tp_id128_eq(draft->lifecycle.target_id, atlas_id);
 }
 
 bool gui_animation_edit_matches(tp_id128 atlas_id, tp_id128 animation_id) {
-    return s_edit_kind == EDIT_ANIM &&
-           tp_id128_eq(s_actions.edit_anim_atlas_id, atlas_id) &&
-           tp_id128_eq(s_actions.edit_anim_id, animation_id);
+    const gui_draft_owner *draft = &s_actions.draft;
+    return draft->family == GUI_DRAFT_TEXT &&
+           draft->lifecycle.phase != GUI_EDIT_IDLE &&
+           draft->text.kind == GUI_TEXT_EDIT_ANIMATION_NAME &&
+           tp_id128_eq(draft->text.atlas_id, atlas_id) &&
+           tp_id128_eq(draft->lifecycle.target_id, animation_id);
 }
 
 void clamp_selection(void) {

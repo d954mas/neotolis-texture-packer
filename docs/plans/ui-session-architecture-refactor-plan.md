@@ -168,23 +168,61 @@ explicit draft decision.
 **Goal:** reuse the R3a reducer for text-shaped values without creating a field
 framework.
 
-**Owned production area:** relevant actions, text widgets, list/settings views,
-project mutation/pending callers, and the R3 reducer tests.
+**Owned production area:** the concrete GUI draft owner, relevant actions,
+text widgets, list/settings/chrome views, main-loop edit routing, session
+adapters, project mutation/pending callers, the Save-As preflight seam, and the
+R3 reducer/action tests.
 
 **Implement:**
 
-1. Convert inline rename, text fields, and target path.
-2. Preserve the user's buffer on conflict, validation failure, OOM, and resync.
-3. Offer Apply Mine, Discard, and Copy only where Copy has real meaning.
-4. Test one representative action for each ordering:
+1. Lift the R3a lifecycle into one `gui_draft_owner` per GUI view. It contains
+   exactly one `gui_edit_state`, a closed family discriminator, and the two
+   concrete payloads needed so far: atlas scalar and text. Do not add a value
+   variant, field registry, callbacks, vtable, or global UI store.
+2. Convert exactly four current text semantics: atlas name, animation name,
+   sprite rename, and target `out_path`. The text payload stores its exact
+   domain kind, canonical structural identity, and one owned UTF-8 value.
+3. Permit only one active draft by construction. One observation reducer and
+   one receipt/conflict/resync path serve both concrete families.
+4. Preserve the user's text on conflict, validation failure, OOM, resync, and
+   target deletion. Apply Mine resolves the stable identity again against the
+   newest pinned snapshot and never performs automatic retry or merge.
+5. Keep engine-required caret/text memory as presentation-only scratch. It is
+   synchronized from the active draft and writes changes immediately back
+   through the action ingress; it is not another semantic owner.
+6. Offer Apply Mine, Discard, and Copy only where Copy has real meaning.
+7. Every text submit uses an exact identified terminal receipt. Target path
+   submits only `TP_TF_OUT_PATH` and never round-trips sibling fields.
+8. Test one representative action for each ordering:
    commit-first, choice-first, and preflight-first.
-5. Abort every outer action when its draft prerequisite fails.
+9. Abort every outer action when its draft prerequisite fails. Save As performs
+   its read-only path/identity/controller feasibility preflight before draft
+   submission; no continuation/token framework is introduced.
 
-**Delete:** converted callers of `gui_project_flush_pending` and
-`gui_project_pending_offer`, plus their superseded view buffers.
+**Delete:**
 
-**Gate:** no text loss and no outer action continues on an older committed
-state.
+- `s_edit_kind`, `s_edit_atlas`, `s_edit_anim`, `s_edit_sprite`, and
+  `s_edit_buf` as semantic state;
+- `edit_atlas_*`, `edit_anim_*`, and `edit_sprite_*` action-state mirrors;
+- `s_pending_commit_edit`, `s_pending_commit_edit_enter`,
+  `commit_active_edit`, `commit_sprite_rename`, and the force-cancel path that
+  loses an invalid draft;
+- `TARGET_INTENT_OUT_PATH`, its heap queue/drain route,
+  `CK_TARGET_OUTPATH`, and the target-path use of
+  `gui_project_pending_offer`;
+- the per-target path array as semantic state. A single active engine input
+  scratch may remain only as presentation storage;
+- converted GUI callers and implementations of the old revision-only rename
+  and path mutation routes. Their replacements are narrow identified-submit
+  endpoints with exact terminal receipts;
+- selection-change `cancel_edit()` paths that silently discard text.
+
+Stable widget identity remains owned by R4. R3b binds the draft to stable domain
+identity and must not pull the broader row/widget identity cutover forward.
+
+**Gate:** one active draft, no text loss, no outer action continues on an older
+committed state, all four text kinds build the exact operation/mask, and no old
+inline/path pending symbols remain.
 
 ### R3c — Grouped read-modify-write drafts and final legacy cutover
 

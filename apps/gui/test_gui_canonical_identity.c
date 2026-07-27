@@ -41,6 +41,22 @@ static char s_left_dir[512];
 static char s_right_dir[512];
 static char s_left_file[512];
 static char s_right_file[512];
+static uint64_t s_test_submit_id;
+
+static gui_session_submit_identity test_submit_identity(
+    char transaction_id[33]) {
+    gui_session_submit_identity identity = {0};
+    identity.origin_view_id.bytes[0] = 1U;
+    ++s_test_submit_id;
+    identity.draft_instance_id.bytes[0] = 2U;
+    memcpy(
+        &identity.draft_instance_id.bytes[8],
+        &s_test_submit_id, sizeof s_test_submit_id);
+    (void)snprintf(
+        transaction_id, 33, "%016llx%016llx",
+        1ULL, (unsigned long long)s_test_submit_id);
+    return identity;
+}
 
 static bool test_offer_atlas_draft(
     tp_id128 atlas_id, int64_t revision,
@@ -49,6 +65,48 @@ static bool test_offer_atlas_draft(
         atlas_id, revision, field, ivalue, fvalue);
     return gui_atlas_edit_value(
         atlas_id, field, NULL, NULL);
+}
+
+static bool test_submit_atlas_name(
+    tp_id128 atlas_id, int64_t revision,
+    const char *name) {
+    char transaction_id[33];
+    const gui_session_submit_identity identity =
+        test_submit_identity(transaction_id);
+    gui_session_submit_terminal terminal = {0};
+    tp_error error = {{0}};
+    return gui_project_submit_atlas_name(
+               atlas_id, revision, name, identity,
+               transaction_id, &terminal, &error) ==
+           TP_STATUS_OK;
+}
+
+static bool test_submit_animation_name(
+    const gui_animation_ref *animation,
+    const char *name) {
+    char transaction_id[33];
+    const gui_session_submit_identity identity =
+        test_submit_identity(transaction_id);
+    gui_session_submit_terminal terminal = {0};
+    tp_error error = {{0}};
+    return gui_project_submit_animation_name(
+               animation, name, identity,
+               transaction_id, &terminal, &error) ==
+           TP_STATUS_OK;
+}
+
+static bool test_submit_sprite_name(
+    const gui_sprite_ref *sprite,
+    const char *name) {
+    char transaction_id[33];
+    const gui_session_submit_identity identity =
+        test_submit_identity(transaction_id);
+    gui_session_submit_terminal terminal = {0};
+    tp_error error = {{0}};
+    return gui_project_submit_sprite_name(
+               sprite, name, identity,
+               transaction_id, &terminal, &error) ==
+           TP_STATUS_OK;
 }
 
 static bool remove_flat_test_dir(const char *root) {
@@ -220,7 +278,7 @@ static bool prepare_two_source_project(tp_id128 *left_id,
 
     gui_sprite_ref left_ref = {atlas->id, left->id, "shared.png",
                                tp_session_snapshot_revision(snapshot)};
-    if (!gui_project_set_sprite_rename(&left_ref, "left-name")) {
+    if (!test_submit_sprite_name(&left_ref, "left-name")) {
         char error[256];
         error[0] = '\0';
         (void)gui_project_take_op_error(error, sizeof error);
@@ -230,7 +288,7 @@ static bool prepare_two_source_project(tp_id128 *left_id,
     snapshot = gui_project_snapshot();
     gui_sprite_ref right_ref = {*atlas_id, *right_id, "shared.png",
                                 tp_session_snapshot_revision(snapshot)};
-    if (!gui_project_set_sprite_rename(&right_ref, "right-name")) {
+    if (!test_submit_sprite_name(&right_ref, "right-name")) {
         char error[256];
         error[0] = '\0';
         (void)gui_project_take_op_error(error, sizeof error);
@@ -440,7 +498,7 @@ void test_native_pack_marks_token_change_stale_without_host_side_probe(void) {
     admit_queued_job();
 
     snapshot = gui_project_snapshot();
-    TEST_ASSERT_TRUE(gui_project_set_atlas_name(
+    TEST_ASSERT_TRUE(test_submit_atlas_name(
         other_atlas_id, tp_session_snapshot_revision(snapshot),
         "unrelated-edit"));
 
@@ -591,7 +649,7 @@ void test_controller_guard_rejects_identity_change_before_flush_or_write(void) {
     char error[256] = {0};
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_UNSUPPORTED_CAPABILITY,
-        gui_project_save_as(
+        gui_project_save_as_preflight(
             first_path, error,
             sizeof error));
     TEST_ASSERT_EQUAL_INT(
@@ -603,6 +661,17 @@ void test_controller_guard_rejects_identity_change_before_flush_or_write(void) {
         gui_project_undo_depth());
     TEST_ASSERT_FALSE(
         gui_scan_exists(first_path));
+    TEST_ASSERT_EQUAL_INT(
+        GUI_EDIT_EDITING,
+        gui_draft_phase());
+    int preserved_padding = 0;
+    TEST_ASSERT_TRUE(
+        gui_atlas_edit_value(
+            atlas->id, GUI_ATLAS_PADDING,
+            &preserved_padding, NULL));
+    TEST_ASSERT_EQUAL_INT(
+        atlas->padding + 1,
+        preserved_padding);
 
     attached = false;
     gui_request_gesture_commit();
@@ -622,6 +691,11 @@ void test_controller_guard_rejects_identity_change_before_flush_or_write(void) {
     attached = true;
     /* No intervening frame observation: the guard must refresh through the
      * session client and recognize this as the same identity. */
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_project_save_as_preflight(
+            first_path, error,
+            sizeof error));
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
         gui_project_save_as(
@@ -645,7 +719,7 @@ void test_controller_guard_rejects_identity_change_before_flush_or_write(void) {
             atlas->padding + 1, 0.0F));
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_UNSUPPORTED_CAPABILITY,
-        gui_project_save_as(
+        gui_project_save_as_preflight(
             cross_path, error,
             sizeof error));
     TEST_ASSERT_EQUAL_INT64(
@@ -659,6 +733,9 @@ void test_controller_guard_rejects_identity_change_before_flush_or_write(void) {
         first_path, gui_project_path());
     TEST_ASSERT_FALSE(
         gui_scan_exists(cross_path));
+    TEST_ASSERT_EQUAL_INT(
+        GUI_EDIT_EDITING,
+        gui_draft_phase());
 
     attached = false;
     gui_request_gesture_commit();
@@ -688,6 +765,111 @@ void test_controller_guard_rejects_identity_change_before_flush_or_write(void) {
     TEST_ASSERT_TRUE(gui_project_test_new());
     (void)remove(first_path);
     (void)remove(cross_path);
+}
+
+void test_save_as_preflight_success_does_not_submit_or_write(void) {
+    char path[TP_IDENTITY_PATH_MAX];
+    (void)snprintf(
+        path, sizeof path,
+        "%s/preflight-read-only.ntpacker_project",
+        TP_GUI_IDENTITY_TEST_DIR);
+    (void)remove(path);
+
+    const tp_session_snapshot *snapshot =
+        gui_project_snapshot();
+    const tp_snapshot_atlas *atlas =
+        tp_session_snapshot_atlas_at(snapshot, 0);
+    TEST_ASSERT_NOT_NULL(atlas);
+    const tp_id128 atlas_id = atlas->id;
+    const int value = atlas->padding + 1;
+    const int64_t revision =
+        tp_session_snapshot_revision(snapshot);
+    const int undo_depth =
+        gui_project_undo_depth();
+    TEST_ASSERT_TRUE(
+        test_offer_atlas_draft(
+            atlas_id, revision,
+            GUI_ATLAS_PADDING, value, 0.0F));
+
+    char error[256] = {0};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_project_save_as_preflight(
+            path, error, sizeof error));
+    TEST_ASSERT_EQUAL_INT64(
+        revision,
+        tp_session_revision(
+            gui_project__test_session()));
+    TEST_ASSERT_EQUAL_INT(
+        undo_depth,
+        gui_project_undo_depth());
+    TEST_ASSERT_FALSE(gui_scan_exists(path));
+    TEST_ASSERT_EQUAL_INT(
+        GUI_EDIT_EDITING,
+        gui_draft_phase());
+    int preserved = 0;
+    TEST_ASSERT_TRUE(
+        gui_atlas_edit_value(
+            atlas_id, GUI_ATLAS_PADDING,
+            &preserved, NULL));
+    TEST_ASSERT_EQUAL_INT(value, preserved);
+
+    gui_draft_discard();
+    (void)remove(path);
+}
+
+void test_save_as_preflight_observe_failure_preserves_draft_and_model(void) {
+    char path[TP_IDENTITY_PATH_MAX];
+    (void)snprintf(
+        path, sizeof path,
+        "%s/preflight-observe-failure.ntpacker_project",
+        TP_GUI_IDENTITY_TEST_DIR);
+    (void)remove(path);
+
+    const tp_session_snapshot *snapshot =
+        gui_project_snapshot();
+    const tp_snapshot_atlas *atlas =
+        tp_session_snapshot_atlas_at(snapshot, 0);
+    TEST_ASSERT_NOT_NULL(atlas);
+    const tp_id128 atlas_id = atlas->id;
+    const int value = atlas->padding + 1;
+    const int64_t revision =
+        tp_session_snapshot_revision(snapshot);
+    const int undo_depth =
+        gui_project_undo_depth();
+    TEST_ASSERT_TRUE(
+        test_offer_atlas_draft(
+            atlas_id, revision,
+            GUI_ATLAS_PADDING, value, 0.0F));
+
+    gui_project__test_fail_next_observe();
+    char error[256] = {0};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OOM,
+        gui_project_save_as_preflight(
+            path, error, sizeof error));
+    TEST_ASSERT_NOT_NULL(
+        strstr(error, "observation test allocation failure"));
+    TEST_ASSERT_EQUAL_INT64(
+        revision,
+        tp_session_revision(
+            gui_project__test_session()));
+    TEST_ASSERT_EQUAL_INT(
+        undo_depth,
+        gui_project_undo_depth());
+    TEST_ASSERT_FALSE(gui_scan_exists(path));
+    TEST_ASSERT_EQUAL_INT(
+        GUI_EDIT_EDITING,
+        gui_draft_phase());
+    int preserved = 0;
+    TEST_ASSERT_TRUE(
+        gui_atlas_edit_value(
+            atlas_id, GUI_ATLAS_PADDING,
+            &preserved, NULL));
+    TEST_ASSERT_EQUAL_INT(value, preserved);
+
+    gui_draft_discard();
+    (void)remove(path);
 }
 
 void test_open_current_canonical_identity_rejects_before_replacement(void) {
@@ -826,12 +1008,13 @@ void test_oversized_names_cannot_enter_a_truncating_editor(void) {
     const tp_snapshot_atlas *atlas = tp_session_snapshot_atlas_at(snapshot, 0);
     TEST_ASSERT_NOT_NULL(atlas);
     const tp_id128 atlas_id = atlas->id;
-    TEST_ASSERT_TRUE(gui_project_set_atlas_name(
+    TEST_ASSERT_TRUE(test_submit_atlas_name(
         atlas_id, tp_session_snapshot_revision(snapshot), oversized));
     snapshot = gui_project_snapshot();
     cancel_edit();
     start_atlas_edit_ref(atlas_id, tp_session_snapshot_revision(snapshot));
-    TEST_ASSERT_EQUAL_INT(EDIT_NONE, s_edit_kind);
+    TEST_ASSERT_EQUAL_INT(
+        GUI_EDIT_IDLE, gui_draft_phase());
 
     const int animation_index =
         gui_project_create_animation(
@@ -846,12 +1029,13 @@ void test_oversized_names_cannot_enter_a_truncating_editor(void) {
     TEST_ASSERT_NOT_NULL(animation);
     gui_animation_ref animation_ref = {
         atlas_id, animation->id, tp_session_snapshot_revision(snapshot)};
-    TEST_ASSERT_TRUE(gui_project_set_anim_id(&animation_ref, oversized));
+    TEST_ASSERT_TRUE(test_submit_animation_name(&animation_ref, oversized));
     snapshot = gui_project_snapshot();
     animation_ref.expected_revision = tp_session_snapshot_revision(snapshot);
     cancel_edit();
     start_anim_edit_ref(&animation_ref);
-    TEST_ASSERT_EQUAL_INT(EDIT_NONE, s_edit_kind);
+    TEST_ASSERT_EQUAL_INT(
+        GUI_EDIT_IDLE, gui_draft_phase());
 
     (void)add_coin_source();
     snapshot = gui_project_snapshot();
@@ -864,14 +1048,15 @@ void test_oversized_names_cannot_enter_a_truncating_editor(void) {
     const gui_sprite_ref sprite = {
         atlas_id, source_id, "coin.png",
         tp_session_snapshot_revision(snapshot)};
-    TEST_ASSERT_TRUE(gui_project_set_sprite_rename(&sprite, oversized));
+    TEST_ASSERT_TRUE(test_submit_sprite_name(&sprite, oversized));
     snapshot = gui_project_snapshot();
     const gui_sprite_ref renamed = {
         atlas_id, source_id, "coin.png",
         tp_session_snapshot_revision(snapshot)};
     cancel_edit();
     start_sprite_edit_ref(&renamed, oversized);
-    TEST_ASSERT_EQUAL_INT(EDIT_NONE, s_edit_kind);
+    TEST_ASSERT_EQUAL_INT(
+        GUI_EDIT_IDLE, gui_draft_phase());
 }
 
 void test_recovery_entry_keeps_core_path_capacity(void) {
@@ -917,7 +1102,7 @@ void test_undo_redo_keep_last_successful_pack_result(void) {
     const int page_count = packed->page_count;
 
     const tp_session_snapshot *snapshot = gui_project_snapshot();
-    TEST_ASSERT_TRUE(gui_project_set_atlas_name(
+    TEST_ASSERT_TRUE(test_submit_atlas_name(
         atlas_id, tp_session_snapshot_revision(snapshot), "edited"));
     assert_atlas_name(atlas_id, "edited");
 
@@ -1087,8 +1272,10 @@ void test_sprite_edit_state_uses_canonical_duplicate_identity(void) {
 
     start_sprite_edit_ref(&ref, right->sprite_name);
 
-    TEST_ASSERT_EQUAL_INT(EDIT_SPRITE, s_edit_kind);
-    TEST_ASSERT_EQUAL_STRING("right-name", s_edit_buf);
+    TEST_ASSERT_EQUAL_INT(
+        GUI_EDIT_EDITING, gui_draft_phase());
+    TEST_ASSERT_EQUAL_STRING(
+        "right-name", gui_text_edit_value());
     TEST_ASSERT_TRUE(gui_sprite_edit_matches(right));
     TEST_ASSERT_FALSE(gui_sprite_edit_matches(row_for_source(left_id)));
 }
@@ -1105,21 +1292,52 @@ void test_sprite_edit_rejects_genuinely_stale_captured_revision(void) {
     const gui_sprite_ref ref = {atlas_id, right_id, right->source_key,
                                 tp_session_snapshot_revision(snapshot)};
     start_sprite_edit_ref(&ref, right->sprite_name);
-    TEST_ASSERT_TRUE(gui_project_set_atlas_name(
-        atlas_id, tp_session_snapshot_revision(snapshot), "changed-atlas"));
-    (void)snprintf(s_edit_buf, sizeof s_edit_buf, "%s", "must-not-land");
-
-    commit_sprite_rename();
+    char changed_atlas[] = "changed-atlas";
+    tp_operation operation = {
+        .kind = TP_OP_ATLAS_RENAME,
+        .atlas_id = {{0}},
+        .u.atlas_rename.name = changed_atlas,
+    };
+    operation.atlas_id = atlas_id;
+    tp_txn_request request = {
+        .schema = TP_TXN_SCHEMA,
+        .expected_revision =
+            tp_session_snapshot_revision(snapshot),
+        .label = "atlas.rename",
+        .author = "test",
+        .ops = &operation,
+        .op_count = 1,
+    };
+    (void)snprintf(
+        request.id_hex, sizeof request.id_hex,
+        "%s", "abababababababababababababababab");
+    tp_txn_result result = {0};
+    tp_error apply_error = {{0}};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_session_apply(
+            gui_project__test_session(), &request,
+            &result, &apply_error));
+    tp_txn_result_free(&result);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_project_frame_begin(&apply_error));
+    gui_project_frame_end();
+    TEST_ASSERT_TRUE(
+        gui_text_edit_update("must-not-land"));
+    gui_request_gesture_commit();
+    apply_pending();
 
     snapshot = gui_project_snapshot();
     const tp_snapshot_sprite *sprite = tp_session_snapshot_sprite_by_key(
         snapshot, atlas_id, right_id, "shared.png");
     TEST_ASSERT_NOT_NULL(sprite);
     TEST_ASSERT_EQUAL_STRING("right-name", sprite->rename);
-    char error[256];
-    error[0] = '\0';
-    TEST_ASSERT_TRUE(gui_project_take_op_error(error, sizeof error));
-    TEST_ASSERT_NOT_NULL(strstr(error, "revision"));
+    TEST_ASSERT_EQUAL_INT(
+        GUI_EDIT_CONFLICTED, gui_draft_phase());
+    TEST_ASSERT_EQUAL_STRING(
+        "must-not-land", gui_text_edit_value());
+    gui_draft_discard();
 }
 
 void test_delayed_animation_context_ref_never_retargets_after_index_shift(void) {
@@ -1235,7 +1453,7 @@ void test_recovery_notice_is_sticky_exact_and_clears_after_save_heals(void) {
     TEST_ASSERT_NOT_NULL(atlas);
     const tp_id128 atlas_id = atlas->id;
     tp_journal__test_set_record_limit(1U);
-    TEST_ASSERT_TRUE(gui_project_set_atlas_name(
+    TEST_ASSERT_TRUE(test_submit_atlas_name(
         atlas_id, tp_session_snapshot_revision(snapshot), "recovery-notice"));
 
     char save_path[512];
@@ -1277,8 +1495,8 @@ void test_recovery_notice_is_sticky_exact_and_clears_after_save_heals(void) {
     apply_pending();
     TEST_ASSERT_EQUAL_INT(
         GUI_EDIT_CONFLICTED,
-        gui_atlas_edit_phase());
-    gui_atlas_edit_discard();
+        gui_draft_phase());
+    gui_draft_discard();
     gui_recovery_notice after_drain = {0};
     TEST_ASSERT_TRUE(gui_project_recovery_notice_query(&after_drain));
     TEST_ASSERT_EQUAL_STRING(notice.notice_id, after_drain.notice_id);
@@ -1332,7 +1550,7 @@ void test_save_as_recovery_rebind_uses_post_save_identity(void) {
         "%s", attached_journal);
     tp_journal__test_set_record_limit(1U);
     TEST_ASSERT_TRUE(
-        gui_project_set_atlas_name(
+        test_submit_atlas_name(
             before_save_atlas->id,
             tp_session_snapshot_revision(before_save),
             "rebind-before-save"));
@@ -1383,7 +1601,7 @@ void test_save_as_recovery_rebind_uses_post_save_identity(void) {
             snapshot, 0);
     TEST_ASSERT_NOT_NULL(atlas);
     TEST_ASSERT_TRUE(
-        gui_project_set_atlas_name(
+        test_submit_atlas_name(
             atlas->id,
             tp_session_snapshot_revision(snapshot),
             "dirty-after-save"));
@@ -1434,7 +1652,7 @@ void test_save_as_projects_clean_identity_only_at_common_frame_observation(void)
         tp_session_snapshot_atlas_at(snapshot, 0);
     TEST_ASSERT_NOT_NULL(atlas);
     TEST_ASSERT_TRUE(
-        gui_project_set_atlas_name(
+        test_submit_atlas_name(
             atlas->id,
             tp_session_snapshot_revision(snapshot),
             "save-observation-boundary"));
@@ -1735,6 +1953,10 @@ int main(int argc, char **argv) {
         test_save_as_projects_clean_identity_only_at_common_frame_observation);
     RUN_TEST(
         test_controller_guard_rejects_identity_change_before_flush_or_write);
+    RUN_TEST(
+        test_save_as_preflight_success_does_not_submit_or_write);
+    RUN_TEST(
+        test_save_as_preflight_observe_failure_preserves_draft_and_model);
     RUN_TEST(
         test_open_current_canonical_identity_rejects_before_replacement);
     RUN_TEST(test_required_recovery_without_root_warns_but_allows_edit_undo_redo);

@@ -107,11 +107,6 @@ int s_preview_cur;
 int s_preview_frame_count;
 
 /* --- inline rename edit --- */
-int s_edit_kind;
-int s_edit_atlas;
-int s_edit_anim;
-char s_edit_sprite[TP_SRCKEY_MAX];
-char s_edit_buf[TP_SRCKEY_MAX];
 
 /* --- runtime column widths --- */
 float s_content_w = 1280.0F;

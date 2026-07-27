@@ -11,6 +11,13 @@
 tp_status gui_session_rename_atlas(gui_session_client *client, tp_id128 atlas_id,
                                    int64_t expected_revision, const char *name,
                                    tp_error *err);
+tp_status gui_session_submit_atlas_name(
+    gui_session_client *client, tp_id128 atlas_id,
+    int64_t expected_revision, const char *name,
+    gui_session_submit_identity identity,
+    const char transaction_id[33],
+    gui_session_submit_terminal *out_terminal,
+    tp_error *err);
 
 tp_status gui_session_create_atlas(gui_session_client *client, tp_id128 atlas_id,
                                    tp_id128 target_id, int64_t expected_revision,
@@ -42,6 +49,14 @@ tp_status gui_session_set_sprite_name(gui_session_client *client, tp_id128 atlas
                                       tp_id128 source_id, const char *source_key,
                                       int64_t expected_revision, const char *name,
                                       tp_error *err);
+tp_status gui_session_submit_sprite_name(
+    gui_session_client *client, tp_id128 atlas_id,
+    tp_id128 source_id, const char *source_key,
+    int64_t expected_revision, const char *name,
+    gui_session_submit_identity identity,
+    const char transaction_id[33],
+    gui_session_submit_terminal *out_terminal,
+    tp_error *err);
 tp_status gui_session_set_sprite_override(gui_session_client *client, tp_id128 atlas_id,
                                           tp_id128 source_id, const char *source_key,
                                           int64_t expected_revision,
@@ -64,6 +79,13 @@ tp_status gui_session_rename_animation(gui_session_client *client, tp_id128 atla
                                        tp_id128 animation_id,
                                        int64_t expected_revision, const char *name,
                                        tp_error *err);
+tp_status gui_session_submit_animation_name(
+    gui_session_client *client, tp_id128 atlas_id,
+    tp_id128 animation_id, int64_t expected_revision,
+    const char *name, gui_session_submit_identity identity,
+    const char transaction_id[33],
+    gui_session_submit_terminal *out_terminal,
+    tp_error *err);
 tp_status gui_session_set_animation_settings(gui_session_client *client, tp_id128 atlas_id,
                                              tp_id128 animation_id,
                                              int64_t expected_revision,
@@ -100,6 +122,14 @@ tp_status gui_session_set_target(gui_session_client *client, tp_id128 atlas_id,
                                  const tp_op_target_set *settings,
                                  gui_session_submit_terminal *out_terminal,
                                  tp_error *err);
+tp_status gui_session_submit_target_out_path(
+    gui_session_client *client, tp_id128 atlas_id,
+    tp_id128 target_id, int64_t expected_revision,
+    const char *out_path,
+    gui_session_submit_identity identity,
+    const char transaction_id[33],
+    gui_session_submit_terminal *out_terminal,
+    tp_error *err);
 
 /* Copies the presentation value from an owned snapshot. */
 tp_status gui_session_copy_atlas_name(const tp_session_snapshot *snapshot,

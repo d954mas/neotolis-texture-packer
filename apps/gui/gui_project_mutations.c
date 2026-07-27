@@ -314,55 +314,26 @@ bool gui_project_remove_source(tp_id128 atlas_id, tp_id128 source_id,
     return true;
 }
 
-bool gui_project_set_atlas_name(tp_id128 atlas_id, int64_t expected_revision, const char *name) {
-    const int64_t revision_before_flush = gui_project__borrow_active_session() ? tp_session_revision(gui_project__borrow_active_session()) : 0;
-    if (!gui_project_flush_pending()) {
-        return false; /* buffered operation rejected */
+tp_status gui_project_submit_atlas_name(
+    tp_id128 atlas_id, int64_t expected_revision,
+    const char *name, gui_session_submit_identity identity,
+    const char transaction_id[33],
+    gui_session_submit_terminal *terminal, tp_error *err) {
+    if (!gui_project__borrow_active_session() ||
+        tp_id128_is_nil(atlas_id) || !name || !transaction_id) {
+        return tp_error_set(
+            err, TP_STATUS_INVALID_ARGUMENT,
+            "atlas name draft submit requires an active session, target, value, and transaction");
     }
-    if (!gui_project__borrow_active_session() || !name) {
-        return false;
-    }
-    if (expected_revision == revision_before_flush &&
-        tp_session_revision(gui_project__borrow_active_session()) != revision_before_flush) {
-        expected_revision = tp_session_revision(gui_project__borrow_active_session());
-    }
-    tp_error err = {0};
-    const tp_status status = gui_session_rename_atlas(&s_project.binding.client, atlas_id, expected_revision, name, &err);
-    if (status != TP_STATUS_OK) {
-        gui_project__note_session_reject(status, &err);
-        return false;
-    }
-    return true;
+    return gui_session_submit_atlas_name(
+        &s_project.binding.client, atlas_id,
+        expected_revision, name, identity,
+        transaction_id, terminal, err);
 }
 
 tp_status gui_project_copy_atlas_name(tp_id128 atlas_id, char *out, size_t capacity,
                                       tp_error *err) {
     return gui_session_copy_atlas_name(gui_project_snapshot(), atlas_id, out, capacity, err);
-}
-
-bool gui_project_set_sprite_rename(const gui_sprite_ref *sprite, const char *rename) {
-    const int64_t revision_before_flush = gui_project__borrow_active_session() ? tp_session_revision(gui_project__borrow_active_session()) : 0;
-    if (!gui_project_flush_pending()) {
-        return false; /* buffered operation rejected */
-    }
-    if (!gui_project__borrow_active_session() || !sprite || tp_id128_is_nil(sprite->atlas_id) ||
-        tp_id128_is_nil(sprite->source_id) || !sprite->source_key ||
-        sprite->source_key[0] == '\0') {
-        return false;
-    }
-    int64_t expected_revision = sprite->expected_revision;
-    if (expected_revision == revision_before_flush &&
-        tp_session_revision(gui_project__borrow_active_session()) != revision_before_flush) {
-        expected_revision = tp_session_revision(gui_project__borrow_active_session());
-    }
-    tp_error err = {0};
-    const tp_status status = gui_session_set_sprite_name(&s_project.binding.client, sprite->atlas_id, sprite->source_id, sprite->source_key,
-        expected_revision, rename, &err);
-    if (status != TP_STATUS_OK) {
-        gui_project__note_session_reject(status, &err);
-        return false;
-    }
-    return true;
 }
 
 /* Maps a gui_atlas_field to its op mask bit + fills the matching payload field. */
@@ -621,6 +592,27 @@ bool gui_project_remove_target(const gui_target_ref *target) {
     return true;
 }
 
+tp_status gui_project_submit_sprite_name(
+    const gui_sprite_ref *sprite, const char *name,
+    gui_session_submit_identity identity,
+    const char transaction_id[33],
+    gui_session_submit_terminal *terminal, tp_error *err) {
+    if (!gui_project__borrow_active_session() || !sprite ||
+        tp_id128_is_nil(sprite->atlas_id) ||
+        tp_id128_is_nil(sprite->source_id) ||
+        !sprite->source_key || sprite->source_key[0] == '\0' ||
+        !transaction_id) {
+        return tp_error_set(
+            err, TP_STATUS_INVALID_ARGUMENT,
+            "sprite name draft submit requires an active session, stable target, and transaction");
+    }
+    return gui_session_submit_sprite_name(
+        &s_project.binding.client, sprite->atlas_id,
+        sprite->source_id, sprite->source_key,
+        sprite->expected_revision, name, identity,
+        transaction_id, terminal, err);
+}
+
 bool gui_project_set_target(const gui_target_ref *target, const char *exporter_id,
                             const char *out_path, bool enabled) {
     if (!target) return false;
@@ -660,55 +652,32 @@ bool gui_project_set_target(const gui_target_ref *target, const char *exporter_i
     return true;
 }
 
-/* H/G3 + C1 mask: COALESCABLE out-path-only setter for the export-target path text field. Discrete target
- * edits build their own single-field MASKED ops (enabled checkbox -> TP_TF_ENABLED, exporter dropdown ->
- * TP_TF_EXPORTER, below); browse calls this setter and flushes immediately. The free-text out-path
- * field, however, fired one gui_project_set_target per keystroke -> one committed TP_OP_TARGET_SET per
- * keystroke = undo spam. Buffering it under a per-target key (field = index) makes
- * the field's existing Enter/blur gesture-commit flush the whole edit as ONE undo step -- mirrors the
- * target out-path path below. The op is MASKED to TP_TF_OUT_PATH: it carries ONLY
- * out_path, so exporter_id + enabled are left untouched by apply -- no RMW-seed, and no way for this edit to
- * clobber a concurrently-changed sibling field (C1 mask). Switching to a different target index is a
- * different key -> gui_project_pending_route flushes -> a correct one-undo-per-target boundary. */
-bool gui_project_set_target_out_path(const gui_target_ref *target,
-                                     const char *out_path) {
-    if (!target) return false;
-    gui_coalesce_key ck = make_key(CK_TARGET_OUTPATH, -1);
-    ck.atlas_id = target->atlas_id;
-    ck.source_id = target->target_id;
-    const int64_t revision_before_route = tp_session_revision(gui_project__borrow_active_session());
-    gui_project_pending_route(&ck); /* flush a DIFFERENT key (other target / other knob) BEFORE reading this target */
-    if (!out_path) {
-        return false;
+tp_status gui_project_submit_target_out_path(
+    const gui_target_ref *target, const char *out_path,
+    gui_session_submit_identity identity,
+    const char transaction_id[33],
+    gui_session_submit_terminal *terminal, tp_error *err) {
+    if (!gui_project__borrow_active_session() || !target ||
+        tp_id128_is_nil(target->atlas_id) ||
+        tp_id128_is_nil(target->target_id) ||
+        !out_path || !transaction_id) {
+        return tp_error_set(
+            err, TP_STATUS_INVALID_ARGUMENT,
+            "target path draft submit requires an active session, stable target, value, and transaction");
     }
-    char *outp = dupstr(out_path);
-    if (!outp) {
-        return false;
-    }
-    tp_operation op;
-    memset(&op, 0, sizeof op);
-    op.kind = TP_OP_TARGET_SET;
-    op.atlas_id = target->atlas_id;
-    op.u.target_set.target_id = target->target_id;
-    op.u.target_set.mask = TP_TF_OUT_PATH;     /* MASKED: only out_path -- exporter/enabled untouched (no RMW-seed) */
-    op.u.target_set.out_path = outp;           /* ownership transfers to op */
-    s_project.pending_expected_revision = revision_after_owned_route(
-        target->expected_revision, revision_before_route);
-    return gui_project_pending_offer(&ck, &op);
+    return gui_session_submit_target_out_path(
+        &s_project.binding.client, target->atlas_id,
+        target->target_id, target->expected_revision,
+        out_path, identity, transaction_id,
+        terminal, err);
 }
 
-/* H/G3 + C1 mask: discrete target-field setters (enabled toggle / exporter change). IMMEDIATE (one undo step
- * each), and MASKED to the single field they edit -- so they never re-send exporter/out_path and can never
- * revert a concurrently-buffered out-path gesture (the hazard the pre-mask workaround had to RMW-seed around
- * is now impossible at the op level). They still flush any buffered out-path gesture FIRST: a discrete pick
- * is a gesture boundary, so the pending out-path commits as its own undo step before this one (clean
- * sequential history). An empty out_path is never buffered (gui_project_set_target_out_path guards it), so
- * that flush never rejects on emptiness. A genuine operation rejection aborts
- * this edit too. */
+/* Discrete target fields submit one masked operation and never resend sibling
+ * fields. The action layer orders an active text draft before these calls. */
 bool gui_project_set_target_enabled(const gui_target_ref *target, bool enabled) {
     if (!target) return false;
     const int64_t revision_before_flush = tp_session_revision(gui_project__borrow_active_session());
-    if (!gui_project_flush_pending()) { /* commit any buffered out-path gesture FIRST (gesture boundary) */
+    if (!gui_project_flush_pending()) {
         return false;
     }
     tp_op_target_set settings = {0};
@@ -866,29 +835,6 @@ bool gui_project_remove_animation(const gui_animation_ref *animation) {
     return true;
 }
 
-bool gui_project_set_anim_id(const gui_animation_ref *animation, const char *new_id) {
-    if (!animation) {
-        return false;
-    }
-    const int64_t revision_before_flush = tp_session_revision(gui_project__borrow_active_session());
-    if (!gui_project_flush_pending()) {
-        return false; /* buffered operation rejected */
-    }
-    int64_t expected_revision = animation->expected_revision;
-    if (expected_revision == revision_before_flush &&
-        tp_session_revision(gui_project__borrow_active_session()) != revision_before_flush) {
-        expected_revision = tp_session_revision(gui_project__borrow_active_session());
-    }
-    tp_error err = {0};
-    const tp_status status = gui_session_rename_animation(&s_project.binding.client, animation->atlas_id, animation->animation_id,
-        expected_revision, new_id, &err);
-    if (status != TP_STATUS_OK) {
-        gui_project__note_session_reject(status, &err);
-        return false;
-    }
-    return true;
-}
-
 /* Buffers one animation.settings.set under `k` (the caller has run gui_project_pending_route). */
 static gui_coalesce_key make_animation_key(gui_coalesce_kind kind,
                                        const gui_animation_ref *animation) {
@@ -991,6 +937,26 @@ bool gui_project_anim_add_frames(const gui_animation_ref *animation,
         return false;
     }
     return true;
+}
+
+tp_status gui_project_submit_animation_name(
+    const gui_animation_ref *animation, const char *name,
+    gui_session_submit_identity identity,
+    const char transaction_id[33],
+    gui_session_submit_terminal *terminal, tp_error *err) {
+    if (!gui_project__borrow_active_session() || !animation ||
+        tp_id128_is_nil(animation->atlas_id) ||
+        tp_id128_is_nil(animation->animation_id) ||
+        !name || !transaction_id) {
+        return tp_error_set(
+            err, TP_STATUS_INVALID_ARGUMENT,
+            "animation name draft submit requires an active session, stable target, value, and transaction");
+    }
+    return gui_session_submit_animation_name(
+        &s_project.binding.client, animation->atlas_id,
+        animation->animation_id,
+        animation->expected_revision, name,
+        identity, transaction_id, terminal, err);
 }
 
 bool gui_project_anim_remove_frame(const gui_animation_ref *animation,

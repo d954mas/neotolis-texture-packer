@@ -46,15 +46,7 @@ static void edit_transaction_id(
     out[32] = '\0';
 }
 
-static bool atlas_target_present(
-    const tp_session_snapshot *snapshot,
-    tp_id128 atlas_id) {
-    return snapshot &&
-           tp_session_snapshot_atlas_by_id(
-               snapshot, atlas_id) != NULL;
-}
-
-static gui_session_submit_identity atlas_edit_identity(
+static gui_session_submit_identity draft_identity(
     const gui_edit_state *edit) {
     if (!edit || edit->phase == GUI_EDIT_IDLE) {
         return (gui_session_submit_identity){0};
@@ -65,21 +57,57 @@ static gui_session_submit_identity atlas_edit_identity(
     };
 }
 
-static void atlas_draft_clear_if_idle(
-    gui_atlas_draft *draft) {
-    if (draft->lifecycle.phase == GUI_EDIT_IDLE) {
-        draft->component = GUI_ATLAS_MAX_SIZE;
-        draft->integer = 0;
-        draft->real = 0.0F;
+static void draft_clear_if_idle(
+    gui_draft_owner *draft) {
+    if (draft->lifecycle.phase != GUI_EDIT_IDLE) {
+        return;
     }
+    draft->family = GUI_DRAFT_NONE;
+    memset(&draft->atlas, 0, sizeof draft->atlas);
+    memset(&draft->text, 0, sizeof draft->text);
 }
 
-static void reduce_atlas_edit_observation(
+static bool draft_target_present(
+    const gui_draft_owner *draft,
+    const tp_session_snapshot *snapshot) {
+    if (!draft || !snapshot ||
+        draft->lifecycle.phase == GUI_EDIT_IDLE) {
+        return false;
+    }
+    if (draft->family == GUI_DRAFT_ATLAS_SCALAR ||
+        (draft->family == GUI_DRAFT_TEXT &&
+         draft->text.kind == GUI_TEXT_EDIT_ATLAS_NAME)) {
+        return tp_session_snapshot_atlas_by_id(
+                   snapshot, draft->lifecycle.target_id) != NULL;
+    }
+    if (draft->family != GUI_DRAFT_TEXT) {
+        return false;
+    }
+    switch (draft->text.kind) {
+        case GUI_TEXT_EDIT_ATLAS_NAME:
+            return false;
+        case GUI_TEXT_EDIT_ANIMATION_NAME:
+            return tp_session_snapshot_animation_by_id(
+                       snapshot, draft->text.atlas_id,
+                       draft->lifecycle.target_id) != NULL;
+        case GUI_TEXT_EDIT_SPRITE_RENAME:
+            return tp_session_snapshot_source_by_id(
+                       snapshot, draft->text.atlas_id,
+                       draft->text.source_id) != NULL;
+        case GUI_TEXT_EDIT_TARGET_OUT_PATH:
+            return tp_session_snapshot_target_by_id(
+                       snapshot, draft->text.atlas_id,
+                       draft->lifecycle.target_id) != NULL;
+    }
+    return false;
+}
+
+static void reduce_draft_observation(
     void *context,
     const tp_session_observation *observation,
     uint64_t instance_generation) {
     (void)instance_generation;
-    gui_atlas_draft *draft = context;
+    gui_draft_owner *draft = context;
     gui_edit_state *edit =
         draft ? &draft->lifecycle : NULL;
     if (!edit || edit->phase == GUI_EDIT_IDLE) {
@@ -92,9 +120,8 @@ static void reduce_atlas_edit_observation(
             ? tp_session_snapshot_revision(snapshot)
             : edit->base_revision;
     const bool target_present =
-        snapshot
-            ? atlas_target_present(snapshot, edit->target_id)
-            : edit->target_present;
+        snapshot ? draft_target_present(draft, snapshot)
+                 : edit->target_present;
     tp_error error = {{0}};
     if (tp_session_observation_resync_required(observation)) {
         gui_session_submit_terminal terminal = {0};
@@ -102,7 +129,7 @@ static void reduce_atlas_edit_observation(
             edit->phase == GUI_EDIT_SUBMITTING &&
             gui_project_submit_receipt_query(
                 edit->submitted_transaction_id,
-                atlas_edit_identity(edit),
+                draft_identity(edit),
                 &terminal) &&
             (terminal.no_change ||
              terminal.echo_state ==
@@ -110,7 +137,7 @@ static void reduce_atlas_edit_observation(
         (void)gui_edit_resync(
             edit, revision, target_present,
             exact_terminal, &error);
-        atlas_draft_clear_if_idle(draft);
+        draft_clear_if_idle(draft);
         return;
     }
 
@@ -137,18 +164,18 @@ static void reduce_atlas_edit_observation(
             exact_echo =
             gui_project_submit_receipt_query(
                 source->transaction_id,
-                atlas_edit_identity(edit),
+                draft_identity(edit),
                 &terminal);
         }
         (void)gui_edit_model_revision(
             edit, source->revision_after,
             target_present, exact_echo, &error);
     }
-    atlas_draft_clear_if_idle(draft);
+    draft_clear_if_idle(draft);
 }
 
-static bool ensure_atlas_edit_owner(void) {
-    if (!s_actions.atlas_edit_initialized) {
+static bool ensure_draft_owner(void) {
+    if (!s_actions.draft_initialized) {
         tp_id128 view_id = tp_id128_nil();
         if (!edit_id_generate(
                 &view_id,
@@ -156,25 +183,25 @@ static bool ensure_atlas_edit_owner(void) {
             return false;
         }
         gui_edit_state_init(
-            &s_actions.atlas_edit.lifecycle,
+            &s_actions.draft.lifecycle,
             view_id);
-        s_actions.atlas_edit_initialized = true;
+        s_actions.draft_initialized = true;
     }
-    if (!s_actions.atlas_edit_reducer_registered) {
+    if (!s_actions.draft_reducer_registered) {
         tp_error error = {{0}};
         const tp_status status =
             gui_project_register_observation_reducer(
-                reduce_atlas_edit_observation,
-                &s_actions.atlas_edit, &error);
+                reduce_draft_observation,
+                &s_actions.draft, &error);
         if (status != TP_STATUS_OK) {
             set_statusf_ex(
                 STATUS_ERROR,
-                "Could not observe atlas edits: %s",
+                "Could not observe GUI drafts: %s",
                 error.msg[0] ? error.msg
                              : tp_status_str(status));
             return false;
         }
-        s_actions.atlas_edit_reducer_registered = true;
+        s_actions.draft_reducer_registered = true;
     }
     return true;
 }
@@ -187,7 +214,7 @@ static bool atlas_field_valid(gui_atlas_field field) {
 void gui_edit_atlas_setting(
     tp_id128 atlas_id, int64_t expected_revision,
     gui_atlas_field field, int ivalue, float fvalue) {
-    if (!ensure_atlas_edit_owner()) {
+    if (!ensure_draft_owner()) {
         return;
     }
     if (!atlas_field_valid(field)) {
@@ -196,8 +223,7 @@ void gui_edit_atlas_setting(
             "Atlas edit rejected: unknown scalar field.");
         return;
     }
-    gui_atlas_draft *draft =
-        &s_actions.atlas_edit;
+    gui_draft_owner *draft = &s_actions.draft;
     gui_edit_state *edit = &draft->lifecycle;
     tp_error error = {{0}};
     tp_status status = TP_STATUS_OK;
@@ -212,12 +238,14 @@ void gui_edit_atlas_setting(
             edit, atlas_id, expected_revision,
             draft_id, &error);
         if (status == TP_STATUS_OK) {
-            draft->component = field;
+            draft->family = GUI_DRAFT_ATLAS_SCALAR;
+            draft->atlas.component = field;
         }
     } else {
-        if (!tp_id128_eq(
+        if (draft->family != GUI_DRAFT_ATLAS_SCALAR ||
+            !tp_id128_eq(
                 edit->target_id, atlas_id) ||
-            draft->component != field) {
+            draft->atlas.component != field) {
             set_status_ex(
                 STATUS_WARNING,
                 "Finish or discard the active atlas edit before editing another field.");
@@ -239,71 +267,245 @@ void gui_edit_atlas_setting(
         return;
     }
     if (field == GUI_ATLAS_PIXELS_PER_UNIT) {
-        draft->real = fvalue;
+        draft->atlas.real = fvalue;
     } else {
-        draft->integer = ivalue;
+        draft->atlas.integer = ivalue;
     }
 }
 
 bool gui_atlas_edit_value(
     tp_id128 atlas_id, gui_atlas_field field,
     int *ivalue, float *fvalue) {
-    const gui_atlas_draft *draft =
-        &s_actions.atlas_edit;
+    const gui_draft_owner *draft = &s_actions.draft;
     if (draft->lifecycle.phase == GUI_EDIT_IDLE ||
+        draft->family != GUI_DRAFT_ATLAS_SCALAR ||
         !tp_id128_eq(
             draft->lifecycle.target_id,
             atlas_id) ||
-        draft->component != field) {
+        draft->atlas.component != field) {
         return false;
     }
     if (field == GUI_ATLAS_PIXELS_PER_UNIT) {
         if (fvalue) {
-            *fvalue = draft->real;
+            *fvalue = draft->atlas.real;
         }
     } else if (ivalue) {
-        *ivalue = draft->integer;
+        *ivalue = draft->atlas.integer;
     }
     return true;
 }
 
-bool gui_atlas_edit_targets(tp_id128 atlas_id) {
-    return s_actions.atlas_edit.lifecycle.phase !=
-               GUI_EDIT_IDLE &&
-           tp_id128_eq(
-               s_actions.atlas_edit.lifecycle.target_id,
-               atlas_id);
+gui_edit_phase gui_draft_phase(void) {
+    return s_actions.draft.lifecycle.phase;
 }
 
-gui_edit_phase gui_atlas_edit_phase(void) {
-    return s_actions.atlas_edit.lifecycle.phase;
-}
-
-bool gui_atlas_edit_can_apply(void) {
-    return s_actions.atlas_edit.lifecycle.phase ==
+bool gui_draft_can_apply(void) {
+    return s_actions.draft.lifecycle.phase ==
                GUI_EDIT_CONFLICTED &&
-           s_actions.atlas_edit.lifecycle.target_present;
+           s_actions.draft.lifecycle.target_present;
 }
 
-void gui_atlas_edit_apply_mine(void) {
-    s_actions.atlas_apply_mine = true;
+void gui_draft_apply_mine(void) {
+    s_actions.draft_apply_mine = true;
 }
 
-void gui_atlas_edit_discard(void) {
+void gui_draft_discard(void) {
     tp_error error = {{0}};
     const tp_status status =
         gui_edit_discard(
-            &s_actions.atlas_edit.lifecycle,
+            &s_actions.draft.lifecycle,
             &error);
     if (status != TP_STATUS_OK) {
         set_statusf_ex(
-            STATUS_WARNING, "Atlas draft cannot be discarded: %s",
+            STATUS_WARNING, "GUI draft cannot be discarded: %s",
             error.msg[0] ? error.msg
                          : tp_status_str(status));
         return;
     }
-    atlas_draft_clear_if_idle(
-        &s_actions.atlas_edit);
+    draft_clear_if_idle(&s_actions.draft);
+}
+
+static bool text_value_copy(
+    char out[TP_IDENTITY_PATH_MAX],
+    size_t capacity, const char *value,
+    const char *what) {
+    if (!value) {
+        set_statusf_ex(
+            STATUS_WARNING, "%s requires text.",
+            what);
+        return false;
+    }
+    const size_t length = strlen(value);
+    if (length >= capacity) {
+        set_statusf_ex(
+            STATUS_WARNING,
+            "%s exceeds the GUI text limit.",
+            what);
+        return false;
+    }
+    memcpy(out, value, length + 1U);
+    return true;
+}
+
+static bool text_edit_begin(
+    gui_text_edit_kind kind, tp_id128 target_id,
+    tp_id128 atlas_id, tp_id128 source_id,
+    const char *source_key, int64_t expected_revision,
+    const char *initial_value) {
+    if (!ensure_draft_owner()) {
+        return false;
+    }
+    gui_draft_owner *draft = &s_actions.draft;
+    if (draft->lifecycle.phase != GUI_EDIT_IDLE) {
+        set_status_ex(
+            STATUS_WARNING,
+            "Finish or discard the active edit first.");
+        return false;
+    }
+    if (tp_id128_is_nil(target_id) ||
+        expected_revision < 0 ||
+        !text_value_copy(
+            draft->text.value,
+            kind == GUI_TEXT_EDIT_TARGET_OUT_PATH
+                ? sizeof draft->text.value
+                : TP_SRCKEY_MAX,
+            initial_value,
+            "GUI text edit")) {
+        return false;
+    }
+    if (source_key) {
+        const size_t key_length = strlen(source_key);
+        if (key_length == 0U ||
+            key_length >= sizeof draft->text.source_key) {
+            draft_clear_if_idle(draft);
+            set_status_ex(
+                STATUS_WARNING,
+                "Sprite rename requires a valid source key.");
+            return false;
+        }
+        memcpy(
+            draft->text.source_key, source_key,
+            key_length + 1U);
+    }
+
+    tp_id128 draft_id = tp_id128_nil();
+    if (!edit_id_generate(
+            &draft_id,
+            "Could not create the text draft identity")) {
+        draft_clear_if_idle(draft);
+        return false;
+    }
+    tp_error error = {{0}};
+    const tp_status status = gui_edit_begin(
+        &draft->lifecycle, target_id,
+        expected_revision, draft_id, &error);
+    if (status != TP_STATUS_OK) {
+        draft_clear_if_idle(draft);
+        set_statusf_ex(
+            STATUS_WARNING, "Text edit rejected: %s",
+            error.msg[0] ? error.msg
+                         : tp_status_str(status));
+        return false;
+    }
+    draft->family = GUI_DRAFT_TEXT;
+    draft->text.kind = kind;
+    draft->text.atlas_id = atlas_id;
+    draft->text.source_id = source_id;
+    return true;
+}
+
+bool gui_text_edit_begin_atlas_name(
+    tp_id128 atlas_id, int64_t expected_revision,
+    const char *initial_value) {
+    return text_edit_begin(
+        GUI_TEXT_EDIT_ATLAS_NAME, atlas_id,
+        atlas_id, tp_id128_nil(), NULL,
+        expected_revision, initial_value);
+}
+
+bool gui_text_edit_begin_animation_name(
+    const gui_animation_ref *animation,
+    const char *initial_value) {
+    return animation &&
+           text_edit_begin(
+               GUI_TEXT_EDIT_ANIMATION_NAME,
+               animation->animation_id,
+               animation->atlas_id, tp_id128_nil(),
+               NULL, animation->expected_revision,
+               initial_value);
+}
+
+bool gui_text_edit_begin_sprite_rename(
+    const gui_sprite_ref *sprite,
+    const char *initial_value) {
+    return sprite &&
+           text_edit_begin(
+               GUI_TEXT_EDIT_SPRITE_RENAME,
+               sprite->source_id, sprite->atlas_id,
+               sprite->source_id, sprite->source_key,
+               sprite->expected_revision,
+               initial_value);
+}
+
+bool gui_text_edit_begin_target_out_path(
+    const gui_target_ref *target,
+    const char *initial_value) {
+    return target &&
+           text_edit_begin(
+               GUI_TEXT_EDIT_TARGET_OUT_PATH,
+               target->target_id, target->atlas_id,
+               tp_id128_nil(), NULL,
+               target->expected_revision,
+               initial_value);
+}
+
+bool gui_text_edit_update(const char *value) {
+    gui_draft_owner *draft = &s_actions.draft;
+    if (draft->family != GUI_DRAFT_TEXT ||
+        (draft->lifecycle.phase != GUI_EDIT_EDITING &&
+         draft->lifecycle.phase != GUI_EDIT_CONFLICTED)) {
+        set_status_ex(
+            STATUS_WARNING,
+            "No editable text draft is active.");
+        return false;
+    }
+    return text_value_copy(
+        draft->text.value,
+        draft->text.kind ==
+                GUI_TEXT_EDIT_TARGET_OUT_PATH
+            ? sizeof draft->text.value
+            : TP_SRCKEY_MAX,
+        value, "GUI text edit");
+}
+
+const char *gui_text_edit_value(void) {
+    return s_actions.draft.family == GUI_DRAFT_TEXT &&
+                   s_actions.draft.lifecycle.phase != GUI_EDIT_IDLE
+               ? s_actions.draft.text.value
+               : NULL;
+}
+
+bool gui_target_path_edit_matches(
+    const gui_target_ref *target) {
+    const gui_draft_owner *draft = &s_actions.draft;
+    return target &&
+           draft->family == GUI_DRAFT_TEXT &&
+           draft->lifecycle.phase != GUI_EDIT_IDLE &&
+           draft->text.kind ==
+               GUI_TEXT_EDIT_TARGET_OUT_PATH &&
+           tp_id128_eq(
+               draft->text.atlas_id,
+               target->atlas_id) &&
+           tp_id128_eq(
+               draft->lifecycle.target_id,
+               target->target_id);
+}
+
+bool gui_inline_text_edit_active(void) {
+    return s_actions.draft.family == GUI_DRAFT_TEXT &&
+           s_actions.draft.lifecycle.phase != GUI_EDIT_IDLE &&
+           s_actions.draft.text.kind !=
+               GUI_TEXT_EDIT_TARGET_OUT_PATH;
 }
 
 /* Local heap strdup (POSIX strdup is not ISO C17). NULL treated as ""; NULL on OOM. */
@@ -519,20 +721,6 @@ void gui_edit_target(const gui_target_ref *target, const char *exporter_id,
     }
     (void)target_intent_push(&e);
 }
-/* H/G3: the out-path text field's per-keystroke enqueue. Same heap out_path as gui_edit_target (up to
- * TP_PATH_MAX, no 255 slot), but the drain routes to the COALESCABLE gui_project_set_target_out_path so
- * the field's Enter/blur gesture-commit collapses the whole edit into ONE undo step. */
-void gui_edit_target_out_path(const gui_target_ref *target, const char *out_path) {
-    target_edit_intent e = {0};
-    e.kind = TARGET_INTENT_OUT_PATH;
-    edit_capture_target(&e, target);
-    e.out_path = gui_actions__strdup(out_path); /* HEAP full path -- a >255 out_path must not truncate (F2) */
-    if (!e.out_path) {
-        set_status_ex(STATUS_ERROR, "Out of memory: export target edit not applied.");
-        return;
-    }
-    (void)target_intent_push(&e);
-}
 /* H/G3: discrete enabled toggle. Carries ONLY the new enabled + the target index; the drain setter reads
  * exporter_id + out_path from the committed record AFTER flushing any buffered out-path gesture, so a
  * still-uncommitted typed out-path is preserved (not reverted by a stale re-send). */
@@ -580,45 +768,171 @@ void gui_edit_anim_add_frames(const gui_animation_ref *animation,
 }
 
 static bool atlas_draft_is_net_zero(
-    const gui_atlas_draft *draft,
-    const tp_snapshot_atlas *atlas,
-    gui_atlas_field component) {
+    const gui_draft_owner *draft,
+    const tp_snapshot_atlas *atlas) {
     if (!atlas) {
         return false;
     }
-    switch (component) {
+    switch (draft->atlas.component) {
         case GUI_ATLAS_MAX_SIZE:
-            return draft->integer == atlas->max_size;
+            return draft->atlas.integer == atlas->max_size;
         case GUI_ATLAS_PADDING:
-            return draft->integer == atlas->padding;
+            return draft->atlas.integer == atlas->padding;
         case GUI_ATLAS_MARGIN:
-            return draft->integer == atlas->margin;
+            return draft->atlas.integer == atlas->margin;
         case GUI_ATLAS_EXTRUDE:
-            return draft->integer == atlas->extrude;
+            return draft->atlas.integer == atlas->extrude;
         case GUI_ATLAS_ALPHA_THRESHOLD:
-            return draft->integer ==
+            return draft->atlas.integer ==
                    atlas->alpha_threshold;
         case GUI_ATLAS_MAX_VERTICES:
-            return draft->integer ==
+            return draft->atlas.integer ==
                    atlas->max_vertices;
         case GUI_ATLAS_SHAPE:
-            return draft->integer == atlas->shape;
+            return draft->atlas.integer == atlas->shape;
         case GUI_ATLAS_ALLOW_TRANSFORM:
-            return draft->integer ==
+            return draft->atlas.integer ==
                    (atlas->allow_transform ? 1 : 0);
         case GUI_ATLAS_POWER_OF_TWO:
-            return draft->integer ==
+            return draft->atlas.integer ==
                    (atlas->power_of_two ? 1 : 0);
         case GUI_ATLAS_PIXELS_PER_UNIT:
-            return draft->real ==
+            return draft->atlas.real ==
                    atlas->pixels_per_unit;
     }
     return false;
 }
 
-static bool submit_atlas_edit(bool apply_mine) {
-    gui_atlas_draft *draft =
-        &s_actions.atlas_edit;
+static bool text_draft_is_net_zero(
+    const gui_draft_owner *draft,
+    const tp_session_snapshot *snapshot) {
+    const char *committed = NULL;
+    switch (draft->text.kind) {
+        case GUI_TEXT_EDIT_ATLAS_NAME: {
+            const tp_snapshot_atlas *atlas =
+                tp_session_snapshot_atlas_by_id(
+                    snapshot,
+                    draft->lifecycle.target_id);
+            committed = atlas ? atlas->name : NULL;
+            break;
+        }
+        case GUI_TEXT_EDIT_ANIMATION_NAME: {
+            const tp_snapshot_animation *animation =
+                tp_session_snapshot_animation_by_id(
+                    snapshot, draft->text.atlas_id,
+                    draft->lifecycle.target_id);
+            committed = animation ? animation->name
+                                  : NULL;
+            break;
+        }
+        case GUI_TEXT_EDIT_SPRITE_RENAME: {
+            const tp_snapshot_sprite *sprite =
+                tp_session_snapshot_sprite_by_key(
+                    snapshot, draft->text.atlas_id,
+                    draft->text.source_id,
+                    draft->text.source_key);
+            committed =
+                sprite && sprite->rename
+                    ? sprite->rename
+                    : "";
+            break;
+        }
+        case GUI_TEXT_EDIT_TARGET_OUT_PATH: {
+            const tp_snapshot_target *target =
+                tp_session_snapshot_target_by_id(
+                    snapshot, draft->text.atlas_id,
+                    draft->lifecycle.target_id);
+            committed = target ? target->out_path : NULL;
+            break;
+        }
+    }
+    return committed &&
+           strcmp(committed, draft->text.value) == 0;
+}
+
+static bool draft_is_net_zero(
+    const gui_draft_owner *draft,
+    const tp_session_snapshot *snapshot) {
+    if (!draft || !snapshot) {
+        return false;
+    }
+    if (draft->family == GUI_DRAFT_ATLAS_SCALAR) {
+        return atlas_draft_is_net_zero(
+            draft,
+            tp_session_snapshot_atlas_by_id(
+                snapshot,
+                draft->lifecycle.target_id));
+    }
+    return draft->family == GUI_DRAFT_TEXT &&
+           text_draft_is_net_zero(draft, snapshot);
+}
+
+static tp_status submit_draft_operation(
+    const gui_draft_owner *draft,
+    gui_session_submit_identity identity,
+    const char transaction_id[33],
+    gui_session_submit_terminal *terminal,
+    tp_error *error) {
+    const gui_edit_state *edit = &draft->lifecycle;
+    if (draft->family == GUI_DRAFT_ATLAS_SCALAR) {
+        return gui_project_submit_atlas_setting(
+            edit->target_id, edit->base_revision,
+            draft->atlas.component,
+            draft->atlas.component ==
+                    GUI_ATLAS_PIXELS_PER_UNIT
+                ? 0
+                : draft->atlas.integer,
+            draft->atlas.component ==
+                    GUI_ATLAS_PIXELS_PER_UNIT
+                ? draft->atlas.real
+                : 0.0F,
+            identity, transaction_id, terminal,
+            error);
+    }
+    switch (draft->text.kind) {
+        case GUI_TEXT_EDIT_ATLAS_NAME:
+            return gui_project_submit_atlas_name(
+                edit->target_id, edit->base_revision,
+                draft->text.value, identity,
+                transaction_id, terminal, error);
+        case GUI_TEXT_EDIT_ANIMATION_NAME: {
+            const gui_animation_ref animation = {
+                draft->text.atlas_id, edit->target_id,
+                edit->base_revision};
+            return gui_project_submit_animation_name(
+                &animation, draft->text.value,
+                identity, transaction_id, terminal,
+                error);
+        }
+        case GUI_TEXT_EDIT_SPRITE_RENAME: {
+            const gui_sprite_ref sprite = {
+                draft->text.atlas_id,
+                draft->text.source_id,
+                draft->text.source_key,
+                edit->base_revision};
+            return gui_project_submit_sprite_name(
+                &sprite, draft->text.value,
+                identity, transaction_id, terminal,
+                error);
+        }
+        case GUI_TEXT_EDIT_TARGET_OUT_PATH: {
+            const gui_target_ref target = {
+                draft->text.atlas_id,
+                edit->target_id,
+                edit->base_revision};
+            return gui_project_submit_target_out_path(
+                &target, draft->text.value,
+                identity, transaction_id, terminal,
+                error);
+        }
+    }
+    return tp_error_set(
+        error, TP_STATUS_INVALID_ARGUMENT,
+        "%s", "unknown GUI draft family");
+}
+
+static bool submit_draft(bool apply_mine) {
+    gui_draft_owner *draft = &s_actions.draft;
     gui_edit_state *edit = &draft->lifecycle;
     if (edit->phase == GUI_EDIT_IDLE) {
         return true;
@@ -630,18 +944,13 @@ static bool submit_atlas_edit(bool apply_mine) {
         set_status_ex(
             STATUS_WARNING,
             edit->phase == GUI_EDIT_CONFLICTED
-                ? "Choose Apply Mine or Discard for the conflicted atlas edit."
-                : "The atlas edit is still awaiting its exact session result.");
+                ? "Choose Apply Mine or Discard for the conflicted edit."
+                : "The edit is still awaiting its exact session result.");
         return false;
     }
 
     const tp_session_snapshot *snapshot =
         gui_project_snapshot();
-    const tp_snapshot_atlas *atlas =
-        snapshot
-            ? tp_session_snapshot_atlas_by_id(
-                  snapshot, edit->target_id)
-            : NULL;
     const int64_t revision =
         snapshot
             ? tp_session_snapshot_revision(snapshot)
@@ -649,14 +958,14 @@ static bool submit_atlas_edit(bool apply_mine) {
     if (revision < 0 || revision == INT64_MAX) {
         set_status_ex(
             STATUS_ERROR,
-            "Atlas draft cannot resolve a valid current revision.");
+            "GUI draft cannot resolve a valid current revision.");
         return false;
     }
 
     tp_id128 transaction = tp_id128_nil();
     if (!edit_id_generate(
             &transaction,
-            "Could not create the atlas edit transaction")) {
+            "Could not create the GUI edit transaction")) {
         return false;
     }
     char transaction_id[33];
@@ -667,54 +976,34 @@ static bool submit_atlas_edit(bool apply_mine) {
     if (apply_mine) {
         status = gui_edit_apply_mine(
             edit, revision, revision + 1,
-            atlas != NULL, transaction_id, &error);
+            draft_target_present(draft, snapshot),
+            transaction_id, &error);
     } else {
         status = gui_edit_commit(
             edit,
-            atlas_draft_is_net_zero(
-                draft, atlas, draft->component),
+            draft_is_net_zero(draft, snapshot),
             transaction_id, revision + 1, &error);
     }
     if (status != TP_STATUS_OK) {
         set_statusf_ex(
-            STATUS_WARNING, "Atlas edit not submitted: %s",
+            STATUS_WARNING, "GUI edit not submitted: %s",
             error.msg[0] ? error.msg
                          : tp_status_str(status));
         return false;
     }
     if (edit->phase == GUI_EDIT_IDLE) {
-        atlas_draft_clear_if_idle(draft);
+        draft_clear_if_idle(draft);
         return true;
     }
 
-    const tp_id128 target_id = edit->target_id;
-    const gui_atlas_field component =
-        draft->component;
-    const int integer = draft->integer;
-    const float real = draft->real;
     const gui_session_submit_identity identity =
-        atlas_edit_identity(edit);
+        draft_identity(edit);
     gui_session_submit_terminal terminal = {0};
-    status = gui_project_submit_atlas_setting(
-        target_id, edit->base_revision,
-        component,
-        component == GUI_ATLAS_PIXELS_PER_UNIT
-            ? 0
-            : integer,
-        component == GUI_ATLAS_PIXELS_PER_UNIT
-            ? real
-            : 0.0F,
-        identity, transaction_id, &terminal, &error);
+    status = submit_draft_operation(
+        draft, identity, transaction_id,
+        &terminal, &error);
 
     if (edit->phase == GUI_EDIT_SUBMITTING) {
-        if (terminal.transaction_id[0] == '\0') {
-            (void)memcpy(
-                terminal.transaction_id,
-                transaction_id,
-                sizeof terminal.transaction_id);
-            terminal.identity = identity;
-            terminal.status = status;
-        }
         const tp_session_snapshot *after =
             gui_project_snapshot();
         tp_error reduce_error = {{0}};
@@ -742,17 +1031,17 @@ static bool submit_atlas_edit(bool apply_mine) {
         if (reduce_status != TP_STATUS_OK) {
             set_statusf_ex(
                 STATUS_ERROR,
-                "Atlas submit receipt was invalid: %s",
+                "GUI submit receipt was invalid: %s",
                 reduce_error.msg[0]
                     ? reduce_error.msg
                     : tp_status_str(reduce_status));
             return false;
         }
-        atlas_draft_clear_if_idle(draft);
+        draft_clear_if_idle(draft);
     }
     if (status != TP_STATUS_OK) {
         set_statusf_ex(
-            STATUS_WARNING, "Atlas edit rejected: %s",
+            STATUS_WARNING, "GUI edit rejected: %s",
             error.msg[0] ? error.msg
                          : tp_status_str(status));
         return false;
@@ -760,18 +1049,18 @@ static bool submit_atlas_edit(bool apply_mine) {
     if (edit->phase != GUI_EDIT_IDLE) {
         set_status_ex(
             STATUS_WARNING,
-            "Atlas edit is waiting for its exact session result.");
+            "GUI edit is waiting for its exact session result.");
         return false;
     }
     return true;
 }
 
-bool gui_actions__submit_atlas_edit(void) {
-    return submit_atlas_edit(false);
+bool gui_actions__submit_draft(void) {
+    return submit_draft(false);
 }
 
-bool gui_actions__apply_atlas_mine(void) {
-    return submit_atlas_edit(true);
+bool gui_actions__apply_draft_mine(void) {
+    return submit_draft(true);
 }
 
 /* The queues below were captured from one pinned frame. When the atlas
@@ -913,10 +1202,6 @@ void gui_actions__drain_edits(void) {
                                              e->out_path ? e->out_path : "",
                                              e->b0);
                 break;
-            case TARGET_INTENT_OUT_PATH:
-                (void)gui_project_set_target_out_path(
-                    &target, e->out_path ? e->out_path : "");
-                break;
             case TARGET_INTENT_ENABLED:
                 (void)gui_project_set_target_enabled(&target, e->b0);
                 break;
@@ -961,8 +1246,8 @@ void gui_actions__discard_deferred_edits(void) {
 }
 
 void gui_actions__discard_edits(void) {
-    gui_atlas_edit_discard();
-    s_actions.atlas_apply_mine = false;
+    gui_draft_discard();
+    s_actions.draft_apply_mine = false;
     gui_actions__discard_deferred_edits();
     s_actions.gesture_commit = false;
 }

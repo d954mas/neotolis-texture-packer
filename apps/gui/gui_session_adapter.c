@@ -63,6 +63,21 @@ static tp_status apply_atlas_ops_identified(
     gui_session_submit_result result = {0};
     const tp_status status =
         gui_session_client_submit(client, &request, &result, err);
+    if (transaction_id &&
+        strlen(transaction_id) == 32U &&
+        result.terminal.transaction_id[0] == '\0') {
+        const tp_session_snapshot *snapshot =
+            gui_session_client_snapshot(client);
+        (void)memcpy(
+            result.terminal.transaction_id,
+            transaction_id,
+            sizeof result.terminal.transaction_id);
+        result.terminal.identity = identity;
+        result.terminal.status = status;
+        result.terminal.revision =
+            snapshot ? tp_session_snapshot_revision(snapshot)
+                     : expected_revision;
+    }
     if (out_terminal) {
         *out_terminal = result.terminal;
     }
@@ -99,6 +114,23 @@ tp_status gui_session_rename_atlas(gui_session_client *client, tp_id128 atlas_id
     operation.atlas_id = atlas_id;
     operation.u.atlas_rename.name = (char *)name;
     return apply_atlas_ops(client, &operation, 1, expected_revision, NULL, NULL, err);
+}
+
+tp_status gui_session_submit_atlas_name(
+    gui_session_client *client, tp_id128 atlas_id,
+    int64_t expected_revision, const char *name,
+    gui_session_submit_identity identity,
+    const char transaction_id[33],
+    gui_session_submit_terminal *out_terminal,
+    tp_error *err) {
+    tp_operation operation;
+    memset(&operation, 0, sizeof operation);
+    operation.kind = TP_OP_ATLAS_RENAME;
+    operation.atlas_id = atlas_id;
+    operation.u.atlas_rename.name = (char *)name;
+    return apply_atlas_ops_identified(
+        client, &operation, 1, expected_revision,
+        NULL, identity, transaction_id, out_terminal, err);
 }
 
 tp_status gui_session_create_atlas(gui_session_client *client, tp_id128 atlas_id,
@@ -237,6 +269,26 @@ tp_status gui_session_set_sprite_name(gui_session_client *client, tp_id128 atlas
     return apply_atlas_ops(client, &operation, 1, expected_revision, NULL, NULL, err);
 }
 
+tp_status gui_session_submit_sprite_name(
+    gui_session_client *client, tp_id128 atlas_id,
+    tp_id128 source_id, const char *source_key,
+    int64_t expected_revision, const char *name,
+    gui_session_submit_identity identity,
+    const char transaction_id[33],
+    gui_session_submit_terminal *out_terminal,
+    tp_error *err) {
+    tp_operation operation;
+    memset(&operation, 0, sizeof operation);
+    operation.kind = TP_OP_SPRITE_NAME_SET;
+    operation.atlas_id = atlas_id;
+    operation.u.sprite_name.source_id = source_id;
+    operation.u.sprite_name.src_key = (char *)source_key;
+    operation.u.sprite_name.name = (char *)name;
+    return apply_atlas_ops_identified(
+        client, &operation, 1, expected_revision,
+        NULL, identity, transaction_id, out_terminal, err);
+}
+
 tp_status gui_session_set_sprite_override(gui_session_client *client, tp_id128 atlas_id,
                                           tp_id128 source_id, const char *source_key,
                                           int64_t expected_revision,
@@ -326,6 +378,24 @@ tp_status gui_session_rename_animation(gui_session_client *client, tp_id128 atla
     operation.u.anim_rename.anim_id = animation_id;
     operation.u.anim_rename.name = (char *)name;
     return apply_atlas_ops(client, &operation, 1, expected_revision, NULL, NULL, err);
+}
+
+tp_status gui_session_submit_animation_name(
+    gui_session_client *client, tp_id128 atlas_id,
+    tp_id128 animation_id, int64_t expected_revision,
+    const char *name, gui_session_submit_identity identity,
+    const char transaction_id[33],
+    gui_session_submit_terminal *out_terminal,
+    tp_error *err) {
+    tp_operation operation;
+    memset(&operation, 0, sizeof operation);
+    operation.kind = TP_OP_ANIMATION_RENAME;
+    operation.atlas_id = atlas_id;
+    operation.u.anim_rename.anim_id = animation_id;
+    operation.u.anim_rename.name = (char *)name;
+    return apply_atlas_ops_identified(
+        client, &operation, 1, expected_revision,
+        NULL, identity, transaction_id, out_terminal, err);
 }
 
 tp_status gui_session_set_animation_settings(gui_session_client *client, tp_id128 atlas_id,
@@ -460,6 +530,26 @@ tp_status gui_session_set_target(gui_session_client *client, tp_id128 atlas_id,
     operation.u.target_set.target_id = target_id;
     return apply_atlas_ops(client, &operation, 1, expected_revision, NULL,
                            out_terminal, err);
+}
+
+tp_status gui_session_submit_target_out_path(
+    gui_session_client *client, tp_id128 atlas_id,
+    tp_id128 target_id, int64_t expected_revision,
+    const char *out_path,
+    gui_session_submit_identity identity,
+    const char transaction_id[33],
+    gui_session_submit_terminal *out_terminal,
+    tp_error *err) {
+    tp_operation operation;
+    memset(&operation, 0, sizeof operation);
+    operation.kind = TP_OP_TARGET_SET;
+    operation.atlas_id = atlas_id;
+    operation.u.target_set.target_id = target_id;
+    operation.u.target_set.mask = TP_TF_OUT_PATH;
+    operation.u.target_set.out_path = (char *)out_path;
+    return apply_atlas_ops_identified(
+        client, &operation, 1, expected_revision,
+        NULL, identity, transaction_id, out_terminal, err);
 }
 
 tp_status gui_session_copy_atlas_name(const tp_session_snapshot *snapshot,

@@ -30,7 +30,6 @@ typedef struct preview_frame_cache {
 
 typedef enum target_intent_kind {
     TARGET_INTENT_FULL = 0,
-    TARGET_INTENT_OUT_PATH,
     TARGET_INTENT_ENABLED,
     TARGET_INTENT_EXPORTER
 } target_intent_kind;
@@ -85,12 +84,35 @@ typedef struct animation_edit_intent {
     int frame_count;
 } animation_edit_intent;
 
-typedef struct gui_atlas_draft {
+typedef enum gui_draft_family {
+    GUI_DRAFT_NONE = 0,
+    GUI_DRAFT_ATLAS_SCALAR,
+    GUI_DRAFT_TEXT
+} gui_draft_family;
+
+typedef enum gui_text_edit_kind {
+    GUI_TEXT_EDIT_ATLAS_NAME = 0,
+    GUI_TEXT_EDIT_ANIMATION_NAME,
+    GUI_TEXT_EDIT_SPRITE_RENAME,
+    GUI_TEXT_EDIT_TARGET_OUT_PATH
+} gui_text_edit_kind;
+
+typedef struct gui_draft_owner {
     gui_edit_state lifecycle;
-    gui_atlas_field component;
-    int integer;
-    float real;
-} gui_atlas_draft;
+    gui_draft_family family;
+    struct {
+        gui_atlas_field component;
+        int integer;
+        float real;
+    } atlas;
+    struct {
+        gui_text_edit_kind kind;
+        tp_id128 atlas_id;
+        tp_id128 source_id;
+        char source_key[TP_SRCKEY_MAX];
+        char value[TP_IDENTITY_PATH_MAX];
+    } text;
+} gui_draft_owner;
 
 typedef struct gui_actions_state {
     gui_lifecycle_request pending_lifecycle_request;
@@ -120,10 +142,10 @@ typedef struct gui_actions_state {
     target_edit_intent *target_intents;
     int target_intent_count;
     int target_intent_cap;
-    gui_atlas_draft atlas_edit;
-    bool atlas_edit_initialized;
-    bool atlas_edit_reducer_registered;
-    bool atlas_apply_mine;
+    gui_draft_owner draft;
+    bool draft_initialized;
+    bool draft_reducer_registered;
+    bool draft_apply_mine;
     sprite_edit_intent *sprite_intents;
     int sprite_intent_count;
     int sprite_intent_cap;
@@ -131,15 +153,6 @@ typedef struct gui_actions_state {
     int animation_intent_count;
     int animation_intent_cap;
     bool gesture_commit;
-    tp_id128 edit_atlas_id;
-    int64_t edit_atlas_revision;
-    tp_id128 edit_anim_atlas_id;
-    tp_id128 edit_anim_id;
-    int64_t edit_anim_revision;
-    tp_id128 edit_sprite_atlas_id;
-    tp_id128 edit_sprite_source_id;
-    int64_t edit_sprite_revision;
-    char edit_sprite_source_key[TP_SRCKEY_MAX];
 } gui_actions_state;
 
 extern gui_actions_state s_actions;
@@ -154,8 +167,8 @@ void gui_actions__rebase_deferred_edits(
     int64_t revision_after);
 void gui_actions__discard_deferred_edits(void);
 void gui_actions__discard_edits(void);
-bool gui_actions__submit_atlas_edit(void);
-bool gui_actions__apply_atlas_mine(void);
+bool gui_actions__submit_draft(void);
+bool gui_actions__apply_draft_mine(void);
 void gui_actions__pending_create_animation_dispose(
     pending_create_animation *request);
 bool gui_actions__resolve_animation_ref(const gui_animation_ref *animation,

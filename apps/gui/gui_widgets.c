@@ -326,14 +326,43 @@ bool tp_checkbox(nt_ui_context_t *ctx, uint32_t id, bool cur, bool enabled) {
 
 static const nt_ui_input_props_t s_rename_props = {
     .placeholder = "name", .allow = NULL, .max_length = 0U, .keyboard = NT_UI_KB_TEXT, .password = false};
+static char s_rename_scratch[TP_IDENTITY_PATH_MAX];
+
+const char *rename_field_changed_value(void) {
+    return s_rename_scratch;
+}
 
 /* The single inline rename field, sized to fill its (bounded) parent so it clips to the row. */
-bool render_rename_field(nt_ui_context_t *ctx) {
+bool render_rename_field(nt_ui_context_t *ctx,
+                         const char *draft_value,
+                         bool *out_changed) {
     bool submitted = false;
+    if (out_changed) {
+        *out_changed = false;
+    }
+    if (!draft_value) {
+        return false;
+    }
+    if (strcmp(s_rename_scratch, draft_value) != 0) {
+        (void)snprintf(
+            s_rename_scratch, sizeof s_rename_scratch,
+            "%s", draft_value);
+    }
     /* min width: a 0-width field collapses its floating text/caret clip -> empty-scissor assert. */
     const Clay_ElementDeclaration decl = {
         .layout = {.sizing = {CLAY_SIZING_GROW(S(28.0F), 0), CLAY_SIZING_FIXED(S(BASE_ROW_H - 5.0F))}}};
-    (void)nt_ui_input_text(ctx, NT_UI_DATA_LAYER(LAYER_IMG), LAYER_TEXT, s_id_rename, s_edit_buf, sizeof s_edit_buf,
-                           &s_rename_props, &s_rename_input, &decl, true, &submitted);
+    const bool changed =
+        nt_ui_input_text(
+            ctx, NT_UI_DATA_LAYER(LAYER_IMG),
+            LAYER_TEXT, s_id_rename,
+            s_rename_scratch,
+            sizeof s_rename_scratch,
+            &s_rename_props, &s_rename_input,
+            &decl, true, &submitted);
+    if (changed) {
+        if (out_changed) {
+            *out_changed = true;
+        }
+    }
     return submitted;
 }

@@ -129,13 +129,11 @@ static void declare_atlas_list(nt_ui_context_t *ctx, const tp_session_snapshot *
         } else if (row_clicked && i != s_sel_atlas) {
             s_sel_atlas = i;
             reset_selection();
-            cancel_edit();
         }
         if (nt_ui_menu_open_trigger(ctx, s_id_ctx_menu, row_id, false, &s_ctx_state)) {
             close_menubar_menus();
             s_sel_atlas = i; /* right-click selects the row first */
             reset_selection();
-            cancel_edit();
             s_ctx_kind = CTX_ATLAS;
             s_ctx_atlas_id = atlas->id;
             s_ctx_atlas_revision = revision;
@@ -152,8 +150,15 @@ static void declare_atlas_list(nt_ui_context_t *ctx, const tp_session_snapshot *
             CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}, .childGap = Su(6), .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
                 ui_row_icon(ctx, &s_ic_layers, selected ? &g_row_strong : &g_caption);
                 if (editing) {
-                    if (render_rename_field(ctx)) {
-                        s_pending_commit_edit_enter = true; /* defer: never commit while holding `proj` */
+                    bool changed = false;
+                    if (render_rename_field(
+                            ctx, gui_text_edit_value(),
+                            &changed)) {
+                        gui_request_gesture_commit();
+                    }
+                    if (changed) {
+                        (void)gui_text_edit_update(
+                            rename_field_changed_value());
                     }
                 } else {
                     ui_label_fit(ctx, atlas->name, selected ? &g_row_strong : &g_row,
@@ -361,7 +366,7 @@ void filter_type_pump(void) {
         return; /* not armed, or an engine text field owns typed chars this frame */
     }
     if (s_confirm_open || s_about_open || s_export_open || s_recovery_open ||
-        s_edit_kind != EDIT_NONE) {
+        gui_draft_phase() != GUI_EDIT_IDLE) {
         return; /* a modal / inline-rename owns the keyboard -- don't steal its chars into the filter */
     }
     char buf[256];
@@ -701,8 +706,15 @@ static void declare_sprite_list(nt_ui_context_t *ctx) {
                     }
                     ui_row_icon(ctx, ic, ic_tint);
                     if (editing) {
-                        if (render_rename_field(ctx)) {
-                            s_pending_commit_edit_enter = true; /* defer: never commit while holding row pointers */
+                        bool changed = false;
+                        if (render_rename_field(
+                                ctx, gui_text_edit_value(),
+                                &changed)) {
+                            gui_request_gesture_commit();
+                        }
+                        if (changed) {
+                            (void)gui_text_edit_update(
+                                rename_field_changed_value());
                         }
                     } else {
                         /* Folder rows carry a fixed smart-folder tooltip on the whole row (below), so skip the
@@ -787,7 +799,6 @@ static void declare_animations_list(nt_ui_context_t *ctx,
         } else if (row_clicked) {
             s_sel_anim = i;
             s_sel_anim_frame = -1;
-            cancel_edit();
         }
         if (nt_ui_menu_open_trigger(ctx, s_id_ctx_menu, row_id, false, &s_ctx_state)) {
             close_menubar_menus();
@@ -809,8 +820,15 @@ static void declare_animations_list(nt_ui_context_t *ctx,
             CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}, .childGap = Su(6), .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
                 ui_row_icon(ctx, &s_ic_film, selected ? &g_row_strong : &g_caption);
                 if (editing) {
-                    if (render_rename_field(ctx)) {
-                        s_pending_commit_edit_enter = true; /* defer: never commit while holding `a` */
+                    bool changed = false;
+                    if (render_rename_field(
+                            ctx, gui_text_edit_value(),
+                            &changed)) {
+                        gui_request_gesture_commit();
+                    }
+                    if (changed) {
+                        (void)gui_text_edit_update(
+                            rename_field_changed_value());
                     }
                 } else {
                     ui_label_fit(ctx, animation->name, selected ? &g_row_strong : &g_row,

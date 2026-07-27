@@ -54,6 +54,39 @@ static bool do_save_as(void) {
         return false;
     }
     char err[256];
+    const tp_status preflight =
+        gui_project_save_as_preflight(
+            full, err, sizeof err);
+    if (preflight != TP_STATUS_OK) {
+        set_statusf_ex(
+            STATUS_ERROR, "Save failed: %s",
+            err[0] ? err : tp_status_str(preflight));
+        return false;
+    }
+
+    const tp_session_snapshot *before =
+        gui_project_snapshot();
+    const int64_t revision_before =
+        before ? tp_session_snapshot_revision(before)
+               : -1;
+    if (gui_draft_phase() != GUI_EDIT_IDLE &&
+        !gui_actions__submit_draft()) {
+        return false;
+    }
+    const tp_session_snapshot *after =
+        gui_project_snapshot();
+    const int64_t revision_after =
+        after ? tp_session_snapshot_revision(after)
+              : -1;
+    if (revision_before >= 0 &&
+        revision_after >= 0) {
+        gui_actions__rebase_deferred_edits(
+            revision_before, revision_after);
+    }
+    gui_actions__drain_edits();
+    if (gui_actions__flush_failed()) {
+        return false;
+    }
     if (gui_project_save_as(full, err, sizeof err) == TP_STATUS_OK) {
         char notice[256];
         if (gui_project_take_save_notice(notice, sizeof notice)) {
@@ -236,11 +269,12 @@ void gui_actions__browse_target(const gui_target_ref *queued) {
                       "Output path is invalid or exceeds the supported path limit.");
         return;
     }
-    /* Browse changes one field only. Commit the masked out-path operation as
-     * this dialog's discrete gesture; never round-trip exporter/enabled through
-     * frontend buffers where a long registered format id could be truncated. */
-    if (gui_project_set_target_out_path(&target, rel) &&
-        gui_project_flush_pending()) {
+    /* The dialog is one complete text gesture. It enters the same draft
+     * lifecycle as typing, then submits the exact masked operation. */
+    if (gui_text_edit_begin_target_out_path(
+            &target, t->out_path) &&
+        gui_text_edit_update(rel) &&
+        gui_actions__submit_draft()) {
         set_statusf("Output path: %s", rel);
     }
 }
@@ -311,7 +345,7 @@ static void do_add_folder(void) {
  * gate never discards the project and Pack never runs on stale state.
  * Returns true when the flush FAILED (the caller must abort); false when it is safe to proceed. */
 bool gui_actions__flush_failed(void) {
-    if (!gui_actions__submit_atlas_edit()) {
+    if (!gui_actions__submit_draft()) {
         return true;
     }
     if (gui_project_flush_pending()) {
@@ -388,7 +422,7 @@ bool gui_actions__apply_lifecycle_request(void) {
             "A project lifecycle transition is already in progress.");
         return false;
     }
-    if (gui_atlas_edit_phase() != GUI_EDIT_IDLE) {
+    if (gui_draft_phase() != GUI_EDIT_IDLE) {
         s_after_confirm = request;
         s_confirm_draft = true;
         s_confirm_open = true;
@@ -439,12 +473,12 @@ void gui_actions__apply_confirm(void) {
     if (s_confirm_draft) {
         if (s_modal_action == MODAL_SAVE) {
             const bool applied =
-                gui_atlas_edit_phase() ==
+                gui_draft_phase() ==
                         GUI_EDIT_CONFLICTED
-                    ? gui_actions__apply_atlas_mine()
-                    : gui_actions__submit_atlas_edit();
+                    ? gui_actions__apply_draft_mine()
+                    : gui_actions__submit_draft();
             if (applied &&
-                gui_atlas_edit_phase() ==
+                gui_draft_phase() ==
                     GUI_EDIT_IDLE) {
                 s_confirm_open = false;
                 s_confirm_draft = false;
@@ -458,8 +492,8 @@ void gui_actions__apply_confirm(void) {
                 s_confirm_draft = true;
             }
         } else if (s_modal_action == MODAL_DISCARD) {
-            gui_atlas_edit_discard();
-            if (gui_atlas_edit_phase() ==
+            gui_draft_discard();
+            if (gui_draft_phase() ==
                 GUI_EDIT_IDLE) {
                 s_confirm_open = false;
                 s_confirm_draft = false;

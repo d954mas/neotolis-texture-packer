@@ -197,8 +197,22 @@ static const tp_snapshot_sprite *selftest_sprite_by_name(int atlas_index,
 static bool selftest_set_atlas_name_at(int index, const char *name) {
     const tp_session_snapshot *snapshot = NULL;
     const tp_snapshot_atlas *atlas = selftest_atlas_at(index, &snapshot);
-    return atlas && gui_project_set_atlas_name(
-                        atlas->id, tp_session_snapshot_revision(snapshot), name);
+    if (!atlas ||
+        !gui_text_edit_begin_atlas_name(
+            atlas->id,
+            tp_session_snapshot_revision(snapshot),
+            atlas->name) ||
+        !gui_text_edit_update(name)) {
+        return false;
+    }
+    gui_request_gesture_commit();
+    apply_pending();
+    const bool committed =
+        gui_draft_phase() == GUI_EDIT_IDLE;
+    if (!committed) {
+        gui_draft_discard();
+    }
+    return committed;
 }
 
 static bool selftest_remove_atlas_at(int index) {
@@ -266,8 +280,21 @@ static bool selftest_sprite_ref_at(int atlas_index, const char *source_key,
 static bool selftest_set_sprite_rename_at(int atlas_index, const char *source_key,
                                           const char *rename) {
     gui_sprite_ref sprite;
-    return selftest_sprite_ref_at(atlas_index, source_key, &sprite) &&
-           gui_project_set_sprite_rename(&sprite, rename);
+    if (!selftest_sprite_ref_at(
+            atlas_index, source_key, &sprite) ||
+        !gui_text_edit_begin_sprite_rename(
+            &sprite, "") ||
+        !gui_text_edit_update(rename)) {
+        return false;
+    }
+    gui_request_gesture_commit();
+    apply_pending();
+    const bool committed =
+        gui_draft_phase() == GUI_EDIT_IDLE;
+    if (!committed) {
+        gui_draft_discard();
+    }
+    return committed;
 }
 
 static int selftest_pack_find_sprite_ref_at(int atlas_index, int source_index,
@@ -302,7 +329,19 @@ static bool selftest_rename_animation_frame_at(int atlas_index,
     const gui_sprite_ref sprite = {
         atlas->id, frame->source_id, frame->source_key,
         tp_session_snapshot_revision(snapshot)};
-    return gui_project_set_sprite_rename(&sprite, rename);
+    if (!gui_text_edit_begin_sprite_rename(
+            &sprite, "") ||
+        !gui_text_edit_update(rename)) {
+        return false;
+    }
+    gui_request_gesture_commit();
+    apply_pending();
+    const bool committed =
+        gui_draft_phase() == GUI_EDIT_IDLE;
+    if (!committed) {
+        gui_draft_discard();
+    }
+    return committed;
 }
 
 static bool selftest_set_sprite_origin_at(int atlas_index, const char *source_key,
@@ -378,8 +417,22 @@ static int selftest_create_animation_at(int atlas_index, const char *base,
 static bool selftest_set_anim_id_at(int atlas_index, int animation_index,
                                     const char *name) {
     gui_animation_ref animation;
-    return gui_project_animation_ref_at(atlas_index, animation_index, &animation) &&
-           gui_project_set_anim_id(&animation, name);
+    if (!gui_project_animation_ref_at(
+            atlas_index, animation_index,
+            &animation) ||
+        !gui_text_edit_begin_animation_name(
+            &animation, "") ||
+        !gui_text_edit_update(name)) {
+        return false;
+    }
+    gui_request_gesture_commit();
+    apply_pending();
+    const bool committed =
+        gui_draft_phase() == GUI_EDIT_IDLE;
+    if (!committed) {
+        gui_draft_discard();
+    }
+    return committed;
 }
 
 static bool selftest_set_anim_fps_at(int atlas_index, int animation_index,
@@ -450,22 +503,19 @@ static bool selftest_set_target_at(int atlas_index, int target_index,
 static bool selftest_set_target_path_at(int atlas_index, int target_index,
                                         const char *out_path) {
     gui_target_ref target;
-    return selftest_target_ref_at(atlas_index, target_index, &target) &&
-           gui_project_set_target_out_path(&target, out_path);
-}
-
-static bool selftest_set_target_enabled_at(int atlas_index, int target_index,
-                                           bool enabled) {
-    gui_target_ref target;
-    return selftest_target_ref_at(atlas_index, target_index, &target) &&
-           gui_project_set_target_enabled(&target, enabled);
-}
-
-static bool selftest_set_target_exporter_at(int atlas_index, int target_index,
-                                            const char *exporter_id) {
-    gui_target_ref target;
-    return selftest_target_ref_at(atlas_index, target_index, &target) &&
-           gui_project_set_target_exporter(&target, exporter_id);
+    if (!selftest_target_ref_at(
+            atlas_index, target_index, &target)) {
+        return false;
+    }
+    const tp_snapshot_target *current =
+        selftest_target_at(atlas_index, target_index);
+    if (!gui_target_path_edit_matches(&target) &&
+        (!current ||
+         !gui_text_edit_begin_target_out_path(
+             &target, current->out_path))) {
+        return false;
+    }
+    return gui_text_edit_update(out_path);
 }
 
 static void selftest_queue_target_at(int atlas_index, int target_index,
@@ -477,15 +527,12 @@ static void selftest_queue_target_at(int atlas_index, int target_index,
     }
 }
 
-#define gui_project_set_atlas_name(index, name) selftest_set_atlas_name_at((index), (name))
 #define gui_project_remove_atlas(index) selftest_remove_atlas_at((index))
 #define gui_project_copy_atlas_name(index, out, capacity, err) \
     selftest_copy_atlas_name_at((index), (out), (capacity), (err))
 #define gui_project_add_source(index, path) selftest_add_source_at((index), (path))
 #define gui_project_add_sources(index, paths, count, kind, added, duplicate) \
     selftest_add_sources_at((index), (paths), (count), (kind), (added), (duplicate))
-#define gui_project_set_sprite_rename(index, key, rename) \
-    selftest_set_sprite_rename_at((index), (key), (rename))
 #define gui_project_set_sprite_origin(index, key, axis, value) \
     selftest_set_sprite_origin_at((index), (key), (axis), (value))
 #define gui_project_set_sprite_slice9(index, key, component, value) \
@@ -496,8 +543,6 @@ static void selftest_queue_target_at(int atlas_index, int target_index,
     selftest_peek_sprite_slice9_at((index), (key), (out_lrtb))
 #define gui_project_create_animation(index, base, frames, frame_count) \
     selftest_create_animation_at((index), (base), (frames), (frame_count))
-#define gui_project_set_anim_id(index, animation, name) \
-    selftest_set_anim_id_at((index), (animation), (name))
 #define gui_project_set_anim_fps(index, animation, fps) \
     selftest_set_anim_fps_at((index), (animation), (fps))
 #define gui_project_set_anim_playback(index, animation, playback) \
@@ -512,12 +557,6 @@ static void selftest_queue_target_at(int atlas_index, int target_index,
     selftest_remove_animation_named_at((index), (name))
 #define gui_project_set_target(index, target, exporter, path, enabled) \
     selftest_set_target_at((index), (target), (exporter), (path), (enabled))
-#define gui_project_set_target_out_path(index, target, path) \
-    selftest_set_target_path_at((index), (target), (path))
-#define gui_project_set_target_enabled(index, target, enabled) \
-    selftest_set_target_enabled_at((index), (target), (enabled))
-#define gui_project_set_target_exporter(index, target, exporter) \
-    selftest_set_target_exporter_at((index), (target), (exporter))
 #define gui_edit_target(index, target, exporter, path, enabled) \
     selftest_queue_target_at((index), (target), (exporter), (path), (enabled))
 
@@ -738,7 +777,7 @@ static bool selftest_make_recovery_candidate(const char *root,
             return false;
         }
     }
-    if (!gui_project_set_atlas_name(0, atlas_name)) {
+    if (!selftest_set_atlas_name_at(0, atlas_name)) {
         return false;
     }
     gui_project_test_shutdown(false); /* dirty raw close keeps the candidate */
@@ -845,7 +884,7 @@ void run_selftest(void) {
     char name0[64];
     (void)snprintf(name0, sizeof name0, "%s", selftest_atlas_at(0, NULL)->name);
     NT_ASSERT(!gui_project_is_dirty() && "reloaded project is clean at its saved baseline");
-    gui_project_set_atlas_name(0, "hero_atlas"); /* structural: commits immediately -> one history step */
+    selftest_set_atlas_name_at(0, "hero_atlas"); /* structural: commits immediately -> one history step */
     char committed_atlas_name[64];
     tp_error committed_name_error = {0};
     NT_ASSERT(gui_project_copy_atlas_name(0, committed_atlas_name, sizeof committed_atlas_name,
@@ -897,7 +936,7 @@ void run_selftest(void) {
                 if (dot) {
                     *dot = '\0';
                 }
-                gui_project_set_sprite_rename(0, sprite, "renamed_region");
+                selftest_set_sprite_rename_at(0, sprite, "renamed_region");
                 const tp_snapshot_sprite *ov = tp_session_snapshot_sprite_by_key(
                     gui_project_snapshot(), folder_atlas_id, folder_source_id, sprite);
                 nt_log_info("SELFTEST: rename region '%s' -> override='%s'", sprite, (ov && ov->rename) ? ov->rename : "(none)");
@@ -1127,7 +1166,7 @@ void run_selftest(void) {
             NT_ASSERT(cyr_idx >= 0 && "Cyrillic-named region lookup");
 
             /* Cyrillic rename + save/load round-trip (multi-byte name survives serialization). */
-            gui_project_set_sprite_rename(sidx, cyr_source_key,
+            selftest_set_sprite_rename_at(sidx, cyr_source_key,
                                           "\xD0\xB8\xD0\xBC\xD1\x8F"); /* "имя" */
             char *sbuf = NULL;
             size_t slen = 0;
@@ -1965,13 +2004,8 @@ void run_selftest(void) {
         NT_ASSERT(g10c->animation_count == g10n0 - 1 &&
                   "#10: remove_animation resolves the intended stable animation after the pending flush");
 
-        /* (#11 -- H/G3) TARGET OUT-PATH coalescing: the export-target path text field used to fire one
-         *       gui_project_set_target per keystroke -> one committed TP_OP_TARGET_SET each = undo spam.
-         *       The out-path edit is now COALESCABLE, keyed per target (field = index): several distinct
-         *       values typed within one gesture BUFFER (latest wins, no commit); the field's Enter/blur
-         *       gesture boundary flushes the whole edit as EXACTLY ONE undo step; one undo reverts to the
-         *       committed baseline and redo re-applies. RMW-seeds exporter_id + enabled (only out_path
-         *       changes). Mirrors the padding-drag case (2), on the target out-path. */
+        /* (#11) Target-path typing is one reducer-owned draft. Keystrokes
+         * replace only its value; one gesture submits one masked operation. */
         gui_project_test_new();
         gui_pack_clear(-1);
         s_sel_atlas = 0;
@@ -1984,90 +2018,66 @@ void run_selftest(void) {
         NT_ASSERT(strcmp(t11a->out_path, t11_base) == 0 && "#11: baseline out_path committed");
         const bool t11_en = t11a->enabled;
         char t11_exp[TP_EXPORTER_ID_MAX];
-        memcpy(t11_exp, t11a->exporter_id, strlen(t11a->exporter_id) + 1U); /* remember for the RMW-seed check */
+        memcpy(t11_exp, t11a->exporter_id, strlen(t11a->exporter_id) + 1U);
         const int t11_u0 = gui_project_undo_depth();
-        /* simulate typing "out/f" -> ... -> "out/final.json": several DISTINCT values, SAME key, NO flush between */
-        (void)gui_project_set_target_out_path(0, 0, "out/f");
-        (void)gui_project_set_target_out_path(0, 0, "out/fin");
-        (void)gui_project_set_target_out_path(0, 0, "out/final");
-        (void)gui_project_set_target_out_path(0, 0, "out/final.json");
-        const int t11_umid = gui_project_undo_depth();                                          /* still t11_u0: buffered */
-        const char *t11_mid = selftest_target_at(0, 0)->out_path;  /* still the baseline */
+        (void)selftest_set_target_path_at(0, 0, "out/f");
+        (void)selftest_set_target_path_at(0, 0, "out/fin");
+        (void)selftest_set_target_path_at(0, 0, "out/final");
+        (void)selftest_set_target_path_at(0, 0, "out/final.json");
+        const int t11_umid = gui_project_undo_depth();
+        const char *t11_mid = selftest_target_at(0, 0)->out_path;
         NT_ASSERT(t11_umid == t11_u0 && strcmp(t11_mid, t11_base) == 0 &&
-                  "#11: in-flight out-path keystrokes stay buffered (uncommitted) until the gesture boundary");
-        gui_project_flush_pending();                                                            /* Enter / blur boundary */
+                  "#11: in-flight path text exists only in the draft");
+        NT_ASSERT(gui_actions__submit_draft() &&
+                  "#11: gesture submits the active path draft");
         const int t11_u1 = gui_project_undo_depth();
         const tp_snapshot_target *t11b = selftest_target_at(0, 0);
-        nt_log_info("SELFTEST: #11 out-path coalesce: 4 keystrokes undo %d->%d path='%s' exporter='%s' enabled=%d", t11_u0,
+        nt_log_info("SELFTEST: #11 path draft: 4 changes undo %d->%d path='%s' exporter='%s' enabled=%d", t11_u0,
                     t11_u1, t11b->out_path, t11b->exporter_id, t11b->enabled);
         NT_ASSERT(t11_u1 - t11_u0 == 1 && strcmp(t11b->out_path, "out/final.json") == 0 &&
-                  "#11: N out-path keystrokes = ONE undo step (final typed value wins)");
+                  "#11: N text changes produce one operation and one Undo step");
         NT_ASSERT(strcmp(t11b->exporter_id, t11_exp) == 0 && t11b->enabled == t11_en &&
-                  "#11: the coalesced out-path edit leaves exporter_id + enabled UNTOUCHED (mask=TP_TF_OUT_PATH)");
+                  "#11: path operation leaves target siblings untouched");
         NT_ASSERT(gui_project_undo() &&
                   strcmp(selftest_target_at(0, 0)->out_path, t11_base) == 0 &&
-                  "#11: one undo reverts the ENTIRE coalesced out-path edit back to the baseline");
+                  "#11: one undo reverts the path gesture");
         NT_ASSERT(gui_project_redo() &&
                   strcmp(selftest_target_at(0, 0)->out_path, "out/final.json") == 0 &&
-                  "#11: redo re-applies the coalesced out-path edit");
-        /* #11 net-zero parity: core semantic-diff admission owns the no-change verdict. */
+                  "#11: redo reapplies the path gesture");
+
         const int t11_unz = gui_project_undo_depth();
         const bool t11_stale_before = gui_project_is_stale();
-        (void)gui_project_set_target_out_path(0, 0, "out/scratch");
-        (void)gui_project_set_target_out_path(0, 0, "out/final.json"); /* revert to the committed value */
-        gui_project_flush_pending();
+        (void)selftest_set_target_path_at(0, 0, "out/scratch");
+        (void)selftest_set_target_path_at(0, 0, "out/final.json");
+        NT_ASSERT(gui_actions__submit_draft());
         NT_ASSERT(gui_project_undo_depth() == t11_unz &&
                   gui_project_is_stale() == t11_stale_before &&
                   strcmp(selftest_target_at(0, 0)->out_path, "out/final.json") == 0 &&
-                  "#11: a net-zero out-path gesture preserves Undo and preview state");
-        /* #11 interleave (the coalescing hazard G3 introduced + fixed): a discrete enabled toggle made while
-         * an out-path edit is still BUFFERED (typed, not yet Enter/blur) must NOT revert the typed path. The
-         * old discrete gui_edit_target re-sent the STALE committed out_path, so its internal flush committed
-         * the buffered value then overwrote it back. gui_project_set_target_enabled now flushes FIRST (commits
-         * the buffered out-path as its own step) then commits a mask=TP_TF_ENABLED-only op -- it never re-sends
-         * out_path, so the typed path cannot be reverted. Buffer "out/typed.json", then toggle enabled. */
-        (void)gui_project_set_target_out_path(0, 0, "out/typed.json"); /* buffered, uncommitted */
+                  "#11: a net-zero gesture changes neither history nor preview state");
+
+        gui_target_ref t11_ref;
+        NT_ASSERT(selftest_target_ref_at(0, 0, &t11_ref));
+        (void)selftest_set_target_path_at(0, 0, "out/typed.json");
+        gui_edit_target_enabled(&t11_ref, !t11_en);
+        gui_request_gesture_commit();
+        apply_pending();
         const tp_snapshot_target *t11i = selftest_target_at(0, 0);
-        NT_ASSERT(strcmp(t11i->out_path, "out/final.json") == 0 &&
-                  "#11: the typed out-path is still buffered (committed record unchanged)");
-        const bool t11_en0 = t11i->enabled;
-        NT_ASSERT(gui_project_set_target_enabled(0, 0, !t11_en0) && "#11: discrete enabled toggle commits");
-        t11i = selftest_target_at(0, 0);
-        NT_ASSERT(strcmp(t11i->out_path, "out/typed.json") == 0 && t11i->enabled == !t11_en0 &&
-                  "#11: a discrete toggle mid-typing commits the buffered out-path FIRST (typed path preserved, not reverted)");
-        /* #11 exporter interleave (same hazard on the EXPORTER path): buffer a new out-path, then change the
-         * exporter -- the typed path must be preserved and the exporter changed. Default target is json-neotolis
-         * (see the coalesce log line above), so switching to "defold" is a real change. */
-        (void)gui_project_set_target_out_path(0, 0, "out/typed2.json"); /* buffered, uncommitted */
-        NT_ASSERT(gui_project_set_target_exporter(0, 0, "defold") && "#11: discrete exporter change commits");
-        t11i = selftest_target_at(0, 0);
-        NT_ASSERT(strcmp(t11i->out_path, "out/typed2.json") == 0 &&
-                  strcmp(t11i->exporter_id, "defold") == 0 &&
-                  "#11: an exporter change mid-typing preserves the buffered out-path (not reverted)");
-        /* #11 empty-path: frontend forwards the typed intent; core validation is
-         * the only owner. The flush-first toggle reports that rejection and may
-         * be retried after the invalid pending intent has been consumed. */
-        (void)gui_project_set_target_out_path(0, 0, "out/willclear"); /* buffered (uncommitted) */
-        t11i = selftest_target_at(0, 0);
-        NT_ASSERT(strcmp(t11i->out_path, "out/typed2.json") == 0 &&
-                  "#11: [0] buffered edit not yet committed (record still the last valid path)");
-        (void)gui_project_set_target_out_path(0, 0, "");
-        t11i = selftest_target_at(0, 0);
-        NT_ASSERT(strcmp(t11i->out_path, "out/typed2.json") == 0 &&
-                  "#11: [0] pending invalid intent does not mutate the committed record");
+        NT_ASSERT(strcmp(t11i->out_path, "out/typed.json") == 0 &&
+                  t11i->enabled == !t11_en &&
+                  "#11: dependent target toggle runs after exact draft success");
+
+        (void)selftest_set_target_path_at(0, 0, "");
         const bool t11_en1 = t11i->enabled;
-        NT_ASSERT(!gui_project_set_target_enabled(0, 0, !t11_en1) &&
-                  "#11: [0] flush-first surfaces the core validation failure");
-        char t11_error[256] = {0};
-        NT_ASSERT(gui_project_take_op_error(t11_error, sizeof t11_error) &&
-                  strstr(t11_error, "out_path") != NULL &&
-                  "#11: [0] invalid input produces a structured core error");
-        NT_ASSERT(gui_project_set_target_enabled(0, 0, !t11_en1) &&
-                  "#11: [0] retry succeeds after the rejected pending intent is consumed");
+        NT_ASSERT(selftest_target_ref_at(0, 0, &t11_ref));
+        gui_edit_target_enabled(&t11_ref, !t11_en1);
+        gui_request_gesture_commit();
+        apply_pending();
         t11i = selftest_target_at(0, 0);
-        NT_ASSERT(t11i->enabled == !t11_en1 && t11i->out_path[0] != '\0' &&
-                  strcmp(t11i->out_path, "out/typed2.json") == 0 &&
-                  "#11: [0] the toggle applied and kept the last valid (non-empty) out-path");
+        NT_ASSERT(gui_draft_phase() == GUI_EDIT_EDITING &&
+                  t11i->enabled == t11_en1 &&
+                  strcmp(t11i->out_path, "out/typed.json") == 0 &&
+                  "#11: invalid draft preserves text and blocks dependent mutation");
+        gui_draft_discard();
 
         /* Restore a packable atlas-0 project for the render frames below (the pixel probe packs
          * atlas 0 and probes its region outlines) -- gui_project_test_new left it source-less. */
@@ -2117,7 +2127,7 @@ void run_selftest(void) {
          * atlas1 -> 'sprites' (its target stays out/atlas1); Add Atlas must SKIP "atlas1" (out/atlas1 taken)
          * and pick "atlas2". */
         gui_project_test_new(); /* fresh atlas1 + default target out/atlas1 */
-        NT_ASSERT(gui_project_set_atlas_name(0, "sprites") && "P2-14/B: rename atlas1 -> 'sprites' (target stays out/atlas1)");
+        NT_ASSERT(selftest_set_atlas_name_at(0, "sprites") && "P2-14/B: rename atlas1 -> 'sprites' (target stays out/atlas1)");
         const int p14b =
             gui_project_add_atlas().visible_index;
         const tp_snapshot_atlas *p14ba = selftest_atlas_at(p14b, NULL);
@@ -2190,7 +2200,7 @@ void run_selftest(void) {
         (void)snprintf(nm0, sizeof nm0, "%s", selftest_atlas_at(0, NULL)->name);
         const bool dirty_before = gui_project_is_dirty();
         gui_project__test_fail_next_recovery_writes(1); /* the NEXT journal append fails entirely */
-        const bool committed = gui_project_set_atlas_name(0, "committed_without_recovery");
+        const bool committed = selftest_set_atlas_name_at(0, "committed_without_recovery");
         gui_recovery_notice j1notice = {0};
         const bool surfaced = gui_project__test_recovery_notice(
             TP_STATUS_JOURNAL_FAILED, &j1notice);
@@ -2208,7 +2218,7 @@ void run_selftest(void) {
         NT_ASSERT(j1health.degraded && j1health.first_cause == TP_STATUS_JOURNAL_FAILED &&
                   "J1: recovery health retains the first durable-write cause");
         /* Sticky degradation skips dependent appends, but editing stays live. */
-        NT_ASSERT(gui_project_set_atlas_name(0, "works_after") &&
+        NT_ASSERT(selftest_set_atlas_name_at(0, "works_after") &&
                   strcmp(selftest_atlas_at(0, NULL)->name, "works_after") == 0 &&
                   "J1: the editor keeps working while recovery is degraded");
         gui_recovery_notice j1after = {0};
@@ -2224,7 +2234,7 @@ void run_selftest(void) {
         s_sel_atlas = 0;
         (void)gui_project_take_op_error(NULL, 0);
         NT_ASSERT(gui_project__test_attach_memory_recovery() && "J2: memory recovery journal attached");
-        NT_ASSERT(gui_project_set_atlas_name(0, "before_save") && "J2: a committed edit lands (journal healthy)");
+        NT_ASSERT(selftest_set_atlas_name_at(0, "before_save") && "J2: a committed edit lands (journal healthy)");
         NT_ASSERT(gui_project_is_dirty() && "J2: the committed edit dirties the model");
         const int j2pad = selftest_atlas_at(0, NULL)->padding;
         const tp_session_snapshot *j2snapshot = NULL;
@@ -2234,7 +2244,7 @@ void run_selftest(void) {
             j2atlas->id, tp_session_snapshot_revision(j2snapshot),
             GUI_ATLAS_PADDING, j2pad + 5, 0.0F);
         gui_project__test_fail_next_recovery_writes(1);
-        NT_ASSERT(gui_actions__submit_atlas_edit() &&
+        NT_ASSERT(gui_actions__submit_draft() &&
                   "J2: reducer draft submits despite recovery degradation");
         char s2path[1200];
         (void)snprintf(s2path, sizeof s2path, "%s/selftest_savefail.ntpacker_project", s_exe_dir);
@@ -2276,9 +2286,9 @@ void run_selftest(void) {
             j6atlas->id, tp_session_snapshot_revision(j6snapshot),
             GUI_ATLAS_PADDING, j6pad + 7, 0.0F);
         gui_project__test_fail_next_recovery_writes(1);
-        NT_ASSERT(gui_actions__submit_atlas_edit() &&
+        NT_ASSERT(gui_actions__submit_draft() &&
                   "J6: draft submit remains successful when recovery degrades");
-        const bool j6ret = gui_project_set_atlas_name(0, "structural_should_abort");
+        const bool j6ret = selftest_set_atlas_name_at(0, "structural_should_abort");
         gui_recovery_notice j6notice = {0};
         const bool j6surfaced = gui_project__test_recovery_notice(
             TP_STATUS_JOURNAL_FAILED, &j6notice);
@@ -2360,14 +2370,14 @@ void run_selftest(void) {
                     (int)s_confirm_draft);
         NT_ASSERT(j8kept && s_confirm_open && s_confirm_draft &&
                   s_after_confirm == GUI_LIFECYCLE_REQUEST_NEW &&
-                  gui_atlas_edit_phase() == GUI_EDIT_EDITING &&
+                  gui_draft_phase() == GUI_EDIT_EDITING &&
                   "J8: New presents the explicit active-draft choice");
         NT_ASSERT(!gui_project__test_recovery_notice(
                        TP_STATUS_JOURNAL_FAILED, NULL) &&
                   "J8: opening the draft choice does not submit it");
         s_modal_action = MODAL_SAVE; /* Apply & Continue */
         apply_pending();
-        NT_ASSERT(gui_atlas_edit_phase() == GUI_EDIT_IDLE &&
+        NT_ASSERT(gui_draft_phase() == GUI_EDIT_IDLE &&
                   s_confirm_open && !s_confirm_draft &&
                   s_after_confirm == GUI_LIFECYCLE_REQUEST_NEW &&
                   gui_project_is_dirty() &&
@@ -2404,7 +2414,7 @@ void run_selftest(void) {
             j9atlas->id, tp_session_snapshot_revision(j9snapshot),
             GUI_ATLAS_PADDING, j9pad + 6, 0.0F);
         gui_project__test_fail_next_recovery_writes(1);
-        NT_ASSERT(gui_actions__submit_atlas_edit() &&
+        NT_ASSERT(gui_actions__submit_draft() &&
                   "J9: prerequisite draft submit succeeds");
         const bool j9ret_fail = gui_project_remove_atlas(j9added);
         const int j9count1 = tp_session_snapshot_atlas_count(gui_project_snapshot());
@@ -2425,16 +2435,15 @@ void run_selftest(void) {
         const int j10a = gui_project_create_animation(0, "anim_a", NULL, 0);
         const int j10b = gui_project_create_animation(0, "anim_b", NULL, 0);
         NT_ASSERT(j10a == 0 && j10b == 1 && "J10: created two animations");
-        /* Case A -- genuine collision: rename anim_b to "anim_a" (exists) -> false AND the CORE reject
-         *   "an animation named 'anim_a' already exists" rides the op-error channel (no client heuristic). */
-        const bool j10_collide_ret = gui_project_set_anim_id(0, j10b, "anim_a");
-        char j10_cerr[256] = {0};
-        const bool j10_csurfaced = gui_project_take_op_error(j10_cerr, sizeof j10_cerr);
-        nt_log_info("SELFTEST: J10 collision ret=%d surfaced=%d msg='%s' (want 0,1 -> the core collision message)",
-                    (int)j10_collide_ret, (int)j10_csurfaced, j10_cerr);
-        NT_ASSERT(!j10_collide_ret && j10_csurfaced && strstr(j10_cerr, "an animation named") != NULL &&
-                  strstr(j10_cerr, "already exists") != NULL &&
-                  "J10/live: a genuine duplicate -> set_anim_id false AND the op-error IS the core collision message");
+        /* Case A -- genuine collision: the exact core reject is surfaced by
+         * the draft submit; no client-side collision heuristic exists. */
+        const bool j10_collide_ret = selftest_set_anim_id_at(0, j10b, "anim_a");
+        nt_log_info("SELFTEST: J10 collision ret=%d msg='%s' (want 0 -> the core collision message)",
+                    (int)j10_collide_ret, s_status);
+        NT_ASSERT(!j10_collide_ret &&
+                  strstr(s_status, "an animation named") != NULL &&
+                  strstr(s_status, "already exists") != NULL &&
+                  "J10/live: a genuine duplicate preserves the core collision message");
         /* Case B -- recovery-degraded draft submit before a UNIQUE name: both
          * operations commit, with a recovery warning rather than a false collision. */
         NT_ASSERT(gui_project__test_attach_memory_recovery() && "J10: memory journal attached");
@@ -2446,9 +2455,9 @@ void run_selftest(void) {
             j10atlas->id, tp_session_snapshot_revision(j10snapshot),
             GUI_ATLAS_PADDING, j10pad + 2, 0.0F);
         gui_project__test_fail_next_recovery_writes(1);
-        NT_ASSERT(gui_actions__submit_atlas_edit() &&
+        NT_ASSERT(gui_actions__submit_draft() &&
                   "J10: prerequisite draft submit succeeds");
-        const bool j10_flush_ret = gui_project_set_anim_id(0, j10b, "totally_unique_name");
+        const bool j10_flush_ret = selftest_set_anim_id_at(0, j10b, "totally_unique_name");
         gui_recovery_notice j10_notice = {0};
         const bool j10_fsurfaced = gui_project__test_recovery_notice(
             TP_STATUS_JOURNAL_FAILED, &j10_notice);
@@ -2471,7 +2480,7 @@ void run_selftest(void) {
         /* (C) own/unchanged name -> a no-op SUCCESS (true) that raises NO op-error. This is exactly the case
          *     the retired heuristic got wrong (the name "exists", yet the rename succeeds); the live path
          *     returns true and leaves the op-error channel empty. */
-        const bool j11_own_ret = gui_project_set_anim_id(0, j11a, "keep_me");
+        const bool j11_own_ret = selftest_set_anim_id_at(0, j11a, "keep_me");
         const bool j11_own_err = gui_project_take_op_error(NULL, 0);
         nt_log_info("SELFTEST: J11 own-name ret=%d op_error=%d (want 1,0 -> a no-op SUCCESS with no op-error)",
                     (int)j11_own_ret, (int)j11_own_err);
@@ -2487,7 +2496,7 @@ void run_selftest(void) {
             j11atlas->id, tp_session_snapshot_revision(j11snapshot),
             GUI_ATLAS_PADDING, j11pad + 1, 0.0F);
         gui_project__test_fail_next_recovery_writes(1);
-        const bool j11_submit = gui_actions__submit_atlas_edit();
+        const bool j11_submit = gui_actions__submit_draft();
         gui_recovery_notice j11_notice = {0};
         const bool j11_fsurfaced = gui_project__test_recovery_notice(
             TP_STATUS_JOURNAL_FAILED, &j11_notice);
@@ -2497,25 +2506,22 @@ void run_selftest(void) {
                    !gui_project_take_op_error(NULL, 0) &&
                    "J11: recovery-degraded draft submit still commits successfully");
 
-        /* (J11b) A core-rejected atlas rename keeps the inline editor alive on Enter so the user can
-         * correct the value. A forced blur dismisses it without mutating the model. */
+        /* (J11b) A core-rejected atlas rename preserves the draft until the
+         * user explicitly corrects or discards it. */
         const int64_t j11b_revision = tp_session_snapshot_revision(gui_project_snapshot());
         start_atlas_edit(0);
-        (void)snprintf(s_edit_buf, sizeof s_edit_buf, "%s", "");
-        s_pending_commit_edit = false;
-        s_pending_commit_edit_enter = true;
+        NT_ASSERT(gui_text_edit_update(""));
+        gui_request_gesture_commit();
         apply_pending();
-        nt_log_info("SELFTEST: J11b invalid atlas Enter edit=%d revision=%lld (want EDIT_ATLAS, unchanged)",
-                    s_edit_kind, (long long)tp_session_snapshot_revision(gui_project_snapshot()));
-        NT_ASSERT(s_edit_kind == EDIT_ATLAS &&
+        nt_log_info("SELFTEST: J11b invalid atlas Enter phase=%d revision=%lld (want EDITING, unchanged)",
+                    (int)gui_draft_phase(), (long long)tp_session_snapshot_revision(gui_project_snapshot()));
+        NT_ASSERT(gui_draft_phase() == GUI_EDIT_EDITING &&
                   tp_session_snapshot_revision(gui_project_snapshot()) == j11b_revision &&
                   "J11b: Enter on an invalid atlas name keeps the editor and model unchanged");
-        s_pending_commit_edit = true;
-        s_pending_commit_edit_enter = false;
-        apply_pending();
-        NT_ASSERT(s_edit_kind == EDIT_NONE &&
+        gui_draft_discard();
+        NT_ASSERT(gui_draft_phase() == GUI_EDIT_IDLE &&
                   tp_session_snapshot_revision(gui_project_snapshot()) == j11b_revision &&
-                  "J11b: forced blur cancels a rejected atlas rename without mutation");
+                  "J11b: explicit discard clears a rejected rename without mutation");
 
         /* (J12) Undo blocks while a reducer-owned draft is active. Once the
          * draft is explicitly applied, Undo operates on committed History and
@@ -2524,7 +2530,7 @@ void run_selftest(void) {
         gui_pack_clear(-1);
         s_sel_atlas = 0;
         (void)gui_project_take_op_error(NULL, 0);
-        NT_ASSERT(gui_project_set_atlas_name(0, "j12_edit") && "J12: a committed edit populates undo history");
+        NT_ASSERT(selftest_set_atlas_name_at(0, "j12_edit") && "J12: a committed edit populates undo history");
         NT_ASSERT(gui_project__test_attach_memory_recovery() && "J12: memory journal attached");
         const int j12pad = selftest_atlas_at(0, NULL)->padding;
         const tp_session_snapshot *j12snapshot = NULL;
@@ -2542,8 +2548,8 @@ void run_selftest(void) {
                     s_status);
         NT_ASSERT(strcmp(
                       s_status,
-                      "Apply or discard the active atlas edit before Undo.") == 0 &&
-                  gui_atlas_edit_phase() == GUI_EDIT_EDITING &&
+                      "Apply or discard the active edit before Undo.") == 0 &&
+                  gui_draft_phase() == GUI_EDIT_EDITING &&
                   tp_session_snapshot_revision(gui_project_snapshot()) ==
                       j12revision &&
                   selftest_atlas_at(0, NULL)->padding == j12pad &&
@@ -2555,7 +2561,7 @@ void run_selftest(void) {
         apply_pending();
         NT_ASSERT(gui_project__test_recovery_notice(
                       TP_STATUS_JOURNAL_FAILED, NULL) &&
-                  gui_atlas_edit_phase() == GUI_EDIT_IDLE &&
+                  gui_draft_phase() == GUI_EDIT_IDLE &&
                   selftest_atlas_at(0, NULL)->padding == j12pad + 5 &&
                   !gui_project_take_op_error(NULL, 0) &&
                   "J12: explicit Apply commits and surfaces recovery degradation");
@@ -2570,7 +2576,7 @@ void run_selftest(void) {
         s_sel_atlas = 0;
         (void)gui_project_take_op_error(NULL, 0);
         NT_ASSERT(gui_project__test_attach_memory_recovery() && "J12b: memory recovery journal attached");
-        NT_ASSERT(gui_project_set_atlas_name(0, "j12b_edit") && "J12b: committed edit populates history");
+        NT_ASSERT(selftest_set_atlas_name_at(0, "j12b_edit") && "J12b: committed edit populates history");
         gui_project__test_fail_next_recovery_writes(1);
         const bool j12b_undo_fail = gui_project_undo();
         gui_recovery_notice j12b_undo_notice = {0};
@@ -2695,7 +2701,7 @@ void run_selftest(void) {
         gui_project_test_shutdown(true);
         gui_project_enable_recovery(j15root);
         gui_project_init();
-        NT_ASSERT(gui_project_set_atlas_name(0, "explicit_discard"));
+        NT_ASSERT(selftest_set_atlas_name_at(0, "explicit_discard"));
         gui_project_test_shutdown(true);
         gui_project_enable_recovery(j15root);
         gui_project_init();
@@ -2712,7 +2718,7 @@ void run_selftest(void) {
          * recovery slot; a failed Open keeps the current session and slot. */
         char j15outgoing[TP_IDENTITY_PATH_MAX];
         const char *j15live = NULL;
-        NT_ASSERT(gui_project_set_atlas_name(0, "discarded_by_new"));
+        NT_ASSERT(selftest_set_atlas_name_at(0, "discarded_by_new"));
         j15live = tp_session__recovery_journal_path(
             gui_project__test_session());
         NT_ASSERT(j15live &&
@@ -2723,7 +2729,7 @@ void run_selftest(void) {
                   gui_recovery_collect(j15list) == 0 &&
                   "J15: New->Discard removes the outgoing dirty recovery slot");
 
-        NT_ASSERT(gui_project_set_atlas_name(0, "discarded_by_open"));
+        NT_ASSERT(selftest_set_atlas_name_at(0, "discarded_by_open"));
         j15live = tp_session__recovery_journal_path(
             gui_project__test_session());
         NT_ASSERT(j15live &&
@@ -2735,7 +2741,7 @@ void run_selftest(void) {
                   gui_recovery_collect(j15list) == 0 &&
                   "J15: Open->Discard removes the outgoing dirty recovery slot");
 
-        NT_ASSERT(gui_project_set_atlas_name(0, "failed_open_kept"));
+        NT_ASSERT(selftest_set_atlas_name_at(0, "failed_open_kept"));
         tp_session *j15before_failed_open = gui_project__test_session();
         j15live = tp_session__recovery_journal_path(j15before_failed_open);
         NT_ASSERT(j15live &&
@@ -3119,7 +3125,7 @@ void selftest_pre_frame(void) {
                     edit_atlas->id,
                     tp_session_snapshot_revision(edit_snapshot),
                     GUI_ATLAS_MAX_SIZE, 256, 0.0F);
-                NT_ASSERT(gui_actions__submit_atlas_edit() &&
+                NT_ASSERT(gui_actions__submit_draft() &&
                           "SELFTEST: stale-scene max-size draft submits");
                 gui_scan_invalidate_all();
             }
@@ -3240,7 +3246,7 @@ void selftest_pre_frame(void) {
                     edit_atlas->id,
                     tp_session_snapshot_revision(edit_snapshot),
                     GUI_ATLAS_ALLOW_TRANSFORM, 1, 0.0F);
-                NT_ASSERT(gui_actions__submit_atlas_edit() &&
+                NT_ASSERT(gui_actions__submit_draft() &&
                           "SELFTEST preview: allow-transform draft submits");
                 gui_scan_invalidate_all();
             }
@@ -3314,7 +3320,7 @@ void selftest_pre_frame(void) {
                       strcmp(tip_again, tip) == 0 &&
                       gui_pack_preview_diff_rebuilds() == 1U &&
                       "SELFTEST preview: unchanged degradation diff is cached");
-            NT_ASSERT(gui_project_set_atlas_name(0, "preview-cache-refresh") &&
+            NT_ASSERT(selftest_set_atlas_name_at(0, "preview-cache-refresh") &&
                       "SELFTEST preview: cache invalidation edit commits");
             (void)gui_pack_preview_diff(0, "defold", chip_again,
                                         sizeof chip_again, tip_again,
@@ -3436,7 +3442,7 @@ void selftest_pre_frame(void) {
             const int survivor =
                 gui_project_add_atlas().visible_index;
             NT_ASSERT(survivor == 1 && "SELFTEST: stable-publication atlas must be index 1");
-            (void)gui_project_set_atlas_name(1, "survivor");
+            (void)selftest_set_atlas_name_at(1, "survivor");
             s_sel_atlas = 1;
             reset_selection();
             char afolder[512];

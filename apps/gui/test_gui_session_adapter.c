@@ -321,6 +321,221 @@ void test_target_family_uses_stable_ids_revision_and_snapshot_read(void) {
     tp_session_destroy(session);
 }
 
+void test_identified_text_submits_preserve_exact_receipts_and_stable_targets(void) {
+    uint8_t seed = 181U;
+    tp_rng rng = {deterministic_fill, &seed};
+    tp_error err = {{0}};
+    tp_session *session = NULL;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_create(&rng, &session, &err));
+    gui_session_client client;
+    gui_session_client_init(&client);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_session_client_attach(&client, session, &err));
+
+    tp_session_snapshot *initial = NULL;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_session_snapshot_create(session, &initial, &err));
+    const tp_snapshot_atlas *atlas =
+        tp_session_snapshot_atlas_at(initial, 0);
+    TEST_ASSERT_NOT_NULL(atlas);
+    const tp_id128 atlas_id = atlas->id;
+    tp_session_snapshot_destroy(initial);
+
+    const tp_id128 source_id = {{0x41U}};
+    const char *source_path = "sprites/hero.png";
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_session_add_sources(
+            &client, atlas_id, &source_id, &source_path, 1,
+            TP_SNAPSHOT_SOURCE_FILE, 0, &err));
+
+    const tp_id128 animation_id = {{0x51U}};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_session_create_animation(
+            &client, atlas_id, animation_id, 1,
+            "idle", NULL, 0, NULL, &err));
+
+    const tp_id128 target_id = {{0x61U}};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_session_create_target(
+            &client, atlas_id, target_id, 2,
+            "json-neotolis", "out/original", true,
+            NULL, &err));
+
+    const gui_session_submit_identity identity = {
+        .origin_view_id = {{0x71U}},
+        .draft_instance_id = {{0x81U}},
+    };
+    static const char atlas_tx[] =
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    static const char animation_tx[] =
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    static const char sprite_tx[] =
+        "cccccccccccccccccccccccccccccccc";
+    static const char target_tx[] =
+        "dddddddddddddddddddddddddddddddd";
+    static const char no_change_tx[] =
+        "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+    gui_session_submit_terminal terminal = {0};
+
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_session_submit_atlas_name(
+            &client, atlas_id, 3, "identified-atlas",
+            identity, atlas_tx, &terminal, &err));
+    TEST_ASSERT_EQUAL_STRING(atlas_tx, terminal.transaction_id);
+    TEST_ASSERT_EQUAL_MEMORY(
+        &identity, &terminal.identity, sizeof identity);
+    TEST_ASSERT_TRUE(terminal.committed);
+    TEST_ASSERT_FALSE(terminal.no_change);
+    TEST_ASSERT_EQUAL_INT64(4, terminal.revision);
+
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_session_submit_animation_name(
+            &client, atlas_id, animation_id, 4,
+            "identified-animation", identity, animation_tx,
+            &terminal, &err));
+    TEST_ASSERT_EQUAL_STRING(animation_tx, terminal.transaction_id);
+    TEST_ASSERT_EQUAL_MEMORY(
+        &identity, &terminal.identity, sizeof identity);
+    TEST_ASSERT_EQUAL_INT64(5, terminal.revision);
+
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_session_submit_sprite_name(
+            &client, atlas_id, source_id, "hero.png", 5,
+            "identified-sprite", identity, sprite_tx,
+            &terminal, &err));
+    TEST_ASSERT_EQUAL_STRING(sprite_tx, terminal.transaction_id);
+    TEST_ASSERT_EQUAL_MEMORY(
+        &identity, &terminal.identity, sizeof identity);
+    TEST_ASSERT_EQUAL_INT64(6, terminal.revision);
+
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_session_submit_target_out_path(
+            &client, atlas_id, target_id, 6,
+            "out/identified", identity, target_tx,
+            &terminal, &err));
+    TEST_ASSERT_EQUAL_STRING(target_tx, terminal.transaction_id);
+    TEST_ASSERT_EQUAL_MEMORY(
+        &identity, &terminal.identity, sizeof identity);
+    TEST_ASSERT_EQUAL_INT64(7, terminal.revision);
+
+    tp_session_snapshot *after = NULL;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_session_snapshot_create(session, &after, &err));
+    atlas = tp_session_snapshot_atlas_by_id(after, atlas_id);
+    const tp_snapshot_animation *animation =
+        tp_session_snapshot_animation_by_id(
+            after, atlas_id, animation_id);
+    const tp_snapshot_sprite *sprite =
+        tp_session_snapshot_sprite_by_key(
+            after, atlas_id, source_id, "hero.png");
+    const tp_snapshot_target *target =
+        tp_session_snapshot_target_by_id(
+            after, atlas_id, target_id);
+    TEST_ASSERT_NOT_NULL(atlas);
+    TEST_ASSERT_NOT_NULL(animation);
+    TEST_ASSERT_NOT_NULL(sprite);
+    TEST_ASSERT_NOT_NULL(target);
+    TEST_ASSERT_EQUAL_STRING("identified-atlas", atlas->name);
+    TEST_ASSERT_EQUAL_STRING(
+        "identified-animation", animation->name);
+    TEST_ASSERT_EQUAL_STRING(
+        "identified-sprite", sprite->rename);
+    TEST_ASSERT_EQUAL_STRING(
+        "out/identified", target->out_path);
+    TEST_ASSERT_EQUAL_STRING(
+        "json-neotolis", target->exporter_id);
+    TEST_ASSERT_TRUE(target->enabled);
+    tp_session_snapshot_destroy(after);
+
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_session_submit_atlas_name(
+            &client, atlas_id, 7, "identified-atlas",
+            identity, no_change_tx, &terminal, &err));
+    TEST_ASSERT_EQUAL_STRING(
+        no_change_tx, terminal.transaction_id);
+    TEST_ASSERT_EQUAL_MEMORY(
+        &identity, &terminal.identity, sizeof identity);
+    TEST_ASSERT_FALSE(terminal.committed);
+    TEST_ASSERT_TRUE(terminal.no_change);
+    TEST_ASSERT_EQUAL_INT64(7, terminal.revision);
+
+    gui_session_submit_identity wrong_identity = identity;
+    wrong_identity.draft_instance_id.bytes[0]++;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_INVALID_ARGUMENT,
+        gui_session_submit_target_out_path(
+            &client, atlas_id, target_id, 7,
+            "out/must-not-land", wrong_identity, target_tx,
+            &terminal, &err));
+    TEST_ASSERT_EQUAL_INT64(7, tp_session_revision(session));
+
+    gui_session_client_detach(&client);
+    tp_session_destroy(session);
+}
+
+void test_identified_submit_returns_exact_terminal_when_admission_is_closed(void) {
+    uint8_t seed = 211U;
+    tp_rng rng = {deterministic_fill, &seed};
+    tp_error err = {{0}};
+    tp_session *session = NULL;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK, tp_session_create(&rng, &session, &err));
+    gui_session_client client;
+    gui_session_client_init(&client);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_session_client_attach(&client, session, &err));
+
+    const tp_session_snapshot *snapshot =
+        gui_session_client_snapshot(&client);
+    TEST_ASSERT_NOT_NULL(snapshot);
+    const tp_snapshot_atlas *atlas =
+        tp_session_snapshot_atlas_at(snapshot, 0);
+    TEST_ASSERT_NOT_NULL(atlas);
+    const tp_id128 atlas_id = atlas->id;
+    const int64_t revision =
+        tp_session_snapshot_revision(snapshot);
+    const gui_session_submit_identity identity = {
+        .origin_view_id = {{0x91U}},
+        .draft_instance_id = {{0xa1U}},
+    };
+    static const char transaction_id[] =
+        "ffffffffffffffffffffffffffffffff";
+    gui_session_submit_terminal terminal = {0};
+
+    gui_session_client_close_admission(&client);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_INVALID_ARGUMENT,
+        gui_session_submit_atlas_name(
+            &client, atlas_id, revision, "must-not-land",
+            identity, transaction_id, &terminal, &err));
+    TEST_ASSERT_EQUAL_STRING(
+        transaction_id, terminal.transaction_id);
+    TEST_ASSERT_EQUAL_MEMORY(
+        &identity, &terminal.identity, sizeof identity);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_INVALID_ARGUMENT, terminal.status);
+    TEST_ASSERT_FALSE(terminal.committed);
+    TEST_ASSERT_FALSE(terminal.no_change);
+    TEST_ASSERT_EQUAL_INT64(revision, terminal.revision);
+    TEST_ASSERT_EQUAL_INT64(revision, tp_session_revision(session));
+
+    gui_session_client_detach(&client);
+    tp_session_destroy(session);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_shipping_atlas_rename_uses_session_admission_and_snapshot_read);
@@ -328,5 +543,9 @@ int main(void) {
     RUN_TEST(test_source_family_uses_stable_ids_and_atomic_batch_admission);
     RUN_TEST(test_animation_family_uses_stable_ids_revision_and_snapshot_read);
     RUN_TEST(test_target_family_uses_stable_ids_revision_and_snapshot_read);
+    RUN_TEST(
+        test_identified_text_submits_preserve_exact_receipts_and_stable_targets);
+    RUN_TEST(
+        test_identified_submit_returns_exact_terminal_when_admission_is_closed);
     return UNITY_END();
 }

@@ -241,11 +241,19 @@ bool gui_project_remove_source(tp_id128 atlas_id, tp_id128 source_id,
 
 /* Atlas-family intents carry structural identity + the revision captured with the
  * immutable read view. The session is the sole admission/validation owner. */
-bool gui_project_set_atlas_name(tp_id128 atlas_id, int64_t expected_revision, const char *name);
+tp_status gui_project_submit_atlas_name(
+    tp_id128 atlas_id, int64_t expected_revision,
+    const char *name, gui_session_submit_identity identity,
+    const char transaction_id[33],
+    gui_session_submit_terminal *terminal, tp_error *err);
 tp_status gui_project_copy_atlas_name(tp_id128 atlas_id, char *out, size_t capacity,
                                       tp_error *err);
 /* Sets/clears a sprite's rename export-name override (empty/NULL clears it). */
-bool gui_project_set_sprite_rename(const gui_sprite_ref *sprite, const char *rename);
+tp_status gui_project_submit_sprite_name(
+    const gui_sprite_ref *sprite, const char *name,
+    gui_session_submit_identity identity,
+    const char transaction_id[33],
+    gui_session_submit_terminal *terminal, tp_error *err);
 
 /* Sets ONE atlas knob via an atlas.settings.set transaction. The int/bool knobs read
  * `ivalue` (bool as 0/1); pixels_per_unit reads `fvalue`. Value RANGES are core's now
@@ -279,8 +287,11 @@ gui_project_create_result gui_project_create_animation(
     int frame_count);
 /* Removes the animation with `id`. Returns true iff removed (false on flush-abort/not-found). */
 bool gui_project_remove_animation(const gui_animation_ref *animation);
-/* Renames animation `anim_index`; fails on empty or a name already used by another animation. */
-bool gui_project_set_anim_id(const gui_animation_ref *animation, const char *new_id);
+tp_status gui_project_submit_animation_name(
+    const gui_animation_ref *animation, const char *name,
+    gui_session_submit_identity identity,
+    const char transaction_id[33],
+    gui_session_submit_terminal *terminal, tp_error *err);
 bool gui_project_set_anim_fps(const gui_animation_ref *animation, float fps);
 bool gui_project_set_anim_playback(const gui_animation_ref *animation, int playback);
 bool gui_project_set_anim_flip(const gui_animation_ref *animation, bool flip_h, bool flip_v);
@@ -298,11 +309,11 @@ gui_project_create_result gui_project_add_target(
 bool gui_project_remove_target(const gui_target_ref *target);
 bool gui_project_set_target(const gui_target_ref *target, const char *exporter_id,
                             const char *out_path, bool enabled);
-/* H/G3: COALESCABLE out-path-only setter (the path text field). Buffers under a per-target key so the
- * field's Enter/blur gesture-commit flushes the whole edit as ONE undo step; RMW-seeds exporter_id +
- * enabled from the committed record. Discrete target edits keep using gui_project_set_target (immediate). */
-bool gui_project_set_target_out_path(const gui_target_ref *target,
-                                     const char *out_path);
+tp_status gui_project_submit_target_out_path(
+    const gui_target_ref *target, const char *out_path,
+    gui_session_submit_identity identity,
+    const char transaction_id[33],
+    gui_session_submit_terminal *terminal, tp_error *err);
 /* H/G3: discrete target-field setters (IMMEDIATE, one undo step each). They flush any buffered out-path
  * gesture FIRST, then RMW-seed the un-edited fields from the NOW-committed record -- so a discrete
  * enabled/exporter edit made mid-typing never reverts the just-typed out_path (the hazard of re-sending a
@@ -326,6 +337,12 @@ bool gui_project_redo(void);
 /* --- file operations (paths explicit; dialogs live in the UI layer) --- */
 /* Saves to the current path (must exist). Clears project_dirty. */
 tp_status gui_project_save(char *err_out, size_t err_cap);
+/* Read-only Save As feasibility check. Canonicalizes the destination, refreshes
+ * the observed session identity, and rejects an identity change while the
+ * host-owned controller status port reports an attached controller. It never
+ * submits or flushes a draft and performs no file write. */
+tp_status gui_project_save_as_preflight(
+    const char *path, char *err_out, size_t err_cap);
 /* Saves to `path`, remembers it, clears project_dirty. Promotes structural ids FIRST
  * and, on RNG failure, returns the error WITHOUT writing (never persists a nil-id file). */
 tp_status gui_project_save_as(const char *path, char *err_out, size_t err_cap);

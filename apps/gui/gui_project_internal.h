@@ -13,8 +13,7 @@ typedef enum gui_coalesce_kind {
     CK_SPRITE_OVERRIDE,
     CK_ANIM_FPS,
     CK_ANIM_PLAYBACK,
-    CK_ANIM_FLIP,
-    CK_TARGET_OUTPATH
+    CK_ANIM_FLIP
 } gui_coalesce_kind;
 
 typedef struct gui_coalesce_key {

@@ -654,12 +654,12 @@ void declare_export_modal(nt_ui_context_t *ctx) {
 void declare_confirm_modal(nt_ui_context_t *ctx) {
     if (nt_ui_modal_visible(ctx, s_id_modal, &s_modal_style, &s_confirm_open)) {
         const gui_edit_phase draft_phase =
-            gui_atlas_edit_phase();
+            gui_draft_phase();
         const bool apply_enabled =
             !s_confirm_draft ||
             draft_phase == GUI_EDIT_EDITING ||
             (draft_phase == GUI_EDIT_CONFLICTED &&
-             gui_atlas_edit_can_apply());
+             gui_draft_can_apply());
         CLAY({.layout = {.sizing = {
                              CLAY_SIZING_FIXED(
                                  S(s_confirm_draft ? 520 : 460)),

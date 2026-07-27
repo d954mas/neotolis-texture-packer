@@ -43,7 +43,7 @@ static char s_nb_pad[16], s_nb_margin[16], s_nb_extrude[16], s_nb_maxv[16], s_nb
 static char s_nb_alpha[16]; /* alpha-threshold numeric input (paired with the slider) */
 static char s_nb_ox[24], s_nb_oy[24], s_nb_s9[4][16];
 static char s_nb_ov_margin[16], s_nb_ov_extrude[16];
-static char s_nb_target_path[GUI_MAX_TARGETS][TP_IDENTITY_PATH_MAX];
+static char s_target_path_scratch[TP_IDENTITY_PATH_MAX];
 /* --- animation editor (right-panel section 4) --- */
 static bool s_dd_playback_open;     /* playback-mode combo open bit */
 static char s_nb_anim_fps[16];      /* fps field edit buffer */
@@ -350,24 +350,23 @@ static float atlas_real_value(
     return value;
 }
 
-static void declare_atlas_conflict(
-    nt_ui_context_t *ctx,
-    const tp_snapshot_atlas *selected) {
-    if (gui_atlas_edit_phase() != GUI_EDIT_CONFLICTED) {
+static void declare_draft_conflict(
+    nt_ui_context_t *ctx) {
+    if (gui_draft_phase() != GUI_EDIT_CONFLICTED) {
         return;
     }
-    const bool target_selected =
-        selected &&
-        gui_atlas_edit_targets(selected->id);
     const bool target_present =
-        gui_atlas_edit_can_apply();
+        gui_draft_can_apply();
+    const char *text = gui_text_edit_value();
     panel_note(
         ctx,
         !target_present
-            ? "The edited atlas no longer exists."
-            : target_selected
-                  ? "This field changed in the project while you were editing it."
-                  : "Another atlas has a conflicted edit. Select it to apply, or discard.");
+            ? "The edited target no longer exists."
+            : "The project changed while you were editing this value.");
+    if (text) {
+        panel_note(ctx, "Your value:");
+        panel_note(ctx, text);
+    }
     CLAY({.layout = {
               .sizing = {
                   CLAY_SIZING_GROW(0),
@@ -379,15 +378,22 @@ static void declare_atlas_conflict(
         if (ui_btn(
                 ctx, nt_ui_id("set/conflict_apply"),
                 "Apply Mine", &g_btn,
-                target_selected && target_present,
+                target_present,
                 0.0F, 24.0F, &g_caption)) {
-            gui_atlas_edit_apply_mine();
+            gui_draft_apply_mine();
+        }
+        if (text && gui_actions_copy_text_available() &&
+            ui_btn(
+                ctx, nt_ui_id("set/conflict_copy"),
+                "Copy", &g_btn_ghost, true,
+                0.0F, 24.0F, &g_caption)) {
+            gui_actions_copy_text(text);
         }
         if (ui_btn(
                 ctx, nt_ui_id("set/conflict_discard"),
                 "Discard", &g_btn_ghost, true,
                 0.0F, 24.0F, &g_caption)) {
-            gui_atlas_edit_discard();
+            gui_draft_discard();
         }
     }
 }
@@ -839,17 +845,43 @@ static void declare_export_targets(nt_ui_context_t *ctx,
             CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(BASE_ROW_H))}, .childGap = Su(6), .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
                 CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}, .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
                     const bool path_editable =
-                        strlen(t->out_path) < sizeof s_nb_target_path[ti];
-                    if (ui_text_field(ctx, nt_ui_child_id(row_id, "path"), s_nb_target_path[ti], sizeof s_nb_target_path[ti],
-                                      t->out_path, path_editable, "out/atlas.json")) {
-                        gui_edit_target_out_path(&target, s_nb_target_path[ti]); /* H/G3: coalesce -> ONE undo step */
+                        strlen(t->out_path) <
+                        TP_IDENTITY_PATH_MAX;
+                    const bool editing_path =
+                        gui_target_path_edit_matches(
+                            &target);
+                    const char *effective_path =
+                        editing_path
+                            ? gui_text_edit_value()
+                            : t->out_path;
+                    char inactive_scratch[
+                        TP_IDENTITY_PATH_MAX];
+                    char *path_scratch =
+                        editing_path
+                            ? s_target_path_scratch
+                            : inactive_scratch;
+                    if (ui_text_field(ctx, nt_ui_child_id(row_id, "path"), path_scratch, TP_IDENTITY_PATH_MAX,
+                                      effective_path, path_editable, "out/atlas.json")) {
+                        if ((editing_path ||
+                             gui_text_edit_begin_target_out_path(
+                                 &target, t->out_path))) {
+                            (void)gui_text_edit_update(
+                                path_scratch);
+                            if (!editing_path) {
+                                (void)snprintf(
+                                    s_target_path_scratch,
+                                    sizeof s_target_path_scratch,
+                                    "%s", path_scratch);
+                            }
+                        }
                     }
                 }
                 if (ui_btn(ctx, nt_ui_child_id(row_id, "browse"), "\xE2\x80\xA6", &g_btn_ghost, true, 28.0F, 22.0F, &g_caption)) { /* U+2026 */
                     gui_request_browse_target(s_sel_atlas, ti);
                 }
             }
-            if (strlen(t->out_path) >= sizeof s_nb_target_path[ti]) {
+            if (strlen(t->out_path) >=
+                TP_IDENTITY_PATH_MAX) {
                 panel_note(ctx, "Output path exceeds the GUI path limit; shorten it before editing.");
             }
         }
@@ -870,9 +902,8 @@ static void declare_export_targets(nt_ui_context_t *ctx,
             }
         }
     }
-    /* The UI arrays (s_dd_target_open / s_nb_target_path) are fixed at GUI_MAX_TARGETS, so targets past
-     * that are not editable here -- but export still writes ALL of them, so surface the hidden tail
-     * instead of dropping it silently (P2). */
+    /* Exporter dropdown state is fixed at GUI_MAX_TARGETS, so targets past
+     * that are not editable here. Export still writes all of them. */
     if (a->target_count > GUI_MAX_TARGETS) {
         char more[80];
         (void)snprintf(more, sizeof more, "+%d more target(s) not editable here (still exported).",
@@ -908,8 +939,15 @@ static void declare_animation_editor(nt_ui_context_t *ctx,
 
     if (editing_id) {
         PANEL_ROW_BEGIN("Id", &g_row) {
-            if (render_rename_field(ctx)) {
-                s_pending_commit_edit_enter = true; /* defer: never commit while holding `an` */
+            bool changed = false;
+            if (render_rename_field(
+                    ctx, gui_text_edit_value(),
+                    &changed)) {
+                gui_request_gesture_commit();
+            }
+            if (changed) {
+                (void)gui_text_edit_update(
+                    rename_field_changed_value());
             }
         }
         PANEL_ROW_END;
@@ -1040,7 +1078,7 @@ void declare_right_panel(nt_ui_context_t *ctx) {
                          .padding = {Su(8), Su(8), Su(8), Su(10)},
                          .layoutDirection = CLAY_TOP_TO_BOTTOM,
                          .childGap = Su(4)}}) {
-            declare_atlas_conflict(ctx, snapshot_atlas);
+            declare_draft_conflict(ctx);
             if (!snapshot_atlas) {
                 nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), "No atlas selected.", &g_caption);
             } else {

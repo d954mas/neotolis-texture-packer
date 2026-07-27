@@ -228,7 +228,8 @@ static void handle_canvas_input(void) {
     const bool transient_owner =
         gui_canvas_get_mode(&s_canvas) != GUI_CANVAS_ATLAS ||
         !gui_canvas_has_atlas(&s_canvas) || s_confirm_open || s_about_open ||
-        s_export_open || s_recovery_open || s_edit_kind != EDIT_NONE;
+        s_export_open || s_recovery_open ||
+        gui_draft_phase() != GUI_EDIT_IDLE;
     if (gui_canvas_input_blocked(&s_canvas_input,
                                  gui_view_chrome_any_menu_open(),
                                  transient_owner)) {
@@ -323,7 +324,8 @@ static void handle_canvas_double_click(void) {
     const bool transient_owner =
         gui_canvas_get_mode(&s_canvas) != GUI_CANVAS_ATLAS ||
         !gui_canvas_has_atlas(&s_canvas) || s_confirm_open || s_about_open ||
-        s_export_open || s_recovery_open || s_edit_kind != EDIT_NONE;
+        s_export_open || s_recovery_open ||
+        gui_draft_phase() != GUI_EDIT_IDLE;
     if (gui_canvas_input_blocked(&s_canvas_input,
                                  gui_view_chrome_any_menu_open(),
                                  transient_owner)) {
@@ -384,7 +386,8 @@ static void handle_shortcuts(void) {
     if (s_preview_active && nt_input_key_is_pressed(NT_KEY_SPACE)) {
         preview_toggle_play();
     }
-    if (s_edit_kind == EDIT_NONE && s_sel_anim >= 0 && s_sel_anim_frame >= 0 &&
+    if (gui_draft_phase() == GUI_EDIT_IDLE &&
+        s_sel_anim >= 0 && s_sel_anim_frame >= 0 &&
         nt_input_key_is_pressed(NT_KEY_DELETE)) {
         gui_animation_ref animation;
         if (gui_project_animation_ref_at(
@@ -438,7 +441,7 @@ static void handle_list_nav(void) {
     }
     if (nt_ui_input_any_focused(s_ctx) || gui_view_chrome_any_menu_open() ||
         s_confirm_open || s_about_open || s_export_open || s_recovery_open ||
-        s_edit_kind != EDIT_NONE) {
+        gui_draft_phase() != GUI_EDIT_IDLE) {
         return;
     }
     if (nt_input_key_is_down(NT_KEY_LCTRL) || nt_input_key_is_down(NT_KEY_RCTRL)) {
@@ -553,9 +556,10 @@ static void frame(void) {
         if (gui_view_chrome_consume_escape()) {
             /* Menus own Escape while open. Do not also clear filters or stop
              * either preview mode on the same key press. */
-        } else if (s_edit_kind != EDIT_NONE) {
+        } else if (gui_draft_phase() !=
+                   GUI_EDIT_IDLE) {
             cancel_edit();
-            set_status("Rename cancelled.");
+            set_status("Edit discarded.");
         } else if (s_export_open) {
             s_export_open = false;
         } else if (s_about_open) {
@@ -566,13 +570,6 @@ static void frame(void) {
             s_confirm_open = false;
             s_confirm_draft = false;
             s_after_confirm = GUI_LIFECYCLE_REQUEST_NONE;
-        } else if (gui_atlas_edit_phase() !=
-                   GUI_EDIT_IDLE) {
-            gui_atlas_edit_discard();
-            if (gui_atlas_edit_phase() ==
-                GUI_EDIT_IDLE) {
-                set_status("Atlas edit discarded.");
-            }
         } else if (s_filter_active || gui_rows_filter_active()) {
             gui_rows_set_filter(""); /* Esc clears the sprite-tree speed-search. */
             s_filter_active = false;
@@ -593,14 +590,14 @@ static void frame(void) {
     /* Click/right-click OUTSIDE the active inline editor commits it (Enter-equivalent desktop UX);
      * Esc still cancels. Uses last frame's field bbox vs this frame's press. The UI is configured
      * STRETCH with ref = framebuffer, so logical bbox coords and framebuffer pointer px coincide. */
-    if (s_edit_kind != EDIT_NONE) {
+    if (gui_inline_text_edit_active()) {
         const nt_pointer_t *p = &g_nt_input.pointers[0];
         if (p->buttons[NT_BUTTON_LEFT].is_pressed || p->buttons[NT_BUTTON_RIGHT].is_pressed) {
             const nt_ui_bbox_t fb = nt_ui_get_bbox(s_ctx, s_id_rename);
             const bool inside = fb.width > 0.0F && p->x >= fb.x && p->x < (fb.x + fb.width) &&
                                 p->y >= fb.y && p->y < (fb.y + fb.height);
             if (!inside) {
-                s_pending_commit_edit = true;
+                gui_request_gesture_commit();
             }
         }
     }

@@ -75,8 +75,9 @@ static bool current_identity_is(
     const tp_session_identity identity =
         tp_session_snapshot_identity(snapshot);
     return identity.kind == TP_IDENTITY_SAVED &&
-           strcmp(identity.canonical_path,
-                  canonical_path) == 0;
+           tp_identity_path_equal(
+               identity.canonical_path,
+               canonical_path);
 }
 
 static bool controller_attached(void) {
@@ -448,7 +449,10 @@ tp_status gui_project_save(char *err_out, size_t err_cap) {
 /* Master spec 14.2: tp_session exclusively owns the exact-byte Open/Save
  * baseline and rejects an external replacement before publication. */
 
-tp_status gui_project_save_as(const char *path, char *err_out, size_t err_cap) {
+static tp_status save_as_preflight(
+    const char *path,
+    char canonical_path[TP_IDENTITY_PATH_MAX],
+    char *err_out, size_t err_cap) {
     if (!gui_project__ingress_is_open()) {
         if (err_out && err_cap) {
             (void)snprintf(
@@ -465,9 +469,8 @@ tp_status gui_project_save_as(const char *path, char *err_out, size_t err_cap) {
         return TP_STATUS_OUT_OF_BOUNDS;
     }
     tp_error err = {0};
-    char canonical_path[TP_IDENTITY_PATH_MAX];
     tp_status canonical = tp_identity_project_path_canonical(
-        path, canonical_path, sizeof canonical_path, &err);
+        path, canonical_path, TP_IDENTITY_PATH_MAX, &err);
     if (canonical != TP_STATUS_OK) {
         if (err_out && err_cap) {
             (void)snprintf(err_out, err_cap, "%s", err.msg[0] ? err.msg : tp_status_str(canonical));
@@ -496,6 +499,24 @@ tp_status gui_project_save_as(const char *path, char *err_out, size_t err_cap) {
         }
         return TP_STATUS_UNSUPPORTED_CAPABILITY;
     }
+    return TP_STATUS_OK;
+}
+
+tp_status gui_project_save_as_preflight(
+    const char *path, char *err_out, size_t err_cap) {
+    char canonical_path[TP_IDENTITY_PATH_MAX];
+    return save_as_preflight(
+        path, canonical_path, err_out, err_cap);
+}
+
+tp_status gui_project_save_as(const char *path, char *err_out, size_t err_cap) {
+    char canonical_path[TP_IDENTITY_PATH_MAX];
+    const tp_status preflight_status =
+        save_as_preflight(
+            path, canonical_path, err_out, err_cap);
+    if (preflight_status != TP_STATUS_OK) {
+        return preflight_status;
+    }
     /* Never save an older snapshot when the pending edit failed to commit. */
     if (!gui_project_flush_pending()) {
         const tp_status flush_status = s_project.op_error_status != TP_STATUS_OK
@@ -504,7 +525,7 @@ tp_status gui_project_save_as(const char *path, char *err_out, size_t err_cap) {
         gui_project_flush_error(err_out, err_cap);
         return flush_status;
     }
-    err = (tp_error){0};
+    tp_error err = {0};
     tp_session_save_result result;
     const tp_status st = tp_session_save_as(
         gui_project__borrow_active_session(),

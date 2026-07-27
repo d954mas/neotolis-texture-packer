@@ -28,8 +28,6 @@ extern "C" {
 /* --- deferred side-effect queue (set by views, consumed by apply_pending) --- */
 extern bool s_pending_open, s_pending_save, s_pending_save_as, s_pending_add_files, s_pending_add_folder, s_pending_add_atlas, s_pending_refresh;
 extern bool s_pending_pack, s_pending_export;
-extern bool s_pending_commit_edit; /* a press landed outside the active inline-edit field -> commit it */
-extern bool s_pending_commit_edit_enter; /* Enter pressed in the inline editor -> commit it (deferred, non-force) */
 void gui_request_add_animation(int atlas_index);
 void gui_request_create_animation_from_selection(void);
 void gui_request_open_preview(const gui_animation_ref *animation);
@@ -84,11 +82,25 @@ void gui_edit_atlas_setting(tp_id128 atlas_id, int64_t expected_revision,
                             gui_atlas_field field, int ivalue, float fvalue);
 bool gui_atlas_edit_value(tp_id128 atlas_id, gui_atlas_field field,
                           int *ivalue, float *fvalue);
-bool gui_atlas_edit_targets(tp_id128 atlas_id);
-gui_edit_phase gui_atlas_edit_phase(void);
-bool gui_atlas_edit_can_apply(void);
-void gui_atlas_edit_apply_mine(void);
-void gui_atlas_edit_discard(void);
+gui_edit_phase gui_draft_phase(void);
+bool gui_draft_can_apply(void);
+void gui_draft_apply_mine(void);
+void gui_draft_discard(void);
+bool gui_actions_copy_text_available(void);
+void gui_actions_copy_text(const char *text);
+bool gui_text_edit_begin_atlas_name(tp_id128 atlas_id,
+                                    int64_t expected_revision,
+                                    const char *initial_value);
+bool gui_text_edit_begin_animation_name(const gui_animation_ref *animation,
+                                        const char *initial_value);
+bool gui_text_edit_begin_sprite_rename(const gui_sprite_ref *sprite,
+                                       const char *initial_value);
+bool gui_text_edit_begin_target_out_path(const gui_target_ref *target,
+                                         const char *initial_value);
+bool gui_text_edit_update(const char *value);
+const char *gui_text_edit_value(void);
+bool gui_target_path_edit_matches(const gui_target_ref *target);
+bool gui_inline_text_edit_active(void);
 void gui_queue_sprite_origin(const gui_sprite_ref *sprite, int axis, float value); /* axis 0=X, 1=Y (#2) */
 void gui_queue_sprite_slice9(const gui_sprite_ref *sprite, int lrtb_index, int value);
 void gui_queue_sprite_override(const gui_sprite_ref *sprite, gui_sprite_ov which, int value);
@@ -103,9 +115,6 @@ void gui_edit_anim_add_frames(const gui_animation_ref *animation,
                               const tp_op_sprite_ref *frames, int count);
 void gui_edit_target(const gui_target_ref *target, const char *exporter_id,
                      const char *out_path, bool enabled);
-/* H/G3: the out-path text field's per-keystroke enqueue -- drains to the COALESCABLE setter so an edit
- * gesture (typing then Enter/blur) collapses into ONE undo step, unlike the immediate gui_edit_target. */
-void gui_edit_target_out_path(const gui_target_ref *target, const char *out_path);
 /* H/G3: discrete enabled/exporter enqueues -- carry ONLY the changed field; the drain setters read the
  * un-edited fields from the committed record post-flush, so a discrete edit mid-typing never reverts the
  * just-typed out_path. Use these instead of gui_edit_target for the enabled checkbox / exporter dropdown. */
@@ -178,12 +187,6 @@ void start_sprite_edit(const sprite_row *row);
 bool gui_sprite_edit_matches(const sprite_row *row);
 bool gui_atlas_edit_matches(tp_id128 atlas_id);
 bool gui_animation_edit_matches(tp_id128 atlas_id, tp_id128 animation_id);
-
-/* --- inline rename commits --- */
-/* The live Enter/blur path is commit_active_edit (static, gui_actions.c), which inlines the atlas +
- * animation rename and delegates the sprite rename to commit_sprite_rename. (fix4 deleted the dead
- * commit_atlas_rename / commit_anim_rename that had no callers.) */
-void commit_sprite_rename(void);
 
 /* --- animation ops + preview player (ux.md §3.7b) --- */
 const tp_snapshot_animation *preview_animation(void); /* active stable-ID target, or NULL */

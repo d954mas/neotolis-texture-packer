@@ -151,12 +151,6 @@ extern int s_preview_cur;         /* resolved current frame index (0-based) this
 extern int s_preview_frame_count; /* resolved (missing-frame-skipped) frame count this frame */
 
 /* Inline rename edit (F1): one active at a time. kind 0 none / 1 atlas / 2 sprite / 3 animation. */
-enum { EDIT_NONE = 0, EDIT_ATLAS, EDIT_SPRITE, EDIT_ANIM };
-extern int s_edit_kind;
-extern int s_edit_atlas;        /* atlas being renamed (EDIT_ATLAS) */
-extern int s_edit_anim;         /* animation index being renamed (EDIT_ANIM) */
-extern char s_edit_sprite[TP_SRCKEY_MAX]; /* atlas-relative sprite name being renamed */
-extern char s_edit_buf[TP_SRCKEY_MAX];    /* the input buffer */
 
 /* Runtime (already SCALED) column widths. Clamped narrow when the window can't fit both side panels +
  * a minimal canvas, so the panels never get pushed off-screen (recomputed each frame). */
