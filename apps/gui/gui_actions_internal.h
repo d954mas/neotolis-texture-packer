@@ -169,5 +169,6 @@ void gui_actions__apply_pack_requests(void);
 void gui_actions__apply_recovery(void);
 void gui_actions__apply_structural_edits(void);
 void gui_actions__clear_pending(void);
+void gui_actions__clear_history_request(void);
 
 #endif /* NTPACKER_GUI_ACTIONS_INTERNAL_H */

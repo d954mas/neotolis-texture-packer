@@ -475,6 +475,20 @@ void test_timeout_force_terminates_owned_process(void) {
     tp_job_worker_process_destroy(process);
 }
 
+void test_forced_terminal_does_not_wait_for_kill_completion(void) {
+    tp_proc__test_reset_destroy_trace();
+    tp_proc__test_fail_next_kill();
+    tp_job_worker__test_set_timeout_ms(20);
+    tp_job_worker_process *process = start_process("timeout");
+    const tp_job_worker_proto_response *response =
+        pump_to_terminal(process, 200);
+    TEST_ASSERT_EQUAL_INT(TP_SESSION_JOB_FAILED, response->state);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_BUILDER_CRASHED, response->status);
+    tp_job_worker_process_destroy(process);
+    TEST_ASSERT_GREATER_OR_EQUAL_UINT(
+        2U, tp_proc__test_destroy_kill_calls());
+}
+
 void test_destroy_live_process_returns_without_waiting_for_child(void) {
     tp_proc__test_reset_destroy_trace();
     const size_t payload_size = 1024U * 1024U;
@@ -519,6 +533,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_mismatched_terminal_and_trailing_bytes_fail_closed);
     RUN_TEST(test_nonzero_exit_after_terminal_is_not_admitted);
     RUN_TEST(test_timeout_force_terminates_owned_process);
+    RUN_TEST(test_forced_terminal_does_not_wait_for_kill_completion);
     RUN_TEST(test_destroy_live_process_returns_without_waiting_for_child);
     return UNITY_END();
 }

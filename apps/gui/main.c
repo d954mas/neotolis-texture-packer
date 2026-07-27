@@ -1162,7 +1162,6 @@ static int gui_main_utf8(int argc, char *argv[]) {
                     &shutdown_error);
             if (observe_status == TP_STATUS_OK) {
                 gui_actions_poll_host_completion();
-                gui_project_frame_end();
             } else {
                 nt_log_error(
                     "GUI shutdown observation failed: %s",
@@ -1170,6 +1169,9 @@ static int gui_main_utf8(int argc, char *argv[]) {
                         ? shutdown_error.msg
                         : tp_status_str(
                               observe_status));
+            }
+            if (gui_project_frame_is_pinned()) {
+                gui_project_frame_end();
             }
         }
     }

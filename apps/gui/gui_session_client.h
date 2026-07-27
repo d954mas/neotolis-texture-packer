@@ -50,14 +50,13 @@ typedef struct gui_session_submit_terminal {
 
 typedef struct gui_session_submit_result {
     tp_txn_result transaction;
+    gui_session_submit_terminal terminal;
     tp_status terminal_status;
     tp_status observation_status;
     bool observation_pending;
 } gui_session_submit_result;
 
 typedef struct gui_session_pending_submit {
-    bool occupied;
-    bool terminal_ready;
     bool result_available;
     tp_status observation_status;
     gui_session_submit_terminal terminal;
@@ -77,7 +76,6 @@ typedef struct gui_session_client_prepared {
     tp_session *session;
     tp_session_observation *initial;
     uint64_t next_instance_generation;
-    bool ready;
 } gui_session_client_prepared;
 
 typedef struct gui_session_client {
@@ -91,12 +89,9 @@ typedef struct gui_session_client {
         reducers[GUI_SESSION_CLIENT_MAX_REDUCERS];
     gui_session_pending_submit
         pending[GUI_SESSION_CLIENT_MAX_PENDING_SUBMITS];
-    gui_session_submit_terminal last_submit;
-    bool has_last_submit;
     tp_rng transaction_rng;
     size_t reducer_count;
     bool frame_pinned;
-    bool observe_requested;
     bool admission_open;
 } gui_session_client;
 
@@ -134,10 +129,6 @@ bool gui_session_client_pending_submit_query(
     const char transaction_id[33],
     gui_session_submit_identity identity,
     gui_session_submit_terminal *out);
-bool gui_session_client_last_submit(
-    const gui_session_client *client,
-    gui_session_submit_terminal *out);
-
 /* A frame begin observes once and pins both the latest typed observation and
  * the most recent immutable model snapshot until frame_end. */
 tp_status gui_session_client_frame_begin(

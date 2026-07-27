@@ -3,6 +3,7 @@
 #ifdef TP_ENABLE_TEST_SEAMS
 static unsigned int s_test_destroy_kill_calls;
 static unsigned int s_test_destroy_blocking_wait_calls;
+static bool s_test_fail_next_kill;
 #endif
 
 #include <stdio.h>
@@ -736,6 +737,10 @@ void tp_proc_kill(tp_proc *proc) {
     }
 #ifdef TP_ENABLE_TEST_SEAMS
     s_test_destroy_kill_calls++;
+    if (s_test_fail_next_kill) {
+        s_test_fail_next_kill = false;
+        return;
+    }
 #endif
     if (proc->job) {
         /* The direct child may already be waited while a nested worker remains. */
@@ -826,6 +831,11 @@ void tp_proc_destroy(tp_proc *proc) {
 void tp_proc__test_reset_destroy_trace(void) {
     s_test_destroy_kill_calls = 0U;
     s_test_destroy_blocking_wait_calls = 0U;
+    s_test_fail_next_kill = false;
+}
+
+void tp_proc__test_fail_next_kill(void) {
+    s_test_fail_next_kill = true;
 }
 
 unsigned int tp_proc__test_destroy_kill_calls(void) {

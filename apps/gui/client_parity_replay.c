@@ -320,7 +320,7 @@ static int outcome_error(const char *path) {
     settings.mask = TP_AF_PADDING;
     settings.padding = -1;
     const tp_status status = gui_session_set_atlas_settings(
-        &s_replay_client, atlas_id, revision_before, &settings, &err);
+        &s_replay_client, atlas_id, revision_before, &settings, NULL, &err);
     int64_t revision_after = 0;
     uint64_t events_after = 0U;
     const int snapshot_rc = snapshot_counters(
@@ -529,7 +529,7 @@ static int replay_atlas(tp_session *session, const harvest_ids *ids,
         &s_replay_client, ids->atlas_id, ids->target_id,
         revision_of(session, err),
         "two", ids->target_exporter, ids->target_out_path,
-        ids->target_enabled, err);
+        ids->target_enabled, NULL, err);
     if (status != TP_STATUS_OK) return fail("atlas create", status, err);
     status = gui_session_rename_atlas(&s_replay_client, ids->atlas_id,
                                       revision_of(session, err), "golden",
@@ -542,7 +542,7 @@ static int replay_atlas(tp_session *session, const harvest_ids *ids,
     settings.margin = 2;
     status = gui_session_set_atlas_settings(&s_replay_client, ids->atlas_id,
                                             revision_of(session, err),
-                                            &settings, err);
+                                            &settings, NULL, err);
     return status == TP_STATUS_OK ? 0 : fail("atlas settings", status, err);
 }
 
@@ -603,7 +603,7 @@ static int replay_sprite(tp_session *session, tp_error *err) {
     settings.ov_extrude = 2;
     status = gui_session_set_sprite_override(
         &s_replay_client, atlas_id, source_id, source_key,
-        revision_of(session, err), &settings, err);
+        revision_of(session, err), &settings, NULL, err);
     return status == TP_STATUS_OK ? 0 : fail("sprite settings", status, err);
 }
 
@@ -630,7 +630,7 @@ static int replay_sprite_clear(tp_session *session, tp_error *err) {
     settings.ov_extrude = TP_PROJECT_OV_INHERIT;
     status = gui_session_set_sprite_override(
         &s_replay_client, atlas_id, source_id, source_key,
-        revision_of(session, err), &settings, err);
+        revision_of(session, err), &settings, NULL, err);
     return status == TP_STATUS_OK ? 0 : fail("sprite clear", status, err);
 }
 
@@ -650,7 +650,7 @@ static int replay_animation(tp_session *session, const harvest_ids *ids,
         {hero_source, hero_key}, {coin_source, coin_key}};
     tp_status status = gui_session_create_animation(
         &s_replay_client, atlas_id, ids->animation_id,
-        revision_of(session, err), "walk", frames, 2, err);
+        revision_of(session, err), "walk", frames, 2, NULL, err);
     if (status != TP_STATUS_OK) return fail("animation create", status, err);
     status = gui_session_add_animation_frames(
         &s_replay_client, atlas_id, ids->animation_id,
@@ -673,7 +673,7 @@ static int replay_animation(tp_session *session, const harvest_ids *ids,
     settings.flip_v = false;
     status = gui_session_set_animation_settings(
         &s_replay_client, atlas_id, ids->animation_id,
-        revision_of(session, err), &settings, err);
+        revision_of(session, err), &settings, NULL, err);
     if (status != TP_STATUS_OK) return fail("animation settings", status, err);
     status = gui_session_rename_animation(
         &s_replay_client, atlas_id, ids->animation_id,
@@ -687,7 +687,7 @@ static int replay_target(tp_session *session, const harvest_ids *ids,
     if (base_atlas(session, &atlas_id, err) != 0) return 1;
     tp_status status = gui_session_create_target(
         &s_replay_client, atlas_id, ids->target_id,
-        revision_of(session, err), "defold", "out/d", true, err);
+        revision_of(session, err), "defold", "out/d", true, NULL, err);
     if (status != TP_STATUS_OK) return fail("target create", status, err);
     tp_op_target_set settings;
     memset(&settings, 0, sizeof settings);
@@ -696,7 +696,7 @@ static int replay_target(tp_session *session, const harvest_ids *ids,
     settings.enabled = false;
     status = gui_session_set_target(&s_replay_client, atlas_id, ids->target_id,
                                     revision_of(session, err), &settings,
-                                    err);
+                                    NULL, err);
     return status == TP_STATUS_OK ? 0 : fail("target settings", status, err);
 }
 

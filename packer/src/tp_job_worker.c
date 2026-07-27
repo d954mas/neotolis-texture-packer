@@ -337,9 +337,21 @@ void tp_job_worker_process_pump(tp_job_worker_process *process) {
             (double)TP_JOB_WORKER_CANCEL_GRACE_MS;
     const bool timeout_expired =
         now - process->started_ms >= (double)process_timeout_ms();
-    if (!process->killed && (cancel_expired || timeout_expired)) {
-        tp_proc_kill(process->proc);
-        process->killed = true;
+    if (cancel_expired || timeout_expired) {
+        const tp_status status =
+            cancel_expired ? TP_STATUS_CANCELLED
+                           : TP_STATUS_BUILDER_CRASHED;
+        const char *message =
+            cancel_expired
+                ? "job worker did not stop within the cancellation grace period"
+                : "job worker exceeded its execution timeout";
+        if (process->response_ready) {
+            replace_terminal_failure(process, status, message);
+        } else {
+            set_terminal_failure(process, status, message);
+        }
+        process->terminal = process->response_ready;
+        return;
     }
 
     if (!process->process_finished) {
@@ -365,7 +377,7 @@ void tp_job_worker_process_pump(tp_job_worker_process *process) {
                 process, TP_STATUS_BUILDER_FAILED,
                 "job worker response ended with an incomplete frame");
         }
-        if (process->response_ready &&
+        if (process->response_ready && !process->killed &&
             (process->process_result.how != TP_PROC_END_EXITED ||
              process->process_result.code != 0)) {
             replace_terminal_failure(

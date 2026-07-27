@@ -114,8 +114,6 @@ void gui_host_queue__test_retag_staged_request(
     gui_host_queue *queue, uint64_t request_id);
 void gui_host_queue__test_fail_next_poll(void);
 void gui_host_queue__test_fail_next_take(void);
-void gui_host_queue__test_hold_active_polls(
-    unsigned int count);
 bool gui_host_queue__test_active(
     const gui_host_queue *queue);
 #endif

@@ -6,7 +6,6 @@
 
 #include "log/nt_log.h"
 
-#include "tp_core/tp_arena.h"
 #include "tp_core/tp_input.h"
 #include "tp_core/tp_names.h"
 
@@ -22,7 +21,6 @@ typedef struct pack_ref_entry {
 } pack_ref_entry;
 
 typedef struct {
-    tp_arena *arena;
     tp_result *result;
     tp_session_job_result_handle *result_owner;
     pack_ref_entry *ref_index;
@@ -118,8 +116,6 @@ static void pack_slot_clear(pack_slot *slot) {
         tp_session_job_result owned = {0};
         owned._owner = slot->result_owner;
         tp_session_job_result_destroy(&owned);
-    } else if (slot->arena) {
-        tp_arena_destroy(slot->arena);
     }
     memset(slot, 0, sizeof *slot);
 }
@@ -193,6 +189,16 @@ static pack_slot *pack_slot_for_publish(int atlas_index, tp_id128 atlas_id) {
 bool gui_pack_publish_native(tp_session_job_result *job_result,
                              int atlas_index, double elapsed_ms,
                              gui_pack_result_info *out) {
+    if (!job_result || job_result->kind != TP_SESSION_JOB_PACK ||
+        !job_result->_owner || !job_result->pack.result) {
+        if (out) {
+            out->status = TP_STATUS_INVALID_ARGUMENT;
+            (void)snprintf(
+                out->err, sizeof out->err,
+                "Pack result publication requires a retained owner.");
+        }
+        return false;
+    }
     tp_session_pack_job_result *pack = &job_result->pack;
     pack_ref_entry *ref_index = NULL;
     size_t ref_index_cap = 0U;
@@ -205,7 +211,6 @@ bool gui_pack_publish_native(tp_session_job_result *job_result,
     }
     pack_slot *slot = pack_slot_for_publish(atlas_index, pack->atlas_id);
     pack_slot_clear(slot);
-    slot->arena = pack->arena;
     slot->result = pack->result;
     slot->result_owner = job_result->_owner;
     slot->ref_index = ref_index;

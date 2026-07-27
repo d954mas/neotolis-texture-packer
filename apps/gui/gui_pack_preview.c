@@ -4,13 +4,11 @@
 
 #include "log/nt_log.h"
 
-#include "tp_core/tp_arena.h"
 #include "tp_core/tp_export.h"
 
 #include "gui_project.h"
 
 typedef struct {
-    tp_arena *arena;
     tp_result *result;
     tp_session_job_result_handle *result_owner;
     tp_id128 atlas_id;
@@ -47,17 +45,25 @@ uint64_t gui_pack_preview_diff_rebuilds(void) {
 }
 #endif
 
-void gui_pack_preview_publish(tp_session_job_result *job_result,
-                              int atlas_index, double elapsed_ms) {
+bool gui_pack_preview_publish(tp_session_job_result *job_result,
+                              int atlas_index, double elapsed_ms,
+                              gui_pack_result_info *out) {
+    if (!job_result || job_result->kind != TP_SESSION_JOB_PACK ||
+        !job_result->_owner || !job_result->pack.result) {
+        if (out) {
+            out->status = TP_STATUS_INVALID_ARGUMENT;
+            (void)snprintf(
+                out->err, sizeof out->err,
+                "Pack preview publication requires a retained owner.");
+        }
+        return false;
+    }
     tp_session_pack_job_result *pack = &job_result->pack;
     if (s_preview.result_owner) {
         tp_session_job_result owned = {0};
         owned._owner = s_preview.result_owner;
         tp_session_job_result_destroy(&owned);
-    } else if (s_preview.arena) {
-        tp_arena_destroy(s_preview.arena);
     }
-    s_preview.arena = pack->arena;
     s_preview.result = pack->result;
     s_preview.result_owner = job_result->_owner;
     s_preview.atlas_id = pack->atlas_id;
@@ -73,6 +79,7 @@ void gui_pack_preview_publish(tp_session_job_result *job_result,
                 s_preview.result->atlas_name, s_preview.exporter_id,
                 s_preview.result->sprite_count, s_preview.result->page_count,
                 elapsed_ms);
+    return true;
 }
 
 bool gui_pack_preview_belongs_to(int atlas_index) {
@@ -99,10 +106,7 @@ void gui_pack_preview_clear(void) {
         tp_session_job_result owned = {0};
         owned._owner = s_preview.result_owner;
         tp_session_job_result_destroy(&owned);
-    } else if (s_preview.arena) {
-        tp_arena_destroy(s_preview.arena);
     }
-    s_preview.arena = NULL;
     s_preview.result = NULL;
     s_preview.result_owner = NULL;
     s_preview.atlas_id = tp_id128_nil();

@@ -16,13 +16,11 @@ static bool key_eq(const gui_coalesce_key *a, const gui_coalesce_key *b) {
 }
 
 static void settle_pending_success(
-    bool preview_stale_before) {
-    gui_session_submit_terminal terminal = {0};
-    const bool has_terminal =
-        gui_session_client_last_submit(
-            &s_project.binding.client, &terminal);
-    NT_ASSERT(has_terminal);
-    if (has_terminal && terminal.no_change) {
+    bool preview_stale_before,
+    const gui_session_submit_terminal *terminal) {
+    NT_ASSERT(terminal != NULL);
+    NT_ASSERT(terminal->transaction_id[0] != '\0');
+    if (terminal && terminal->no_change) {
         s_project.preview_stale =
             preview_stale_before;
     }
@@ -50,11 +48,12 @@ bool gui_project_flush_pending(void) {
     s_project.pending_valid = false;
     if (op.kind == TP_OP_ATLAS_SETTINGS_SET) {
         tp_error err = {0};
-        const tp_status status = gui_session_set_atlas_settings(&s_project.binding.client, op.atlas_id, expected_revision, &op.u.atlas_settings, &err);
+        gui_session_submit_terminal terminal = {0};
+        const tp_status status = gui_session_set_atlas_settings(&s_project.binding.client, op.atlas_id, expected_revision, &op.u.atlas_settings, &terminal, &err);
         tp_operation_free(&op);
         if (status == TP_STATUS_OK) {
             settle_pending_success(
-                preview_stale_before);
+                preview_stale_before, &terminal);
             return true;
         }
         gui_project__note_session_reject(status, &err);
@@ -63,13 +62,14 @@ bool gui_project_flush_pending(void) {
     if (op.kind == TP_OP_SPRITE_OVERRIDE_SET &&
         !tp_id128_is_nil(op.u.sprite_set.source_id)) {
         tp_error err = {0};
+        gui_session_submit_terminal terminal = {0};
         const tp_status status = gui_session_set_sprite_override(&s_project.binding.client, op.atlas_id, op.u.sprite_set.source_id,
             op.u.sprite_set.src_key, expected_revision,
-            &op.u.sprite_set, &err);
+            &op.u.sprite_set, &terminal, &err);
         tp_operation_free(&op);
         if (status == TP_STATUS_OK) {
             settle_pending_success(
-                preview_stale_before);
+                preview_stale_before, &terminal);
             return true;
         }
         gui_project__note_session_reject(status, &err);
@@ -77,12 +77,13 @@ bool gui_project_flush_pending(void) {
     }
     if (op.kind == TP_OP_ANIMATION_SETTINGS_SET) {
         tp_error err = {0};
+        gui_session_submit_terminal terminal = {0};
         const tp_status status = gui_session_set_animation_settings(&s_project.binding.client, op.atlas_id, op.u.anim_settings.anim_id,
-            expected_revision, &op.u.anim_settings, &err);
+            expected_revision, &op.u.anim_settings, &terminal, &err);
         tp_operation_free(&op);
         if (status == TP_STATUS_OK) {
             settle_pending_success(
-                preview_stale_before);
+                preview_stale_before, &terminal);
             return true;
         }
         gui_project__note_session_reject(status, &err);
@@ -90,12 +91,13 @@ bool gui_project_flush_pending(void) {
     }
     if (op.kind == TP_OP_TARGET_SET) {
         tp_error err = {0};
+        gui_session_submit_terminal terminal = {0};
         const tp_status status = gui_session_set_target(&s_project.binding.client, op.atlas_id, op.u.target_set.target_id,
-            expected_revision, &op.u.target_set, &err);
+            expected_revision, &op.u.target_set, &terminal, &err);
         tp_operation_free(&op);
         if (status == TP_STATUS_OK) {
             settle_pending_success(
-                preview_stale_before);
+                preview_stale_before, &terminal);
             return true;
         }
         gui_project__note_session_reject(status, &err);

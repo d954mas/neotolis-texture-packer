@@ -18,7 +18,8 @@ set(_arch_rules
     VIEW_PLATFORM
     VIEW_MODEL_POLICY
     CORE_FRONTEND
-    ASYNC_RAW_SESSION)
+    ASYNC_RAW_SESSION
+    HOST_QUEUE_RAW_SESSION_STORAGE)
 
 foreach(_rule IN LISTS _arch_rules)
     set_property(GLOBAL PROPERTY "ARCH_HITS_${_rule}" "")
@@ -153,6 +154,12 @@ foreach(_source IN LISTS _arch_sources)
        AND _scan MATCHES "(^|[^A-Za-z0-9_])((const[ \t\r\n]+)?tp_session)[ \t\r\n]*\\*[ \t\r\n]*[A-Za-z_][A-Za-z0-9_]*")
         _arch_hit(ASYNC_RAW_SESSION "${_relative}" "0")
     endif()
+    if(_relative MATCHES "^apps/gui/gui_host_queue\\.(c|h)$"
+       AND _scan MATCHES "typedef[ \t\r\n]+struct[ \t\r\n]+gui_host_queue[ \t\r\n]*\\{[^}]*((const[ \t\r\n]+)?tp_session)[ \t\r\n]*\\*[ \t\r\n]*[A-Za-z_][A-Za-z0-9_]*[ \t\r\n]*;")
+        _arch_hit(
+            HOST_QUEUE_RAW_SESSION_STORAGE
+            "${_relative}" "0")
+    endif()
 endforeach()
 
 if(DEFINED ARCH_EXPECT_RULE AND NOT ARCH_EXPECT_RULE STREQUAL "")
@@ -206,6 +213,9 @@ _arch_assert_rule(VIEW_MODEL_POLICY "PV-settings/RESULT-INDEX"
                   "apps/gui/gui_view_settings\\.c")
 _arch_assert_rule(CORE_FRONTEND "R1a/R1b")
 _arch_assert_rule(ASYNC_RAW_SESSION "R1c/R2b")
+_arch_assert_rule(
+    HOST_QUEUE_RAW_SESSION_STORAGE
+    "R2b no retained raw session")
 
 # Zero-only deletion guard. Behavioral tests prove presence and sequencing;
 # this gate only prevents a removed path from returning.

@@ -5,6 +5,7 @@
 #include <string.h>
 
 #if defined(_WIN32)
+#include <direct.h>
 #include <fcntl.h>
 #include <io.h>
 #include <windows.h>
@@ -13,19 +14,45 @@
 #include <unistd.h>
 #endif
 
+#include "tp_core/tp_build_worker.h"
+#include "tp_core/tp_export.h"
+#include "tp_core/tp_project.h"
+#include "tp_core/tp_scan.h"
+#include "tp_job_worker_process_internal.h"
 #include "tp_proc_internal.h"
+#include "tp_fs_internal.h"
+#include "tp_project_identity_internal.h"
+#include "tp_project_mutation_internal.h"
 #include "unity.h"
 
 #define TP_PROC_TEST_CHILD_ARG "__proc-job-transport-test"
 #define TP_PROC_TEST_BUILD_ARG "__proc-job-transport-build"
 #define TP_PROC_TEST_PROGRESS_ARG "__proc-job-transport-progress"
 #define TP_PROC_TEST_TREE_ARG "__proc-job-transport-tree"
+#define TP_PROC_TEST_REAPED_TREE_ARG "__proc-job-transport-reaped-tree"
 #define TP_PROC_TEST_GRANDCHILD_ARG "__proc-job-transport-grandchild"
 #define TP_PROC_TEST_SLOW_STDIN_ARG "__proc-job-transport-slow-stdin"
 #define TP_PROC_TEST_PROGRESS_BYTES (256U * 1024U)
 #define TP_PROC_TEST_TREE_MARKER "tp_proc_tree_survived.tmp"
+#define TP_PROC_TEST_TREE_READY_MARKER "tp_proc_tree_ready.tmp"
 
 static const uint8_t g_request[] = {'J', 'O', 'B', '!'};
+static const uint8_t g_png_4x4[] = {
+    0x89U, 0x50U, 0x4EU, 0x47U, 0x0DU, 0x0AU, 0x1AU, 0x0AU,
+    0x00U, 0x00U, 0x00U, 0x0DU, 0x49U, 0x48U, 0x44U, 0x52U,
+    0x00U, 0x00U, 0x00U, 0x04U, 0x00U, 0x00U, 0x00U, 0x04U,
+    0x08U, 0x06U, 0x00U, 0x00U, 0x00U, 0xA9U, 0xF1U, 0x9EU,
+    0x7EU, 0x00U, 0x00U, 0x00U, 0x33U, 0x49U, 0x44U, 0x41U,
+    0x54U, 0x78U, 0xDAU, 0x15U, 0xC8U, 0xA1U, 0x11U, 0x00U,
+    0x30U, 0x08U, 0x04U, 0x41U, 0x34U, 0x3AU, 0x95U, 0x44U,
+    0x53U, 0x09U, 0x9AU, 0x42U, 0x98U, 0xD7U, 0xF4U, 0x4CU,
+    0x2EU, 0x62U, 0xCDU, 0x9AU, 0x9FU, 0xDEU, 0x8BU, 0x84U,
+    0x60U, 0x1EU, 0x04U, 0x12U, 0x8AU, 0x1FU, 0x45U, 0x20U,
+    0xA1U, 0xFAU, 0x31U, 0x04U, 0x12U, 0x9AU, 0xDEU, 0x07U,
+    0x18U, 0xA8U, 0x21U, 0x51U, 0x4CU, 0xC2U, 0x35U, 0x74U,
+    0x00U, 0x00U, 0x00U, 0x00U, 0x49U, 0x45U, 0x4EU, 0x44U,
+    0xAEU, 0x42U, 0x60U, 0x82U,
+};
 
 void setUp(void) {}
 void tearDown(void) {}
@@ -44,6 +71,56 @@ static void sleep_ms(unsigned milliseconds) {
 
 static void sleep_one_ms(void) {
     sleep_ms(1U);
+}
+
+static void remove_tree(const char *path) {
+    tp_fs_dir *dir = tp_fs_dir_open(path);
+    if (dir) {
+        tp_fs_dir_entry entry;
+        while (tp_fs_dir_next(dir, &entry) == TP_FS_DIR_ENTRY) {
+            char child[2048];
+            const int length = snprintf(
+                child, sizeof child, "%s/%s", path, entry.name);
+            if (length < 0 || (size_t)length >= sizeof child) {
+                continue;
+            }
+            if (entry.info.kind == TP_FS_KIND_DIRECTORY &&
+                !entry.info.reparse) {
+                remove_tree(child);
+            } else {
+                (void)tp_fs_remove_file(child);
+            }
+        }
+        tp_fs_dir_close(dir);
+    }
+    (void)tp_fs_remove_dir(path);
+}
+
+static void export_scratch_dir(char *out, size_t capacity) {
+    char cwd[1024];
+#if defined(_WIN32)
+    TEST_ASSERT_NOT_NULL(_getcwd(cwd, (int)sizeof cwd));
+#else
+    TEST_ASSERT_NOT_NULL(getcwd(cwd, sizeof cwd));
+#endif
+    for (char *cursor = cwd; *cursor; ++cursor) {
+        if (*cursor == '\\') {
+            *cursor = '/';
+        }
+    }
+    const int length = snprintf(
+        out, capacity, "%s/tp_proc_real_export", cwd);
+    TEST_ASSERT_TRUE(length > 0 && (size_t)length < capacity);
+}
+
+static int deterministic_fill(
+    void *context, uint8_t *out, size_t length) {
+    uint8_t *seed = context;
+    for (size_t i = 0U; i < length; ++i) {
+        out[i] = (uint8_t)(*seed + (uint8_t)i);
+    }
+    *seed = (uint8_t)(*seed + 31U);
+    return (int)length;
 }
 
 static bool read_exact_stdin(void *out, size_t size) {
@@ -121,6 +198,15 @@ static int run_progress_child(void) {
 }
 
 static int run_grandchild(void) {
+    FILE *ready = fopen(TP_PROC_TEST_TREE_READY_MARKER, "wb");
+    if (!ready) {
+        return 4;
+    }
+    const bool ready_wrote = fwrite("ready", 1U, 5U, ready) == 5U;
+    const bool ready_closed = fclose(ready) == 0;
+    if (!ready_wrote || !ready_closed) {
+        return 4;
+    }
     sleep_ms(500U);
     FILE *marker = fopen(TP_PROC_TEST_TREE_MARKER, "wb");
     if (!marker) {
@@ -131,18 +217,54 @@ static int run_grandchild(void) {
     return wrote && closed ? 0 : 4;
 }
 
-static int run_tree_child(void) {
+static int run_tree_child(bool exit_after_ready) {
     char self[4096];
     if (!tp_proc_self_path(self, sizeof self)) {
         return 2;
     }
-    tp_proc *grandchild = tp_proc_spawn(self, TP_PROC_TEST_GRANDCHILD_ARG, NULL);
-    if (!grandchild) {
-        return 2;
+    tp_proc *grandchild = NULL;
+#if !defined(_WIN32)
+    if (exit_after_ready) {
+        const pid_t pid = fork();
+        if (pid < 0) {
+            return 2;
+        }
+        if (pid == 0) {
+            _exit(run_grandchild());
+        }
+    } else
+#endif
+    {
+        grandchild =
+            tp_proc_spawn(self, TP_PROC_TEST_GRANDCHILD_ARG, NULL);
+        if (!grandchild) {
+            return 2;
+        }
+    }
+    bool grandchild_ready = false;
+    for (int i = 0; i < 2000 && !grandchild_ready; i++) {
+        FILE *ready = fopen(TP_PROC_TEST_TREE_READY_MARKER, "rb");
+        if (ready) {
+            grandchild_ready = true;
+            (void)fclose(ready);
+        } else {
+            sleep_one_ms();
+        }
+    }
+    if (!grandchild_ready) {
+        if (grandchild) {
+            tp_proc_destroy(grandchild);
+        }
+        return 3;
     }
     if (fwrite("ready", 1U, 5U, stdout) != 5U || fflush(stdout) != 0) {
-        tp_proc_destroy(grandchild);
+        if (grandchild) {
+            tp_proc_destroy(grandchild);
+        }
         return 3;
+    }
+    if (exit_after_ready) {
+        return 0;
     }
     for (;;) {
         sleep_one_ms();
@@ -284,6 +406,7 @@ void test_nonblocking_stdout_pump_prevents_pipe_backpressure(void) {
 
 void test_owned_tree_kill_reaches_nested_worker(void) {
     (void)remove(TP_PROC_TEST_TREE_MARKER);
+    (void)remove(TP_PROC_TEST_TREE_READY_MARKER);
     char self[4096];
     TEST_ASSERT_TRUE(tp_proc_self_path(self, sizeof self));
     tp_proc *proc = tp_proc_spawn_owned_tree(self, TP_PROC_TEST_TREE_ARG, NULL);
@@ -315,7 +438,53 @@ void test_owned_tree_kill_reaches_nested_worker(void) {
         (void)fclose(marker);
     }
     (void)remove(TP_PROC_TEST_TREE_MARKER);
+    (void)remove(TP_PROC_TEST_TREE_READY_MARKER);
 }
+
+#if !defined(_WIN32)
+void test_reaped_tree_leader_cleans_nested_worker_before_reap(void) {
+    (void)remove(TP_PROC_TEST_TREE_MARKER);
+    (void)remove(TP_PROC_TEST_TREE_READY_MARKER);
+    char self[4096];
+    TEST_ASSERT_TRUE(tp_proc_self_path(self, sizeof self));
+    tp_proc *proc =
+        tp_proc_spawn_owned_tree(self, TP_PROC_TEST_REAPED_TREE_ARG, NULL);
+    TEST_ASSERT_NOT_NULL(proc);
+    TEST_ASSERT_TRUE(tp_proc_write_stdin(proc, NULL, 0U));
+
+    uint8_t ready[5];
+    size_t total = 0U;
+    for (int i = 0; i < 2000 && total < sizeof ready; i++) {
+        size_t got = 0U;
+        bool eof = false;
+        TEST_ASSERT_TRUE(tp_proc_try_read_stdout(
+            proc, ready + total, sizeof ready - total, &got, &eof));
+        total += got;
+        if (got == 0U) {
+            sleep_one_ms();
+        }
+    }
+    TEST_ASSERT_EQUAL_size_t(sizeof ready, total);
+    TEST_ASSERT_EQUAL_MEMORY("ready", ready, sizeof ready);
+
+    tp_proc_result result;
+    TEST_ASSERT_TRUE(wait_finished(proc, &result));
+    TEST_ASSERT_EQUAL_INT(TP_PROC_END_EXITED, result.how);
+    TEST_ASSERT_EQUAL_INT(0, result.code);
+    tp_proc_kill(proc);
+    tp_proc_destroy(proc);
+
+    sleep_ms(750U);
+    FILE *marker = fopen(TP_PROC_TEST_TREE_MARKER, "rb");
+    TEST_ASSERT_NULL_MESSAGE(
+        marker, "nested worker escaped cleanup before leader reap");
+    if (marker) {
+        (void)fclose(marker);
+    }
+    (void)remove(TP_PROC_TEST_TREE_MARKER);
+    (void)remove(TP_PROC_TEST_TREE_READY_MARKER);
+}
+#endif
 
 void test_nonblocking_stdin_pump_reports_backpressure_and_completes(void) {
     char self[4096];
@@ -356,7 +525,118 @@ void test_nonblocking_stdin_pump_reports_backpressure_and_completes(void) {
     tp_proc_destroy(proc);
 }
 
+void test_real_export_reports_committed_files_before_later_writer_failure(void) {
+    char root[1200];
+    char source[1300];
+    char work[1300];
+    char blocked[1300];
+    char published_json[1400];
+    char published_png[1400];
+    export_scratch_dir(root, sizeof root);
+    TEST_ASSERT_TRUE(
+        snprintf(source, sizeof source, "%s/sprite.png", root) > 0);
+    TEST_ASSERT_TRUE(
+        snprintf(work, sizeof work, "%s/work", root) > 0);
+    TEST_ASSERT_TRUE(
+        snprintf(blocked, sizeof blocked, "%s/blocked", root) > 0);
+    TEST_ASSERT_TRUE(
+        snprintf(published_json, sizeof published_json,
+                 "%s/published/atlas.json", root) > 0);
+    TEST_ASSERT_TRUE(
+        snprintf(published_png, sizeof published_png,
+                 "%s/published/atlas-0.png", root) > 0);
+    remove_tree(root);
+    tp_mkdirs(root);
+    tp_mkdirs(work);
+    TEST_ASSERT_TRUE(tp_fs_write_file(
+        source, g_png_4x4, sizeof g_png_4x4));
+    TEST_ASSERT_TRUE(tp_fs_write_file(
+        blocked, "not-a-directory", 15U));
+
+    tp_project *project = tp_project_create();
+    TEST_ASSERT_NOT_NULL(project);
+    tp_project_atlas *atlas = tp_project_get_atlas(project, 0);
+    TEST_ASSERT_NOT_NULL(atlas);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_atlas_add_source_kind(
+            atlas, "sprite.png", TP_SOURCE_KIND_FILE));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_atlas_add_target(
+            atlas, TP_EXPORTER_ID_JSON_NEOTOLIS,
+            "published/atlas", NULL));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_atlas_add_target(
+            atlas, TP_EXPORTER_ID_JSON_NEOTOLIS,
+            "blocked/atlas", NULL));
+    uint8_t seed = 7U;
+    const tp_rng rng = {deterministic_fill, &seed};
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_project_assign_missing_ids(project, &rng, &error),
+        error.msg);
+    char *project_json = NULL;
+    size_t project_json_len = 0U;
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_project_save_buffer(
+            project, &project_json, &project_json_len, &error),
+        error.msg);
+    tp_project_destroy(project);
+
+    const tp_job_worker_proto_request request = {
+        .kind = TP_SESSION_JOB_EXPORT,
+        .session_instance_generation = 12U,
+        .request_id = 34U,
+        .project_json = (const uint8_t *)project_json,
+        .project_json_len = project_json_len,
+        .project_dir = root,
+        .work_dir = work,
+        .preview_exporter_id = "",
+    };
+    tp_job_worker_process *process = NULL;
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_job_worker_process_start(&request, &process, &error),
+        error.msg);
+    TEST_ASSERT_NOT_NULL(process);
+    free(project_json);
+
+    for (int elapsed = 0;
+         elapsed < 5000 &&
+         !tp_job_worker_process_terminal(process);
+         ++elapsed) {
+        tp_job_worker_process_pump(process);
+        sleep_one_ms();
+    }
+    TEST_ASSERT_TRUE_MESSAGE(
+        tp_job_worker_process_terminal(process),
+        "real Export worker did not reach terminal state");
+    const tp_job_worker_proto_response *response =
+        tp_job_worker_process_response(process);
+    TEST_ASSERT_NOT_NULL(response);
+    TEST_ASSERT_EQUAL_INT(TP_SESSION_JOB_FAILED, response->state);
+    TEST_ASSERT_EQUAL_INT(1, response->export_result.targets);
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(
+        2, response->export_result.files);
+    TEST_ASSERT_EQUAL_INT(1, response->export_result.atlases_failed);
+    TEST_ASSERT_TRUE(response->export_result.partial_publication);
+    TEST_ASSERT_TRUE(response->export_result.publication_uncertain);
+    TEST_ASSERT_NOT_EQUAL(
+        '\0', response->export_result.first_error[0]);
+    TEST_ASSERT_TRUE(tp_fs_exists(published_json));
+    TEST_ASSERT_TRUE(tp_fs_exists(published_png));
+    tp_job_worker_process_destroy(process);
+    remove_tree(root);
+}
+
 int main(int argc, char **argv) {
+    if (tp_build_is_worker_invocation(argc, argv)) {
+        return tp_build_worker_main();
+    }
     if (argc >= 2 && strcmp(argv[1], TP_PROC_TEST_CHILD_ARG) == 0) {
         return run_control_child();
     }
@@ -367,7 +647,10 @@ int main(int argc, char **argv) {
         return run_progress_child();
     }
     if (argc >= 2 && strcmp(argv[1], TP_PROC_TEST_TREE_ARG) == 0) {
-        return run_tree_child();
+        return run_tree_child(false);
+    }
+    if (argc >= 2 && strcmp(argv[1], TP_PROC_TEST_REAPED_TREE_ARG) == 0) {
+        return run_tree_child(true);
     }
     if (argc >= 2 && strcmp(argv[1], TP_PROC_TEST_GRANDCHILD_ARG) == 0) {
         return run_grandchild();
@@ -382,6 +665,11 @@ int main(int argc, char **argv) {
     RUN_TEST(test_build_worker_write_closes_stdin_after_request);
     RUN_TEST(test_nonblocking_stdout_pump_prevents_pipe_backpressure);
     RUN_TEST(test_owned_tree_kill_reaches_nested_worker);
+#if !defined(_WIN32)
+    RUN_TEST(test_reaped_tree_leader_cleans_nested_worker_before_reap);
+#endif
     RUN_TEST(test_nonblocking_stdin_pump_reports_backpressure_and_completes);
+    RUN_TEST(
+        test_real_export_reports_committed_files_before_later_writer_failure);
     return UNITY_END();
 }

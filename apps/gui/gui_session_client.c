@@ -168,6 +168,12 @@ static void pending_clear(
     memset(pending, 0, sizeof *pending);
 }
 
+static bool pending_occupied(
+    const gui_session_pending_submit *pending) {
+    return pending &&
+           pending->terminal.transaction_id[0] != '\0';
+}
+
 static void submit_state_clear(
     gui_session_client *client) {
     NT_ASSERT(client != NULL);
@@ -176,10 +182,6 @@ static void submit_state_clear(
          ++index) {
         pending_clear(&client->pending[index]);
     }
-    client->has_last_submit = false;
-    memset(
-        &client->last_submit, 0,
-        sizeof client->last_submit);
 }
 
 static void reconcile_submit_echoes(
@@ -204,8 +206,7 @@ static void reconcile_submit_echoes(
          ++pending_index) {
         gui_session_pending_submit *pending =
             &client->pending[pending_index];
-        if (!pending->occupied ||
-            !pending->terminal_ready ||
+        if (!pending_occupied(pending) ||
             pending->terminal.echo_state !=
                 GUI_SESSION_SUBMIT_ECHO_PENDING) {
             continue;
@@ -236,12 +237,6 @@ static void reconcile_submit_echoes(
             TP_STATUS_OK;
         pending->terminal.echo_state =
             GUI_SESSION_SUBMIT_ECHO_OBSERVED;
-        if (client->has_last_submit &&
-            strcmp(
-                client->last_submit.transaction_id,
-                pending->terminal.transaction_id) == 0) {
-            client->last_submit = pending->terminal;
-        }
     }
 }
 
@@ -282,7 +277,6 @@ static void publish_observation(
             tp_session_observation_destroy(old_latest);
         }
     }
-    client->observe_requested = false;
 }
 
 static bool submit_identity_equal(
@@ -357,7 +351,7 @@ static gui_session_pending_submit *pending_find_id(
          ++index) {
         gui_session_pending_submit *pending =
             &client->pending[index];
-        if (pending->occupied &&
+        if (pending_occupied(pending) &&
             strcmp(
                 pending->terminal.transaction_id,
                 transaction_id) == 0) {
@@ -393,7 +387,7 @@ static tp_status pending_register_before_admission(
     for (size_t index = 0U;
          index < GUI_SESSION_CLIENT_MAX_PENDING_SUBMITS;
          ++index) {
-        if (!client->pending[index].occupied) {
+        if (!pending_occupied(&client->pending[index])) {
             pending = &client->pending[index];
             break;
         }
@@ -405,8 +399,7 @@ static tp_status pending_register_before_admission(
              ++index) {
             gui_session_pending_submit *candidate =
                 &client->pending[index];
-            if (candidate->terminal_ready &&
-                candidate->terminal.echo_state !=
+            if (candidate->terminal.echo_state !=
                     GUI_SESSION_SUBMIT_ECHO_PENDING) {
                 pending = candidate;
                 break;
@@ -419,7 +412,6 @@ static tp_status pending_register_before_admission(
             "GUI pending-submit receipt capacity is exhausted by unresolved submissions");
     }
     pending_clear(pending);
-    pending->occupied = true;
     (void)snprintf(
         pending->terminal.transaction_id,
         sizeof pending->terminal.transaction_id,
@@ -451,14 +443,11 @@ static void pending_finish(
             : GUI_SESSION_SUBMIT_ECHO_NOT_APPLICABLE;
     pending->observation_status =
         TP_STATUS_OK;
-    pending->terminal_ready = true;
     tp_error copy_error = {{0}};
     pending->result_available =
         transaction_result_copy(
             transaction, &pending->result,
             &copy_error) == TP_STATUS_OK;
-    client->last_submit = pending->terminal;
-    client->has_last_submit = true;
 }
 
 void gui_session_client_init(gui_session_client *client) {
@@ -528,8 +517,7 @@ tp_status gui_session_client_prepare(
             err, TP_STATUS_INVALID_ARGUMENT,
             "GUI session prepare requires client, session, and output");
     }
-    if (prepared->ready ||
-        prepared->session ||
+    if (prepared->session ||
         prepared->initial) {
         return tp_error_set(
             err, TP_STATUS_INVALID_ARGUMENT,
@@ -567,7 +555,6 @@ tp_status gui_session_client_prepare(
         0U) {
         prepared->next_instance_generation = 1U;
     }
-    prepared->ready = true;
     return TP_STATUS_OK;
 }
 
@@ -586,7 +573,6 @@ tp_session *gui_session_client_commit_prepared(
     gui_session_client_prepared *prepared) {
     NT_ASSERT(client != NULL);
     NT_ASSERT(prepared != NULL);
-    NT_ASSERT(prepared->ready);
     NT_ASSERT(prepared->session != NULL);
     NT_ASSERT(prepared->initial != NULL);
     NT_ASSERT(!client->frame_pinned);
@@ -636,7 +622,6 @@ tp_status gui_session_client_observe(
         return status;
     }
     if (!next) {
-        client->observe_requested = false;
         return TP_STATUS_OK;
     }
     publish_observation(
@@ -746,8 +731,7 @@ tp_status gui_session_client_submit(
     if (status != TP_STATUS_OK) {
         return status;
     }
-    if (existing && pending->terminal_ready &&
-        pending->result_available) {
+    if (existing && pending->result_available) {
         status = transaction_result_copy(
             &pending->result, &out->transaction,
             err);
@@ -761,25 +745,12 @@ tp_status gui_session_client_submit(
             GUI_SESSION_SUBMIT_ECHO_PENDING;
         out->observation_status =
             pending->observation_status;
-        client->last_submit = pending->terminal;
-        client->has_last_submit = true;
+        out->terminal = pending->terminal;
         return pending->terminal.committed ||
                        pending->terminal.no_change
                    ? TP_STATUS_OK
                    : pending->terminal.status;
     }
-    if (existing && pending->terminal_ready) {
-        /* Core owns the authoritative retained result. A failed local copy
-         * must not permanently block an exact-ID retry. */
-        pending->terminal_ready = false;
-        existing = false;
-    }
-    if (existing) {
-        return tp_error_set(
-            err, TP_STATUS_INVALID_ARGUMENT,
-            "GUI retained transaction is already being admitted");
-    }
-
     tp_txn_request transaction_request = {0};
     transaction_request.schema = TP_TXN_SCHEMA;
     (void)snprintf(
@@ -805,12 +776,12 @@ tp_status gui_session_client_submit(
          * that transient answer: a later retry must ask core again rather than
          * replaying a stale revision from this client.
          */
-        pending->terminal_ready = true;
-        pending->result_available = false;
+        pending_clear(pending);
     } else {
         pending_finish(
             client, pending, status,
             &out->transaction);
+        out->terminal = pending->terminal;
     }
 
     if (!out->transaction.committed) {
@@ -823,12 +794,12 @@ tp_status gui_session_client_submit(
             gui_session_client_observe(
                 client, &observe_error);
         if (out->observation_status != TP_STATUS_OK) {
-            client->observe_requested = true;
             out->observation_pending = true;
             pending->observation_status =
                 out->observation_status;
         }
     }
+    out->terminal = pending->terminal;
     /* Once core reports committed, a later recovery/observation failure is not
      * a mutation rejection. The typed receipt preserves both statuses. */
     return TP_STATUS_OK;
@@ -857,7 +828,7 @@ bool gui_session_client_pending_submit_query(
          ++index) {
         const gui_session_pending_submit *pending =
             &client->pending[index];
-        if (pending->occupied &&
+        if (pending_occupied(pending) &&
             strcmp(
                 pending->terminal.transaction_id,
                 transaction_id) == 0 &&
@@ -871,18 +842,6 @@ bool gui_session_client_pending_submit_query(
         }
     }
     return false;
-}
-
-bool gui_session_client_last_submit(
-    const gui_session_client *client,
-    gui_session_submit_terminal *out) {
-    if (!client || !client->has_last_submit) {
-        return false;
-    }
-    if (out) {
-        *out = client->last_submit;
-    }
-    return true;
 }
 
 tp_status gui_session_client_frame_begin(
@@ -922,7 +881,6 @@ tp_status gui_session_client_request_observe(
             err, TP_STATUS_INVALID_ARGUMENT,
             "GUI session observation request requires an attached session");
     }
-    client->observe_requested = true;
     if (client->frame_pinned) {
         return TP_STATUS_OK;
     }
@@ -945,7 +903,6 @@ void gui_session_client_detach(
     client->snapshot_owner = NULL;
     client->observed =
         (tp_session_observation_token){0};
-    client->observe_requested = false;
     submit_state_clear(client);
     if (had_snapshot) {
         client->snapshot_lifetime_generation++;

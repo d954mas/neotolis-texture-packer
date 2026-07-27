@@ -24,6 +24,10 @@ The native GUI uses a **session-observing Supervising Controller**:
    revision conflicts, or implement product validation/capability rules.
 7. An uncommitted human gesture is explicit view-local draft state. Concurrent
    model change preserves the value and requires explicit Apply Mine or Discard.
+8. Data flow is unidirectional:
+   `view intent -> host admission -> tp_session mutation -> atomic observation
+   -> reducer -> view state -> render`. A view never writes observed state, and
+   no facade mirrors session or reducer truth into a competing cache.
 
 At the product boundary this remains Ports and Adapters. Inside the GUI it uses
 Passive View only where it buys a real testability or ownership seam. It does
@@ -449,9 +453,10 @@ acknowledges that submitted draft. Any other revision-changing commit conflicts
 active drafts, including another transaction from the same GUI process or a
 different GUI view.
 
-The client owns attach, observe, resync, submit, replace, and detach. All GUI
-transaction adapters submit through it; none call `tp_session_apply()` directly
-after cutover.
+The client owns attach, observe, resync, submit, and detach. The host binding is
+the sole replacement/shutdown owner and commits a prepared client attachment
+only after the old generation has drained. All GUI transaction adapters submit
+through the client; none call `tp_session_apply()` directly after cutover.
 
 ## 10. Frame contract
 

@@ -153,10 +153,18 @@ void do_redo(void) {
 }
 
 void gui_request_undo(void) {
+    if (gui_project_lifecycle_state_query() !=
+        GUI_PROJECT_LIFECYCLE_OPEN_IDLE) {
+        return;
+    }
     s_pending_history_action = GUI_PENDING_HISTORY_UNDO;
 }
 
 void gui_request_redo(void) {
+    if (gui_project_lifecycle_state_query() !=
+        GUI_PROJECT_LIFECYCLE_OPEN_IDLE) {
+        return;
+    }
     s_pending_history_action = GUI_PENDING_HISTORY_REDO;
 }
 
@@ -169,6 +177,10 @@ static void apply_pending_history_action(void) {
     } else if (action == GUI_PENDING_HISTORY_REDO) {
         do_redo();
     }
+}
+
+void gui_actions__clear_history_request(void) {
+    s_pending_history_action = GUI_PENDING_HISTORY_NONE;
 }
 
 /* Fingerprint every source (folders expand to their scanned children, files stat

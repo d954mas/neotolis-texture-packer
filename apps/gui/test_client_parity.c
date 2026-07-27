@@ -71,6 +71,26 @@ typedef struct parity_receipt {
 static parity_receipt s_headless_receipts[16];
 static size_t s_headless_receipt_count;
 
+static bool wait_for_terminal_job(
+    tp_session *session, tp_session_job_progress *out,
+    tp_error *err) {
+    const size_t max_polls = 1000000U;
+    for (size_t poll = 0U; poll < max_polls; ++poll) {
+        memset(out, 0, sizeof *out);
+        if (tp_session_job_poll(session, out, err) !=
+            TP_STATUS_OK) {
+            return false;
+        }
+        if (out->state != TP_SESSION_JOB_RUNNING) {
+            return true;
+        }
+    }
+    (void)snprintf(
+        err->msg, sizeof err->msg,
+        "job did not terminate after %zu polls", max_polls);
+    return false;
+}
+
 static const char *parity_label(
     const tp_operation *operation) {
     switch (operation->kind) {
@@ -763,12 +783,9 @@ void test_live_headless_runs_real_pack_job_and_export_command(void) {
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
                           tp_session_invalidate_sources(session, &err));
 
-    tp_session_job_progress progress;
-    do {
-        memset(&progress, 0, sizeof progress);
-        TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
-                              tp_session_job_poll(session, &progress, &err));
-    } while (progress.state == TP_SESSION_JOB_RUNNING);
+    tp_session_job_progress progress = {0};
+    TEST_ASSERT_TRUE_MESSAGE(
+        wait_for_terminal_job(session, &progress, &err), err.msg);
     TEST_ASSERT_EQUAL_INT(TP_SESSION_JOB_PACK, progress.kind);
     TEST_ASSERT_EQUAL_INT(TP_SESSION_JOB_SUCCEEDED, progress.state);
     TEST_ASSERT_EQUAL_INT(1, progress.current);
@@ -812,11 +829,8 @@ void test_live_headless_runs_real_pack_job_and_export_command(void) {
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
                           tp_session_export_start(session, &export_request,
                                                   &err));
-    do {
-        memset(&progress, 0, sizeof progress);
-        TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
-                              tp_session_job_poll(session, &progress, &err));
-    } while (progress.state == TP_SESSION_JOB_RUNNING);
+    TEST_ASSERT_TRUE_MESSAGE(
+        wait_for_terminal_job(session, &progress, &err), err.msg);
     TEST_ASSERT_EQUAL_INT(TP_SESSION_JOB_EXPORT, progress.kind);
     memset(&result, 0, sizeof result);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,

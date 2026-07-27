@@ -99,18 +99,14 @@ static gui_project_create_result create_failed(void) {
 }
 
 static gui_project_create_result create_committed(
-    tp_id128 created_id, int visible_index) {
-    gui_session_submit_terminal terminal = {0};
-    const bool has_terminal =
-        gui_session_client_last_submit(
-            &s_project.binding.client, &terminal);
-    NT_ASSERT(has_terminal);
-    NT_ASSERT(!has_terminal || terminal.committed);
+    tp_id128 created_id, int visible_index,
+    const gui_session_submit_terminal *terminal) {
+    NT_ASSERT(terminal != NULL);
+    NT_ASSERT(terminal->committed);
     return (gui_project_create_result){
         .committed = true,
         .observation_pending =
-            has_terminal &&
-            terminal.echo_state ==
+            terminal->echo_state ==
                 GUI_SESSION_SUBMIT_ECHO_PENDING,
         .created_id = created_id,
         .visible_index = visible_index,
@@ -147,8 +143,9 @@ gui_project_create_result gui_project_add_atlas(void) {
         return create_failed();
     }
     err = (tp_error){0};
+    gui_session_submit_terminal terminal = {0};
     const tp_status status = gui_session_create_atlas(&s_project.binding.client, new_id, target_id, tp_session_snapshot_revision(snapshot), name,
-        exporter_id, out_path, target_enabled, &err);
+        exporter_id, out_path, target_enabled, &terminal, &err);
     if (status != TP_STATUS_OK) {
         gui_project__note_session_reject(status, &err);
         return create_failed();
@@ -158,10 +155,10 @@ gui_project_create_result gui_project_add_atlas(void) {
     for (int i = 0; i < count; i++) {
         const tp_snapshot_atlas *atlas = tp_session_snapshot_atlas_at(snapshot, i);
         if (atlas && tp_id128_eq(atlas->id, new_id)) {
-            return create_committed(new_id, i);
+            return create_committed(new_id, i, &terminal);
         }
     }
-    return create_committed(new_id, -1);
+    return create_committed(new_id, -1, &terminal);
 }
 
 /* fix3 [0]: returns TRUE iff the removal actually committed (false on the flush-fail abort, an
@@ -570,8 +567,9 @@ gui_project_create_result gui_project_add_target(
         gui_project__note_session_reject(defaults_status, &err);
         return create_failed();
     }
+    gui_session_submit_terminal terminal = {0};
     const tp_status status = gui_session_create_target(&s_project.binding.client, atlas_id, target_id, expected_revision,
-        exporter_id, out_path, enabled, &err);
+        exporter_id, out_path, enabled, &terminal, &err);
     if (status != TP_STATUS_OK) {
         gui_project__note_session_reject(status, &err);
         return create_failed();
@@ -590,10 +588,10 @@ gui_project_create_result gui_project_add_target(
         if (target &&
             tp_id128_eq(target->id, target_id)) {
             return create_committed(
-                target_id, index);
+                target_id, index, &terminal);
         }
     }
-    return create_committed(target_id, -1);
+    return create_committed(target_id, -1, &terminal);
 }
 
 /* fix3 [0]: bool -- true iff the removal committed (see gui_project_remove_atlas). */
@@ -646,7 +644,7 @@ bool gui_project_set_target(const gui_target_ref *target, const char *exporter_i
     const int64_t expected_revision = revision_after_owned_route(
         target->expected_revision, revision_before_flush);
     const tp_status status = gui_session_set_target(&s_project.binding.client, target->atlas_id, target->target_id,
-        expected_revision, &settings, &err);
+        expected_revision, &settings, NULL, &err);
     free(exp);
     free(outp);
     if (status != TP_STATUS_OK) {
@@ -714,7 +712,7 @@ bool gui_project_set_target_enabled(const gui_target_ref *target, bool enabled) 
     const int64_t expected_revision = revision_after_owned_route(
         target->expected_revision, revision_before_flush);
     const tp_status status = gui_session_set_target(&s_project.binding.client, target->atlas_id, target->target_id,
-        expected_revision, &settings, &err);
+        expected_revision, &settings, NULL, &err);
     if (status != TP_STATUS_OK) {
         gui_project__note_session_reject(status, &err);
         return false;
@@ -740,7 +738,7 @@ bool gui_project_set_target_exporter(const gui_target_ref *target,
     const int64_t expected_revision = revision_after_owned_route(
         target->expected_revision, revision_before_flush);
     const tp_status status = gui_session_set_target(&s_project.binding.client, target->atlas_id, target->target_id,
-        expected_revision, &settings, &err);
+        expected_revision, &settings, NULL, &err);
     free(exp);
     if (status != TP_STATUS_OK) {
         gui_project__note_session_reject(status, &err);
@@ -818,8 +816,9 @@ gui_project_create_result gui_project_create_animation(
         return create_failed();
     }
     tp_error err = {0};
+    gui_session_submit_terminal terminal = {0};
     const tp_status status = gui_session_create_animation(&s_project.binding.client, atlas_id, anim_id, expected_revision, id, frames,
-        frame_count, &err);
+        frame_count, &terminal, &err);
     if (status != TP_STATUS_OK) {
         gui_project__note_session_reject(status, &err);
         return create_failed();
@@ -830,10 +829,10 @@ gui_project_create_result gui_project_create_animation(
         const tp_snapshot_animation *animation =
             tp_session_snapshot_animation_at(snapshot, atlas_id, i);
         if (animation && tp_id128_eq(animation->id, anim_id)) {
-            return create_committed(anim_id, i);
+            return create_committed(anim_id, i, &terminal);
         }
     }
-    return create_committed(anim_id, -1);
+    return create_committed(anim_id, -1, &terminal);
 }
 
 /* fix3 [0]: bool -- true iff the removal committed (see gui_project_remove_atlas). The deferred

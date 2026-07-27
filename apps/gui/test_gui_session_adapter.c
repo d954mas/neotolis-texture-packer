@@ -78,7 +78,7 @@ void test_atlas_structural_and_settings_use_stable_id_revision_contract(void) {
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
         gui_session_create_atlas(&client, atlas_id, target_id, 0, "atlas2",
-                                 "json-neotolis", "out/atlas2", true, &err));
+                                 "json-neotolis", "out/atlas2", true, NULL, &err));
 
     tp_op_atlas_settings settings;
     memset(&settings, 0, sizeof settings);
@@ -86,7 +86,7 @@ void test_atlas_structural_and_settings_use_stable_id_revision_contract(void) {
     settings.padding = 9;
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
-        gui_session_set_atlas_settings(&client, atlas_id, 1, &settings, &err));
+        gui_session_set_atlas_settings(&client, atlas_id, 1, &settings, NULL, &err));
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_REVISION_CONFLICT,
         gui_session_remove_atlas(&client, atlas_id, 1, &err));
@@ -155,11 +155,22 @@ void test_source_family_uses_stable_ids_and_atomic_batch_admission(void) {
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
         gui_session_set_sprite_override(&client, atlas_id, ids[0], "a.png", 1,
-                                        &sprite_settings, &err));
+                                        &sprite_settings, NULL, &err));
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
         gui_session_set_sprite_name(&client, atlas_id, ids[0], "a.png", 2,
                                     "hero", &err));
+    tp_session_event rename_event = {0};
+    size_t rename_event_count = 0U;
+    bool rename_resync = false;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_session_events_after(session, 2U, &rename_event, 1U,
+                                &rename_event_count, &rename_resync, &err));
+    TEST_ASSERT_FALSE(rename_resync);
+    TEST_ASSERT_EQUAL_UINT64(1U, rename_event_count);
+    TEST_ASSERT_EQUAL_STRING(tp_op_wire(TP_OP_SPRITE_NAME_SET),
+                             rename_event.label);
     tp_session_snapshot *sprite_snapshot = NULL;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
                           tp_session_snapshot_create(session, &sprite_snapshot, &err));
@@ -218,7 +229,7 @@ void test_animation_family_uses_stable_ids_revision_and_snapshot_read(void) {
         TP_STATUS_OK,
         gui_session_create_animation(
             &client, atlas_id, animation_id,
-            1, "walk", initial_frames, 2, &err));
+            1, "walk", initial_frames, 2, NULL, &err));
     tp_session_snapshot_destroy(before);
 
     tp_op_anim_settings settings;
@@ -228,7 +239,7 @@ void test_animation_family_uses_stable_ids_revision_and_snapshot_read(void) {
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
         gui_session_set_animation_settings(
-            &client, atlas_id, animation_id, 2, &settings, &err));
+            &client, atlas_id, animation_id, 2, &settings, NULL, &err));
     const tp_op_sprite_ref extra[1] = {{source_id, "walk_3.png"}};
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
@@ -279,7 +290,7 @@ void test_target_family_uses_stable_ids_revision_and_snapshot_read(void) {
         TP_STATUS_OK,
         gui_session_create_target(&client, atlas_id, target_id,
                                   tp_session_snapshot_revision(before),
-                                  "json-neotolis", "out/atlas", true, &err));
+                                  "json-neotolis", "out/atlas", true, NULL, &err));
     tp_session_snapshot_destroy(before);
 
     tp_op_target_set settings;
@@ -289,7 +300,7 @@ void test_target_family_uses_stable_ids_revision_and_snapshot_read(void) {
     settings.enabled = false;
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
-        gui_session_set_target(&client, atlas_id, target_id, 1, &settings, &err));
+        gui_session_set_target(&client, atlas_id, target_id, 1, &settings, NULL, &err));
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_REVISION_CONFLICT,
         gui_session_remove_target(&client, atlas_id, target_id, 1, &err));

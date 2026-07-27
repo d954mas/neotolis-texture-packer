@@ -9,8 +9,9 @@
 bool gui_pack_publish_native(tp_session_job_result *job_result,
                              int atlas_index, double elapsed_ms,
                              gui_pack_result_info *out);
-void gui_pack_preview_publish(tp_session_job_result *job_result,
-                              int atlas_index, double elapsed_ms);
+bool gui_pack_preview_publish(tp_session_job_result *job_result,
+                              int atlas_index, double elapsed_ms,
+                              gui_pack_result_info *out);
 bool gui_pack_preview_belongs_to(int atlas_index);
 
 #ifdef TP_ENABLE_TEST_SEAMS

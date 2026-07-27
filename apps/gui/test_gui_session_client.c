@@ -454,6 +454,13 @@ void test_observe_failure_preserves_snapshot_token_and_generation(void) {
     TEST_ASSERT_EQUAL_UINT64(
         lifetime,
         gui_session_client_snapshot_lifetime_generation(&client));
+    gui_session_client__test_fail_next_observe();
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OOM,
+        gui_session_client_frame_begin(&client, &error));
+    TEST_ASSERT_TRUE(
+        gui_session_client_frame_is_pinned(&client));
+    gui_session_client_frame_end(&client);
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
         gui_session_client_observe(&client, &error));
@@ -618,6 +625,13 @@ void test_submit_generates_full_id_and_publishes_common_echo(void) {
     TEST_ASSERT_EQUAL_STRING(
         "101112131415161718191a1b1c1d1e1f",
         result.transaction.transaction_id);
+    TEST_ASSERT_EQUAL_STRING(
+        result.transaction.transaction_id,
+        result.terminal.transaction_id);
+    TEST_ASSERT_TRUE(result.terminal.committed);
+    TEST_ASSERT_EQUAL_INT(
+        GUI_SESSION_SUBMIT_ECHO_OBSERVED,
+        result.terminal.echo_state);
     const tp_session_observation *observation =
         gui_session_client_observation(&client);
     TEST_ASSERT_EQUAL_size_t(
@@ -831,6 +845,10 @@ void test_retained_id_retry_recovers_after_local_result_copy_failure(void) {
     TEST_ASSERT_EQUAL_INT64(1, retry.transaction.revision);
     TEST_ASSERT_EQUAL_INT64(1, tp_session_revision(session));
     TEST_ASSERT_EQUAL_INT(1, tp_session_history_count(session));
+    gui_session_submit_terminal duplicate_terminal = {0};
+    TEST_ASSERT_FALSE(gui_session_client_pending_submit_query(
+        &client, request.retained_transaction_id,
+        request.identity, &duplicate_terminal));
 
     tp_operation later_operation =
         make_rename_operation(session, "after-copy-retry");
@@ -993,8 +1011,6 @@ void test_successful_reattach_clears_receipts_but_failed_reattach_preserves_them
     TEST_ASSERT_FALSE(gui_session_client_pending_submit_query(
         &client, request.retained_transaction_id,
         identity, &terminal));
-    TEST_ASSERT_FALSE(
-        gui_session_client_last_submit(&client, &terminal));
 
     gui_session_submit_result_destroy(&result);
     tp_operation_free(&operation);
@@ -1411,7 +1427,8 @@ void test_prepare_failure_preserves_attached_session_observation_and_generation(
         old_generation,
         gui_session_client_instance_generation(
             &client));
-    TEST_ASSERT_FALSE(prepared.ready);
+    TEST_ASSERT_NULL(prepared.session);
+    TEST_ASSERT_NULL(prepared.initial);
 
     gui_session_client_detach(&client);
     tp_session_destroy(old_session);
@@ -1439,7 +1456,8 @@ void test_prepare_rejects_active_session_alias_without_state_change(void) {
         gui_session_client_prepare(
             &client, session, &prepared,
             &error));
-    TEST_ASSERT_FALSE(prepared.ready);
+    TEST_ASSERT_NULL(prepared.session);
+    TEST_ASSERT_NULL(prepared.initial);
     TEST_ASSERT_EQUAL_PTR(
         session,
         gui_session_client_attached_session(
@@ -1478,7 +1496,8 @@ void test_prepare_is_invisible_until_nonfallible_commit(void) {
         gui_session_client_prepare(
             &client, candidate, &prepared,
             &error));
-    TEST_ASSERT_TRUE(prepared.ready);
+    TEST_ASSERT_EQUAL_PTR(candidate, prepared.session);
+    TEST_ASSERT_NOT_NULL(prepared.initial);
     TEST_ASSERT_EQUAL_PTR(
         old_session,
         gui_session_client_attached_session(
@@ -1495,7 +1514,8 @@ void test_prepare_is_invisible_until_nonfallible_commit(void) {
         gui_session_client_commit_prepared(
             &client, &prepared);
     TEST_ASSERT_EQUAL_PTR(old_session, retired);
-    TEST_ASSERT_FALSE(prepared.ready);
+    TEST_ASSERT_NULL(prepared.session);
+    TEST_ASSERT_NULL(prepared.initial);
     TEST_ASSERT_EQUAL_PTR(
         candidate,
         gui_session_client_attached_session(

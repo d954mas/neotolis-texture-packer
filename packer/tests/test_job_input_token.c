@@ -14,6 +14,7 @@
 #include "tinycthread.h"
 
 #include "tp_core/tp_build_worker.h"
+#include "tp_core/tp_export.h"
 #include "tp_core/tp_export_run.h"
 #include "tp_core/tp_job.h"
 #include "tp_core/tp_operation.h"
@@ -168,6 +169,41 @@ static void add_file_source(tp_session *session, tp_id128 atlas_id,
     tp_txn_result_free(&result);
     tp_operation_free(&operation);
     tp_session_snapshot_destroy(snapshot);
+}
+
+static tp_id128 add_enabled_export_target(
+    tp_session *session, tp_id128 atlas_id) {
+    const tp_id128 target_id = {{
+        0x21U, 0x32U, 0x43U, 0x54U,
+        0x65U, 0x76U, 0x87U, 0x98U,
+        0xA9U, 0xBAU, 0xCBU, 0xDCU,
+        0xEDU, 0xFEU, 0x10U, 0x20U,
+    }};
+    tp_operation operation = {0};
+    operation.kind = TP_OP_TARGET_CREATE;
+    operation.atlas_id = atlas_id;
+    operation.u.target_create.target_id = target_id;
+    operation.u.target_create.exporter_id =
+        (char *)TP_EXPORTER_ID_JSON_NEOTOLIS;
+    operation.u.target_create.out_path = (char *)"out/job-oom";
+    operation.u.target_create.enabled = true;
+
+    tp_txn_request request = {0};
+    request.schema = TP_TXN_SCHEMA;
+    memcpy(request.id_hex, "dededededededededededededededede",
+           sizeof request.id_hex);
+    request.expected_revision = tp_session_revision(session);
+    request.ops = &operation;
+    request.op_count = 1U;
+    tp_txn_result result = {0};
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_session_apply(session, &request, &result, &error),
+        error.msg);
+    TEST_ASSERT_TRUE(result.committed);
+    tp_txn_result_free(&result);
+    return target_id;
 }
 
 static tp_session_job_result wait_for_result(tp_session *session) {
@@ -349,18 +385,44 @@ void test_export_target_allocation_failure_is_fail_atomic(void) {
     tp_mkdirs(work_dir);
     const tp_id128 atlas_id = default_atlas_id(session);
     add_file_source(session, atlas_id, work_dir);
+    const tp_id128 target_id =
+        add_enabled_export_target(session, atlas_id);
 
-    /* The default atlas has no enabled export target, so this request must fail
-     * before spawning and leave the job slot untouched. */
     const tp_export_command_request request = {
         .work_dir = work_dir,
         .atlas_id = atlas_id,
     };
     tp_error error = {{0}};
+    tp_job__test_fail_next_observation_target_allocation();
     TEST_ASSERT_EQUAL_INT(
-        TP_STATUS_NOT_FOUND,
+        TP_STATUS_OOM,
         tp_session_export_start(session, &request, &error));
+    TEST_ASSERT_TRUE(error.msg[0] != '\0');
     TEST_ASSERT_FALSE(tp_session_job_active(session));
+
+    tp_session_snapshot *snapshot = NULL;
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_session_snapshot_create(session, &snapshot, &error),
+        error.msg);
+    const tp_snapshot_target *target =
+        tp_session_snapshot_target_by_id(
+            snapshot, atlas_id, target_id);
+    TEST_ASSERT_NOT_NULL(target);
+    TEST_ASSERT_TRUE(target->enabled);
+    tp_session_snapshot_destroy(snapshot);
+
+    memset(&error, 0, sizeof error);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_session_export_start(session, &request, &error),
+        error.msg);
+    tp_session_job_result result = wait_for_result(session);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_SESSION_JOB_SUCCEEDED, result.state, result.error.msg);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, result.status);
+    TEST_ASSERT_EQUAL_INT(1, result.export_result.targets);
+    tp_session_job_result_destroy(&result);
     tp_session_destroy(session);
     remove_tree(work_dir);
 }

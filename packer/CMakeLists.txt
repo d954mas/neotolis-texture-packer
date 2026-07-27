@@ -130,7 +130,8 @@ foreach(TP_ARCH_RULE IN ITEMS
         VIEW_PLATFORM
         VIEW_MODEL_POLICY
         CORE_FRONTEND
-        ASYNC_RAW_SESSION)
+        ASYNC_RAW_SESSION
+        HOST_QUEUE_RAW_SESSION_STORAGE)
     string(TOLOWER "${TP_ARCH_RULE}" TP_ARCH_FIXTURE)
     add_test(NAME "tp_architecture_negative_${TP_ARCH_FIXTURE}"
         COMMAND "${CMAKE_COMMAND}"
@@ -143,6 +144,7 @@ foreach(TP_ARCH_RULE IN ITEMS
 endforeach()
 
 foreach(TP_ARCH_CALL_FIXTURE IN ITEMS
+        view_admission
         view_io
         view_platform
         view_model_policy

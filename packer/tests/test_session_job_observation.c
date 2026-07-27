@@ -167,14 +167,14 @@ void test_reverse_completion_accepts_only_latest_request(void) {
         TP_STATUS_OK,
         tp_session_job_observation_begin_internal(session, &b.owner, &err));
 
-    fake_job_complete(&a, TP_SESSION_JOB_SUCCEEDED);
-    TEST_ASSERT_EQUAL_INT(
-        TP_SESSION_JOB_ADMISSION_SUPERSEDED,
-        tp_session_job_observation_admit_internal(session, &a.owner));
     fake_job_complete(&b, TP_SESSION_JOB_SUCCEEDED);
     TEST_ASSERT_EQUAL_INT(
         TP_SESSION_JOB_ADMISSION_TERMINAL,
         tp_session_job_observation_admit_internal(session, &b.owner));
+    fake_job_complete(&a, TP_SESSION_JOB_SUCCEEDED);
+    TEST_ASSERT_EQUAL_INT(
+        TP_SESSION_JOB_ADMISSION_SUPERSEDED,
+        tp_session_job_observation_admit_internal(session, &a.owner));
 
     tp_session_observation *observation = NULL;
     TEST_ASSERT_EQUAL_INT(
@@ -410,11 +410,11 @@ void test_progress_burst_is_coalesced_without_event_or_project_snapshot(void) {
         tp_session_job_observation_begin_internal(session, &job.owner, &err));
     for (int current = 1; current <= 100; ++current) {
         job.sample.current = current;
+        TEST_ASSERT_EQUAL_INT(
+            TP_SESSION_JOB_ADMISSION_PROGRESS,
+            tp_session_job_observation_admit_internal(
+                session, &job.owner));
     }
-    TEST_ASSERT_EQUAL_INT(
-        TP_SESSION_JOB_ADMISSION_PROGRESS,
-        tp_session_job_observation_admit_internal(
-            session, &job.owner));
     tp_session__test_reset_snapshot_allocations();
 
     tp_session_observation *delta = NULL;

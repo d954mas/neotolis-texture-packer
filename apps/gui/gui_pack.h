@@ -77,8 +77,8 @@ uint64_t gui_pack_preview_diff_rebuilds(void);
 bool gui_pack_export(int atlas_index, int *out_targets, int *out_notices, char *err, size_t err_cap, char *notice,
                      size_t notice_cap);
 
-/* Drops the stored result for one atlas (or all with index < 0). Frees its arena. Call on
- * project new/open and before a repack. */
+/* Drops the stored result for one atlas (or all with index < 0) and releases
+ * its retained session-job result owner. Call on project new/open and before a repack. */
 void gui_pack_clear(int atlas_index);
 
 /* --- export-target preview (packet EXP-PREVIEW) --------------------------------------------------
@@ -100,7 +100,8 @@ bool gui_pack_preview_async_start(int atlas_index, const char *exporter_id, char
  * from another atlas never shows). */
 const tp_result *gui_pack_preview_result(int atlas_index);
 
-/* Drops the preview slot (frees its arena). Call on back-to-Native / atlas switch / model edit. */
+/* Drops the preview slot and releases its retained session-job result owner.
+ * Call on back-to-Native / atlas switch / model edit. */
 void gui_pack_preview_clear(void);
 
 /* Degradation summary for `exporter_id` on `atlas_index`: diffs the native session settings

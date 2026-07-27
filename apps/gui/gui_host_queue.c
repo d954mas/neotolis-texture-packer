@@ -8,7 +8,6 @@
 #ifdef TP_ENABLE_TEST_SEAMS
 static bool s_test_fail_next_poll;
 static bool s_test_fail_next_take;
-static unsigned int s_test_hold_active_polls;
 #endif
 
 static bool has_pending_start(
@@ -530,10 +529,6 @@ tp_status gui_host_queue_drain(
     tp_session_job_progress progress = {0};
     tp_error poll_error = {{0}};
 #ifdef TP_ENABLE_TEST_SEAMS
-    if (s_test_hold_active_polls > 0U) {
-        --s_test_hold_active_polls;
-        return TP_STATUS_OK;
-    }
     if (s_test_fail_next_poll) {
         s_test_fail_next_poll = false;
         return tp_error_set(
@@ -741,11 +736,6 @@ void gui_host_queue__test_fail_next_poll(void) {
 
 void gui_host_queue__test_fail_next_take(void) {
     s_test_fail_next_take = true;
-}
-
-void gui_host_queue__test_hold_active_polls(
-    unsigned int count) {
-    s_test_hold_active_polls = count;
 }
 
 bool gui_host_queue__test_active(

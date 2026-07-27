@@ -9,6 +9,8 @@
 #include <fcntl.h>
 #include <io.h>
 #include <windows.h>
+#elif defined(TP_ENABLE_TEST_SEAMS)
+#include <errno.h>
 #endif
 
 #include "hash/nt_hash.h"
@@ -77,6 +79,38 @@ static double worker_now_ms(void) {
            (double)value.tv_nsec / 1000000.0;
 #endif
 }
+
+#ifdef TP_ENABLE_TEST_SEAMS
+static void test_block_before_job_work(void) {
+    const char *text =
+        getenv("TP_TEST_JOB_WORKER_BLOCK_MS");
+    if (!text || text[0] == '\0') {
+        return;
+    }
+    char *end = NULL;
+    const unsigned long milliseconds =
+        strtoul(text, &end, 10);
+    if (!end || *end != '\0' ||
+        milliseconds == 0UL ||
+        milliseconds > 60000UL) {
+        return;
+    }
+#if defined(_WIN32)
+    Sleep((DWORD)milliseconds);
+#else
+    struct timespec delay = {
+        .tv_sec =
+            (time_t)(milliseconds / 1000UL),
+        .tv_nsec =
+            (long)((milliseconds % 1000UL) *
+                   1000000UL),
+    };
+    while (nanosleep(&delay, &delay) != 0 &&
+           errno == EINTR) {
+    }
+#endif
+}
+#endif
 
 static bool worker_cancel_requested(void *context) {
     worker_cancel *cancel = context;
@@ -551,13 +585,17 @@ static tp_status run_export(const tp_job_worker_proto_request *request,
         }
     }
     response->export_result.partial_publication =
-        cancel->requested && response->export_result.targets > 0;
+        response->export_result.targets > 0 &&
+        (cancel->requested || first_status != TP_STATUS_OK);
     return cancel->requested ? TP_STATUS_CANCELLED : first_status;
 }
 
 int tp_job_worker_main_request(const uint8_t *bytes, size_t length) {
 #if defined(_WIN32)
     (void)_setmode(_fileno(stdout), _O_BINARY);
+#endif
+#ifdef TP_ENABLE_TEST_SEAMS
+    test_block_before_job_work();
 #endif
     tp_error error = {{0}};
     tp_job_worker_proto_request request = {0};

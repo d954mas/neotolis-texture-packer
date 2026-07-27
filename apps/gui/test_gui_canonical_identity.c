@@ -1304,6 +1304,14 @@ void test_save_as_recovery_rebind_uses_post_save_identity(void) {
         tp_session_snapshot_atlas_at(
             before_save, 0);
     TEST_ASSERT_NOT_NULL(before_save_atlas);
+    const char *attached_journal =
+        tp_session__recovery_journal_path(
+            gui_project__test_session());
+    TEST_ASSERT_NOT_NULL(attached_journal);
+    char pre_save_journal[TP_IDENTITY_PATH_MAX];
+    (void)snprintf(
+        pre_save_journal, sizeof pre_save_journal,
+        "%s", attached_journal);
     tp_journal__test_set_record_limit(1U);
     TEST_ASSERT_TRUE(
         gui_project_set_atlas_name(
@@ -1313,11 +1321,28 @@ void test_save_as_recovery_rebind_uses_post_save_identity(void) {
     TEST_ASSERT_TRUE(
         tp_session_recovery_health_query(
             gui_project__test_session()).degraded);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OUT_OF_BOUNDS,
+        tp_session_recovery_health_query(
+            gui_project__test_session()).first_cause);
     tp_journal__test_set_record_limit(0U);
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
         gui_project_save_as(
             save_path, error, sizeof error));
+    const char *rebound_journal =
+        tp_session__recovery_journal_path(
+            gui_project__test_session());
+    TEST_ASSERT_NOT_NULL(rebound_journal);
+    TEST_ASSERT_NOT_EQUAL(
+        0, strcmp(pre_save_journal, rebound_journal));
+    char post_save_journal[TP_IDENTITY_PATH_MAX];
+    (void)snprintf(
+        post_save_journal, sizeof post_save_journal,
+        "%s", rebound_journal);
+    TEST_ASSERT_FALSE(
+        tp_session_recovery_health_query(
+            gui_project__test_session()).degraded);
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
         tp_identity_project_path_canonical(
@@ -1358,6 +1383,12 @@ void test_save_as_recovery_rebind_uses_post_save_identity(void) {
     TEST_ASSERT_EQUAL_STRING(
         "rebind.ntpacker_project",
         entry->name);
+    TEST_ASSERT_EQUAL_STRING(
+        post_save_journal,
+        entry->journal_path);
+    TEST_ASSERT_NOT_EQUAL(
+        0, strcmp(pre_save_journal,
+                  entry->journal_path));
     TEST_ASSERT_TRUE(
         entry->has_file_fingerprint);
     TEST_ASSERT_TRUE(

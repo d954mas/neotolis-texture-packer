@@ -9,6 +9,7 @@
 #ifdef TP_ENABLE_TEST_SEAMS
 static unsigned int s_test_destroy_kill_calls;
 static unsigned int s_test_destroy_blocking_wait_calls;
+static bool s_test_fail_next_kill;
 #endif
 
 #include <errno.h>
@@ -502,14 +503,45 @@ bool tp_proc_wait_slice(tp_proc *proc, int slice_ms, tp_proc_result *out, bool *
         return true;
     }
     int status = 0;
-    pid_t r;
-    do {
-        r = waitpid(proc->pid, &status, WNOHANG);
-    } while (r < 0 && errno == EINTR);
-    if (r < 0) {
-        return false;
+    bool exited = false;
+    if (proc->pgid > 0) {
+        /* Observe the leader's terminal state without reaping it. While the
+         * zombie still owns pid == pgid, that group identity cannot be reused,
+         * so it is safe to terminate any descendant that outlived the leader.
+         * Reap only after the group is contained. */
+        siginfo_t info;
+        memset(&info, 0, sizeof info);
+        int observed;
+        do {
+            observed = waitid(
+                P_PID, (id_t)proc->pid, &info,
+                WEXITED | WNOHANG | WNOWAIT);
+        } while (observed < 0 && errno == EINTR);
+        if (observed < 0) {
+            return false;
+        }
+        if (info.si_pid != 0) {
+            (void)kill(-proc->pgid, SIGKILL);
+            pid_t reaped;
+            do {
+                reaped = waitpid(proc->pid, &status, 0);
+            } while (reaped < 0 && errno == EINTR);
+            if (reaped != proc->pid) {
+                return false;
+            }
+            exited = true;
+        }
+    } else {
+        pid_t reaped;
+        do {
+            reaped = waitpid(proc->pid, &status, WNOHANG);
+        } while (reaped < 0 && errno == EINTR);
+        if (reaped < 0) {
+            return false;
+        }
+        exited = reaped == proc->pid;
     }
-    if (r == 0) {
+    if (!exited) {
         /* Still running: sleep out the slice so the caller polls at a bounded
          * cadence rather than spinning. */
         if (slice_ms > 0) {
@@ -529,6 +561,10 @@ bool tp_proc_wait_slice(tp_proc *proc, int slice_ms, tp_proc_result *out, bool *
         proc->result.code = -1;
     }
     proc->reaped = true;
+    /* A process-group id may be reused as soon as its leader has been reaped.
+     * The handle no longer has a safe OS identity with which to signal that
+     * group, even if a former descendant is still running. */
+    proc->pgid = -1;
     if (finished) {
         *finished = true;
     }
@@ -544,8 +580,12 @@ void tp_proc_kill(tp_proc *proc) {
     }
 #ifdef TP_ENABLE_TEST_SEAMS
     s_test_destroy_kill_calls++;
+    if (s_test_fail_next_kill) {
+        s_test_fail_next_kill = false;
+        return;
+    }
 #endif
-    if (proc->pgid > 0) {
+    if (!proc->reaped && proc->pgid > 0) {
         (void)kill(-proc->pgid, SIGKILL);
     } else if (!proc->reaped) {
         (void)kill(proc->pid, SIGKILL);
@@ -573,11 +613,9 @@ void tp_proc_destroy(tp_proc *proc) {
     if (proc->stdout_r >= 0) {
         (void)close(proc->stdout_r);
     }
-    /*
-     * The leader may already be reaped while one of its nested workers is
-     * still alive; owned-tree teardown must still kill the whole group.
-     */
-    tp_proc_kill(proc);
+    if (!proc->reaped) {
+        tp_proc_kill(proc);
+    }
     if (!proc->reaped) {
         if (proc->pgid <= 0) {
             int status = 0;
@@ -619,6 +657,11 @@ void tp_proc_destroy(tp_proc *proc) {
 void tp_proc__test_reset_destroy_trace(void) {
     s_test_destroy_kill_calls = 0U;
     s_test_destroy_blocking_wait_calls = 0U;
+    s_test_fail_next_kill = false;
+}
+
+void tp_proc__test_fail_next_kill(void) {
+    s_test_fail_next_kill = true;
 }
 
 unsigned int tp_proc__test_destroy_kill_calls(void) {

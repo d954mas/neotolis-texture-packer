@@ -172,16 +172,21 @@ add_executable(tp_test_gui_host_binding
     test_gui_host_binding.c
     gui_host_binding.c
     gui_host_queue.c
-    gui_session_client.c)
+    gui_session_client.c
+    "${CMAKE_SOURCE_DIR}/packer/src/tp_job_worker_main.c")
 target_link_libraries(tp_test_gui_host_binding PRIVATE
     tp_build tp_core unity)
+target_include_directories(tp_test_gui_host_binding PRIVATE
+    "${CMAKE_SOURCE_DIR}/packer/src")
 target_compile_options(tp_test_gui_host_binding PRIVATE -U_DLL)
 target_compile_definitions(tp_test_gui_host_binding PRIVATE
     TP_ENABLE_TEST_SEAMS=1
+    _CRT_SECURE_NO_WARNINGS
     TP_GUI_HOST_BINDING_TEST_DIR="${CMAKE_CURRENT_BINARY_DIR}")
 nt_set_warning_flags(tp_test_gui_host_binding)
 nt_set_sanitizer_flags(tp_test_gui_host_binding)
 add_test(NAME tp_gui_host_binding COMMAND tp_test_gui_host_binding)
+set_tests_properties(tp_gui_host_binding PROPERTIES TIMEOUT 30)
 
 add_executable(tp_test_gui_paths test_gui_paths.c gui_paths.c)
 target_link_libraries(tp_test_gui_paths PRIVATE tp_core unity)
@@ -355,6 +360,7 @@ target_compile_definitions(tp_test_client_parity PRIVATE
 nt_set_warning_flags(tp_test_client_parity)
 nt_set_sanitizer_flags(tp_test_client_parity)
 add_test(NAME tp_client_parity COMMAND tp_test_client_parity)
+set_tests_properties(tp_client_parity PROPERTIES TIMEOUT 180)
 
 add_executable(tp_client_parity_replay
     client_parity_replay.c
@@ -370,6 +376,7 @@ add_test(NAME tp_client_parity_real COMMAND ${CMAKE_COMMAND}
     -DSOURCE=${CMAKE_SOURCE_DIR}
     -DWORK=${CMAKE_CURRENT_BINARY_DIR}/tp_client_parity_real_tmp
     -P "${CMAKE_CURRENT_SOURCE_DIR}/client_parity_real.cmake")
+set_tests_properties(tp_client_parity_real PROPERTIES TIMEOUT 180)
 
 set(GUI_PACK_NAMES ntpacker_ui.ntpack)
 

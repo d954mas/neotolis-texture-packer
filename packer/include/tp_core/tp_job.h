@@ -98,7 +98,8 @@ typedef struct tp_session_export_job_result {
     char first_error[256];
     /* Selected atlases with enabled targets but no usable input images. */
     int atlases_skipped;
-    /* True only when cancellation won after at least one target committed. */
+    /* True when terminal failure/cancellation happened after at least one
+     * target committed. */
     bool partial_publication;
     /* True when a direct writer failed and its API cannot prove that it left no
      * partially published artifacts, regardless of terminal cancellation. */

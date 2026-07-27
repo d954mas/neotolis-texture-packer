@@ -141,6 +141,7 @@ void tp_proc_destroy(tp_proc *proc);
 
 #ifdef TP_ENABLE_TEST_SEAMS
 void tp_proc__test_reset_destroy_trace(void);
+void tp_proc__test_fail_next_kill(void);
 unsigned int tp_proc__test_destroy_kill_calls(void);
 unsigned int tp_proc__test_destroy_blocking_wait_calls(void);
 #endif

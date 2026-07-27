@@ -46,6 +46,33 @@ static tp_operation make_rename_operation(
 void setUp(void) {}
 void tearDown(void) {}
 
+static void set_worker_block_environment(void) {
+#if defined(_WIN32)
+    TEST_ASSERT_EQUAL_INT(
+        0, _putenv_s(
+               "TP_TEST_JOB_WORKER_BLOCK_MS",
+               "10000"));
+#else
+    TEST_ASSERT_EQUAL_INT(
+        0, setenv(
+               "TP_TEST_JOB_WORKER_BLOCK_MS",
+               "10000", 1));
+#endif
+}
+
+static void clear_worker_block_environment(void) {
+#if defined(_WIN32)
+    TEST_ASSERT_EQUAL_INT(
+        0, _putenv_s(
+               "TP_TEST_JOB_WORKER_BLOCK_MS",
+               ""));
+#else
+    TEST_ASSERT_EQUAL_INT(
+        0, unsetenv(
+               "TP_TEST_JOB_WORKER_BLOCK_MS"));
+#endif
+}
+
 void test_prepare_failure_preserves_complete_old_binding(void) {
     gui_host_binding binding;
     gui_host_transition_kind completed =
@@ -346,15 +373,17 @@ void test_active_job_completion_is_consumed_before_session_cutover(void) {
             tp_id128_nil(),
             TP_GUI_HOST_BINDING_TEST_DIR,
             &error));
+    /* The child inherits this test-only delay when it is spawned below. The
+     * host itself clears the variable immediately and only uses normal polls. */
+    set_worker_block_environment();
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
         gui_host_binding_pump(
             &binding, &completed, &error));
+    clear_worker_block_environment();
     TEST_ASSERT_TRUE(
         gui_host_queue__test_active(
             &binding.queue));
-    gui_host_queue__test_hold_active_polls(
-        4U);
 
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
@@ -390,29 +419,10 @@ void test_active_job_completion_is_consumed_before_session_cutover(void) {
     gui_session_client_frame_end(
         &binding.client);
 
-    for (int held_poll = 0;
-         held_poll < 4; ++held_poll) {
-        TEST_ASSERT_EQUAL_INT(
-            TP_STATUS_OK,
-            gui_host_binding_pump(
-                &binding, &completed,
-                &error));
-        TEST_ASSERT_EQUAL_INT(
-            GUI_HOST_DRAINING,
-            gui_host_binding_lifecycle(
-                &binding));
-        TEST_ASSERT_EQUAL_PTR(
-            old_session,
-            gui_session_client_attached_session(
-                &binding.client));
-        TEST_ASSERT_EQUAL_INT(
-            TP_STATUS_OK,
-            gui_session_client_frame_begin(
-                &binding.client,
-                &error));
-        gui_session_client_frame_end(
-            &binding.client);
-    }
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_host_binding_pump(
+            &binding, &completed, &error));
     TEST_ASSERT_EQUAL_INT(
         GUI_HOST_DRAINING,
         gui_host_binding_lifecycle(
@@ -468,6 +478,12 @@ void test_active_job_completion_is_consumed_before_session_cutover(void) {
                 TEST_ASSERT_EQUAL_INT(
                     TP_SESSION_JOB_EXPORT,
                     completion.envelope.kind);
+                TEST_ASSERT_EQUAL_INT(
+                    TP_SESSION_JOB_CANCELLED,
+                    completion.state);
+                TEST_ASSERT_EQUAL_INT(
+                    TP_STATUS_CANCELLED,
+                    completion.status);
                 gui_host_completion_destroy(
                     &completion);
                 saw_completion = true;

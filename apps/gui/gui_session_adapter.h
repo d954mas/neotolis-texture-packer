@@ -16,6 +16,7 @@ tp_status gui_session_create_atlas(gui_session_client *client, tp_id128 atlas_id
                                    tp_id128 target_id, int64_t expected_revision,
                                    const char *name, const char *exporter_id,
                                    const char *out_path, bool target_enabled,
+                                   gui_session_submit_terminal *out_terminal,
                                    tp_error *err);
 tp_status gui_session_remove_atlas(gui_session_client *client, tp_id128 atlas_id,
                                    int64_t expected_revision,
@@ -23,6 +24,7 @@ tp_status gui_session_remove_atlas(gui_session_client *client, tp_id128 atlas_id
 tp_status gui_session_set_atlas_settings(gui_session_client *client, tp_id128 atlas_id,
                                          int64_t expected_revision,
                                          const tp_op_atlas_settings *settings,
+                                         gui_session_submit_terminal *out_terminal,
                                          tp_error *err);
 tp_status gui_session_add_sources(gui_session_client *client, tp_id128 atlas_id,
                                   const tp_id128 *source_ids,
@@ -42,6 +44,7 @@ tp_status gui_session_set_sprite_override(gui_session_client *client, tp_id128 a
                                           tp_id128 source_id, const char *source_key,
                                           int64_t expected_revision,
                                           const tp_op_sprite_set *settings,
+                                          gui_session_submit_terminal *out_terminal,
                                           tp_error *err);
 
 tp_status gui_session_create_animation(gui_session_client *client, tp_id128 atlas_id,
@@ -49,6 +52,7 @@ tp_status gui_session_create_animation(gui_session_client *client, tp_id128 atla
                                        int64_t expected_revision, const char *name,
                                        const tp_op_sprite_ref *frames,
                                        int frame_count,
+                                       gui_session_submit_terminal *out_terminal,
                                        tp_error *err);
 tp_status gui_session_remove_animation(gui_session_client *client, tp_id128 atlas_id,
                                        tp_id128 animation_id,
@@ -62,6 +66,7 @@ tp_status gui_session_set_animation_settings(gui_session_client *client, tp_id12
                                              tp_id128 animation_id,
                                              int64_t expected_revision,
                                              const tp_op_anim_settings *settings,
+                                             gui_session_submit_terminal *out_terminal,
                                              tp_error *err);
 tp_status gui_session_add_animation_frames(gui_session_client *client, tp_id128 atlas_id,
                                            tp_id128 animation_id,
@@ -83,6 +88,7 @@ tp_status gui_session_create_target(gui_session_client *client, tp_id128 atlas_i
                                     tp_id128 target_id, int64_t expected_revision,
                                     const char *exporter_id, const char *out_path,
                                     bool enabled,
+                                    gui_session_submit_terminal *out_terminal,
                                     tp_error *err);
 tp_status gui_session_remove_target(gui_session_client *client, tp_id128 atlas_id,
                                     tp_id128 target_id, int64_t expected_revision,
@@ -90,6 +96,7 @@ tp_status gui_session_remove_target(gui_session_client *client, tp_id128 atlas_i
 tp_status gui_session_set_target(gui_session_client *client, tp_id128 atlas_id,
                                  tp_id128 target_id, int64_t expected_revision,
                                  const tp_op_target_set *settings,
+                                 gui_session_submit_terminal *out_terminal,
                                  tp_error *err);
 
 /* Copies the presentation value from an owned snapshot. */

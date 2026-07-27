@@ -16,6 +16,7 @@
 #include "gui_canvas.h"
 #include "gui_canvas_internal.h"
 #include "gui_pack.h"
+#include "gui_pack_internal.h"
 #include "gui_project.h"
 #include "gui_project_test_driver.h"
 #include "gui_rows.h"
@@ -266,6 +267,39 @@ void test_undo_redo_preserves_selected_animation_by_stable_id(void) {
         gui_project_snapshot(), atlas_id, s_sel_anim);
     TEST_ASSERT_NOT_NULL(selected);
     TEST_ASSERT_TRUE(tp_id128_eq(selected_id, selected->id));
+}
+
+void test_pack_result_slots_reject_ownerless_results(void) {
+    const tp_session_snapshot *snapshot = gui_project_snapshot();
+    const tp_snapshot_atlas *atlas =
+        tp_session_snapshot_atlas_at(snapshot, 0);
+    TEST_ASSERT_NOT_NULL(atlas);
+
+    tp_result borrowed = {0};
+    borrowed.atlas_name = "ownerless";
+    tp_session_job_result result = {
+        .kind = TP_SESSION_JOB_PACK,
+        .state = TP_SESSION_JOB_SUCCEEDED,
+        .status = TP_STATUS_OK,
+        .pack = {
+            .atlas_id = atlas->id,
+            .result = &borrowed,
+        },
+    };
+    gui_pack_result_info info = {0};
+
+    TEST_ASSERT_FALSE(
+        gui_pack_publish_native(&result, 0, 0.0, &info));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_ARGUMENT, info.status);
+    TEST_ASSERT_NOT_NULL(strstr(info.err, "retained owner"));
+    TEST_ASSERT_NULL(gui_pack_result(0));
+
+    memset(&info, 0, sizeof info);
+    TEST_ASSERT_FALSE(
+        gui_pack_preview_publish(&result, 0, 0.0, &info));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_ARGUMENT, info.status);
+    TEST_ASSERT_NOT_NULL(strstr(info.err, "retained owner"));
+    TEST_ASSERT_NULL(gui_pack_preview_result(0));
 }
 
 void test_deferred_frame_delete_clears_selection_only_after_commit(void) {
@@ -1361,6 +1395,7 @@ int main(int argc, char **argv) {
     }
     UNITY_BEGIN();
     RUN_TEST(test_state_ownership_inventory_preserves_three_classes);
+    RUN_TEST(test_pack_result_slots_reject_ownerless_results);
     RUN_TEST(
         test_lifecycle_requests_are_declaration_only);
     RUN_TEST(

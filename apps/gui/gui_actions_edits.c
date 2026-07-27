@@ -617,6 +617,7 @@ void gui_actions__apply_structural_edits(void) {
 }
 
 void gui_actions__clear_pending(void) {
+    gui_actions__clear_history_request();
     s_actions.pending_lifecycle_request =
         GUI_LIFECYCLE_REQUEST_NONE;
     s_pending_open = s_pending_save = s_pending_save_as = false;
