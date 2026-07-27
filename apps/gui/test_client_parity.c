@@ -815,6 +815,8 @@ void test_live_headless_runs_real_pack_job_and_export_command(void) {
     tp_session_destroy(session);
 }
 
+/* USA-08 partial: equal GUI/headless typed transactions produce equal
+ * snapshot/event/revision/result; history rows are not compared. */
 void test_gui_and_headless_share_golden_transaction_session_corpus(void) {
     const corpus_result gui = run_corpus(CORPUS_GUI);
     const corpus_result headless = run_corpus(CORPUS_HEADLESS);

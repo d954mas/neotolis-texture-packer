@@ -3043,6 +3043,8 @@ void test_history_dto_starts_empty_and_reopen_resets(void) {
     (void)remove(path);
 }
 
+/* USA-14 partial: a trusted author/label reaches the projected history row
+ * unmodified; multi-client fan-out is not asserted here. */
 void test_history_dto_edit_row_passthrough_and_cursor_moves(void) {
     tp_session *session = make_session();
     tp_error err = {{0}};

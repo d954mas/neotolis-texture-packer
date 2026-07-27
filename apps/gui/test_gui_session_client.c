@@ -174,6 +174,8 @@ void test_attach_owns_initial_resync_and_fans_out(void) {
     tp_session_destroy(session);
 }
 
+/* USA-09: a direct external session commit is visible at the next
+ * observation without wrapper invalidation. */
 void test_external_commit_becomes_the_displayed_snapshot(void) {
     tp_session *session = make_session();
     gui_session_client client;
@@ -279,6 +281,9 @@ void test_unchanged_observe_does_not_swap_or_advance_lifetime(void) {
     tp_session_destroy(session);
 }
 
+/* USA-26 partial: the reducer fan-out runs in a target linked against
+ * tp_core + unity only, so "runs without nt_ui" is a link-line property
+ * of this executable rather than an assertion. */
 void test_one_batch_fans_out_to_every_registered_reducer(void) {
     tp_session *session = make_session();
     gui_session_client client;
@@ -636,6 +641,8 @@ void test_failed_reattach_keeps_old_binding_and_generation(void) {
     tp_session_destroy(second);
 }
 
+/* USA-10: an own revision-changing commit updates presentation through its
+ * echo. */
 void test_submit_generates_full_id_and_publishes_common_echo(void) {
     tp_session *session = make_session();
     gui_session_client client;
@@ -861,6 +868,7 @@ void test_submit_rng_failure_is_structured_and_non_mutating(void) {
     tp_session_destroy(session);
 }
 
+/* USA-12: a lost response plus a retained-id retry commits exactly once. */
 void test_retained_id_retry_commits_once_and_returns_duplicate_result(void) {
     tp_session *session = make_session();
     gui_session_client client;
@@ -1291,6 +1299,8 @@ void test_generated_id_collision_regenerates_instead_of_replaying(void) {
     tp_session_destroy(session);
 }
 
+/* USA-13: a 100-operation transaction is one revision, event, and Undo
+ * entry. */
 void test_submit_100_operations_is_one_revision_event_and_undo_step(void) {
     enum { OPERATION_COUNT = 100 };
     tp_session *session = make_session();

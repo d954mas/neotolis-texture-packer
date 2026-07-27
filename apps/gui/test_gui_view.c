@@ -25,6 +25,7 @@
 
 #include "gui_actions.h"
 #include "gui_canvas.h"
+#include "gui_canvas_internal.h"
 #include "gui_left_layout.h"
 #include "gui_pack.h"
 #include "gui_project.h"
@@ -459,6 +460,9 @@ void test_view_collapse_hides_children_and_filter_overrides(void) {
  *    changes, the primary selection is re-resolved by canonical ref (kept if the sprite survives,
  *    cleared if gone) and multi-select refs pointing at removed sprites are pruned. Here the "model
  *    change" is deleting a child file + rescanning, standing in for an undo that drops a sprite. */
+/* USA-24 partial: an external removal preserves the surviving stable
+ * primary and prunes the dead multi-select ref; insert/reorder and the
+ * explicit-clear case are the sibling reconcile tests. */
 void test_view_reconcile_preserves_primary_and_prunes_multi(void) {
     add_sources_and_build(NULL, NULL);
     build_view();
@@ -1302,6 +1306,8 @@ static void install_large_synthetic_selection(void) {
     TEST_ASSERT_EQUAL_INT(LARGE_SELECTION_COUNT, s_multi_sel_count);
 }
 
+/* USA-28 partial: owner-scale identity and compaction work counts are
+ * bounded; the controlled latency gate is a benchmark, not a test. */
 void test_view_reconcile_5000_present_refs_has_linear_identity_work(void) {
     install_large_synthetic_selection();
     gui_rows_test_reset_selection_identity_comparisons();
@@ -1990,6 +1996,25 @@ void test_empty_canvas_hit_clears_shared_sprite_selection(void) {
     TEST_ASSERT_FALSE(gui_rows_focus_is_set());
 }
 
+void test_canvas_buffer_readiness_requires_every_gpu_handle(void) {
+    gui_canvas canvas = {0};
+    canvas.ibo.id = 1U;
+    canvas.vbo.id = 2U;
+    canvas.sampler.id = 3U;
+    canvas.vbo_checker.id = 4U;
+    canvas.checker_tex.id = 5U;
+    canvas.checker_sampler.id = 6U;
+
+    TEST_ASSERT_TRUE(gui_canvas_resource_handles_ready(&canvas));
+
+    canvas.vbo_checker.id = 0U;
+    TEST_ASSERT_FALSE(gui_canvas_resource_handles_ready(&canvas));
+
+    canvas.vbo_checker.id = 4U;
+    canvas.checker_sampler.id = 0U;
+    TEST_ASSERT_FALSE(gui_canvas_resource_handles_ready(&canvas));
+}
+
 int main(int argc, char **argv) {
     if (tp_build_is_worker_invocation(argc, argv)) {
         return tp_build_worker_main();
@@ -2049,5 +2074,6 @@ int main(int argc, char **argv) {
     RUN_TEST(test_missing_folder_retains_folder_kind_and_missing_state);
     RUN_TEST(test_canvas_menu_owner_cancels_raw_gesture_and_double_click);
     RUN_TEST(test_empty_canvas_hit_clears_shared_sprite_selection);
+    RUN_TEST(test_canvas_buffer_readiness_requires_every_gpu_handle);
     return UNITY_END();
 }

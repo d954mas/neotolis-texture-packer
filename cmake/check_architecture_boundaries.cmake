@@ -699,7 +699,10 @@ foreach(_path IN ITEMS
         apps/gui/gui_actions_edits.c
         apps/gui/gui_view_settings.c
         apps/gui/gui_selftest.c
-        apps/gui/test_gui_action_trace.c
+        apps/gui/test_gui_action_trace_draft.c
+        apps/gui/test_gui_action_trace_refresh.c
+        apps/gui/test_gui_action_trace_job.c
+        apps/gui/test_gui_action_trace_fixture.c
         apps/gui/test_gui_canonical_identity.c)
     _arch_assert_absent(
         "${_path}"
@@ -739,7 +742,10 @@ foreach(_path IN ITEMS
         apps/gui/gui_actions_internal.h
         apps/gui/gui_actions_pack.c
         apps/gui/gui_selftest.c
-        apps/gui/test_gui_action_trace.c
+        apps/gui/test_gui_action_trace_draft.c
+        apps/gui/test_gui_action_trace_refresh.c
+        apps/gui/test_gui_action_trace_job.c
+        apps/gui/test_gui_action_trace_fixture.c
         apps/gui/test_gui_canonical_identity.c)
     _arch_assert_absent(
         "${_path}"

@@ -114,6 +114,9 @@ void tearDown(void) {
     tp_session__test_reset_snapshot_allocations();
 }
 
+/* USA-01: events and immutable state come from one observation cut.
+ * USA-02: a commit injected at the former event/snapshot seam is neither
+ * lost nor displayed before its reducer metadata. */
 void test_observation_cut_remains_consistent_when_commit_follows_unlock(void) {
     tp_session *session = make_session();
     injected_commit injected = {session, first_atlas_id(session)};
@@ -159,6 +162,7 @@ void test_observation_cut_remains_consistent_when_commit_follows_unlock(void) {
     tp_session_destroy(session);
 }
 
+/* USA-05: a no-event observation materializes no project. */
 void test_no_change_observe_is_null_and_allocation_free(void) {
     tp_session *session = make_session();
     tp_session_observation_token token;
@@ -206,6 +210,8 @@ void test_source_only_delta_has_complete_event_without_project_materialization(v
     tp_session_destroy(session);
 }
 
+/* USA-03: an event gap resyncs completely, with no duplicate or lost
+ * commit. */
 void test_event_window_exact_edge_and_overflow_resync_are_complete(void) {
     tp_session *session = make_session();
     tp_error err = {{0}};
@@ -259,6 +265,8 @@ void test_event_window_exact_edge_and_overflow_resync_are_complete(void) {
     tp_session_destroy(session);
 }
 
+/* USA-04: observation OOM preserves the caller token and the prior
+ * observation. */
 void test_observation_oom_preserves_caller_token_and_is_retryable(void) {
     tp_session *session = make_session();
     const tp_id128 atlas_id = first_atlas_id(session);

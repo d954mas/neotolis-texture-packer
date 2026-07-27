@@ -163,6 +163,8 @@ void tearDown(void) {
     tp_session__test_reset_snapshot_allocations();
 }
 
+/* USA-07 partial: reverse-order job completions admit only the current
+ * eligible request; the Refresh-completion half has no equivalent case. */
 void test_reverse_completion_accepts_only_latest_request(void) {
     tp_session *session = make_session();
     const tp_id128 atlas_id = first_atlas_id(session);
@@ -385,6 +387,9 @@ void test_new_job_keeps_previous_result_envelope_identity(void) {
     tp_session_job_release_internal(&b.owner);
 }
 
+/* USA-06 partial: completions are rejected after generation invalidation
+ * and after close, with no session use-after-free. The GUI-side shutdown
+ * ORDER is proven in apps/gui/test_gui_host_binding.c. */
 void test_old_instance_and_post_close_completions_are_rejected(void) {
     tp_session *session = make_session();
     const tp_id128 atlas_id = first_atlas_id(session);
@@ -421,6 +426,8 @@ void test_old_instance_and_post_close_completions_are_rejected(void) {
     tp_session_job_release_internal(&current_job.owner);
 }
 
+/* USA-30: a coalesced progress generation is visible on the next
+ * observation without project materialization. */
 void test_progress_burst_is_coalesced_without_event_or_project_snapshot(void) {
     tp_session *session = make_session();
     const tp_session_observation_token before = initial_token(session);

@@ -141,6 +141,8 @@ void test_commit_net_zero_finishes_and_valid_submit_records_receipt_identity(voi
         TX_ONE, state.submitted_transaction_id);
 }
 
+/* USA-15 partial: owns the invalid-action-per-phase table; the valid
+ * transitions are spread over the other cases in this file. */
 void test_commit_rejects_wrong_phase_and_bad_transaction_without_mutation(void) {
     tp_error error = {{0}};
     gui_edit_state state = idle_state();
@@ -178,6 +180,7 @@ void test_submit_result_requires_normalized_exact_owner(void) {
         &error, &before, &state);
 }
 
+/* USA-11: OK/no_change terminates its draft without waiting for an event. */
 void test_submit_result_resolves_success_no_change_and_observed_echo(void) {
     tp_error error = {{0}};
     gui_edit_state state = submitting_state();
@@ -243,6 +246,9 @@ void test_submit_result_keeps_pending_commit_or_restores_rejected_draft(void) {
     TEST_ASSERT_EQUAL_INT(GUI_EDIT_CONFLICTED, state.phase);
 }
 
+/* USA-17 partial: the v1 rule is revision plus exact receipt and never
+ * inspects the field, so same-field and different-field commits share it;
+ * there is no explicit paired same/different-field case. */
 void test_model_revision_ignores_stale_resolves_exact_and_conflicts_false_exact(void) {
     tp_error error = {{0}};
     gui_edit_state state = submitting_state();
@@ -271,6 +277,9 @@ void test_model_revision_ignores_stale_resolves_exact_and_conflicts_false_exact(
         tp_id128_eq(test_id(0x11U), state.target_id));
 }
 
+/* USA-18 partial: two view ids -- the same commit resolves the owner and
+ * conflicts the other view. Unit level only: the shipping GUI now has a
+ * single live draft owner. */
 void test_same_commit_resolves_only_the_view_with_the_exact_receipt(void) {
     tp_error error = {{0}};
     gui_edit_state owner;

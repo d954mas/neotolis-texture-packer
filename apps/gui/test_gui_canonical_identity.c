@@ -623,6 +623,9 @@ void test_preview_after_native_pack_uses_observed_runtime_generation(void) {
     TEST_ASSERT_NOT_NULL(gui_pack_preview_result(0));
 }
 
+/* USA-27 partial: staleness comes only from the observed composite token, so
+ * the GUI keeps no second freshness probe; the no-duplicate-implementation
+ * invariant itself is a build gate. */
 void test_native_pack_marks_token_change_stale_without_host_side_probe(void) {
     const tp_id128 packed_atlas_id = add_coin_source_to_atlas(0);
     TEST_ASSERT_EQUAL_INT(
@@ -703,6 +706,9 @@ void test_failed_current_hash_probe_is_stale(void) {
         gui_pack__test_native_pack_input_changed_since(&completed));
 }
 
+/* USA-25 partial: rejecting mutation, filesystem, platform, and business
+ * policy in views is owned by cmake/check_architecture_boundaries.cmake;
+ * this is the closest runtime case (no source decode on the UI thread). */
 void test_gui_poll_does_not_decode_sources_on_gui_thread(void) {
     const tp_id128 atlas_id = add_coin_source();
     TEST_ASSERT_TRUE(gui_pack_init(TP_GUI_IDENTITY_TEST_DIR));
@@ -750,6 +756,8 @@ static bool controller_attached(
            *(const bool *)context;
 }
 
+/* USA-29: a cross-identity Save As cannot silently move a bound
+ * controller. */
 void test_controller_guard_rejects_identity_change_before_flush_or_write(void) {
     char first_path[TP_IDENTITY_PATH_MAX];
     char cross_path[TP_IDENTITY_PATH_MAX];

@@ -324,41 +324,49 @@ nt_set_warning_flags(tp_test_gui_view)
 nt_set_sanitizer_flags(tp_test_gui_view)
 add_test(NAME tp_gui_view COMMAND tp_test_gui_view)
 
-# P1-10 action/state trace oracle.  This is deliberately a separate headless
-# target: decomposition of gui_actions/gui_project must preserve between-frame
-# timing and state ownership without making the broader identity corpus absorb
-# another responsibility.
-add_executable(tp_test_gui_action_trace
-    test_gui_action_trace.c
-    "${CMAKE_SOURCE_DIR}/packer/src/tp_scan.c"
-    "${CMAKE_SOURCE_DIR}/packer/src/tp_job.c"
-    "${CMAKE_SOURCE_DIR}/packer/src/tp_job_worker.c"
-    "${CMAKE_SOURCE_DIR}/packer/src/tp_job_worker_proto.c"
-    ${_tp_gui_headless_sources}
-)
-target_link_libraries(tp_test_gui_action_trace PRIVATE
-    nt_core nt_app nt_window nt_input nt_math nt_log nt_time nt_resource
-    nt_material nt_shared nt_atlas
-    nt_sprite_renderer nt_text_renderer nt_font nt_ui
-    nt_render nt_hash nt_mem_scratch nt_shape_renderer
-    nt_gfx nt_http_stub nt_fs nt_clipboard
-    tp_build stb_image tinyfiledialogs tinycthread unity
-)
-target_include_directories(tp_test_gui_action_trace PRIVATE
-    "${CMAKE_SOURCE_DIR}/packer/src"
-    "${CMAKE_SOURCE_DIR}/apps/common"
-)
-target_compile_definitions(tp_test_gui_action_trace PRIVATE
-    TP_ENABLE_TEST_SEAMS=1
-    TP_GUI_TRACE_TEST_DIR="${CMAKE_CURRENT_BINARY_DIR}/tp_gui_trace_tmp"
-    _CRT_SECURE_NO_WARNINGS
-    NT_INTROSPECT_ENABLED=$<BOOL:${NT_INTROSPECT_ENABLED}>
-    NT_INTROSPECT_WRITE_ENABLED=$<BOOL:${NT_INTROSPECT_WRITE_ENABLED}>
-)
-target_compile_options(tp_test_gui_action_trace PRIVATE -U_DLL)
-nt_set_warning_flags(tp_test_gui_action_trace)
-nt_set_sanitizer_flags(tp_test_gui_action_trace)
-add_test(NAME tp_gui_action_trace COMMAND tp_test_gui_action_trace)
+# P1-10 action/state trace oracle.  Deliberately separate headless targets:
+# decomposition of gui_actions/gui_project must preserve between-frame timing
+# and state ownership without making the broader identity corpus absorb another
+# responsibility.  One TU per responsibility -- drafts/conflicts, source
+# refresh, jobs/lifecycle -- over one shared fixture TU, so a failure names the
+# area it belongs to.  Each target gets its OWN TP_GUI_TRACE_TEST_DIR: the trace
+# cases create and delete real files under it, and `ctest -j` runs the three
+# binaries concurrently.
+foreach(_trace_area draft refresh job)
+    add_executable(tp_test_gui_action_trace_${_trace_area}
+        test_gui_action_trace_${_trace_area}.c
+        test_gui_action_trace_fixture.c
+        "${CMAKE_SOURCE_DIR}/packer/src/tp_scan.c"
+        "${CMAKE_SOURCE_DIR}/packer/src/tp_job.c"
+        "${CMAKE_SOURCE_DIR}/packer/src/tp_job_worker.c"
+        "${CMAKE_SOURCE_DIR}/packer/src/tp_job_worker_proto.c"
+        ${_tp_gui_headless_sources}
+    )
+    target_link_libraries(tp_test_gui_action_trace_${_trace_area} PRIVATE
+        nt_core nt_app nt_window nt_input nt_math nt_log nt_time nt_resource
+        nt_material nt_shared nt_atlas
+        nt_sprite_renderer nt_text_renderer nt_font nt_ui
+        nt_render nt_hash nt_mem_scratch nt_shape_renderer
+        nt_gfx nt_http_stub nt_fs nt_clipboard
+        tp_build stb_image tinyfiledialogs tinycthread unity
+    )
+    target_include_directories(tp_test_gui_action_trace_${_trace_area} PRIVATE
+        "${CMAKE_SOURCE_DIR}/packer/src"
+        "${CMAKE_SOURCE_DIR}/apps/common"
+    )
+    target_compile_definitions(tp_test_gui_action_trace_${_trace_area} PRIVATE
+        TP_ENABLE_TEST_SEAMS=1
+        TP_GUI_TRACE_TEST_DIR="${CMAKE_CURRENT_BINARY_DIR}/tp_gui_trace_${_trace_area}_tmp"
+        _CRT_SECURE_NO_WARNINGS
+        NT_INTROSPECT_ENABLED=$<BOOL:${NT_INTROSPECT_ENABLED}>
+        NT_INTROSPECT_WRITE_ENABLED=$<BOOL:${NT_INTROSPECT_WRITE_ENABLED}>
+    )
+    target_compile_options(tp_test_gui_action_trace_${_trace_area} PRIVATE -U_DLL)
+    nt_set_warning_flags(tp_test_gui_action_trace_${_trace_area})
+    nt_set_sanitizer_flags(tp_test_gui_action_trace_${_trace_area})
+    add_test(NAME tp_gui_action_trace_${_trace_area}
+             COMMAND tp_test_gui_action_trace_${_trace_area})
+endforeach()
 
 # Capability/parity corpus. The second adapter is intentionally test-only:
 # it calls tp_session directly and proves the future transport host needs no

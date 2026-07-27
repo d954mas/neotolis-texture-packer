@@ -211,11 +211,11 @@ tp_status tp_session_job_observation__begin_locked(
     NT_ASSERT(job != NULL);
     NT_ASSERT(out_retired != NULL);
     *out_retired = NULL;
-    if (!job->observe ||
-        !descriptor_is_valid(&job->observation_descriptor)) {
-        return tp_error_set(
-            err, TP_STATUS_INVALID_ARGUMENT,
-            "job observation requires descriptor and observe callback");
+    const tp_status shape_status =
+        tp_session_job_observation__validate_begin_locked(
+            session, job, err);
+    if (shape_status != TP_STATUS_OK) {
+        return shape_status;
     }
     const tp_status reservation_status =
         tp_session_job_observation__reserve_request_id_locked(
@@ -255,9 +255,10 @@ tp_status tp_session_job_observation__begin_locked(
     return TP_STATUS_OK;
 }
 
-/* Pre-flight for the start path only: the shape checks __begin_locked would
- * repeat, minus the request-id rule (the caller reserves the id explicitly
- * through __reserve_request_id_locked, which owns that rejection). */
+/* Sole owner of the "publishable observed job" shape rule. __begin_locked calls
+ * it on the way in, and the start path calls it alone as a pre-flight: there the
+ * request id is reserved explicitly through __reserve_request_id_locked, which
+ * owns that separate rejection. One definition, so the two paths cannot drift. */
 tp_status tp_session_job_observation__validate_begin_locked(
     const tp_session *session, const tp_session_owned_job *job,
     tp_error *err) {

@@ -744,6 +744,43 @@ else
     trap - EXIT
 fi
 
+# 22. Spec §16 verification-id traceability. Every USA-01..USA-32 must be claimed
+#     by at least one `/* USA-nn ... */` tag on the test that owns it, under apps/
+#     or packer/tests. Structurally partial coverage is recorded in the tag with a
+#     "partial:" note and still counts as owned -- the gate proves a requirement
+#     has not silently lost its last test, not that the test is exhaustive.
+_usa_ids() {
+    _usa_i=1
+    while [ "$_usa_i" -le 32 ]; do
+        printf 'USA-%02d\n' "$_usa_i"
+        _usa_i=$((_usa_i + 1))
+    done
+}
+# Reads the ids present in a corpus on $1, prints the ids that are absent.
+_usa_missing() {
+    _usa_present="$1"
+    _usa_ids | while read -r _usa_id; do
+        printf '%s\n' "$_usa_present" | grep -qx -- "$_usa_id" ||
+            printf '%s\n' "$_usa_id"
+    done
+}
+_usa_found=$(grep -rhoE 'USA-[0-9]{2}' apps packer/tests 2>/dev/null | sort -u)
+r22=$(_usa_missing "$_usa_found")
+[ -n "$r22" ] && hit "R22 spec §16 verification id with no owning test" "$r22"
+
+# Self-test: the scanner recognizes the tag form, the detector fires on an id
+# whose owner disappeared, and it stays quiet on a fully covered set.
+if ! printf '/* USA-07 partial: reverse-order admission. */\n' |
+    grep -qoE 'USA-[0-9]{2}'; then
+    hit "R22-selftest" "R22 scanner failed to recognize a USA tag comment"
+fi
+if [ -z "$(_usa_missing "$(_usa_ids | grep -v '^USA-07$')")" ]; then
+    hit "R22-selftest" "R22 detector failed to catch an id with no owning test"
+fi
+if [ -n "$(_usa_missing "$(_usa_ids)")" ]; then
+    hit "R22-selftest" "R22 detector false-positives on a fully covered id set"
+fi
+
 if [ "$fail" -eq 0 ]; then
     say "boundaries OK"
 fi

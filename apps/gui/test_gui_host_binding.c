@@ -349,6 +349,9 @@ void test_failed_prepare_preserves_receipt_and_cutover_clears_it(void) {
             &binding, &completed, &error));
 }
 
+/* USA-32: a delayed worker keeps replacement in DRAINING while the frame
+ * pump stays responsive; candidate publication and the old-session destroy
+ * follow the terminal completion. */
 void test_active_job_completion_is_consumed_before_session_cutover(void) {
     gui_host_binding binding;
     gui_host_transition_kind completed =
