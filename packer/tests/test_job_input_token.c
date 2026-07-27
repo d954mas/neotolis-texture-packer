@@ -355,11 +355,43 @@ static int count_request_dirs(const char *work_dir) {
     return count;
 }
 
+/* Count `.ntpack` artifacts anywhere under work_dir (they live one level down,
+ * inside the worker's private request directory). */
+static int count_pack_artifacts(const char *path) {
+    tp_fs_dir *dir = tp_fs_dir_open(path);
+    if (!dir) {
+        return 0;
+    }
+    int count = 0;
+    tp_fs_dir_entry entry;
+    while (tp_fs_dir_next(dir, &entry) == TP_FS_DIR_ENTRY) {
+        char child[2048];
+        const int length = snprintf(
+            child, sizeof child, "%s/%s", path, entry.name);
+        if (length < 0 || (size_t)length >= sizeof child) {
+            continue;
+        }
+        if (entry.info.kind == TP_FS_KIND_DIRECTORY &&
+            !entry.info.reparse) {
+            count += count_pack_artifacts(child);
+            continue;
+        }
+        const size_t name_length = strlen(entry.name);
+        if (name_length > 7U &&
+            strcmp(entry.name + name_length - 7U, ".ntpack") == 0) {
+            count++;
+        }
+    }
+    tp_fs_dir_close(dir);
+    return count;
+}
+
 /* Cancel linearization without a race: the worker is held in its pre-work block
  * for far longer than the host's cancellation grace, so the cancel is provably
- * issued while the worker has done nothing. The terminal is CANCELLED, no result
- * is adopted, no private directory is left behind, and the host does not wait out
- * the block. */
+ * issued while the worker has done nothing. The host does not wait out the block,
+ * and because the worker never answers, the terminal is SYNTHESIZED -- which is
+ * exactly the terminal that used to report 0 ms to the UI, since only the host
+ * ever saw this request's clock. */
 void test_host_cancel_owns_process_terminal_result(void) {
     tp_session *session = make_session();
     char work_dir[1024];
@@ -387,11 +419,103 @@ void test_host_cancel_owns_process_terminal_result(void) {
     TEST_ASSERT_NULL(result.pack.arena);
     TEST_ASSERT_NULL(result.pack.result);
     TEST_ASSERT_TRUE_MESSAGE(
+        result.elapsed_ms > 0.0,
+        "a synthesized terminal must carry the host's own elapsed measurement");
+    TEST_ASSERT_TRUE_MESSAGE(
         result.elapsed_ms < 6000.0,
         "cancel waited out the blocked worker instead of linearizing");
+    tp_session_job_result_destroy(&result);
+    tp_session_destroy(session);
+    remove_tree(work_dir);
+}
+
+/* The cancel that actually costs something: the worker is parked INSIDE run_pack
+ * with its private request directory already created, so "nothing was left
+ * behind" is a real claim about a real directory. The worker observes the cancel
+ * there, so the terminal is its own CANCELLED frame -- not a crash report from a
+ * killed process -- and neither the directory nor an artifact survives. */
+void test_cancel_of_a_running_pack_leaves_no_artifact_behind(void) {
+    tp_session *session = make_session();
+    char work_dir[1024];
+    scratch_dir(work_dir, sizeof work_dir);
+    remove_tree(work_dir);
+    tp_mkdirs(work_dir);
+    const tp_id128 atlas_id = default_atlas_id(session);
+    add_file_source(session, atlas_id, work_dir);
+
+    const tp_pack_job_request request = {
+        .atlas_id = atlas_id,
+        .work_dir = work_dir,
+    };
+    tp_error error = {{0}};
+    /* The worker waits for the cancel rather than racing it; the grace is widened
+     * so the outcome is the worker's own terminal even on a slow machine. */
+    set_worker_env("TP_TEST_JOB_WORKER_BLOCK_IN_PACK_MS", "20000");
+    tp_job__test_set_worker_cancel_grace_ms(20000);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_session_pack_job_start(session, &request, &error),
+        error.msg);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK, tp_session_job_cancel(session, &error));
+    tp_session_job_result result = wait_for_result(session);
+    set_worker_env("TP_TEST_JOB_WORKER_BLOCK_IN_PACK_MS", "");
+    TEST_ASSERT_EQUAL_INT(TP_SESSION_JOB_CANCELLED, result.state);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_CANCELLED, result.status);
+    TEST_ASSERT_NULL(result.pack.arena);
+    TEST_ASSERT_NULL(result.pack.result);
     TEST_ASSERT_EQUAL_INT_MESSAGE(
         0, count_request_dirs(work_dir),
         "a cancelled Pack must leave no private request directory");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        0, count_pack_artifacts(work_dir),
+        "a cancelled Pack must leave no artifact");
+    tp_session_job_result_destroy(&result);
+    tp_session_destroy(session);
+    remove_tree(work_dir);
+}
+
+/* Cancel racing a SUCCEEDED terminal. The worker is deaf to the cancel byte, so
+ * it publishes a genuine artifact; the host accepted the cancellation first, so
+ * it adopts nothing. The only handle left on that file is the path in the
+ * terminal frame -- if the host does not take it, a `.ntpack` and its private
+ * directory outlive the run for good. */
+void test_cancel_racing_a_successful_pack_deletes_the_orphan(void) {
+    tp_session *session = make_session();
+    char work_dir[1024];
+    scratch_dir(work_dir, sizeof work_dir);
+    remove_tree(work_dir);
+    tp_mkdirs(work_dir);
+    const tp_id128 atlas_id = default_atlas_id(session);
+    add_file_source(session, atlas_id, work_dir);
+
+    const tp_pack_job_request request = {
+        .atlas_id = atlas_id,
+        .work_dir = work_dir,
+    };
+    tp_error error = {{0}};
+    set_worker_env("TP_TEST_JOB_WORKER_IGNORE_CANCEL", "1");
+    tp_job__test_set_worker_cancel_grace_ms(20000);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_session_pack_job_start(session, &request, &error),
+        error.msg);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK, tp_session_job_cancel(session, &error));
+    tp_session_job_result result = wait_for_result(session);
+    set_worker_env("TP_TEST_JOB_WORKER_IGNORE_CANCEL", "");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_SESSION_JOB_CANCELLED, result.state,
+        "an accepted host cancellation outranks the terminal that raced it");
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_CANCELLED, result.status);
+    TEST_ASSERT_NULL(result.pack.arena);
+    TEST_ASSERT_NULL(result.pack.result);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        0, count_pack_artifacts(work_dir),
+        "the artifact of a cancelled-but-successful Pack must be deleted");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        0, count_request_dirs(work_dir),
+        "and so must its private request directory");
     tp_session_job_result_destroy(&result);
     tp_session_destroy(session);
     remove_tree(work_dir);
@@ -583,6 +707,8 @@ int main(int argc, char **argv) {
     RUN_TEST(
         test_process_pack_terminal_is_published_after_host_poll);
     RUN_TEST(test_host_cancel_owns_process_terminal_result);
+    RUN_TEST(test_cancel_of_a_running_pack_leaves_no_artifact_behind);
+    RUN_TEST(test_cancel_racing_a_successful_pack_deletes_the_orphan);
     RUN_TEST(test_rename_during_pack_keeps_the_packed_labels);
     RUN_TEST(test_damaged_pack_artifact_is_a_structured_terminal_failure);
     RUN_TEST(test_worker_timeout_is_a_structured_terminal_failure);

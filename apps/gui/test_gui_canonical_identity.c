@@ -706,9 +706,10 @@ void test_failed_current_hash_probe_is_stale(void) {
         gui_pack__test_native_pack_input_changed_since(&completed));
 }
 
-/* USA-25 partial: rejecting mutation, filesystem, platform, and business
- * policy in views is owned by cmake/check_architecture_boundaries.cmake;
- * this is the closest runtime case (no source decode on the UI thread). */
+/* Behavioural companion to the view-boundary build gate (the VIEW_* rules in
+ * cmake/check_architecture_boundaries.cmake, which OWN that requirement): no
+ * source decode happens on the UI thread. A companion is not an owner, so this
+ * case deliberately carries no verification-id tag. */
 void test_gui_poll_does_not_decode_sources_on_gui_thread(void) {
     const tp_id128 atlas_id = add_coin_source();
     TEST_ASSERT_TRUE(gui_pack_init(TP_GUI_IDENTITY_TEST_DIR));

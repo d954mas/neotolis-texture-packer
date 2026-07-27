@@ -2377,9 +2377,16 @@ static tp_session *attach_live_recovery(const char *journal_path,
         .project_path = "",
         .project_name = project_name,
     };
+    const uint64_t before =
+        tp_session_recovery_health_query(session).generation;
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
         tp_session_attach_recovery_live(session, live, &metadata, err));
+    /* Owner-side transition: taking recovery ownership flips `available` without
+     * touching the model. A consumer that polls the DTO counter must see it move,
+     * or it keeps serving a stale health verdict forever. */
+    TEST_ASSERT_GREATER_THAN_UINT64(
+        before, tp_session_recovery_health_query(session).generation);
     return session;
 }
 

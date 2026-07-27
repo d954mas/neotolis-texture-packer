@@ -146,6 +146,13 @@ tp_status gui_project_lifecycle_begin_shutdown(
 tp_status gui_project_lifecycle_pump(
     gui_project_lifecycle_kind *completed,
     tp_error *err);
+/* Non-fallible forced teardown for the host's exhausted shutdown budget: the
+ * negotiated shutdown is bounded, so the exit path needs a terminal answer that
+ * cannot itself fail. It discards the host owner's leases and staged work, kills
+ * the worker through the ordinary session teardown, and ESTABLISHES the CLOSED
+ * lifecycle that gui_project_shutdown asserts. Nothing else may call it: an
+ * interactive New/Open/Close always negotiates. */
+void gui_project_lifecycle_force_close(void);
 gui_project_lifecycle_state
 gui_project_lifecycle_state_query(void);
 /* Host-owner ingress for the one staged job completion. The queue's typed
@@ -225,7 +232,9 @@ typedef struct gui_text_ref {
 } gui_text_ref;
 
 /* The one identified text submit: atlas.rename, animation.rename,
- * sprite.name.set (empty/NULL clears the rename), or target.set out-path. */
+ * sprite.name.set (an EMPTY value clears the rename), or target.set out-path.
+ * `value` is required: a NULL value is a structured INVALID_ARGUMENT, never a
+ * clear -- callers that mean "clear" pass "". */
 tp_status gui_project_submit_text(
     tp_op_kind kind, const gui_text_ref *ref,
     const char *value, gui_session_submit_identity identity,

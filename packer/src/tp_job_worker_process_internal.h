@@ -20,6 +20,7 @@ void tp_job_worker_process_destroy(tp_job_worker_process *process);
 
 #ifdef TP_ENABLE_TEST_SEAMS
 void tp_job_worker__test_set_timeout_ms(int timeout_ms);
+void tp_job_worker__test_set_cancel_grace_ms(int grace_ms);
 bool tp_job_worker__test_request_backpressured(
     const tp_job_worker_process *process);
 void tp_job_worker__test_reset(void);

@@ -236,6 +236,13 @@ tp_status gui_project_lifecycle_begin_shutdown(
     return status;
 }
 
+void gui_project_lifecycle_force_close(void) {
+    gui_host_binding_force_close(
+        &s_project.binding);
+    s_project.lifecycle_kind =
+        GUI_PROJECT_LIFECYCLE_NONE;
+}
+
 tp_status gui_project_lifecycle_pump(
     gui_project_lifecycle_kind *completed,
     tp_error *err) {

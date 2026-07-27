@@ -42,6 +42,7 @@ static tp_job_worker_proto_request sample_request(tp_session_job_kind kind) {
   request.kind = kind;
   request.session_instance_generation = 17U;
   request.request_id = 42U;
+  request.host_pid = 4242U;
   request.project_json = project;
   request.project_json_len = sizeof project - 1U;
   request.atlas_id =
@@ -117,6 +118,9 @@ void test_request_roundtrip_pack_and_export(void) {
     TEST_ASSERT_EQUAL_UINT64(input.session_instance_generation,
                              output.session_instance_generation);
     TEST_ASSERT_EQUAL_UINT64(input.request_id, output.request_id);
+    /* The worker names its private request directory after the HOST pid, so the
+     * pid has to survive the wire exactly. */
+    TEST_ASSERT_EQUAL_UINT32(input.host_pid, output.host_pid);
     TEST_ASSERT_EQUAL_UINT64((uint64_t)input.project_json_len,
                              (uint64_t)output.project_json_len);
     TEST_ASSERT_EQUAL_MEMORY(input.project_json, output.project_json,
@@ -440,6 +444,60 @@ void test_encode_caps_reject_oversized_project_names_counts_and_path(void) {
   TEST_ASSERT_EQUAL_INT(
       TP_STATUS_INVALID_ARGUMENT,
       tp_job_worker_proto_encode_response(&response, &bytes, &length, &err));
+
+  /* The artifact size drives a single host-side allocation, so a size past the
+   * transport cap is refused on BOTH sides rather than becoming a multi-GB
+   * malloc. */
+  response = sample_pack_response();
+  response.pack.artifact_size = TP_JOB_WORKER_PROTO_MAX_ARTIFACT_BYTES + 1U;
+  TEST_ASSERT_EQUAL_INT(
+      TP_STATUS_INVALID_ARGUMENT,
+      tp_job_worker_proto_encode_response(&response, &bytes, &length, &err));
+
+  /* A request with no host pid names no private directory the reaper could key
+   * on, so it never reaches a worker. */
+  request = sample_request(TP_SESSION_JOB_PACK);
+  request.host_pid = 0U;
+  TEST_ASSERT_EQUAL_INT(
+      TP_STATUS_INVALID_ARGUMENT,
+      tp_job_worker_proto_encode_request(&request, &bytes, &length, &err));
+  TEST_ASSERT_NULL(bytes);
+}
+
+/* The wire artifact size is a u64 from another process; decode must reject one
+ * past the cap instead of handing the host an allocation it cannot make. */
+void test_decoded_artifact_size_past_the_cap_is_rejected(void) {
+  size_t length = 0U;
+  uint8_t *bytes = encode_pack(&length);
+  tp_error err = {{0}};
+  /* artifact_size (u64) follows name_count(180) and artifact_path_len(184). */
+  const uint64_t oversized = TP_JOB_WORKER_PROTO_MAX_ARTIFACT_BYTES + 1U;
+  for (unsigned int i = 0U; i < 8U; ++i) {
+    bytes[188U + i] = (uint8_t)(oversized >> (i * 8U));
+  }
+  tp_job_worker_proto_response out;
+  TEST_ASSERT_EQUAL_INT(
+      TP_STATUS_INVALID_ARGUMENT,
+      tp_job_worker_proto_decode_response(bytes, length, &out, &err));
+  free(bytes);
+}
+
+/* A host pid of zero on the wire is not a request any worker may act on: the
+ * private request directory would carry a pid the reaper cannot ask about. */
+void test_decoded_request_without_host_pid_is_rejected(void) {
+  tp_job_worker_proto_request request = sample_request(TP_SESSION_JOB_PACK);
+  uint8_t *bytes = NULL;
+  size_t length = 0U;
+  tp_error err = {{0}};
+  TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_job_worker_proto_encode_request(
+                                          &request, &bytes, &length, &err));
+  /* host_pid: frame(12) + kind(4) + gen(8) + request(8) + four u32 lengths. */
+  put_u32_le(bytes + 48U, 0U);
+  tp_job_worker_proto_request out;
+  TEST_ASSERT_EQUAL_INT(
+      TP_STATUS_INVALID_ARGUMENT,
+      tp_job_worker_proto_decode_request(bytes, length, &out, &err));
+  free(bytes);
 }
 
 void test_stream_cumulative_and_progress_count_caps_fail_closed(void) {
@@ -485,6 +543,8 @@ int main(void) {
   RUN_TEST(test_bad_magic_version_and_oversized_fields_fail_closed);
   RUN_TEST(test_invalid_utf8_name_is_rejected_on_encode);
   RUN_TEST(test_encode_caps_reject_oversized_project_names_counts_and_path);
+  RUN_TEST(test_decoded_artifact_size_past_the_cap_is_rejected);
+  RUN_TEST(test_decoded_request_without_host_pid_is_rejected);
   RUN_TEST(test_stream_cumulative_and_progress_count_caps_fail_closed);
   return UNITY_END();
 }

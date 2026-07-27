@@ -49,6 +49,7 @@ struct tp_job_worker_process {
 
 #ifdef TP_ENABLE_TEST_SEAMS
 static int s_test_timeout_ms;
+static int s_test_cancel_grace_ms;
 #endif
 
 static double process_now_ms(void) {
@@ -81,6 +82,15 @@ static int process_timeout_ms(void) {
     return TP_JOB_WORKER_TIMEOUT_MS;
 }
 
+static int process_cancel_grace_ms(void) {
+#ifdef TP_ENABLE_TEST_SEAMS
+    if (s_test_cancel_grace_ms > 0) {
+        return s_test_cancel_grace_ms;
+    }
+#endif
+    return TP_JOB_WORKER_CANCEL_GRACE_MS;
+}
+
 static void set_terminal_failure(tp_job_worker_process *process,
                                  tp_status status, const char *message) {
     if (process->response_ready) {
@@ -88,6 +98,12 @@ static void set_terminal_failure(tp_job_worker_process *process,
     }
     memset(&process->response, 0, sizeof process->response);
     process->response.kind = process->kind;
+    /* A synthesized terminal has no worker-measured duration, and memset left it
+     * at 0 -- so every cancelled, killed or crashed job reported "0 ms" to the
+     * UI. The host owns the only clock that saw the whole request, so it measures
+     * the elapsed time itself. */
+    const double elapsed = process_now_ms() - process->started_ms;
+    process->response.elapsed_ms = elapsed > 0.0 ? elapsed : 0.0;
     process->response.session_instance_generation =
         process->session_instance_generation;
     process->response.request_id = process->request_id;
@@ -325,7 +341,7 @@ void tp_job_worker_process_pump(tp_job_worker_process *process) {
     const bool cancel_expired =
         process->cancel_requested &&
         now - process->cancel_started_ms >=
-            (double)TP_JOB_WORKER_CANCEL_GRACE_MS;
+            (double)process_cancel_grace_ms();
     const bool timeout_expired =
         now - process->started_ms >= (double)process_timeout_ms();
     if (cancel_expired || timeout_expired) {
@@ -421,6 +437,10 @@ void tp_job_worker__test_set_timeout_ms(int timeout_ms) {
     s_test_timeout_ms = timeout_ms;
 }
 
+void tp_job_worker__test_set_cancel_grace_ms(int grace_ms) {
+    s_test_cancel_grace_ms = grace_ms;
+}
+
 bool tp_job_worker__test_request_backpressured(
     const tp_job_worker_process *process) {
     return process && process->request_backpressured;
@@ -428,5 +448,6 @@ bool tp_job_worker__test_request_backpressured(
 
 void tp_job_worker__test_reset(void) {
     s_test_timeout_ms = 0;
+    s_test_cancel_grace_ms = 0;
 }
 #endif

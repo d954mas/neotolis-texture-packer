@@ -497,6 +497,124 @@ void test_poll_failure_keeps_active_owner_and_draining_cancel_wins(void) {
     tp_session_destroy(session);
 }
 
+/* A cancel admission that keeps failing must not wedge the drain: the job poll
+ * is the only thing that clears the active lease, so an early return on the
+ * failed cancel left a DRAINING host that could never reach READY_TO_CUTOVER --
+ * New, Open and Exit froze behind it. */
+void test_failing_cancel_admission_does_not_wedge_drain(void) {
+    tp_session *session = make_session();
+    gui_host_queue queue;
+    tp_error error = {{0}};
+    gui_host_queue_init(&queue);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_host_queue_open(&queue, 67U, &error));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_host_queue_enqueue_export(
+            &queue, tp_id128_nil(),
+            TP_GUI_HOST_QUEUE_TEST_DIR, &error));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_host_queue_drain(
+            &queue, session, &error));
+    TEST_ASSERT_TRUE(
+        gui_host_queue__test_active(&queue));
+
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_host_queue_enqueue_cancel(
+            &queue, &error));
+    gui_host_queue__test_fail_cancels(100000U);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_host_queue_begin_drain(&queue, &error));
+    TEST_ASSERT_EQUAL_INT(
+        GUI_HOST_DRAINING,
+        gui_host_queue_lifecycle(&queue));
+
+    bool saw_cancel_failure = false;
+    for (int attempt = 0;
+         attempt < 10000 &&
+         !gui_host_queue__test_has_staged(&queue);
+         ++attempt) {
+        const tp_status status =
+            gui_host_queue_drain(
+                &queue, session, &error);
+        if (status != TP_STATUS_OK) {
+            saw_cancel_failure = true;
+            TEST_ASSERT_EQUAL_INT(
+                TP_STATUS_OOM, status);
+        }
+        if (!gui_host_queue__test_has_staged(
+                &queue)) {
+            nt_time_sleep(0.001);
+        }
+    }
+    /* The rejection was real, the request stayed queued, and the drain still
+     * made progress through it. */
+    TEST_ASSERT_TRUE(saw_cancel_failure);
+    TEST_ASSERT_TRUE(queue.cancel_queued);
+    TEST_ASSERT_TRUE(
+        gui_host_queue__test_has_staged(&queue));
+
+    /* With the job terminal the cancel becomes moot (NOT_FOUND) and resolves. */
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_host_queue_drain(
+            &queue, session, &error));
+    TEST_ASSERT_FALSE(queue.cancel_queued);
+
+    reduce_current_observation(
+        &queue, session, 67U);
+    gui_host_completion completion = {0};
+    TEST_ASSERT_TRUE(
+        gui_host_queue_take_completion(
+            &queue, &completion));
+    gui_host_completion_destroy(&completion);
+    TEST_ASSERT_EQUAL_INT(
+        GUI_HOST_READY_TO_CUTOVER,
+        gui_host_queue_lifecycle(&queue));
+    gui_host_queue__test_fail_cancels(0U);
+    tp_session_destroy(session);
+}
+
+/* The forced close is the exit path's terminal answer: it must reach CLOSED
+ * from a DRAINING owner that still holds an active lease and a staged
+ * completion, because the session behind them is destroyed right after. */
+void test_force_close_reaches_closed_from_a_staged_draining_owner(void) {
+    tp_session *session = make_session();
+    gui_host_queue queue;
+    tp_error error = {{0}};
+    gui_host_queue_init(&queue);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_host_queue_open(&queue, 71U, &error));
+    stage_export_completion(&queue, session);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_host_queue_begin_drain(&queue, &error));
+    TEST_ASSERT_EQUAL_INT(
+        GUI_HOST_DRAINING,
+        gui_host_queue_lifecycle(&queue));
+    TEST_ASSERT_TRUE(
+        gui_host_queue__test_has_staged(&queue));
+
+    gui_host_queue_force_close(&queue);
+    TEST_ASSERT_EQUAL_INT(
+        GUI_HOST_CLOSED,
+        gui_host_queue_lifecycle(&queue));
+    TEST_ASSERT_FALSE(
+        gui_host_queue__test_has_staged(&queue));
+    TEST_ASSERT_FALSE(
+        gui_host_queue__test_active(&queue));
+    TEST_ASSERT_FALSE(
+        gui_host_queue_busy(&queue));
+    TEST_ASSERT_EQUAL_UINT64(
+        0U, queue.session_instance_generation);
+    tp_session_destroy(session);
+}
+
 void test_take_failure_keeps_active_owner_until_retry_detaches(void) {
     tp_session *session = make_session();
     gui_host_queue queue;
@@ -638,6 +756,10 @@ int main(int argc, char **argv) {
         test_begin_drain_does_not_repeat_an_admitted_cancel);
     RUN_TEST(
         test_poll_failure_keeps_active_owner_and_draining_cancel_wins);
+    RUN_TEST(
+        test_failing_cancel_admission_does_not_wedge_drain);
+    RUN_TEST(
+        test_force_close_reaches_closed_from_a_staged_draining_owner);
     RUN_TEST(
         test_take_failure_keeps_active_owner_until_retry_detaches);
     RUN_TEST(

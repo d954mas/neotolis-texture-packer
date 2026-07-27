@@ -172,7 +172,8 @@ static tp_job_worker_progress_phase blocked_phase(const char *mode) {
 }
 
 static int wait_for_cancel(
-    const tp_job_worker_proto_request *request, bool partial) {
+    const tp_job_worker_proto_request *request, bool partial,
+    tp_session_job_state state) {
     for (;;) {
         const tp_proc_stdin_event event = tp_proc_child_poll_stdin();
         if (event == TP_PROC_STDIN_EVENT_NONE) {
@@ -182,15 +183,17 @@ static int wait_for_cancel(
         if (event != TP_PROC_STDIN_EVENT_CANCEL) {
             return 5;
         }
-        /* A real worker folds an observed cancellation into its OWN terminal
-         * frame (tp_job_worker_main.c), so the fake does the same: the process
-         * layer admits the terminal verbatim and never relabels it. */
         tp_job_worker_proto_response response = {0};
         response.kind = request->kind;
-        response.state = TP_SESSION_JOB_CANCELLED;
-        response.status = TP_STATUS_CANCELLED;
+        response.state = state;
+        response.status = state == TP_SESSION_JOB_CANCELLED
+                              ? TP_STATUS_CANCELLED
+                              : TP_STATUS_OK;
         response.elapsed_ms = 3.0;
         if (!partial) {
+            if (state == TP_SESSION_JOB_SUCCEEDED) {
+                response.export_result.atlases_ok = 1;
+            }
             return write_response(request, &response, false, false, false);
         }
         response.export_result.atlases_ok = 1;
@@ -268,7 +271,11 @@ static int run_fake_worker(const char *mode) {
                      ? 0
                      : 4;
     } else if (strcmp(mode, "cancel-race") == 0) {
-        result = wait_for_cancel(&request, false);
+        result = wait_for_cancel(&request, false,
+                                 TP_SESSION_JOB_CANCELLED);
+    } else if (strcmp(mode, "cancel-race-success") == 0) {
+        result = wait_for_cancel(&request, false,
+                                 TP_SESSION_JOB_SUCCEEDED);
     } else if (blocked_phase(mode) != 0) {
         result =
             write_progress(&request, 1, blocked_phase(mode)) &&
@@ -276,7 +283,8 @@ static int run_fake_worker(const char *mode) {
                 ? (sleep_ms(5000U), 0)
                 : 4;
     } else if (strcmp(mode, "partial-cancel") == 0) {
-        result = wait_for_cancel(&request, true);
+        result = wait_for_cancel(&request, true,
+                                 TP_SESSION_JOB_CANCELLED);
     } else if (strcmp(mode, "timeout") == 0) {
         sleep_ms(5000U);
     } else {
@@ -300,6 +308,7 @@ static tp_job_worker_proto_request sample_request(void) {
     request.kind = TP_SESSION_JOB_EXPORT;
     request.session_instance_generation = 9U;
     request.request_id = 77U;
+    request.host_pid = 909U;
     request.project_json = project;
     request.project_json_len = sizeof project - 1U;
     request.project_dir = "C:/project";
@@ -357,6 +366,8 @@ void test_clean_matching_terminal_is_admitted(void) {
     tp_job_worker_process_destroy(process);
 }
 
+/* A worker that observed the cancel byte folds CANCELLED into its OWN terminal
+ * frame; the process layer admits it unchanged. */
 void test_cancel_admitted_before_terminal_owns_outcome(void) {
     tp_job_worker_process *process = start_process("cancel-race");
     tp_job_worker_process_request_cancel(process);
@@ -364,6 +375,40 @@ void test_cancel_admitted_before_terminal_owns_outcome(void) {
         pump_to_terminal(process, 2000);
     TEST_ASSERT_EQUAL_INT(TP_SESSION_JOB_CANCELLED, response->state);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_CANCELLED, response->status);
+    tp_job_worker_process_destroy(process);
+}
+
+/* The other half of that contract, and the one a relabel here would break: a
+ * worker that saw the cancel byte and still SUCCEEDED is admitted VERBATIM at
+ * this layer. Exactly one place decides that an accepted host cancellation
+ * outranks a terminal that raced it -- tp_job.c job_publish_response (covered
+ * end to end by test_job_input_token.c) -- and two competing cancel decisions
+ * over one outcome is the bug this asserts against. */
+void test_successful_terminal_after_cancel_is_admitted_verbatim(void) {
+    tp_job_worker_process *process = start_process("cancel-race-success");
+    tp_job_worker_process_request_cancel(process);
+    const tp_job_worker_proto_response *response =
+        pump_to_terminal(process, 2000);
+    TEST_ASSERT_EQUAL_INT(TP_SESSION_JOB_SUCCEEDED, response->state);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, response->status);
+    TEST_ASSERT_EQUAL_INT(1, response->export_result.atlases_ok);
+    tp_job_worker_process_destroy(process);
+}
+
+/* A synthesized terminal (here: the cancellation grace expiring on a worker that
+ * never answers) carries no worker-measured duration. The host measures it, so
+ * the UI never reports a job that "took 0 ms". */
+void test_synthesized_terminal_carries_host_measured_elapsed(void) {
+    tp_job_worker__test_set_cancel_grace_ms(10);
+    tp_job_worker_process *process = start_process("timeout");
+    sleep_ms(30U);
+    tp_job_worker_process_request_cancel(process);
+    const tp_job_worker_proto_response *response =
+        pump_to_terminal(process, 2000);
+    TEST_ASSERT_EQUAL_INT(TP_SESSION_JOB_CANCELLED, response->state);
+    TEST_ASSERT_TRUE_MESSAGE(
+        response->elapsed_ms > 0.0,
+        "a synthesized terminal must report the host's measured elapsed time");
     tp_job_worker_process_destroy(process);
 }
 
@@ -530,6 +575,8 @@ int main(int argc, char **argv) {
     UNITY_BEGIN();
     RUN_TEST(test_clean_matching_terminal_is_admitted);
     RUN_TEST(test_cancel_admitted_before_terminal_owns_outcome);
+    RUN_TEST(test_successful_terminal_after_cancel_is_admitted_verbatim);
+    RUN_TEST(test_synthesized_terminal_carries_host_measured_elapsed);
     RUN_TEST(test_more_than_one_pump_budget_of_progress_reaches_terminal);
     RUN_TEST(test_each_blocking_operation_class_is_cancellable);
     RUN_TEST(test_cancel_preserves_partial_export_failure_metadata);

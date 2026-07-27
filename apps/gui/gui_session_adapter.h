@@ -9,7 +9,7 @@
 /* Thin stable-ID -> typed-operation -> session adapter for GUI mutations.
  * It never owns or exposes a model/project pointer.
  *
- * Receipt contract. Two intent shapes live here and the difference is visible
+ * Receipt contract. Three intent shapes live here and the difference is visible
  * in the signature:
  *   - DRAFT intents take `identity` + `transaction_id` + `out_terminal`. They
  *     back an editable value owned by the settings-panel draft FSM, which stays
@@ -17,11 +17,19 @@
  *     gui_session_client_submit guarantees a terminal on every non-OK return
  *     (an empty terminal transaction id means "the session never saw it", and
  *     the draft owner returns the draft to EDITING).
- *   - STRUCTURAL intents (create/remove atlas, source, target, animation and
- *     animation-frame add/remove/move) have NO `out_terminal`: they are discrete
- *     commands, not editable values, so they are RECEIPT-FREE BY CONTRACT. Their
- *     caller decides from the returned tp_status alone and there is no draft
- *     phase to strand. Do not add receipts to them to "make it uniform". */
+ *   - CREATE intents (`gui_session_create_atlas`, `_create_animation`,
+ *     `_create_target`) take `out_terminal` but NOT `identity`/`transaction_id`:
+ *     they are not drafts, and nothing stays in SUBMITTING for them, but their
+ *     caller reads the committed revision back out of the terminal to resolve
+ *     the created object's visible index.
+ *   - RECEIPT-FREE intents have no `out_terminal` at all. The set is exactly
+ *     these eight: `gui_session_remove_atlas`, `_add_sources`,
+ *     `_remove_source`, `_remove_animation`, `_add_animation_frames`,
+ *     `_remove_animation_frame`, `_move_animation_frame`, `_remove_target`.
+ *     They are discrete commands, not editable values, so they are RECEIPT-FREE
+ *     BY CONTRACT: the caller decides from the returned tp_status alone and
+ *     there is no draft phase to strand. Do not add receipts to them to "make
+ *     it uniform". */
 tp_status gui_session_submit_atlas_name(
     gui_session_client *client, tp_id128 atlas_id,
     int64_t expected_revision, const char *name,

@@ -8,12 +8,7 @@
 #if defined(_WIN32)
 #include <fcntl.h>
 #include <io.h>
-#include <process.h>
 #include <windows.h>
-#define tp_worker_getpid _getpid
-#else
-#include <unistd.h>
-#define tp_worker_getpid getpid
 #endif
 #if !defined(_WIN32) && defined(TP_ENABLE_TEST_SEAMS)
 #include <errno.h>
@@ -41,7 +36,6 @@ typedef struct worker_cancel {
 typedef struct pack_hash_collect {
     tp_id128 *hashes;
     int count;
-    worker_cancel *cancel;
 } pack_hash_collect;
 
 static char *worker_strdup(const char *text) {
@@ -88,39 +82,61 @@ static double worker_now_ms(void) {
 #endif
 }
 
+static bool worker_cancel_requested(void *context);
+
 #ifdef TP_ENABLE_TEST_SEAMS
-static void test_block_before_job_work(void) {
-    const char *text =
-        getenv("TP_TEST_JOB_WORKER_BLOCK_MS");
-    if (!text || text[0] == '\0') {
-        return;
-    }
-    char *end = NULL;
-    const unsigned long milliseconds =
-        strtoul(text, &end, 10);
-    if (!end || *end != '\0' ||
-        milliseconds == 0UL ||
-        milliseconds > 60000UL) {
-        return;
-    }
+static void worker_sleep_ms(unsigned long milliseconds) {
 #if defined(_WIN32)
     Sleep((DWORD)milliseconds);
 #else
     struct timespec delay = {
-        .tv_sec =
-            (time_t)(milliseconds / 1000UL),
-        .tv_nsec =
-            (long)((milliseconds % 1000UL) *
-                   1000000UL),
+        .tv_sec = (time_t)(milliseconds / 1000UL),
+        .tv_nsec = (long)((milliseconds % 1000UL) * 1000000UL),
     };
-    while (nanosleep(&delay, &delay) != 0 &&
-           errno == EINTR) {
+    while (nanosleep(&delay, &delay) != 0 && errno == EINTR) {
     }
 #endif
 }
-#endif
 
-#ifdef TP_ENABLE_TEST_SEAMS
+/* Bounded millisecond seam value, or 0 when the variable is unset/invalid. */
+static unsigned long test_block_ms(const char *name) {
+    const char *text = getenv(name);
+    if (!text || text[0] == '\0') {
+        return 0UL;
+    }
+    char *end = NULL;
+    const unsigned long milliseconds = strtoul(text, &end, 10);
+    if (!end || *end != '\0' || milliseconds == 0UL ||
+        milliseconds > 60000UL) {
+        return 0UL;
+    }
+    return milliseconds;
+}
+
+static void test_block_before_job_work(void) {
+    const unsigned long milliseconds =
+        test_block_ms("TP_TEST_JOB_WORKER_BLOCK_MS");
+    if (milliseconds > 0UL) {
+        worker_sleep_ms(milliseconds);
+    }
+}
+
+/* Park INSIDE run_pack, after the private request directory exists, until the
+ * host's cancellation arrives (or the cap expires). This is the only way to
+ * exercise a cancel against a Pack that has already taken resources on disk:
+ * TP_TEST_JOB_WORKER_BLOCK_MS parks BEFORE any work, where "no directory was
+ * left behind" is vacuously true. */
+static void test_block_in_pack_until_cancel(worker_cancel *cancel) {
+    const unsigned long milliseconds =
+        test_block_ms("TP_TEST_JOB_WORKER_BLOCK_IN_PACK_MS");
+    for (unsigned long waited = 0UL; waited < milliseconds; ++waited) {
+        if (worker_cancel_requested(cancel)) {
+            return;
+        }
+        worker_sleep_ms(1UL);
+    }
+}
+
 /* Damage the published artifact AFTER its size was announced, so the host's
  * digestless validation (regular file + exact size + pack magic) can be driven
  * end to end without a real disk fault. "truncate" moves the size away from the
@@ -140,8 +156,29 @@ static void test_fault_artifact(const char *path) {
 }
 #endif
 
+#ifdef TP_ENABLE_TEST_SEAMS
+/* Make this worker deaf to the cancel byte, so a Pack the host cancelled still
+ * runs to a SUCCEEDED terminal with a real artifact on disk. That is the exact
+ * race the host's "an accepted cancellation outranks the terminal that raced it"
+ * rule exists for, and the only way to prove the host deletes the artifact
+ * nobody will adopt. */
+static bool test_ignores_cancel(void) {
+    static int cached = -1;
+    if (cached < 0) {
+        const char *text = getenv("TP_TEST_JOB_WORKER_IGNORE_CANCEL");
+        cached = text && text[0] == '1' ? 1 : 0;
+    }
+    return cached == 1;
+}
+#endif
+
 static bool worker_cancel_requested(void *context) {
     worker_cancel *cancel = context;
+#ifdef TP_ENABLE_TEST_SEAMS
+    if (test_ignores_cancel()) {
+        return false;
+    }
+#endif
     if (cancel->requested || cancel->transport_failed) {
         return true;
     }
@@ -189,36 +226,76 @@ static void collect_image_hash(void *context, int sprite_index,
     }
     collect->hashes[sprite_index] =
         tp_pack_semantic_image_hash(width, height, rgba);
-    /* Decoding is the long uninterruptible stretch of a Pack, so drain the
-     * cancellation byte here, between images: tp_pack's own per-image poll then
-     * abandons the decode instead of running it to completion. */
-    (void)worker_cancel_requested(collect->cancel);
 }
 
 /* One private directory per Pack request under the host-chosen work_dir. It is
  * what keeps a native Pack, a preview Pack and a second app instance from
  * colliding on the single `<atlas_name>.ntpack` name, and it gives the host an
- * exact path to adopt. Named with the WORKER pid so tp_worker_reap_stale_dirs
- * heals whatever a killed worker left behind on the next run. */
+ * exact path to adopt.
+ *
+ * Named with the HOST pid, not this worker's. The directory deliberately
+ * OUTLIVES the worker: the host adopts the artifact in budgeted slices after the
+ * child has exited, and only then deletes file and directory. Under the worker
+ * pid, tp_worker_reap_stale_dirs -- which reaps `<prefix><hexpid>-*` whose pid is
+ * definitively dead -- would see an exited worker and let the NEXT Pack (of any
+ * instance sharing this work_dir) delete an artifact still being read. Keying the
+ * name on the host makes the liveness question the right one. The inner builder's
+ * `pkw-` staging keeps the worker pid: it never outlives its owner. */
 static bool make_request_dir(const char *work_dir, uint64_t request_id,
-                             char *out, size_t out_cap) {
+                             uint32_t host_pid, char *out, size_t out_cap,
+                             bool *out_too_long) {
+    *out_too_long = false;
     tp_worker_reap_stale_dirs(work_dir, "req-");
     const int length = snprintf(
         out, out_cap, "%s/req-%08lx-%016llx", work_dir,
-        (unsigned long)((unsigned long)tp_worker_getpid() & 0xffffffffUL),
-        (unsigned long long)request_id);
+        (unsigned long)host_pid, (unsigned long long)request_id);
     if (length <= 0 || (size_t)length >= out_cap) {
         out[0] = '\0';
+        *out_too_long = true;
         return false;
     }
     if (tp_fs_exists(out)) {
-        tp_worker_remove_dir_tree(out); /* our own pid: a leftover, never a peer */
+        /* Our host's pid AND its request id: a leftover of this very request,
+         * never a live peer's directory. */
+        tp_worker_remove_dir_tree(out);
     }
     if (tp_fs_create_dir(out)) {
         return true;
     }
     out[0] = '\0';
     return false;
+}
+
+/* Remove the private request directory holding a published artifact, given the
+ * artifact's path. Only a "req-" basename is ever removed, so a malformed path
+ * can never take a directory this process did not create. */
+static void remove_request_dir_of(const char *artifact_path) {
+    const char *separator = NULL;
+    for (const char *cursor = artifact_path; *cursor; ++cursor) {
+        if (*cursor == '/' || *cursor == '\\') {
+            separator = cursor;
+        }
+    }
+    if (!separator) {
+        return;
+    }
+    const size_t length = (size_t)(separator - artifact_path);
+    char directory[544];
+    if (length == 0U || length >= sizeof directory) {
+        return;
+    }
+    memcpy(directory, artifact_path, length);
+    directory[length] = '\0';
+    const char *base = directory;
+    for (const char *cursor = directory; *cursor; ++cursor) {
+        if (*cursor == '/' || *cursor == '\\') {
+            base = cursor + 1;
+        }
+    }
+    if (strncmp(base, "req-", 4U) != 0) {
+        return;
+    }
+    tp_worker_remove_dir_tree(directory);
 }
 
 static tp_status run_pack(const tp_job_worker_proto_request *request,
@@ -277,14 +354,26 @@ static tp_status run_pack(const tp_job_worker_proto_request *request,
         }
         settings = effective;
     }
-    char request_dir[512];
-    if (!make_request_dir(request->work_dir, request->request_id, request_dir,
-                          sizeof request_dir)) {
+    /* work_dir alone may be a full TP_IDENTITY_PATH_MAX-1 path; the "/req-" +
+     * hexpid + '-' + hex request id component adds 31 more. 512 made a long but
+     * perfectly legal work_dir indistinguishable from an unwritable one. */
+    char request_dir[544];
+    bool request_dir_too_long = false;
+    if (!make_request_dir(request->work_dir, request->request_id,
+                          request->host_pid, request_dir, sizeof request_dir,
+                          &request_dir_too_long)) {
         tp_pack_input_free(&input);
-        return tp_error_set(
-            err, TP_STATUS_FILE_IO_FAILED,
-            "job worker could not create its private Pack directory");
+        return request_dir_too_long
+                   ? tp_error_set(
+                         err, TP_STATUS_INVALID_ARGUMENT,
+                         "job worker Pack work directory path is too long")
+                   : tp_error_set(
+                         err, TP_STATUS_FILE_IO_FAILED,
+                         "job worker could not create its private Pack directory");
     }
+#ifdef TP_ENABLE_TEST_SEAMS
+    test_block_in_pack_until_cancel(cancel);
+#endif
     settings.work_dir = request_dir;
     settings.sprites = input.descs;
     settings.sprite_count = input.count;
@@ -343,7 +432,7 @@ static tp_status run_pack(const tp_job_worker_proto_request *request,
     /* Produce only: this process never reads the artifact back. The host owns
      * the single parse, so a tp_pack_read here would cost a second full decode
      * of every page for a tp_result nobody in this process looks at. */
-    pack_hash_collect collect = {image_hashes, input.count, cancel};
+    pack_hash_collect collect = {image_hashes, input.count};
     char artifact_path[512];
     bool cancelled = false;
     (void)publish_progress(request->request_id, 0, 1,
@@ -365,6 +454,13 @@ static tp_status run_pack(const tp_job_worker_proto_request *request,
             status = tp_error_set(
                 err, TP_STATUS_BUILDER_FAILED,
                 "job worker Pack artifact is missing or unreadable");
+        } else if (info.size > TP_JOB_WORKER_PROTO_MAX_ARTIFACT_BYTES) {
+            /* The host reads the artifact into one buffer, so an artifact past
+             * the transport cap must fail as a structured terminal here rather
+             * than as an unencodable frame or a multi-GB host allocation. */
+            status = tp_error_set(
+                err, TP_STATUS_OUT_OF_BOUNDS,
+                "job worker Pack artifact exceeds the transport size cap");
         } else {
             artifact_size = info.size;
 #ifdef TP_ENABLE_TEST_SEAMS
@@ -395,9 +491,25 @@ static tp_status run_pack(const tp_job_worker_proto_request *request,
         status = tp_error_set(err, TP_STATUS_OOM,
                               "job worker Pack artifact path allocation failed");
     }
-    /* A cancellation admitted while the artifact was produced or hashed outranks
-     * success. Fold it HERE, where the private directory can still be removed,
-     * not at the terminal-frame boundary where its path is already gone. */
+    tp_id128 current_hash = tp_id128_nil();
+    tp_error freshness_error = {{0}};
+    tp_status freshness_status = TP_STATUS_OK;
+    if (status == TP_STATUS_OK) {
+        freshness_status = tp_pack_input_hash_compute(
+            &settings,
+            request->preview_exporter_id &&
+                    request->preview_exporter_id[0]
+                ? request->preview_exporter_id
+                : NULL,
+            NULL, &current_hash, &freshness_error);
+    }
+    /* A cancellation admitted while the artifact was produced, hashed, or probed
+     * for freshness outranks success. Fold it HERE -- after the LAST long step
+     * and before a single pack field is published -- because this is the last
+     * point where the private directory can still be removed. Folding it before
+     * the freshness probe left a cancel arriving during that probe to the
+     * terminal-frame boundary, which publishes an artifact path nobody adopts
+     * and a directory nobody deletes. */
     if (status == TP_STATUS_OK &&
         (cancel->requested || cancel->transport_failed)) {
         status = tp_error_set(
@@ -406,16 +518,6 @@ static tp_status run_pack(const tp_job_worker_proto_request *request,
     }
 
     if (status == TP_STATUS_OK) {
-        tp_id128 current_hash = tp_id128_nil();
-        tp_error freshness_error = {{0}};
-        const tp_status freshness_status =
-            tp_pack_input_hash_compute(
-                &settings,
-                request->preview_exporter_id &&
-                        request->preview_exporter_id[0]
-                    ? request->preview_exporter_id
-                    : NULL,
-                NULL, &current_hash, &freshness_error);
         response->pack.atlas_id = request->atlas_id;
         response->pack.missing_sources = input.missing_sources;
         response->pack.input_token_at_start = request->input_token;
@@ -727,13 +829,43 @@ int tp_job_worker_main_request(const uint8_t *bytes, size_t length) {
 
     uint8_t *encoded = NULL;
     size_t encoded_length = 0U;
-    const tp_status encode_status =
-        tp_job_worker_proto_encode_response(
-            &response, &encoded, &encoded_length, NULL);
+    tp_error encode_error = {{0}};
+    tp_status encode_status = tp_job_worker_proto_encode_response(
+        &response, &encoded, &encoded_length, &encode_error);
+    bool payload_dropped = false;
+    if (encode_status != TP_STATUS_OK) {
+        /* Fail closed for real: a payload the codec refuses (a name map past the
+         * frame cap is the reachable case) used to end the worker with no frame
+         * at all, which the host could only report as "process crashed". Send the
+         * same terminal without the payload instead, so the operator gets the
+         * structured encode error. */
+        tp_job_worker_proto_response fallback = {0};
+        fallback.kind = response.kind;
+        fallback.session_instance_generation =
+            response.session_instance_generation;
+        fallback.request_id = response.request_id;
+        fallback.state = TP_SESSION_JOB_FAILED;
+        fallback.status = encode_status;
+        fallback.elapsed_ms = response.elapsed_ms;
+        (void)tp_error_set(&fallback.error, encode_status, "%s",
+                           encode_error.msg[0]
+                               ? encode_error.msg
+                               : "job worker terminal frame could not be encoded");
+        encode_status = tp_job_worker_proto_encode_response(
+            &fallback, &encoded, &encoded_length, NULL);
+        payload_dropped = true;
+    }
     const bool wrote =
         encode_status == TP_STATUS_OK &&
         write_frame(encoded, encoded_length);
     free(encoded);
+    if (response.kind == TP_SESSION_JOB_PACK && response.pack.artifact_path &&
+        (!wrote || payload_dropped)) {
+        /* The artifact was announced to nobody: the frame carrying its path never
+         * reached the host (or carried no payload at all), so this process is the
+         * last owner of the file and its private directory. */
+        remove_request_dir_of(response.pack.artifact_path);
+    }
     free((void *)response.error.file_io.path);
     if (response.kind == TP_SESSION_JOB_PACK) {
         free((void *)response.pack.freshness_error.file_io.path);

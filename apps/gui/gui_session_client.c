@@ -252,12 +252,18 @@ static gui_session_pending_submit *pending_find_id(
     return NULL;
 }
 
+/* `*out_registered` is true only when THIS attempt created the slot. A retained
+ * id that finds its own earlier receipt reuses that slot, and the earlier
+ * receipt is the answer a retry is asking for -- so only the creating attempt
+ * may ever clear it again. */
 static tp_status pending_register_before_admission(
     gui_session_client *client,
     const char transaction_id[33],
     gui_session_submit_identity identity,
     gui_session_pending_submit **out,
+    bool *out_registered,
     tp_error *err) {
+    *out_registered = false;
     gui_session_pending_submit *pending =
         pending_find_id(client, transaction_id);
     if (pending) {
@@ -306,6 +312,7 @@ static tp_status pending_register_before_admission(
         "%s", transaction_id);
     pending->terminal.identity = identity;
     *out = pending;
+    *out_registered = true;
     return TP_STATUS_OK;
 }
 
@@ -666,9 +673,10 @@ tp_status gui_session_client_submit(
     }
 
     gui_session_pending_submit *pending = NULL;
+    bool pending_registered_here = false;
     status = pending_register_before_admission(
         client, transaction_id, request->identity,
-        &pending, err);
+        &pending, &pending_registered_here, err);
     if (status != TP_STATUS_OK) {
         return fail_submit_with_receipt(
             client, request, transaction_id, out,
@@ -698,10 +706,18 @@ tp_status gui_session_client_submit(
          * Core reports duplicate IDs with its current revision. Do not retain
          * that transient answer: a later retry must ask core again rather than
          * replaying a stale revision from this client. The CALLER still gets a
-         * typed receipt for this attempt -- nothing is retained, but the draft
-         * owner must never be left without an answer.
+         * typed receipt for this attempt -- nothing NEW is retained, but the
+         * draft owner must never be left without an answer.
+         *
+         * Only a slot THIS attempt registered may be cleared. The retained-id
+         * retry is the whole point of DUPLICATE_ID: the first submit already
+         * committed and its terminal receipt is the answer the draft owner is
+         * still waiting to read back. Clearing it here destroyed that receipt
+         * and left the draft stranded in SUBMITTING with nothing to resolve it.
          */
-        pending_clear(pending);
+        if (pending_registered_here) {
+            pending_clear(pending);
+        }
         return fail_submit_with_receipt(
             client, request, transaction_id, out, status);
     }

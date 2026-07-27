@@ -120,8 +120,13 @@ static bool rd_ref(wire_reader *reader, const uint8_t **out, size_t length) {
   return true;
 }
 
+/* Payload accumulator bounded by the frame cap rather than by SIZE_MAX: every
+ * caller turns a false into a structured OUT_OF_BOUNDS error, so an oversized
+ * name map or path is rejected at the field that overshoots instead of relying
+ * on make_frame to catch the total. */
 static bool add_size(size_t *value, size_t addition) {
-  if (addition > SIZE_MAX - *value) {
+  if (*value > TP_JOB_WORKER_PROTO_MAX_FRAME_BYTES ||
+      addition > TP_JOB_WORKER_PROTO_MAX_FRAME_BYTES - *value) {
     return false;
   }
   *value += addition;
@@ -362,8 +367,8 @@ tp_job_worker_proto_encode_request(const tp_job_worker_proto_request *request,
     *out_len = 0U;
   }
   if (!request || !out_bytes || !out_len || !valid_job_kind(request->kind) ||
-      request->request_id == 0U || !request->project_json ||
-      request->project_json_len == 0U ||
+      request->request_id == 0U || request->host_pid == 0U ||
+      !request->project_json || request->project_json_len == 0U ||
       request->project_json_len > TP_JOB_WORKER_PROTO_MAX_PROJECT_JSON_BYTES) {
     return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
                         "tp_job_worker_proto: invalid request");
@@ -416,7 +421,7 @@ tp_job_worker_proto_encode_request(const tp_job_worker_proto_request *request,
   wr_u32(&writer, (uint32_t)project_dir_len);
   wr_u32(&writer, (uint32_t)work_len);
   wr_u32(&writer, (uint32_t)preview_len);
-  wr_u32(&writer, 0U);
+  wr_u32(&writer, request->host_pid);
   wr_bytes(&writer, request->atlas_id.bytes, sizeof request->atlas_id.bytes);
   wr_u64(&writer, request->input_token.model_generation);
   wr_u64(&writer, request->input_token.source_generation);
@@ -446,12 +451,11 @@ tp_status tp_job_worker_proto_decode_request(const uint8_t *bytes, size_t len,
   uint32_t project_dir_len = 0U;
   uint32_t work_len = 0U;
   uint32_t preview_len = 0U;
-  uint32_t reserved = 0U;
   if (reader.length < REQUEST_FIXED_BYTES || !rd_u32(&reader, &kind) ||
       !rd_u64(&reader, &out->session_instance_generation) ||
       !rd_u64(&reader, &out->request_id) || !rd_u32(&reader, &project_len) ||
       !rd_u32(&reader, &project_dir_len) || !rd_u32(&reader, &work_len) ||
-      !rd_u32(&reader, &preview_len) || !rd_u32(&reader, &reserved) ||
+      !rd_u32(&reader, &preview_len) || !rd_u32(&reader, &out->host_pid) ||
       !rd_bytes(&reader, out->atlas_id.bytes, sizeof out->atlas_id.bytes) ||
       !rd_u64(&reader, &out->input_token.model_generation) ||
       !rd_u64(&reader, &out->input_token.source_generation)) {
@@ -459,8 +463,8 @@ tp_status tp_job_worker_proto_decode_request(const uint8_t *bytes, size_t len,
                         "tp_job_worker_proto: truncated request");
   }
   out->kind = (tp_session_job_kind)kind;
-  if (!valid_job_kind(out->kind) || out->request_id == 0U || reserved != 0U ||
-      project_len == 0U ||
+  if (!valid_job_kind(out->kind) || out->request_id == 0U ||
+      out->host_pid == 0U || project_len == 0U ||
       (size_t)project_len > TP_JOB_WORKER_PROTO_MAX_PROJECT_JSON_BYTES ||
       (size_t)project_dir_len > TP_JOB_WORKER_PROTO_MAX_PATH_BYTES ||
       project_dir_len == 0U ||
@@ -640,7 +644,7 @@ tp_status tp_job_worker_proto_encode_response(
         !valid_status((int32_t)pack->freshness_status) ||
         pack->name_count > TP_JOB_WORKER_PROTO_MAX_NAME_ENTRIES ||
         (pack->name_count > 0U && !pack->names) ||
-        pack->artifact_size > (uint64_t)SIZE_MAX ||
+        pack->artifact_size > TP_JOB_WORKER_PROTO_MAX_ARTIFACT_BYTES ||
         (response->state == TP_SESSION_JOB_SUCCEEDED &&
          (pack->artifact_size == 0U || !pack->artifact_path ||
           pack->artifact_path[0] == '\0'))) {
@@ -885,7 +889,7 @@ tp_status tp_job_worker_proto_decode_response(const uint8_t *bytes, size_t len,
         !valid_file_phase(fresh_phase) ||
         pack->name_count > TP_JOB_WORKER_PROTO_MAX_NAME_ENTRIES ||
         (size_t)artifact_path_len > TP_JOB_WORKER_PROTO_MAX_PATH_BYTES ||
-        pack->artifact_size > (uint64_t)SIZE_MAX ||
+        pack->artifact_size > TP_JOB_WORKER_PROTO_MAX_ARTIFACT_BYTES ||
         (out->state == TP_SESSION_JOB_SUCCEEDED &&
          (pack->artifact_size == 0U || artifact_path_len == 0U))) {
       status = tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,

@@ -218,6 +218,39 @@ static void complete_shutdown(
     binding->discard_retired_session = false;
 }
 
+/* Forced terminalize + close. The ordinary shutdown is a bounded, non-blocking
+ * negotiation; when the host exhausts its retry budget it still has to LEAVE,
+ * and it must leave in the CLOSED state the rest of the GUI teardown asserts.
+ * The order matters: the queue drops its leases first (they name a job in a
+ * session that is about to be destroyed), then the prepared candidate of a
+ * replacement that will never cut over is released, then the active session is
+ * retired through the same owner teardown as a clean close -- destroying the
+ * session is what terminates the worker process. */
+void gui_host_binding_force_close(
+    gui_host_binding *binding) {
+    if (!binding) {
+        return;
+    }
+    gui_host_queue_force_close(&binding->queue);
+    if (binding->transition ==
+        GUI_HOST_TRANSITION_REPLACE) {
+        gui_session_client_cancel_prepared(
+            &binding->prepared);
+    }
+    binding->prepared =
+        (gui_session_client_prepared){0};
+    tp_session *retired =
+        gui_session_client_attached_session(
+            &binding->client);
+    gui_session_client_detach(&binding->client);
+    retire_session(
+        retired,
+        binding->discard_retired_session);
+    binding->transition =
+        GUI_HOST_TRANSITION_NONE;
+    binding->discard_retired_session = false;
+}
+
 tp_status gui_host_binding_pump(
     gui_host_binding *binding,
     gui_host_transition_kind *completed,

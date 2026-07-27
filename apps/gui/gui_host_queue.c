@@ -8,6 +8,7 @@
 #ifdef TP_ENABLE_TEST_SEAMS
 static bool s_test_fail_next_poll;
 static bool s_test_fail_next_take;
+static unsigned s_test_fail_cancels;
 #endif
 
 static bool has_pending_start(
@@ -302,6 +303,31 @@ void gui_host_queue_commit_close(
     queue->lifecycle = GUI_HOST_CLOSED;
 }
 
+/* Forced teardown. `gui_host_queue_commit_close` is the ORDINARY close: it
+ * asserts a fully drained owner because a clean shutdown must never lose a
+ * completion. This entry point is the escape hatch for the host's bounded
+ * shutdown-failure budget: once the host gives up, the session is destroyed
+ * regardless, so every lease the queue still holds refers to something that is
+ * about to disappear. Pending start, active lease, and any staged completion
+ * are therefore DISCARDED rather than asserted absent, and the queue reaches
+ * CLOSED from any lifecycle state so the process-wide CLOSED postcondition
+ * still holds at gui_project_shutdown. */
+void gui_host_queue_force_close(
+    gui_host_queue *queue) {
+    if (!queue) {
+        return;
+    }
+    clear_staged(queue);
+    queue->pending_start =
+        (gui_host_command){0};
+    queue->active_envelope =
+        (gui_host_job_envelope){0};
+    queue->session_instance_generation = 0U;
+    queue->cancellation_requested = false;
+    queue->cancel_queued = false;
+    queue->lifecycle = GUI_HOST_CLOSED;
+}
+
 tp_status gui_host_queue_enqueue_pack(
     gui_host_queue *queue, tp_id128 atlas_id,
     const char *work_dir,
@@ -455,6 +481,16 @@ static tp_status admit_cancel(
             err, TP_STATUS_NOT_FOUND,
             "host has no admitted job to cancel");
     }
+#ifdef TP_ENABLE_TEST_SEAMS
+    /* Placed AFTER the no-job check so the seam can only forge the transient
+     * rejection class, never the terminal NOT_FOUND one. */
+    if (s_test_fail_cancels > 0U) {
+        --s_test_fail_cancels;
+        return tp_error_set(
+            err, TP_STATUS_OOM,
+            "host cancel admission test failure");
+    }
+#endif
     const tp_status status =
         tp_session_job_cancel(session, err);
     if (status == TP_STATUS_OK) {
@@ -511,19 +547,28 @@ tp_status gui_host_queue_drain(
             }
         }
     }
+    /* The queued cancel is consumed only once it is RESOLVED: admitted (OK), or
+     * permanently moot because there is no job left to cancel (NOT_FOUND). Any
+     * other rejection is transient, so the request survives for the next pump
+     * instead of being silently dropped and leaving the job running.
+     *
+     * A failed admission is REPORTED, never an early return. The job poll below
+     * is the only thing that clears the active lease, and a DRAINING host
+     * reaches READY_TO_CUTOVER only through it. Returning here would therefore
+     * stop the very drain the cancel exists to accelerate: a persistently
+     * failing cancel admission would keep re-failing on every pump, the poll
+     * would never run, and the host would stay DRAINING forever -- freezing
+     * New, Open and Exit. The status still travels back to the caller from the
+     * end of the drain, so the failure stays visible without being fatal. */
+    tp_status cancel_status = TP_STATUS_OK;
     if (queue->cancel_queued) {
-        const tp_status cancel_status =
+        const tp_status status =
             admit_cancel(queue, session, err);
-        /* The queued cancel is consumed only once it is RESOLVED: admitted (OK), or
-         * permanently moot because there is no job left to cancel (NOT_FOUND). Any
-         * other rejection is transient, so the request survives for the next pump
-         * instead of being silently dropped and leaving the job running. */
-        if (cancel_status == TP_STATUS_OK ||
-            cancel_status == TP_STATUS_NOT_FOUND) {
+        if (status == TP_STATUS_OK ||
+            status == TP_STATUS_NOT_FOUND) {
             queue->cancel_queued = false;
-        }
-        if (cancel_status != TP_STATUS_OK) {
-            return cancel_status;
+        } else {
+            cancel_status = status;
         }
     }
 
@@ -534,7 +579,7 @@ tp_status gui_host_queue_drain(
             queue->lifecycle =
                 GUI_HOST_READY_TO_CUTOVER;
         }
-        return TP_STATUS_OK;
+        return cancel_status;
     }
 
     /* The poll DTO is a pump side effect, not state: poll admits the job's
@@ -594,7 +639,7 @@ tp_status gui_host_queue_drain(
         queue->lifecycle =
             GUI_HOST_READY_TO_CUTOVER;
     }
-    return TP_STATUS_OK;
+    return cancel_status;
 }
 
 void gui_host_queue_reduce_observation(
@@ -752,6 +797,11 @@ void gui_host_queue__test_fail_next_poll(void) {
 
 void gui_host_queue__test_fail_next_take(void) {
     s_test_fail_next_take = true;
+}
+
+void gui_host_queue__test_fail_cancels(
+    unsigned count) {
+    s_test_fail_cancels = count;
 }
 
 bool gui_host_queue__test_active(

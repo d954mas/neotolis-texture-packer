@@ -72,6 +72,12 @@ void gui_host_queue_commit_cutover(
     uint64_t session_instance_generation);
 void gui_host_queue_commit_close(
     gui_host_queue *queue);
+/* Forced close for the host's exhausted shutdown budget: discards the pending
+ * start, the active lease and any staged completion, and reaches CLOSED from
+ * any lifecycle state. Unlike commit_close it asserts nothing about drainage --
+ * the session behind those leases is destroyed immediately afterwards. */
+void gui_host_queue_force_close(
+    gui_host_queue *queue);
 
 tp_status gui_host_queue_enqueue_pack(
     gui_host_queue *queue, tp_id128 atlas_id,
@@ -114,6 +120,9 @@ void gui_host_queue__test_retag_staged_request(
     gui_host_queue *queue, uint64_t request_id);
 void gui_host_queue__test_fail_next_poll(void);
 void gui_host_queue__test_fail_next_take(void);
+/* Makes the next `count` cancel admissions fail with a TRANSIENT rejection
+ * (never NOT_FOUND), so the drain's keep-queued path can be driven. */
+void gui_host_queue__test_fail_cancels(unsigned count);
 bool gui_host_queue__test_active(
     const gui_host_queue *queue);
 #endif

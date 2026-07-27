@@ -524,8 +524,9 @@ static void frame(void) {
      * Run it at the same between-frame semantic ingress boundary, never after
      * the immutable observation has been pinned for declaration. */
     gui_bench_tick();
-    /* --shot: dead-stick input, advance the shot frame counter, and run the blocking
-     * pack at the same pre-pin ingress boundary the bench suite uses. */
+    /* --shot: dead-stick input, advance the shot liveness counter, and run the blocking
+     * pack at the same pre-pin ingress boundary the bench suite uses. The pack itself is
+     * gated on RENDERED frames (gui_shot_note_rendered), not on this counter. */
     gui_shot_pre_pin_tick();
 
     gui_actions_pump_lifecycle();
@@ -666,6 +667,7 @@ static void frame(void) {
     nt_font_step();
 
     if (sprite_info) {
+        gui_shot_note_rendered(); /* screenshot mode: this frame reaches the render path */
         nt_gfx_update_buffer(s_frame_ubo, &uniforms, sizeof(uniforms));
         nt_gfx_bind_uniform_buffer(s_frame_ubo, 0);
 
@@ -1140,13 +1142,22 @@ static int gui_main_utf8(int argc, char *argv[]) {
      * the same non-blocking lifecycle owner. A persistently failing request or
      * pump must not spin the exit path at 100% CPU with a log line per iteration:
      * every iteration pumps the window, the failure log is rate-limited, and a
-     * bounded retry budget falls through to forced teardown. */
+     * bounded CONSECUTIVE-failure budget falls through to a forced teardown that
+     * really terminalizes and closes the owner. */
     int shutdown_failures = 0;
+    bool shutdown_forced = false;
     static const int k_shutdown_failure_budget = 600;
     static const int k_shutdown_log_every = 60;
     while (gui_project_lifecycle_state_query() !=
            GUI_PROJECT_LIFECYCLE_CLOSED) {
         tp_error shutdown_error = {{0}};
+        /* Every step of one iteration is a shutdown PREREQUISITE, so any of
+         * them failing is one failed attempt. Observation especially: the
+         * staged completion is classified only by an atomic observation, so a
+         * persistently failing observe is exactly as terminal as a failing
+         * pump -- counting only the pump left that case as an infinite
+         * DRAINING spin with no budget. */
+        bool iteration_failed = false;
         nt_window_poll();
         if (gui_project_lifecycle_state_query() ==
             GUI_PROJECT_LIFECYCLE_OPEN_IDLE) {
@@ -1154,6 +1165,7 @@ static int gui_main_utf8(int argc, char *argv[]) {
                 gui_project_lifecycle_begin_shutdown(
                     false, &shutdown_error);
             if (begin_status != TP_STATUS_OK) {
+                iteration_failed = true;
                 if (shutdown_failures %
                         k_shutdown_log_every ==
                     0) {
@@ -1164,59 +1176,70 @@ static int gui_main_utf8(int argc, char *argv[]) {
                             : tp_status_str(
                                   begin_status));
                 }
-                if (++shutdown_failures >=
-                    k_shutdown_failure_budget) {
+            }
+        } else {
+            const tp_status pump_status =
+                gui_project_lifecycle_pump(
+                    NULL, &shutdown_error);
+            if (pump_status != TP_STATUS_OK) {
+                iteration_failed = true;
+                if (shutdown_failures %
+                        k_shutdown_log_every ==
+                    0) {
                     nt_log_error(
-                        "GUI host shutdown gave up after %d failed requests; forcing teardown",
-                        shutdown_failures);
-                    break;
+                        "GUI host shutdown pump failed: %s",
+                        shutdown_error.msg[0]
+                            ? shutdown_error.msg
+                            : tp_status_str(
+                                  pump_status));
+                }
+            } else if (
+                gui_project_lifecycle_state_query() ==
+                GUI_PROJECT_LIFECYCLE_DRAINING) {
+                const tp_status observe_status =
+                    gui_project_frame_begin(
+                        &shutdown_error);
+                if (observe_status == TP_STATUS_OK) {
+                    gui_actions_poll_host_completion();
+                } else {
+                    iteration_failed = true;
+                    if (shutdown_failures %
+                            k_shutdown_log_every ==
+                        0) {
+                        nt_log_error(
+                            "GUI shutdown observation failed: %s",
+                            shutdown_error.msg[0]
+                                ? shutdown_error.msg
+                                : tp_status_str(
+                                      observe_status));
+                    }
+                }
+                if (gui_project_frame_is_pinned()) {
+                    gui_project_frame_end();
                 }
             }
+        }
+        if (!iteration_failed) {
+            /* CONSECUTIVE failures, not lifetime ones: a long drain that
+             * makes progress must not accumulate its way into a forced
+             * teardown. One clean iteration means the negotiation is alive. */
+            shutdown_failures = 0;
             continue;
         }
-
-        const tp_status pump_status =
-            gui_project_lifecycle_pump(
-                NULL, &shutdown_error);
-        if (pump_status != TP_STATUS_OK) {
-            if (shutdown_failures %
-                    k_shutdown_log_every ==
-                0) {
-                nt_log_error(
-                    "GUI host shutdown pump failed: %s",
-                    shutdown_error.msg[0]
-                        ? shutdown_error.msg
-                        : tp_status_str(
-                              pump_status));
-            }
-            if (++shutdown_failures >=
-                k_shutdown_failure_budget) {
-                nt_log_error(
-                    "GUI host shutdown gave up after %d failed pumps; forcing teardown",
-                    shutdown_failures);
-                break;
-            }
-            continue;
+        if (++shutdown_failures >=
+            k_shutdown_failure_budget) {
+            nt_log_error(
+                "GUI host shutdown gave up after %d consecutive failures; forcing teardown",
+                shutdown_failures);
+            shutdown_forced = true;
+            break;
         }
-        if (gui_project_lifecycle_state_query() ==
-            GUI_PROJECT_LIFECYCLE_DRAINING) {
-            const tp_status observe_status =
-                gui_project_frame_begin(
-                    &shutdown_error);
-            if (observe_status == TP_STATUS_OK) {
-                gui_actions_poll_host_completion();
-            } else {
-                nt_log_error(
-                    "GUI shutdown observation failed: %s",
-                    shutdown_error.msg[0]
-                        ? shutdown_error.msg
-                        : tp_status_str(
-                              observe_status));
-            }
-            if (gui_project_frame_is_pinned()) {
-                gui_project_frame_end();
-            }
-        }
+    }
+    if (shutdown_forced) {
+        /* Leaving the loop is not leaving the session: the teardown below and
+         * gui_project_shutdown both require a CLOSED owner, so the forced path
+         * must establish it rather than assume it. */
+        gui_project_lifecycle_force_close();
     }
 
     gui_canvas_shutdown(&s_canvas);

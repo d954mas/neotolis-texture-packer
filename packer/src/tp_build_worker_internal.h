@@ -69,6 +69,9 @@ tp_status tp_build_worker_run_opts(const tp_pack_settings *settings,
 /* Private-directory hygiene, shared with the outer job worker (which stages one
  * `.ntpack` per Pack request in its own `req-<hexpid>-<id>` directory under
  * work_dir). Both owners follow one naming contract so one reaper heals both.
+ * The pid in the name is always the pid whose death makes the directory garbage:
+ * the worker's own for `pkw-` staging, but the HOST's for `req-`, because a
+ * request directory outlives its worker until the host has read the artifact.
  *
  * tp_worker_remove_dir_tree: best-effort recursive removal that never descends
  * into a junction / directory symlink (it unlinks the link itself).

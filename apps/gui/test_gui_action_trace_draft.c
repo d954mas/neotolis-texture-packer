@@ -179,8 +179,112 @@ void test_atlas_draft_maps_every_scalar_component(void) {
     TEST_ASSERT_EQUAL_INT(0, atlas->shape);
 }
 
-/* USA-21 partial: Undo conflicts an active draft. The "Save/source/job
- * state does not conflict" half lives in the job and refresh targets. */
+/* Sibling of test_atlas_draft_maps_every_scalar_component for the descriptor
+ * rows the rest of the corpus never asserts: the three sprite overrides
+ * ROTATE / MAXVERT / EXTRUDE, slice9 slots 2 and 3 (only slots 0 and 1 are
+ * driven elsewhere), and the animation FLIP_V component as a REAL value change
+ * rather than a preserved foreign sibling. Same table-driven oracle shape: every
+ * row must reach IDLE in exactly one revision and land its own field. */
+void test_sprite_and_animation_drafts_map_every_uncovered_component(void) {
+    gui_sprite_ref sprite = add_test_sprite_ref(
+        "__uncovered_component_source__.png",
+        "uncovered-component-sprite.png");
+    const struct {
+        gui_sprite_edit_kind kind;
+        int component;
+        int value;
+    } edits[] = {
+        {GUI_SPRITE_EDIT_OVERRIDE,
+         GUI_SPRITE_OV_ROTATE, 0},
+        {GUI_SPRITE_EDIT_OVERRIDE,
+         GUI_SPRITE_OV_MAXVERT, 7},
+        {GUI_SPRITE_EDIT_OVERRIDE,
+         GUI_SPRITE_OV_EXTRUDE, 2},
+        {GUI_SPRITE_EDIT_SLICE9, 2, 33},
+        {GUI_SPRITE_EDIT_SLICE9, 3, 44},
+    };
+    for (size_t index = 0U;
+         index < sizeof edits / sizeof edits[0];
+         ++index) {
+        const int64_t revision =
+            tp_session_snapshot_revision(
+                gui_project_snapshot());
+        sprite.expected_revision = revision;
+        if (edits[index].kind ==
+            GUI_SPRITE_EDIT_SLICE9) {
+            gui_edit_sprite_slice9(
+                &sprite, edits[index].component,
+                edits[index].value);
+        } else {
+            gui_edit_sprite_override(
+                &sprite,
+                (gui_sprite_ov)edits[index].component,
+                edits[index].value);
+        }
+        gui_request_gesture_commit();
+        apply_pending();
+        TEST_ASSERT_EQUAL_INT(
+            GUI_EDIT_IDLE, gui_draft_phase());
+        TEST_ASSERT_EQUAL_INT64(
+            revision + 1,
+            tp_session_snapshot_revision(
+                gui_project_snapshot()));
+    }
+    const tp_snapshot_sprite *committed =
+        tp_session_snapshot_sprite_by_key(
+            gui_project_snapshot(), sprite.atlas_id,
+            sprite.source_id, sprite.source_key);
+    TEST_ASSERT_NOT_NULL(committed);
+    TEST_ASSERT_EQUAL_INT(
+        0, committed->override_allow_rotate);
+    TEST_ASSERT_EQUAL_INT(
+        7, committed->override_max_vertices);
+    TEST_ASSERT_EQUAL_INT(
+        2, committed->override_extrude);
+    TEST_ASSERT_EQUAL_UINT16(
+        33, committed->slice9_lrtb[2]);
+    TEST_ASSERT_EQUAL_UINT16(
+        44, committed->slice9_lrtb[3]);
+
+    const tp_session_snapshot *snapshot =
+        gui_project_snapshot();
+    const tp_snapshot_atlas *atlas =
+        tp_session_snapshot_atlas_at(snapshot, 0);
+    TEST_ASSERT_NOT_NULL(atlas);
+    TEST_ASSERT_EQUAL_INT(
+        0, (gui_project_create_animation(
+               atlas->id,
+               tp_session_snapshot_revision(snapshot),
+               "uncovered-flip", NULL, 0))
+               .visible_index);
+    gui_animation_ref animation = {0};
+    TEST_ASSERT_TRUE(
+        trace_animation_ref_at(0, 0, &animation));
+    const int64_t animation_revision =
+        tp_session_snapshot_revision(
+            gui_project_snapshot());
+    gui_edit_anim_flip(&animation, 1, true);
+    gui_request_gesture_commit();
+    apply_pending();
+    TEST_ASSERT_EQUAL_INT(
+        GUI_EDIT_IDLE, gui_draft_phase());
+    TEST_ASSERT_EQUAL_INT64(
+        animation_revision + 1,
+        tp_session_snapshot_revision(
+            gui_project_snapshot()));
+    const tp_snapshot_animation *committed_animation =
+        tp_session_snapshot_animation_by_id(
+            gui_project_snapshot(), animation.atlas_id,
+            animation.animation_id);
+    TEST_ASSERT_NOT_NULL(committed_animation);
+    TEST_ASSERT_TRUE(committed_animation->flip_v);
+    TEST_ASSERT_FALSE(committed_animation->flip_h);
+}
+
+/* The LOCAL Undo trigger is spec §12.4's blocked-with-choice row, not the
+ * event-impact subject of §8.3: a blocked command never reaches the conflict
+ * path, so this case deliberately carries no verification-id tag. The
+ * conflicting Undo is the FOREIGN one, tagged below. */
 void test_undo_blocks_without_submitting_active_atlas_draft(void) {
     const tp_session_snapshot *snapshot =
         gui_project_snapshot();
@@ -203,6 +307,64 @@ void test_undo_blocks_without_submitting_active_atlas_draft(void) {
     TEST_ASSERT_EQUAL_STRING(
         "Apply or discard the active edit before Undo.",
         s_status);
+    gui_draft_discard();
+}
+
+/* USA-21 partial: an Undo admitted from ANOTHER view or controller is a
+ * revision-changing event and conflicts an active draft. Limit: the
+ * "Save/source/job state does not conflict" half lives in the sibling targets. */
+void test_foreign_undo_conflicts_active_atlas_draft(void) {
+    /* A committed step to undo, made before the draft exists. */
+    const tp_session_snapshot *snapshot =
+        gui_project_snapshot();
+    const tp_snapshot_atlas *atlas =
+        tp_session_snapshot_atlas_at(snapshot, 0);
+    TEST_ASSERT_NOT_NULL(atlas);
+    const tp_id128 atlas_id = atlas->id;
+    char foreign_name[] = "undo-me";
+    tp_operation rename = {
+        .kind = TP_OP_ATLAS_RENAME,
+        .atlas_id = {{0}},
+        .u.atlas_rename.name = foreign_name,
+    };
+    rename.atlas_id = atlas_id;
+    apply_foreign_operation(
+        &rename, "a5000000000000000000000000000001");
+    TEST_ASSERT_TRUE(gui_project_can_undo());
+
+    snapshot = gui_project_snapshot();
+    const tp_snapshot_atlas *based =
+        tp_session_snapshot_atlas_by_id(
+            snapshot, atlas_id);
+    TEST_ASSERT_NOT_NULL(based);
+    const int draft_padding = based->padding + 3;
+    gui_edit_atlas_setting(
+        atlas_id,
+        tp_session_snapshot_revision(snapshot),
+        GUI_ATLAS_PADDING, draft_padding, 0.0F);
+    TEST_ASSERT_EQUAL_INT(
+        GUI_EDIT_EDITING, gui_draft_phase());
+
+    /* Not do_undo(): that is the LOCAL trigger, which §12.4 blocks. This is an
+     * Undo admitted straight into the session by another owner. */
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_session_undo(
+            gui_project__test_session(), &error));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_project_frame_begin(&error));
+    gui_project_frame_end();
+
+    TEST_ASSERT_EQUAL_INT(
+        GUI_EDIT_CONFLICTED, gui_draft_phase());
+    int retained = 0;
+    TEST_ASSERT_TRUE(
+        gui_atlas_edit_value(
+            atlas_id, GUI_ATLAS_PADDING,
+            &retained, NULL));
+    TEST_ASSERT_EQUAL_INT(draft_padding, retained);
     gui_draft_discard();
 }
 
@@ -1249,7 +1411,10 @@ int main(int argc, char **argv) {
     UNITY_BEGIN();
     RUN_TEST(test_atlas_draft_updates_then_undo_redo_trace_is_exact);
     RUN_TEST(test_atlas_draft_maps_every_scalar_component);
+    RUN_TEST(
+        test_sprite_and_animation_drafts_map_every_uncovered_component);
     RUN_TEST(test_undo_blocks_without_submitting_active_atlas_draft);
+    RUN_TEST(test_foreign_undo_conflicts_active_atlas_draft);
     RUN_TEST(test_foreign_model_transaction_conflicts_active_atlas_draft);
     RUN_TEST(
         test_event_gap_resync_conflicts_active_draft_and_retains_visible_value);

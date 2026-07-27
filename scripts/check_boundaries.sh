@@ -744,11 +744,20 @@ else
     trap - EXIT
 fi
 
-# 22. Spec §16 verification-id traceability. Every USA-01..USA-32 must be claimed
-#     by at least one `/* USA-nn ... */` tag on the test that owns it, under apps/
-#     or packer/tests. Structurally partial coverage is recorded in the tag with a
-#     "partial:" note and still counts as owned -- the gate proves a requirement
-#     has not silently lost its last test, not that the test is exhaustive.
+# 22. Spec §16 verification-id traceability. Every USA-01..USA-32 must be OWNED,
+#     and ownership has exactly two classes:
+#       test -- a `/* USA-nn ... */` tag within 3 lines of the `void test_`
+#               definition it claims, in a TEST source file;
+#       gate -- a registry line in a build check (cmake/, scripts/) carrying both
+#               the id and the literal marker `owner: gate`, for the handful of
+#               requirements whose proof IS a build gate and not a runtime test.
+#     Partial coverage is recorded in the tag with a "partial:" note and still
+#     counts as owned -- the gate proves a requirement has not silently lost its
+#     last owner, not that the owner is exhaustive.
+#
+#     The corpus used to be a bare `grep -r USA- apps packer/tests`, which any
+#     production comment, CMakeLists note, or the gate's own self-test text
+#     satisfied: an id could keep its tag long after its last test was deleted.
 _usa_ids() {
     _usa_i=1
     while [ "$_usa_i" -le 32 ]; do
@@ -764,15 +773,67 @@ _usa_missing() {
             printf '%s\n' "$_usa_id"
     done
 }
-_usa_found=$(grep -rhoE 'USA-[0-9]{2}' apps packer/tests 2>/dev/null | sort -u)
+_usa_test_sources() {
+    ls apps/*/test_*.c apps/gui/gui_selftest.c packer/tests/*.c 2>/dev/null
+}
+# Ids claimed by a tag adjacent to the `void test_` definition it owns. A tag
+# with no test under it (deleted owner) contributes nothing.
+_usa_test_owned() {
+    awk '
+        FNR == 1 { p1 = ""; p2 = ""; p3 = "" }
+        {
+            if ($0 ~ /(^|[^A-Za-z0-9_])void[ \t]+test_[A-Za-z0-9_]*[ \t]*\(/) {
+                s = p3 " " p2 " " p1 " " $0
+                while (match(s, /USA-[0-9][0-9]/)) {
+                    print substr(s, RSTART, RLENGTH)
+                    s = substr(s, RSTART + RLENGTH)
+                }
+            }
+            p3 = p2; p2 = p1; p1 = $0
+        }
+    ' "$@" 2>/dev/null | sort -u
+}
+# Ids explicitly registered as build-gate-owned.
+_usa_gate_owned() {
+    grep -hoE 'USA-[0-9]{2}.*owner: gate' "$@" 2>/dev/null |
+        grep -oE 'USA-[0-9]{2}' | sort -u
+}
+_usa_found=$( { _usa_test_owned $(_usa_test_sources)
+                _usa_gate_owned cmake/*.cmake scripts/*.sh; } | sort -u)
 r22=$(_usa_missing "$_usa_found")
-[ -n "$r22" ] && hit "R22 spec §16 verification id with no owning test" "$r22"
+[ -n "$r22" ] && hit "R22 spec §16 verification id with no owning test or gate" "$r22"
 
-# Self-test: the scanner recognizes the tag form, the detector fires on an id
-# whose owner disappeared, and it stays quiet on a fully covered set.
-if ! printf '/* USA-07 partial: reverse-order admission. */\n' |
-    grep -qoE 'USA-[0-9]{2}'; then
-    hit "R22-selftest" "R22 scanner failed to recognize a USA tag comment"
+# Seeded self-test (R21 shape): a scratch tree proves each ownership class
+# accepts what it must and, above all, that the gate FAILS when the owning test
+# disappears and only its tag is left behind.
+_r22_dir=$(mktemp -d 2>/dev/null)
+if [ -z "$_r22_dir" ] || [ ! -d "$_r22_dir" ]; then
+    hit "R22-selftest" "R22 self-test could not create a scratch dir (mktemp failed)"
+else
+    trap 'rm -rf "$_r22_dir"' EXIT
+    printf '/* USA-77 partial: owned. */\nvoid test_owned(void) {\n}\n' \
+        >"$_r22_dir/test_owned.c"
+    printf '/* USA-77: the test that owned this was deleted. */\n' \
+        >"$_r22_dir/test_orphan.c"
+    printf 'void helper(void) { /* USA-77 in production prose */ }\n' \
+        >"$_r22_dir/prod.c"
+    printf '# USA-77 named in a build file with no owner marker\n' \
+        >"$_r22_dir/note.cmake"
+    printf '# USA-78 owner: gate -- proven by a build check\n' \
+        >"$_r22_dir/gate.cmake"
+
+    [ "$(_usa_test_owned "$_r22_dir/test_owned.c")" = "USA-77" ] ||
+        hit "R22-selftest" "R22 failed to credit a tag adjacent to its owning test"
+    [ -n "$(_usa_test_owned "$_r22_dir/test_orphan.c")" ] &&
+        hit "R22-selftest" "R22 credited a tag whose owning test disappeared"
+    [ -n "$(_usa_test_owned "$_r22_dir/prod.c")" ] &&
+        hit "R22-selftest" "R22 credited a production comment as a test owner"
+    [ -n "$(_usa_gate_owned "$_r22_dir/note.cmake")" ] &&
+        hit "R22-selftest" "R22 credited a build-file note with no owner: gate marker"
+    [ "$(_usa_gate_owned "$_r22_dir/gate.cmake")" = "USA-78" ] ||
+        hit "R22-selftest" "R22 failed to credit an explicit gate owner"
+    rm -rf "$_r22_dir"
+    trap - EXIT
 fi
 if [ -z "$(_usa_missing "$(_usa_ids | grep -v '^USA-07$')")" ]; then
     hit "R22-selftest" "R22 detector failed to catch an id with no owning test"

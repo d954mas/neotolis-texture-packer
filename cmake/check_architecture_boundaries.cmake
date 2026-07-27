@@ -87,9 +87,12 @@ foreach(_candidate IN LISTS _arch_view_candidates)
     endif()
 endforeach()
 
-function(_arch_hit rule relative_path line_number)
+# A hit records WHICH forbidden symbol fired, not only where. The per-site debt
+# allowances below are expressed in exactly that vocabulary, so an exempted file
+# cannot quietly grow a new symbol of the same forbidden family.
+function(_arch_hit rule relative_path line_number symbol)
     get_property(_hits GLOBAL PROPERTY "ARCH_HITS_${rule}")
-    list(APPEND _hits "${relative_path}:${line_number}")
+    list(APPEND _hits "${relative_path}:${line_number}:${symbol}")
     set_property(GLOBAL PROPERTY "ARCH_HITS_${rule}" "${_hits}")
 endfunction()
 
@@ -160,19 +163,23 @@ foreach(_source IN LISTS _arch_sources)
             # Match the symbol token, not the opening parenthesis, so a
             # multiline call cannot bypass the boundary.
             if(_trimmed MATCHES "(^|[^A-Za-z0-9_])(tp_session_(apply|undo|redo|save|save_as|save_new|discard|invalidate_sources|require_recovery|pack_job_start|export_start|job_cancel|job_take_result)|gui_project_(new|open|save|save_as|discard|undo|redo|invalidate_sources)|gui_project_submit_[A-Za-z0-9_]*|gui_session_client_[A-Za-z0-9_]*)([^A-Za-z0-9_]|$)")
-                _arch_hit(VIEW_ADMISSION "${_relative}" "${_line_number}")
+                _arch_hit(VIEW_ADMISSION "${_relative}" "${_line_number}"
+                          "${CMAKE_MATCH_2}")
             endif()
 
             if(_trimmed MATCHES "(^|[^A-Za-z0-9_])(tp_scan_[A-Za-z0-9_]*|tp_image_[A-Za-z0-9_]*|tp_pack_input_[A-Za-z0-9_]*)([^A-Za-z0-9_]|$)")
-                _arch_hit(VIEW_IO "${_relative}" "${_line_number}")
+                _arch_hit(VIEW_IO "${_relative}" "${_line_number}"
+                          "${CMAKE_MATCH_2}")
             endif()
 
             if(_trimmed MATCHES "(^|[^A-Za-z0-9_])(ShellExecute[A-Z]*|CreateProcess[A-Z]*|nt_clipboard_[A-Za-z0-9_]*|tinyfd_[A-Za-z0-9_]*)([^A-Za-z0-9_]|$)")
-                _arch_hit(VIEW_PLATFORM "${_relative}" "${_line_number}")
+                _arch_hit(VIEW_PLATFORM "${_relative}" "${_line_number}"
+                          "${CMAKE_MATCH_2}")
             endif()
 
             if(_trimmed MATCHES "(^|[^A-Za-z0-9_])(tp_model_[A-Za-z0-9_]*|tp_project_[A-Za-z0-9_]*|tp_validate_[A-Za-z0-9_]*|tp_exporter_(count|at)|gui_pack_(preview_diff|result|find_sprite_ref))([^A-Za-z0-9_]|$)")
-                _arch_hit(VIEW_MODEL_POLICY "${_relative}" "${_line_number}")
+                _arch_hit(VIEW_MODEL_POLICY "${_relative}" "${_line_number}"
+                          "${CMAKE_MATCH_2}")
             endif()
         endif()
     endforeach()
@@ -186,48 +193,58 @@ foreach(_source IN LISTS _arch_sources)
     string(REGEX REPLACE "\\\\[ \t]*[\r\n]+" "" _directives "${_directives}")
     if(_is_view
        AND _directives MATCHES "#[ \t]*include[ \t]*[<\"](tp_core/tp_(session|job)\\.h|gui_project\\.h|gui_session_client\\.h)[>\"]")
-        _arch_hit(VIEW_ADMISSION "${_relative}" "0")
+        _arch_hit(VIEW_ADMISSION "${_relative}" "0"
+                  "#include:${CMAKE_MATCH_1}")
     endif()
     if(_is_view
        AND _directives MATCHES "#[ \t]*include[ \t]*[<\"](tp_core/tp_(scan|image|input|pack_hash)\\.h|gui_scan\\.h)[>\"]")
-        _arch_hit(VIEW_IO "${_relative}" "0")
+        _arch_hit(VIEW_IO "${_relative}" "0"
+                  "#include:${CMAKE_MATCH_1}")
     endif()
     if(_is_view
        AND _directives MATCHES "#[ \t]*include[ \t]*[<\"](windows\\.h|clipboard/nt_clipboard\\.h|tinyfiledialogs\\.h)[>\"]")
-        _arch_hit(VIEW_PLATFORM "${_relative}" "0")
+        _arch_hit(VIEW_PLATFORM "${_relative}" "0"
+                  "#include:${CMAKE_MATCH_1}")
     endif()
     if(_is_view
-       AND _directives MATCHES "#[ \t]*include[ \t]*[<\"]tp_core/tp_(model|project|operation|validate|client_capability|export)\\.h[>\"]")
-        _arch_hit(VIEW_MODEL_POLICY "${_relative}" "0")
+       AND _directives MATCHES "#[ \t]*include[ \t]*[<\"](tp_core/tp_(model|project|operation|validate|client_capability|export)\\.h)[>\"]")
+        _arch_hit(VIEW_MODEL_POLICY "${_relative}" "0"
+                  "#include:${CMAKE_MATCH_1}")
     endif()
     if(_is_core
        AND _directives MATCHES "#[ \t]*include[ \t]*[<\"][^>\"]*(apps/|gui_|cli_|mcp_|devapi_|dev_api_|jsonrpc|transport)")
-        _arch_hit(CORE_FRONTEND "${_relative}" "0")
+        _arch_hit(CORE_FRONTEND "${_relative}" "0"
+                  "#include:${CMAKE_MATCH_1}")
     endif()
 
     # String literals are irrelevant to symbol/call checks below.
     string(REGEX REPLACE "\"([^\"\\\\]|\\\\.)*\"" "\"\"" _scan "${_scan}")
     if(_is_view
        AND _scan MATCHES "(^|[^A-Za-z0-9_])(fopen|open|stat|opendir|readdir|FindFirstFile[A-Z]*)[ \t\r\n]*\\(")
-        _arch_hit(VIEW_IO "${_relative}" "0")
+        _arch_hit(VIEW_IO "${_relative}" "0"
+                  "${CMAKE_MATCH_2}")
     endif()
     if(_is_view
        AND _scan MATCHES "(^|[^A-Za-z0-9_])(system|popen)[ \t\r\n]*\\(")
-        _arch_hit(VIEW_PLATFORM "${_relative}" "0")
+        _arch_hit(VIEW_PLATFORM "${_relative}" "0"
+                  "${CMAKE_MATCH_2}")
     endif()
     if(_is_core
-       AND _scan MATCHES "(^|[^A-Za-z0-9_])(gui_|cli_|mcp_|devapi_)[A-Za-z0-9_]*[ \t\r\n]*\\(")
-        _arch_hit(CORE_FRONTEND "${_relative}" "0")
+       AND _scan MATCHES "(^|[^A-Za-z0-9_])((gui_|cli_|mcp_|devapi_)[A-Za-z0-9_]*)[ \t\r\n]*\\(")
+        _arch_hit(CORE_FRONTEND "${_relative}" "0"
+                  "${CMAKE_MATCH_2}")
     endif()
     if(_is_async
        AND _scan MATCHES "(^|[^A-Za-z0-9_])((const[ \t\r\n]+)?tp_session)[ \t\r\n]*\\*[ \t\r\n]*[A-Za-z_][A-Za-z0-9_]*")
-        _arch_hit(ASYNC_RAW_SESSION "${_relative}" "0")
+        _arch_hit(ASYNC_RAW_SESSION "${_relative}" "0"
+                  "tp_session-pointer")
     endif()
     if(_relative MATCHES "^apps/gui/gui_host_queue\\.(c|h)$"
        AND _scan MATCHES "typedef[ \t\r\n]+struct[ \t\r\n]+gui_host_queue[ \t\r\n]*\\{[^}]*((const[ \t\r\n]+)?tp_session)[ \t\r\n]*\\*[ \t\r\n]*[A-Za-z_][A-Za-z0-9_]*[ \t\r\n]*;")
         _arch_hit(
             HOST_QUEUE_RAW_SESSION_STORAGE
-            "${_relative}" "0")
+            "${_relative}" "0"
+            "retained-tp_session-member")
     endif()
 endforeach()
 
@@ -260,7 +277,7 @@ function(_arch_assert_rule rule remove_in)
     foreach(_hit IN LISTS _hits)
         set(_allowed false)
         foreach(_allowed_path IN LISTS _allowed_paths)
-            if(_hit MATCHES "^${_allowed_path}:[0-9]+$")
+            if(_hit MATCHES "^${_allowed_path}:[0-9]+:")
                 set(_allowed true)
                 break()
             endif()
@@ -273,69 +290,99 @@ function(_arch_assert_rule rule remove_in)
 endfunction()
 
 # Non-gating debt report (AGENTS.md Simplification Policy: inventory, not a
-# gate). Every file listed as exempt below has pre-existing debt with a named
-# rationale, so the rule as written can never fail on it — gating it would be
-# a rule that neutralizes itself. Its hits are printed instead. Deleting debt
-# stays green because nothing is compared against a baseline: there are no
-# occurrence counts in any exemption, only in the printed report.
+# gate) with PER-SITE allowances. A whole-file exemption neutralizes its own
+# rule twice over: it makes the rule unable to fail on that file, AND it lets
+# the exempted view accrue unlimited NEW debt of the same forbidden family.
 #
-# The rule is NOT dead, though: a view TU that is not on the exemption list
-# must have zero hits, so a new view cannot accrue this debt silently.
+# So the allowance is not "how many" (AGENTS.md forbids occurrence counts and
+# ratchets outright) but "WHICH": every entry pins one file to the exact
+# forbidden-API symbols that file already uses, with a rationale. Consequences:
+#   - deleting debt stays green (nothing is compared against a baseline);
+#   - a NEW symbol of the forbidden family fails even inside an exempted file;
+#   - a file that is not listed at all must still have zero hits.
+#
+# Entry format: "<file-regex>|<symbol>,<symbol>,...". Include-directive hits use
+# the symbol form "#include:<header>"; whole-file call scans use the call name.
+# The whole-file scans report the FIRST match in a file, so an entry lists every
+# forbidden header/call that file legitimately has — otherwise merely reordering
+# includes would move the reported hit and fail a green tree. Per-LINE symbol
+# hits are reported individually and carry no such caveat.
 function(_arch_report_debt rule note)
     get_property(_hits GLOBAL PROPERTY "ARCH_HITS_${rule}")
-    set(_exempt_paths ${ARGN})
-    set(_files "")
+    set(_entries "${ARGN}")
+    set(_sites "")
     foreach(_hit IN LISTS _hits)
-        string(REGEX REPLACE ":[0-9]+$" "" _file "${_hit}")
+        if(NOT _hit MATCHES "^([^:]+):([0-9]+):(.*)$")
+            message(FATAL_ERROR
+                "${rule}: malformed hit record '${_hit}'")
+        endif()
+        set(_file "${CMAKE_MATCH_1}")
+        set(_line "${CMAKE_MATCH_2}")
+        set(_symbol "${CMAKE_MATCH_3}")
         set(_allowed false)
-        foreach(_exempt_path IN LISTS _exempt_paths)
-            if(_file MATCHES "^${_exempt_path}$")
-                set(_allowed true)
-                break()
+        foreach(_entry IN LISTS _entries)
+            if(NOT _entry MATCHES "^([^|]+)\\|(.*)$")
+                message(FATAL_ERROR
+                    "${rule}: malformed debt entry '${_entry}'")
             endif()
+            set(_entry_file "${CMAKE_MATCH_1}")
+            set(_entry_symbols "${CMAKE_MATCH_2}")
+            if(NOT _file MATCHES "^${_entry_file}$")
+                continue()
+            endif()
+            string(REPLACE "," ";" _allowed_symbols
+                   "${_entry_symbols}")
+            if("${_symbol}" IN_LIST _allowed_symbols)
+                set(_allowed true)
+            endif()
+            break()
         endforeach()
         if(NOT _allowed)
             message(FATAL_ERROR
-                "${rule} violation in a file with no ${note} debt "
-                "exemption: ${_hit}")
+                "${rule} violation: ${_file}:${_line} uses '${_symbol}', "
+                "which is not an allowed ${note} debt site. Exemptions name "
+                "the exact symbols a file already uses, never the whole file, "
+                "so a NEW symbol of this family fails here too. Remove the "
+                "dependency, or add the symbol with a written rationale.")
         endif()
-        list(APPEND _files "${_file}")
+        list(APPEND _sites "${_file} ${_symbol}")
     endforeach()
-    if(NOT _files)
+    if(NOT _sites)
         message(STATUS "debt ${rule}: none")
         return()
     endif()
-    set(_unique ${_files})
-    list(SORT _unique)
-    list(REMOVE_DUPLICATES _unique)
-    foreach(_file IN LISTS _unique)
-        set(_count 0)
-        foreach(_entry IN LISTS _files)
-            if(_entry STREQUAL _file)
-                math(EXPR _count "${_count} + 1")
-            endif()
-        endforeach()
-        message(STATUS "debt ${rule}: ${_file} (${_count})")
+    list(SORT _sites)
+    list(REMOVE_DUPLICATES _sites)
+    foreach(_site IN LISTS _sites)
+        message(STATUS "debt ${rule}: ${_site}")
     endforeach()
 endfunction()
 
+# USA-25 owner: gate. Spec §16's "boundary checks reject mutation, filesystem,
+# platform, and business policy in views" is a statement ABOUT a build check, so
+# its owner is this file's four VIEW_* rules -- there is no runtime test that can
+# prove it. apps/gui/test_gui_canonical_identity.c carries the closest
+# behavioural companion (no source decode on the UI thread), but a companion is
+# not an owner. scripts/check_boundaries.sh R22 reads this line.
 _arch_assert_rule(VIEW_ADMISSION "R2c/R2d")
 _arch_assert_rule(VIEW_IO "SR-BASE/PV-tree-list")
+# pre-SR-BASE debt: the chrome view owns the menu/dialog seam and reaches the
+# OS shell and clipboard directly; the seam moves behind the host owner later.
+# `system` is the "reveal in file manager" helper, ShellExecute* its Win32 half.
 _arch_report_debt(VIEW_PLATFORM "PLATFORM-SEAM/PV-chrome"
-                  # pre-SR-BASE debt: the chrome view owns the menu/dialog
-                  # seam and calls the platform file dialog and clipboard
-                  # directly; the seam moves behind the host owner later.
-                  "apps/gui/gui_view_chrome\\.c")
+                  "apps/gui/gui_view_chrome\\.c|#include:windows.h,#include:clipboard/nt_clipboard.h,system,ShellExecute,ShellExecuteA,ShellExecuteW,nt_clipboard_available,nt_clipboard_set_text")
 _arch_report_debt(VIEW_MODEL_POLICY "PV-settings/RESULT-INDEX"
                   # pre-SR-BASE debt: the canvas view reads pack/result model
-                  # data (gui_pack_result, sprite-ref lookup) to draw.
-                  "apps/gui/gui_view_canvas\\.c"
-                  # pre-SR-BASE debt: the chrome view reads project/model
-                  # state for its title and status affordances.
-                  "apps/gui/gui_view_chrome\\.c"
-                  # pre-SR-BASE debt: tp_validate/tp_exporter reads over the
-                  # pending PV-settings slice live in the settings view.
-                  "apps/gui/gui_view_settings\\.c")
+                  # data (gui_pack_result, preview diff) to draw, and the
+                  # exporter registry to fill its preview-target selector.
+                  "apps/gui/gui_view_canvas\\.c|#include:tp_core/tp_export.h,tp_exporter_count,tp_exporter_at,gui_pack_result,gui_pack_preview_diff"
+                  # pre-SR-BASE debt: the chrome view reads the exporter
+                  # registry for the export modal's target dropdown.
+                  "apps/gui/gui_view_chrome\\.c|#include:tp_core/tp_export.h,tp_exporter_count,tp_exporter_at"
+                  # pre-SR-BASE debt: tp_validate/tp_exporter reads plus the
+                  # effective-shape projection over the pending PV-settings
+                  # slice live in the settings view.
+                  "apps/gui/gui_view_settings\\.c|#include:tp_core/tp_export.h,#include:tp_core/tp_validate.h,tp_exporter_count,tp_exporter_at,tp_validate_session_snapshot_target,tp_project_sprite_effective_shape,gui_pack_result,gui_pack_find_sprite_ref")
 _arch_assert_rule(CORE_FRONTEND "R1a/R1b")
 _arch_assert_rule(ASYNC_RAW_SESSION "R1c/R2b")
 _arch_assert_rule(
@@ -842,27 +889,77 @@ _arch_assert_absent(
 # makes the fence load-bearing.
 #
 # Two halves, because either one alone can be satisfied trivially:
-# 1. the guard still exists in the four files that own the seam, and
+# 1. the guarded SYMBOL is inside a TP_ENABLE_TEST_SEAMS conditional in each of
+#    the four files that own the seam, and
 # 2. no other shipping TU names either symbol.
-function(_arch_assert_present relative_path pattern why)
+#
+# Half 1 used to be a whole-file substring search for "TP_ENABLE_TEST_SEAMS",
+# which any unrelated seam elsewhere in the file satisfied — including the very
+# comment describing the rule. The check below is bound to the symbol instead:
+# the file is walked with a conditional-directive depth counter, and every
+# non-comment line naming the symbol must sit inside a live
+# `#ifdef TP_ENABLE_TEST_SEAMS` (or `#if defined(TP_ENABLE_TEST_SEAMS)`) region.
+# The depth model is deliberately simple — it tracks nesting and treats an
+# `#else`/`#elif` at the guard's own depth as leaving the fence — and it does not
+# evaluate compound conditions beyond a leading `defined(...)` test.
+function(_arch_assert_seam_fenced relative_path symbol why)
     set(_path "${_arch_root}/${relative_path}")
     if(NOT EXISTS "${_path}")
         message(FATAL_ERROR
             "${why} guard lost its file: ${relative_path} does not exist.")
     endif()
-    file(READ "${_path}" _source)
-    if(NOT _source MATCHES "${pattern}")
+    file(STRINGS "${_path}" _lines)
+    set(_depth 0)
+    set(_seam_depths "")
+    set(_found false)
+    set(_line_number 0)
+    foreach(_line IN LISTS _lines)
+        math(EXPR _line_number "${_line_number} + 1")
+        string(STRIP "${_line}" _trimmed)
+        if(_trimmed MATCHES "^#[ \t]*(if|ifdef|ifndef)([^A-Za-z0-9_]|$)")
+            math(EXPR _depth "${_depth} + 1")
+            if(_trimmed MATCHES "^#[ \t]*ifdef[ \t]+TP_ENABLE_TEST_SEAMS[ \t]*$"
+               OR _trimmed MATCHES "^#[ \t]*if[ \t]+defined[ \t]*\\([ \t]*TP_ENABLE_TEST_SEAMS[ \t]*\\)")
+                list(APPEND _seam_depths "${_depth}")
+            endif()
+        elseif(_trimmed MATCHES "^#[ \t]*endif")
+            list(REMOVE_ITEM _seam_depths "${_depth}")
+            if(_depth GREATER 0)
+                math(EXPR _depth "${_depth} - 1")
+            endif()
+        elseif(_trimmed MATCHES "^#[ \t]*(else|elif)")
+            list(REMOVE_ITEM _seam_depths "${_depth}")
+        elseif(_trimmed MATCHES "^(//|/\\*|\\*)")
+            # comment line: never a declaration site
+        elseif(_trimmed MATCHES
+               "(^|[^A-Za-z0-9_])${symbol}([^A-Za-z0-9_]|$)")
+            set(_found true)
+            if(NOT _seam_depths)
+                message(FATAL_ERROR
+                    "${why}: ${relative_path}:${_line_number} names "
+                    "${symbol} OUTSIDE a #ifdef TP_ENABLE_TEST_SEAMS fence, "
+                    "so the seam is reachable from a shipping build.")
+            endif()
+        endif()
+    endforeach()
+    if(NOT _found)
         message(FATAL_ERROR
-            "${why}: ${relative_path} no longer contains ${pattern}")
+            "${why}: ${relative_path} no longer names ${symbol}, so the fence "
+            "around it proves nothing. Retarget or delete the rule.")
     endif()
 endfunction()
 
 foreach(_path IN ITEMS packer/src/tp_session.c
-                       packer/src/tp_job_owner_internal.h
-                       packer/src/tp_session_job_observation.c
+                       packer/src/tp_job_owner_internal.h)
+    _arch_assert_seam_fenced(
+        "${_path}" "tp_session_job_attach_internal"
+        "P6 job-owner seams stay compiled out of shipping")
+endforeach()
+foreach(_path IN ITEMS packer/src/tp_session_job_observation.c
                        packer/src/tp_session_job_observation_internal.h)
-    _arch_assert_present("${_path}" "TP_ENABLE_TEST_SEAMS"
-                         "P6 job-owner seams stay compiled out of shipping")
+    _arch_assert_seam_fenced(
+        "${_path}" "tp_session_job_observation_begin_internal"
+        "P6 job-owner seams stay compiled out of shipping")
 endforeach()
 
 file(GLOB_RECURSE _job_seam_sources LIST_DIRECTORIES false

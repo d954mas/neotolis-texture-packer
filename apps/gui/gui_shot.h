@@ -30,9 +30,15 @@ bool gui_shot_active(void);
 
 /* frame(), at the between-frame ingress boundary (beside gui_bench_tick) BEFORE the observation is
  * pinned: dead-stick the mouse pointers so the live cursor can't add hover/wheel state to the
- * capture, advance the shot frame counter (the ONLY place it advances), and run the blocking pack --
- * a model mutation, so it must never run inside the pinned frame. No-op unless --shot is active. */
+ * capture, advance the total-frame liveness counter (the ONLY place it advances), and run the
+ * blocking pack -- a model mutation, so it must never run inside the pinned frame. The pack is
+ * gated on RENDERED frames. No-op unless --shot is active. */
 void gui_shot_pre_pin_tick(void);
+
+/* frame(), inside the can_render/sprite_info block: record that this frame actually reached the
+ * render path. The pack/select/capture thresholds count RENDERED frames, not elapsed ones -- a
+ * pre-bootstrap frame draws nothing, so counting it captured a blank PNG on a slow start. */
+void gui_shot_note_rendered(void);
 
 /* frame(), inside can_render after build_rows: select the first packed region and bind the dev
  * stale/packing/preview states, all of which need the built row model. No-op unless --shot. */

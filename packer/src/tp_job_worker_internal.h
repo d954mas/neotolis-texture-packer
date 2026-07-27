@@ -41,12 +41,21 @@ extern "C" {
 #define TP_JOB_WORKER_PROTO_MAX_RESULT_COUNT 1000000
 #define TP_JOB_WORKER_PROTO_MAX_NAME_ENTRIES 65536U
 #define TP_JOB_WORKER_PROTO_MAX_NAME_BYTES 4096U
+/* Largest Pack artifact the transport admits, and therefore the largest the host
+ * will ever allocate in one piece for it (tp_job.c TP_JOB_ARTIFACT_MAX_BYTES).
+ * The size arrives as a u64 from a separate process, so without a cap a corrupt
+ * or absurd reply turns straight into a multi-GB malloc. 2 GiB is far above any
+ * real multi-page atlas and still safely below a 32-bit size_t. */
+#define TP_JOB_WORKER_PROTO_MAX_ARTIFACT_BYTES ((uint64_t)2U << 30)
 /* No payload is artifact-sized any more, so the frame cap is the largest field
  * the codec still admits (the request's project JSON) plus 16 MiB for every
- * fixed header, path, error and name-map byte around it. A Pack name map that
- * overshoots this (>= 65536 sprites averaging 1.25 KiB of name) fails closed on
- * encode as a structured terminal error, never a truncated frame. The stream cap
- * adds one more 16 MiB window for the progress frames preceding the terminal. */
+ * fixed header, path, error and name-map byte around it. Every payload size is
+ * accumulated against this cap (add_size), so a Pack name map that overshoots it
+ * (>= 65536 sprites averaging 1.25 KiB of name) makes the encoder return a
+ * structured OUT_OF_BOUNDS error, never a truncated frame; the worker turns that
+ * error into a payload-less FAILED terminal rather than exiting frameless. The
+ * stream cap adds one more 16 MiB window for the progress frames preceding the
+ * terminal. */
 #define TP_JOB_WORKER_PROTO_MAX_FRAME_BYTES                                    \
   (TP_JOB_WORKER_PROTO_MAX_PROJECT_JSON_BYTES + ((size_t)16U << 20))
 #define TP_JOB_WORKER_PROTO_MAX_STREAM_BYTES                                   \
@@ -57,6 +66,12 @@ typedef struct tp_job_worker_proto_request {
   tp_session_job_kind kind;
   uint64_t session_instance_generation;
   uint64_t request_id;
+  /* Process id of the HOST that issued this request, never the worker's own.
+   * The per-request `req-` directory outlives the worker (the host adopts the
+   * artifact in chunks after the worker exits), so the cross-run reaper must
+   * key its liveness check on the host: a worker-pid name made another
+   * instance's reaper delete an in-flight artifact. Must be non-zero. */
+  uint32_t host_pid;
   /* Canonical schema-v5 JSON whose source paths were made absolute by the
    * host. Bytes need not be NUL-terminated for encode. */
   const uint8_t *project_json;

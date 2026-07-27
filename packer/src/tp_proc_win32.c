@@ -856,13 +856,49 @@ void tp_proc_destroy(tp_proc *proc) {
             (void)CloseHandle(reaper);
             return;
         }
-        /* CreateThread failure must not turn frame teardown into a wait.
-         * Closing the kill-on-close job reinforces termination; retain the
-         * remaining handle and OVERLAPPED storage until process exit. */
+        /* CreateThread failure must not turn frame teardown into a wait -- and
+         * must not leak the whole proc either. Terminate the owned tree (a 0 ms
+         * call, no wait), then give the cancelled write one non-blocking chance
+         * to settle: once it has, every handle and the proc itself are released
+         * here. Only while the kernel still owns the OVERLAPPED do we
+         * deliberately retain that storage and its stdin handle -- freeing them
+         * would let the completion write into freed memory -- and even then the
+         * process, job and stdout handles are closed. */
+        if (proc->job) {
+            (void)TerminateJobObject(proc->job, 1U);
+        }
+        if (proc->stdout_r) {
+            (void)CloseHandle(proc->stdout_r);
+            proc->stdout_r = NULL;
+        }
+        if (proc->process) {
+            (void)CloseHandle(proc->process);
+            proc->process = NULL;
+        }
         if (proc->job) {
             (void)CloseHandle(proc->job);
             proc->job = NULL;
         }
+        DWORD ignored = 0U;
+        if (!GetOverlappedResult(proc->stdin_w, &proc->stdin_overlapped,
+                                 &ignored, FALSE) &&
+            GetLastError() == ERROR_IO_INCOMPLETE) {
+            return;
+        }
+        free(proc->stdin_pending_buffer);
+        proc->stdin_pending_buffer = NULL;
+        proc->stdin_pending = false;
+        proc->stdin_pending_data = NULL;
+        proc->stdin_pending_size = 0U;
+        if (proc->stdin_w) {
+            (void)CloseHandle(proc->stdin_w);
+            proc->stdin_w = NULL;
+        }
+        if (proc->stdin_event) {
+            (void)CloseHandle(proc->stdin_event);
+            proc->stdin_event = NULL;
+        }
+        free(proc);
         return;
     }
     if (proc->stdin_w) {

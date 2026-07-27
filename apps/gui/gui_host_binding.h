@@ -49,6 +49,13 @@ tp_status gui_host_binding_pump(
     gui_host_binding *binding,
     gui_host_transition_kind *completed,
     tp_error *err);
+/* Escape hatch for an exhausted shutdown budget: force the owner terminal and
+ * CLOSED in one non-fallible step -- discard the queue's leases and any
+ * prepared candidate, then retire the active session through the same teardown
+ * a clean close uses (which is what kills the worker process). Safe to call in
+ * any lifecycle state, including CLOSED. */
+void gui_host_binding_force_close(
+    gui_host_binding *binding);
 gui_host_lifecycle_state
 gui_host_binding_lifecycle(
     const gui_host_binding *binding);

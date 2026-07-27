@@ -180,7 +180,9 @@ void test_submit_result_requires_normalized_exact_owner(void) {
         &error, &before, &state);
 }
 
-/* USA-11: OK/no_change terminates its draft without waiting for an event. */
+/* USA-11 partial: OK/no_change terminates its draft without waiting for an
+ * event. Limit: the committed-WITH-change OK half still waits for the echo
+ * (gui_edit_submit_result), so "no event needed" holds only for no_change. */
 void test_submit_result_resolves_success_no_change_and_observed_echo(void) {
     tp_error error = {{0}};
     gui_edit_state state = submitting_state();
@@ -277,9 +279,9 @@ void test_model_revision_ignores_stale_resolves_exact_and_conflicts_false_exact(
         tp_id128_eq(test_id(0x11U), state.target_id));
 }
 
-/* USA-18 partial: two view ids -- the same commit resolves the owner and
- * conflicts the other view. Unit level only: the shipping GUI now has a
- * single live draft owner. */
+/* USA-18: two view ids -- the same commit resolves the owner and conflicts the
+ * other view. Spec §16 pre-authorizes this reducer-level proof while production
+ * has a single draft owner (§13), so it is full, not partial, coverage. */
 void test_same_commit_resolves_only_the_view_with_the_exact_receipt(void) {
     tp_error error = {{0}};
     gui_edit_state owner;

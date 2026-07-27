@@ -40,9 +40,20 @@ static char s_shot_path[TP_IDENTITY_PATH_MAX];
 static int s_shot_w = 1280;
 static int s_shot_h = 800;
 static float s_shot_scale;  /* 0 = keep the DPI-detected scale */
-static int s_shot_frame;    /* frames since the shot started (advanced by gui_shot_pre_pin_tick only) */
-static bool s_shot_packed;   /* frame-6 blocking pack ran (one-shot) */
-static bool s_shot_selected; /* frame-10 region select/preview ran (one-shot) */
+/* TWO counters, because the thresholds below are about DRAWN content, not about
+ * time. s_shot_rendered is the one the pack/select/capture thresholds consume:
+ * a frame that returned before the render block produced no rows, no pages and
+ * no layout, so counting it toward "6 frames in, resources are bound" captured a
+ * blank PNG whenever bootstrap was slow. s_shot_frame stays a plain liveness
+ * deadline so a shot that never renders at all still terminates instead of
+ * spinning forever. */
+static int s_shot_frame;    /* total frames since the shot started (pre-pin tick only) */
+static int s_shot_rendered; /* frames that actually reached the render block */
+static bool s_shot_packed;   /* rendered-frame-6 blocking pack ran (one-shot) */
+static bool s_shot_selected; /* region select latched -- only on a SUCCESSFUL pack result */
+static bool s_shot_dev_state; /* stale/packing/preview dev states applied (one-shot) */
+/* Liveness cap: bootstrap has ~10 s at 60 Hz to produce 16 rendered frames. */
+static const int k_shot_frame_deadline = 600;
 static bool s_shot_written; /* capture happened; quit on the next frame boundary */
 static bool s_shot_stale;   /* --shot-stale: pack, then re-mark stale so the shot shows the amber Pack + chip */
 static bool s_shot_packing; /* --shot-packing: pack (blocking), then force the busy strip for the shot */
@@ -125,9 +136,10 @@ void gui_shot_apply_scale(void) {
 bool gui_shot_active(void) { return s_shot_active; }
 
 /* Runs at the between-frame semantic ingress boundary (beside gui_bench_tick), BEFORE the
- * observation is pinned for declaration: dead-stick input, advance the shot frame counter,
- * and run the blocking pack. Packing is a model/session mutation, so it belongs here and
- * never inside the pinned frame. The counter is advanced in this one place only. */
+ * observation is pinned for declaration: dead-stick input, advance the total-frame liveness
+ * counter, and run the blocking pack. Packing is a model/session mutation, so it belongs here
+ * and never inside the pinned frame. The pack THRESHOLD reads the rendered counter, which only
+ * gui_shot_note_rendered advances; s_shot_frame advances in this one place only. */
 void gui_shot_pre_pin_tick(void) {
     if (!s_shot_active) {
         return;
@@ -142,28 +154,30 @@ void gui_shot_pre_pin_tick(void) {
         g_nt_input.pointers[i].y = -100000.0F;
     }
     s_shot_frame++;
-    /* One-shot latch, not frame equality: the counter now advances on every frame, including
-     * ones that did not render, so a missed exact frame must not skip the pack forever. */
-    if (s_shot_frame >= 6 && !s_shot_packed) { /* resources are bound; pack the selected atlas like Ctrl+P would (blocking) */
+    /* One-shot latch on the RENDERED count, not frame equality: a missed exact
+     * frame must not skip the pack forever, and a frame that never reached the
+     * render block must not count toward "resources are bound". */
+    if (s_shot_rendered >= 6 && !s_shot_packed) { /* resources are bound; pack the selected atlas like Ctrl+P would (blocking) */
         s_shot_packed = true;
         const tp_session_snapshot *snapshot =
             gui_project_snapshot();
-        int atlas_index = gui_view_atlas_index(snapshot);
-        if (atlas_index < 0) {
-            const tp_snapshot_atlas *first =
-                snapshot
-                    ? tp_session_snapshot_atlas_at(
-                          snapshot, 0)
-                    : NULL;
-            gui_view_select_atlas(
-                first ? first->id : tp_id128_nil());
-            atlas_index =
-                gui_view_atlas_index(snapshot);
-        }
+        /* One adoption rule for the whole GUI: the shot asks the view owner to
+         * adopt the default atlas instead of keeping a private atlas[0]
+         * fallback that could disagree with it. */
+        gui_view_adopt_default_atlas(snapshot);
+        const int atlas_index =
+            gui_view_atlas_index(snapshot);
         if (atlas_index >= 0 &&
             !gui_pack_result(atlas_index)) {
             do_pack_blocking();
         }
+    }
+}
+
+/* frame(), inside the can_render/sprite_info block: one frame actually drew. */
+void gui_shot_note_rendered(void) {
+    if (s_shot_active) {
+        s_shot_rendered++;
     }
 }
 
@@ -172,47 +186,59 @@ void gui_shot_tick(void) {
     if (!s_shot_active) {
         return;
     }
-    if (s_shot_frame >= 10 && !s_shot_selected) { /* pages uploaded; mimic a canvas click on region 0 */
-        s_shot_selected = true;
-        const tp_session_snapshot *snapshot =
-            gui_project_snapshot();
-        const int atlas_index =
-            gui_view_atlas_index(snapshot);
+    if (s_shot_rendered < 10) { /* pages uploaded by now; mimic a canvas click on region 0 */
+        return;
+    }
+    const tp_session_snapshot *snapshot =
+        gui_project_snapshot();
+    const int atlas_index =
+        gui_view_atlas_index(snapshot);
+    if (!s_shot_selected) {
         const tp_result *r =
             atlas_index >= 0
                 ? gui_pack_result(atlas_index)
                 : NULL;
+        /* SUCCESS latch. Consuming the latch on a frame whose pack result is
+         * not published yet burned the one selection attempt and captured an
+         * empty Region panel; retrying costs nothing until frame 16. */
         if (r && r->sprite_count > 0) {
+            s_shot_selected = true;
             s_canvas.mode = GUI_CANVAS_ATLAS;
             gui_canvas_select(&s_canvas, 0);
             select_row_for_region(0);
         }
-        if (s_shot_stale) { /* dev: keep the packed preview but re-mark stale so the amber Pack + chip show */
-            gui_project_mark_stale();
-        }
-        if (s_shot_packing) { /* dev: force the busy strip (Packing... + Cancel) for the screenshot */
-            gui_pack_debug_force_busy(GUI_PACK_ASYNC_PACK);
-        }
-        if (s_shot_preview[0] != '\0') { /* dev: bind the named export-target preview (selector + degradation chip) */
-            char perr[256] = {0};
-            if (atlas_index >= 0 &&
-                gui_pack_preview_blocking(
-                    atlas_index, s_shot_preview,
-                    perr, sizeof perr)) {
-                int idx = -1;
-                for (int i = 0; i < tp_exporter_count(); i++) {
-                    const tp_exporter *e = tp_exporter_at(i);
-                    if (e && strcmp(e->id, s_shot_preview) == 0) {
-                        idx = i;
-                        break;
-                    }
+    }
+    if (s_shot_dev_state) {
+        return;
+    }
+    /* The dev states are independent of the selection: --shot-stale on an empty
+     * project still has to show the amber chip. */
+    s_shot_dev_state = true;
+    if (s_shot_stale) { /* dev: keep the packed preview but re-mark stale so the amber Pack + chip show */
+        gui_project_mark_stale();
+    }
+    if (s_shot_packing) { /* dev: force the busy strip (Packing... + Cancel) for the screenshot */
+        gui_pack_debug_force_busy(GUI_PACK_ASYNC_PACK);
+    }
+    if (s_shot_preview[0] != '\0') { /* dev: bind the named export-target preview (selector + degradation chip) */
+        char perr[256] = {0};
+        if (atlas_index >= 0 &&
+            gui_pack_preview_blocking(
+                atlas_index, s_shot_preview,
+                perr, sizeof perr)) {
+            int idx = -1;
+            for (int i = 0; i < tp_exporter_count(); i++) {
+                const tp_exporter *e = tp_exporter_at(i);
+                if (e && strcmp(e->id, s_shot_preview) == 0) {
+                    idx = i;
+                    break;
                 }
-                if (idx >= 0) {
-                    s_preview_target = idx + 1; /* 0 = Native; k = exporter k-1 */
-                }
-            } else {
-                nt_log_error("SHOT: preview '%s' failed: %s", s_shot_preview, perr);
             }
+            if (idx >= 0) {
+                s_preview_target = idx + 1; /* 0 = Native; k = exporter k-1 */
+            }
+        } else {
+            nt_log_error("SHOT: preview '%s' failed: %s", s_shot_preview, perr);
         }
     }
 }
@@ -236,8 +262,21 @@ static void shot_log_bounds(float win_w, float win_h) {
 
 /* Pre-swap capture (same GL-valid point as selftest_post_draw). */
 void gui_shot_post_draw(void) {
-    if (!s_shot_active || s_shot_frame < 16) {
+    if (!s_shot_active) {
         return;
+    }
+    if (s_shot_rendered < 16) {
+        /* Liveness, not content: if bootstrap never produced 16 rendered
+         * frames the shot still has to end, so capture whatever exists and
+         * say so instead of spinning forever. */
+        if (s_shot_frame < k_shot_frame_deadline) {
+            return;
+        }
+        if (!s_shot_written) {
+            nt_log_error(
+                "SHOT: only %d rendered frames after %d frames; capturing anyway",
+                s_shot_rendered, s_shot_frame);
+        }
     }
     if (s_shot_written) { /* captured last frame -> quit at a clean frame boundary */
         s_shot_active = false;

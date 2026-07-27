@@ -23,6 +23,7 @@ void tp_scan__test_reset_all(void);
 
 void tp_job__test_fail_next_observation_target_allocation(void);
 void tp_job__test_set_worker_timeout_ms(int timeout_ms);
+void tp_job__test_set_worker_cancel_grace_ms(int grace_ms);
 void tp_job__test_reset_all(void);
 
 void tp_export_run__test_set_report_alloc_fail(int nth);

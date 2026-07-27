@@ -76,7 +76,11 @@ recorded in the review transcripts; this document is the executable result.
 - ctest delta: +1..+2 (new fallback/cancel-race assertions).
 
 **Landed:** `5d3a675` — 148/148 debug, 147/147 release (delta 0: the new
-assertions landed inside existing ctests). Deviations: transaction-id resolution
+assertions landed inside existing ctests). The atlas-selection fallback item is
+a deliberate BEHAVIOUR change, not only a fix: undo-deleting the selected atlas
+now CLEARS the selection instead of retargeting it to index 0, which is the
+`USA-24` "preserve or explicitly clear" rule (`gui_rows.c` reconcile; adoption
+moved to the explicit `gui_view_adopt_default_atlas`). Deviations: transaction-id resolution
 stays *below* the admission/pin gates — filling the terminal receipt on every
 non-OK return made the move unnecessary, and hoisting it would have reserved an
 ID for calls that never reach admission; the three CLI `NTPACKER_TEST_*` hooks
@@ -182,11 +186,15 @@ target, so the racy cancel test could be fixed in place as planned.
   `gui_selftest.c:654-667`).
 - ctest delta: 0. Frozen oracle tests must not change.
 
-**Landed:** `1a83549` — 149/149 debug, 148/148 release (delta 0); net −496 LOC;
+**Landed:** `1a83549` — 149/149 debug, 148/148 release (delta 0); net **−232**
+production LOC (the originally recorded −496 counted a 179-line region MOVE into
+`gui_actions_structural.c` as a deletion; the corrected figure counts production
+sources only, moves excluded);
 the five frozen oracle tests are byte-identical. Deviations: **three**
 default-less switches remain, not two (payload write, snapshot read, and the
 draft-value read all need `-Wswitch` exhaustiveness); the descriptor table is
-**25 rows**; 11 forwarders were deleted rather than 6-8, but **four thin
+**29 rows** (the "25 rows" first recorded here predated the four slice9 slots
+being spelled out as their own rows); 11 forwarders were deleted rather than 6-8, but **four thin
 submit-ingress functions were kept on purpose** — `gui_project_submit_text`,
 `_atlas_settings`, `_sprite_settings`, `_animation_settings` — because they are
 the family-level payload boundary the parity harness binds to, not per-field
@@ -261,13 +269,19 @@ detached `tp_session_snapshot_load` path, which had been hand-seeding a
 
 **Landed:** `886f482` — 151/151 debug, 150/150 release (+2 as planned, on the
 149/148 base the earlier packets had already reached). Deviations: the split is
-`_draft` **25** / `_refresh` **10** / `_job` **21** (57 tests, all bodies
-byte-identical incl. the five frozen oracles); **zero deletions** — no
+`_draft` **25** / `_refresh` **10** / `_job` **21** — **56** tests across the
+three targets, plus the one test MOVED to `test_gui_view.c`, all bodies
+byte-identical incl. the five frozen oracles (the "57" first recorded here
+double-counted the moved test); **zero deletions** — no
 duplicated integration fixture met the named-successor rule, because each facade
 test exercises a path the pure reducer table cannot reach; USA tagging landed as
 **15 full and 17 partial** coverage claims, each partial carrying its named
 limit in the tag comment, enforced by a new `check_boundaries.sh` R22 grep gate
-with self-tests.
+with self-tests. That tally has since been re-audited to **13 full / 18 partial
+/ 1 build-gate-owned**: `USA-11`, `USA-12` and `USA-32` were overclaimed as full
+and now name their limits, `USA-18` is full because spec §16 pre-authorizes its
+reducer-level proof, and `USA-25` moved to R22's build-gate owner class — its
+proof IS the checker, so no test can own it.
 
 ### P8 — S8: docs
 
@@ -289,6 +303,18 @@ admitted from another view or controller. Two further amendments beyond the
 packet text: master-spec §14.1 gains the worker mode (argv flag for worker mode,
 then frame magic selects job vs build service), and §10.6 records wire v2 with
 the path + u64 size terminal frame.
+
+## Decision records
+
+- **Escape after a deferred gesture commit is accepted as-is.** `frame()` runs
+  `apply_pending()` at the between-frame ingress boundary (`main.c`), which
+  submits a draft whose gesture already committed, and only later reaches the
+  Escape handler. An Escape pressed in the SAME frame as the gesture commit
+  therefore discards nothing: by the time it is read there is no active draft.
+  This is consistent with spec §12.4, whose Escape row describes an *active*
+  draft, and it is deliberate — moving Escape ahead of `apply_pending` would let
+  a key press race a transaction that is already in flight, which is exactly the
+  stranded-`SUBMITTING` class of bug P1 removed. Recorded, not changed.
 
 ## Deferred (explicitly out of Track S)
 

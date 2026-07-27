@@ -10,6 +10,7 @@
 #include <windows.h>
 #else
 #include <time.h>
+#include <unistd.h>
 #endif
 
 #include "core/nt_assert.h"
@@ -31,6 +32,13 @@
  * runs on the UI thread, so a 256 MiB multi-page atlas is spread over ~16 frames
  * instead of stalling one. */
 #define TP_JOB_ARTIFACT_READ_BUDGET ((size_t)16U << 20)
+
+/* Hard cap on the artifact the host will allocate for in one piece. The size is
+ * whatever a separate process announced and the file system confirmed, so
+ * without a cap a runaway or corrupt Pack turns into a multi-GB malloc and an
+ * OOM kill instead of a structured terminal error. Same bound the transport
+ * admits, so a reply that passes decode can never exceed it either. */
+#define TP_JOB_ARTIFACT_MAX_BYTES TP_JOB_WORKER_PROTO_MAX_ARTIFACT_BYTES
 
 typedef enum tp_job_terminal_claim {
     TP_JOB_TERMINAL_OPEN = 0,
@@ -91,6 +99,10 @@ void tp_job__test_set_worker_timeout_ms(int timeout_ms) {
     tp_job_worker__test_set_timeout_ms(timeout_ms);
 }
 
+void tp_job__test_set_worker_cancel_grace_ms(int grace_ms) {
+    tp_job_worker__test_set_cancel_grace_ms(grace_ms);
+}
+
 void tp_job__test_reset_all(void) {
     s_fail_next_observation_target_allocation = false;
     tp_job_worker__test_reset();
@@ -98,6 +110,8 @@ void tp_job__test_reset_all(void) {
 #endif
 
 static void job_discard_artifact(tp_live_job *job);
+static void job_discard_unadopted_artifact(
+    tp_live_job *job, const tp_job_worker_proto_response *response);
 
 static void *job_observation_target_calloc(size_t count, size_t size) {
 #ifdef TP_ENABLE_TEST_SEAMS
@@ -127,6 +141,14 @@ static double job_now_ms(void) {
     }
     return (double)value.tv_sec * 1000.0 +
            (double)value.tv_nsec / 1000000.0;
+#endif
+}
+
+static uint32_t job_host_pid(void) {
+#ifdef _WIN32
+    return (uint32_t)GetCurrentProcessId();
+#else
+    return (uint32_t)getpid();
 #endif
 }
 
@@ -182,7 +204,14 @@ static void job_cancel_owned(tp_session_owned_job *owned) {
  * the host takes to consume the terminal state. The terminal result keeps its
  * status/error/metadata -- only the released pointers are cleared, so a later
  * tp_session_job_take_result reads NULL pack pointers, never freed memory. The
- * descriptor and observation_targets are untouched (the session borrows them). */
+ * descriptor and observation_targets are untouched (the session borrows them).
+ *
+ * A released Pack payload also stops claiming SUCCEEDED. Leaving the terminal
+ * state alone let tp_session_job_take_result hand back a SUCCEEDED Pack with
+ * NULL arena/result -- a caller that trusts the state (they all do) then
+ * dereferences NULL. The rejection is reported as what it is: CANCELLED when
+ * this job's own cancellation was accepted, otherwise a structured failure for
+ * the only other rejection the session has (its targets were deleted). */
 static void job_release_payload_owned(tp_session_owned_job *owned) {
     tp_live_job *job = (tp_live_job *)owned;
     if (!job) {
@@ -193,6 +222,21 @@ static void job_release_payload_owned(tp_session_owned_job *owned) {
     job->pack_result = NULL;
     job->terminal_result.pack.arena = NULL;
     job->terminal_result.pack.result = NULL;
+    if (job->kind != TP_SESSION_JOB_PACK ||
+        job->terminal_result.state != TP_SESSION_JOB_SUCCEEDED) {
+        return;
+    }
+    const bool cancelled = atomic_load_explicit(
+        &job->cancellation_accepted, memory_order_acquire);
+    job->terminal_result.state = cancelled ? TP_SESSION_JOB_CANCELLED
+                                           : TP_SESSION_JOB_FAILED;
+    job->terminal_result.status = tp_error_set(
+        &job->terminal_result.error,
+        cancelled ? TP_STATUS_CANCELLED : TP_STATUS_NOT_FOUND,
+        cancelled ? "Pack cancelled"
+                  : "Pack result was discarded: its targets no longer exist");
+    atomic_store_explicit(&job->state, job->terminal_result.state,
+                          memory_order_release);
 }
 
 static void job_destroy_owned(tp_session_owned_job *owned) {
@@ -204,6 +248,11 @@ static void job_destroy_owned(tp_session_owned_job *owned) {
     if (job->process) {
         tp_job_worker_process_request_cancel(job->process);
     }
+    /* Destroyed before its terminal was published (session teardown, or a
+     * cancelled job that never re-entered the pump): an artifact announced but
+     * never adopted is still on disk and only the wire path names it. */
+    job_discard_unadopted_artifact(
+        job, tp_job_worker_process_response(job->process));
     tp_job_worker_process_destroy(job->process);
     job_discard_artifact(job);
     tp_arena_destroy(job->arena);
@@ -307,9 +356,65 @@ static void job_remove_request_dir(const char *artifact_path) {
     (void)tp_fs_remove_dir(directory);
 }
 
+/* The artifact path is worker-reported, so it is UNTRUSTED input: a corrupted or
+ * hostile terminal frame naming an arbitrary existing file must never make the
+ * host open it -- much less delete it. The host cannot predict the name (only the
+ * worker knows the request directory it created), so it validates the shape it
+ * does own: the path lies under this job's work_dir, its parent is a direct
+ * "req-" child of that work_dir, both components are non-empty and neither is
+ * "..". No canonicalisation is needed because a ".." segment is rejected outright
+ * rather than resolved, and the work_dir prefix is compared byte for byte: the
+ * worker builds the path by concatenating the very bytes the host sent it, so an
+ * honest reply always matches exactly and any spelling that does not is refused
+ * (the check can only get stricter, never looser). A path that fails is never
+ * stored, opened, or removed. */
+static bool job_artifact_path_is_contained(const tp_live_job *job,
+                                           const char *path) {
+    if (!job || !job->work_dir || job->work_dir[0] == '\0' || !path ||
+        path[0] == '\0' || strlen(path) >= TP_IDENTITY_PATH_MAX) {
+        return false;
+    }
+    size_t work_length = strlen(job->work_dir);
+    while (work_length > 0U && (job->work_dir[work_length - 1U] == '/' ||
+                                job->work_dir[work_length - 1U] == '\\')) {
+        work_length--;
+    }
+    if (work_length == 0U ||
+        strncmp(path, job->work_dir, work_length) != 0) {
+        return false;
+    }
+    const char *cursor = path + work_length;
+    if (*cursor != '/' && *cursor != '\\') {
+        return false;
+    }
+    while (*cursor == '/' || *cursor == '\\') {
+        cursor++;
+    }
+    const char *directory = cursor;
+    while (*cursor && *cursor != '/' && *cursor != '\\') {
+        cursor++;
+    }
+    const size_t directory_length = (size_t)(cursor - directory);
+    if (directory_length < 4U || strncmp(directory, "req-", 4U) != 0 ||
+        (*cursor != '/' && *cursor != '\\')) {
+        return false;
+    }
+    const char *file = cursor + 1;
+    if (file[0] == '\0' || strcmp(file, "..") == 0) {
+        return false;
+    }
+    for (const char *scan = file; *scan; ++scan) {
+        if (*scan == '/' || *scan == '\\') {
+            return false; /* exactly one file inside exactly one req- directory */
+        }
+    }
+    return true;
+}
+
 /* The artifact is a transient private handoff, never a cache: release it as soon
  * as its bytes are in this process or can never be. Whatever a killed host leaves
- * behind is swept by the worker-pid reaper on the next Pack. */
+ * behind is swept on the next Pack by the reaper, which keys the private
+ * directory's name on the HOST pid -- the directory outlives its worker. */
 static void job_discard_artifact(tp_live_job *job) {
     if (job->artifact_file) {
         (void)fclose(job->artifact_file);
@@ -323,6 +428,26 @@ static void job_discard_artifact(tp_live_job *job) {
         free(job->artifact_path);
         job->artifact_path = NULL;
     }
+}
+
+/* Delete an artifact the worker published but this host never adopted. A
+ * cancelled Pack skips the read entirely, so job->artifact_path was never filled
+ * and job_discard_artifact has nothing to remove -- yet a real `.ntpack` and its
+ * private directory are sitting on disk. The only handle on them is the wire
+ * path, which gets the SAME containment check as the adoption path; a path that
+ * fails it is left strictly alone. */
+static void job_discard_unadopted_artifact(
+    tp_live_job *job, const tp_job_worker_proto_response *response) {
+    if (!job || job->artifact_path || job->artifact_settled ||
+        job->kind != TP_SESSION_JOB_PACK || !response ||
+        response->kind != TP_SESSION_JOB_PACK ||
+        !response->pack.artifact_path ||
+        response->pack.artifact_path[0] == '\0' ||
+        !job_artifact_path_is_contained(job, response->pack.artifact_path)) {
+        return;
+    }
+    (void)tp_fs_remove_file(response->pack.artifact_path);
+    job_remove_request_dir(response->pack.artifact_path);
 }
 
 static tp_status job_artifact_fail(tp_live_job *job, tp_status status,
@@ -342,10 +467,26 @@ static tp_status job_artifact_fail(tp_live_job *job, tp_status status,
 static bool job_artifact_open(tp_live_job *job,
                               const tp_job_worker_proto_pack_result *pack) {
     if (!pack->artifact_path || pack->artifact_path[0] == '\0' ||
-        pack->artifact_size == 0U ||
-        pack->artifact_size > (uint64_t)SIZE_MAX) {
+        pack->artifact_size == 0U) {
         (void)job_artifact_fail(job, TP_STATUS_BUILDER_FAILED,
                                 "Pack worker returned no artifact path");
+        return false;
+    }
+    /* Containment first: nothing is stored before it passes, so the failure path
+     * has no path to delete. */
+    if (!job_artifact_path_is_contained(job, pack->artifact_path)) {
+        (void)job_artifact_fail(
+            job, TP_STATUS_BUILDER_FAILED,
+            "Pack artifact path is outside this job's private request directory");
+        return false;
+    }
+    /* Below four bytes the magic check would be skipped, and above the cap the
+     * host would allocate an artifact no real atlas produces. */
+    if (pack->artifact_size < 4U ||
+        pack->artifact_size > TP_JOB_ARTIFACT_MAX_BYTES) {
+        (void)job_artifact_fail(
+            job, TP_STATUS_BUILDER_FAILED,
+            "Pack artifact size is too small to be a pack file or exceeds the host cap");
         return false;
     }
     job->artifact_path = job_strdup(pack->artifact_path);
@@ -430,6 +571,10 @@ static tp_status job_inflate_pack(
     tp_name_map *names = NULL;
     tp_status status = job_build_name_map(pack, &names, err);
     if (status != TP_STATUS_OK) {
+        /* The artifact is dead the moment the inflate fails: nothing else will
+         * ever read it, so release the staged bytes, the file and the private
+         * directory here rather than leaving them to job destruction. */
+        job_discard_artifact(job);
         return status;
     }
     job->arena = tp_arena_create(0);
@@ -494,8 +639,12 @@ static void job_publish_response(
     if (cancelled) {
         /* The single cancel decision point: an accepted host cancellation
          * outranks whatever terminal raced it, and nothing will adopt the
-         * worker's artifact, so drop it here rather than at job destruction. */
+         * worker's artifact, so drop it here rather than at job destruction.
+         * A cancel that raced a SUCCEEDED terminal never opened the artifact at
+         * all, so the wire path is the only handle on the file the worker did
+         * publish -- take it too, or the `.ntpack` outlives the run. */
         job_discard_artifact(job);
+        job_discard_unadopted_artifact(job, response);
         result->state = TP_SESSION_JOB_CANCELLED;
         result->status = tp_error_set(
             &result->error, TP_STATUS_CANCELLED, "%s cancelled",
@@ -634,6 +783,11 @@ static tp_status job_start_process(void *context, tp_error *err) {
         .session_instance_generation =
             descriptor->session_instance_generation,
         .request_id = descriptor->request_id,
+        /* The worker names its private request directory after THIS pid: the
+         * directory outlives the worker (the host reads the artifact in chunks
+         * after the child exits), so the cross-run reaper must ask whether the
+         * host is still alive, not the worker. */
+        .host_pid = job_host_pid(),
         .project_json = (const uint8_t *)job->project_json,
         .project_json_len = job->project_json_len,
         .atlas_id = job->atlas_id,

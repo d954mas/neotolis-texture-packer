@@ -868,7 +868,9 @@ void test_submit_rng_failure_is_structured_and_non_mutating(void) {
     tp_session_destroy(session);
 }
 
-/* USA-12: a lost response plus a retained-id retry commits exactly once. */
+/* USA-12 partial: a retained-id retry commits exactly once and answers
+ * DUPLICATE_ID. Limit: the LOST RESPONSE precondition is unmodelled -- the
+ * first answer IS delivered here, so this proves retry idempotency only. */
 void test_retained_id_retry_commits_once_and_returns_duplicate_result(void) {
     tp_session *session = make_session();
     gui_session_client client;
@@ -912,13 +914,133 @@ void test_retained_id_retry_commits_once_and_returns_duplicate_result(void) {
     TEST_ASSERT_EQUAL_INT64(1, duplicate.terminal.revision);
     TEST_ASSERT_EQUAL_INT64(1, tp_session_revision(session));
     TEST_ASSERT_EQUAL_INT(1, tp_session_history_count(session));
-    gui_session_submit_terminal gone = {0};
-    TEST_ASSERT_FALSE(gui_session_client_pending_submit_query(
+    /* The FIRST submit's terminal receipt survives the duplicate: it is exactly
+     * the answer the retry is asking for, and the draft owner still has to read
+     * it back to leave SUBMITTING. */
+    gui_session_submit_terminal retained = {0};
+    TEST_ASSERT_TRUE(gui_session_client_pending_submit_query(
         &client, request.retained_transaction_id,
-        request.identity, &gone));
+        request.identity, &retained));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK, retained.status);
+    TEST_ASSERT_TRUE(retained.committed);
+    TEST_ASSERT_EQUAL_INT64(1, retained.revision);
     gui_session_submit_result_destroy(&first);
     gui_session_submit_result_destroy(&duplicate);
     tp_operation_free(&operation);
+    gui_session_client_detach(&client);
+    tp_session_destroy(session);
+}
+
+/* A DUPLICATE_ID rejection may only clear the slot the REJECTED attempt itself
+ * registered. Clearing whatever slot happened to answer destroyed the earlier
+ * submit's resolved receipt and stranded its draft in SUBMITTING. */
+void test_duplicate_id_clears_only_the_slot_this_attempt_registered(void) {
+    tp_session *session = make_session();
+    gui_session_client client;
+    tp_error error = {{0}};
+    gui_session_client_init(&client);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_session_client_attach(
+            &client, session, &error));
+
+    /* A resolved retained receipt from an earlier, unrelated draft. */
+    tp_operation resolved_operation =
+        make_rename_operation(session, "resolved-owner");
+    const gui_session_submit_request resolved_request = {
+        .operations = &resolved_operation,
+        .operation_count = 1,
+        .expected_revision = 0,
+        .semantic_label = "atlas.rename",
+        .identity = {
+            .origin_view_id = {{0x41U}},
+            .draft_instance_id = {{0x42U}},
+        },
+        .retained_transaction_id =
+            "41414141414141414141414141414141",
+    };
+    gui_session_submit_result resolved = {0};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_session_client_submit(
+            &client, &resolved_request, &resolved,
+            &error));
+    TEST_ASSERT_TRUE(resolved.transaction.committed);
+    gui_session_submit_result_destroy(&resolved);
+
+    /* A DIFFERENT draft whose id core has already seen: this attempt registers
+     * its own slot and is rejected DUPLICATE_ID. */
+    tp_operation foreign_operation =
+        make_rename_operation(session, "foreign-id-owner");
+    tp_txn_request foreign = {
+        .schema = TP_TXN_SCHEMA,
+        .expected_revision =
+            tp_session_revision(session),
+        .label = "atlas.rename",
+        .author = "human",
+        .ops = &foreign_operation,
+        .op_count = 1,
+    };
+    (void)snprintf(
+        foreign.id_hex, sizeof foreign.id_hex, "%s",
+        "42424242424242424242424242424242");
+    tp_txn_result foreign_result = {0};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_session_apply(
+            session, &foreign, &foreign_result,
+            &error));
+    tp_txn_result_free(&foreign_result);
+
+    tp_operation collide_operation =
+        make_rename_operation(session, "collides");
+    const gui_session_submit_request collide_request = {
+        .operations = &collide_operation,
+        .operation_count = 1,
+        .expected_revision =
+            tp_session_revision(session),
+        .semantic_label = "atlas.rename",
+        .identity = {
+            .origin_view_id = {{0x51U}},
+            .draft_instance_id = {{0x52U}},
+        },
+        .retained_transaction_id =
+            "42424242424242424242424242424242",
+    };
+    gui_session_submit_result collided = {0};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_DUPLICATE_ID,
+        gui_session_client_submit(
+            &client, &collide_request, &collided,
+            &error));
+    TEST_ASSERT_EQUAL_STRING(
+        collide_request.retained_transaction_id,
+        collided.terminal.transaction_id);
+    gui_session_submit_result_destroy(&collided);
+
+    /* The rejected attempt retained nothing... */
+    gui_session_submit_terminal gone = {0};
+    TEST_ASSERT_FALSE(
+        gui_session_client_pending_submit_query(
+            &client,
+            collide_request.retained_transaction_id,
+            collide_request.identity, &gone));
+    /* ...and the earlier draft's receipt is untouched. */
+    gui_session_submit_terminal kept = {0};
+    TEST_ASSERT_TRUE(
+        gui_session_client_pending_submit_query(
+            &client,
+            resolved_request.retained_transaction_id,
+            resolved_request.identity, &kept));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK, kept.status);
+    TEST_ASSERT_TRUE(kept.committed);
+    TEST_ASSERT_EQUAL_INT64(1, kept.revision);
+
+    tp_operation_free(&collide_operation);
+    tp_operation_free(&foreign_operation);
+    tp_operation_free(&resolved_operation);
     gui_session_client_detach(&client);
     tp_session_destroy(session);
 }
@@ -1632,6 +1754,8 @@ int main(void) {
         test_submit_rng_failure_is_structured_and_non_mutating);
     RUN_TEST(
         test_retained_id_retry_commits_once_and_returns_duplicate_result);
+    RUN_TEST(
+        test_duplicate_id_clears_only_the_slot_this_attempt_registered);
     RUN_TEST(
         test_stale_retained_id_retry_reports_current_revision);
     RUN_TEST(

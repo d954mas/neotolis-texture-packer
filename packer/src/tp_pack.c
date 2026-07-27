@@ -651,20 +651,25 @@ tp_status tp_pack_cancellable_observed(const tp_pack_settings *settings,
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "tp_pack: arena and out_result are required");
     }
 
-    char path[512];
-    bool cancelled = false;
-    tp_status st = tp_pack_produce_observed(settings, path, sizeof path, &cancelled,
-                                            cancel_poll, cancel_ctx, observer,
-                                            observer_ctx, err);
-    if (st != TP_STATUS_OK || cancelled) {
-        return st; /* on cancel st is TP_STATUS_OK and *out_result stays NULL */
-    }
-
+    /* Build the reverse name map BEFORE packing. It depends only on the settings,
+     * so a duplicate/invalid name is a cheap up-front rejection -- discovering it
+     * after tp_pack_produce_observed threw away a full pack of work. */
     tp_name_map *names = NULL;
-    st = build_name_map(settings, &names, err);
+    tp_status st = build_name_map(settings, &names, err);
     if (st != TP_STATUS_OK) {
         return st;
     }
+
+    char path[512];
+    bool cancelled = false;
+    st = tp_pack_produce_observed(settings, path, sizeof path, &cancelled,
+                                  cancel_poll, cancel_ctx, observer,
+                                  observer_ctx, err);
+    if (st != TP_STATUS_OK || cancelled) {
+        tp_name_map_destroy(names);
+        return st; /* on cancel st is TP_STATUS_OK and *out_result stays NULL */
+    }
+
     tp_result **results = NULL;
     int count = 0;
     st = tp_pack_read_file(path, names, arena, &results, &count, err);
