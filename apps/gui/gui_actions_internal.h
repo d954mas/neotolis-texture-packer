@@ -182,6 +182,10 @@ typedef struct gui_actions_state {
     int recovery_pending_action;
 
     gui_animation_ref preview_animation_ref;
+    /* The player has resolved at least one real pack result since it was armed.
+     * It is what separates "this atlas was never packed" (show the hint) from
+     * "the result we were playing is gone" (stop, and say so). */
+    bool preview_had_result;
     preview_frame_cache preview_frames;
 #ifdef NTPACKER_GUI_SELFTEST
     gui_preview_frame_work preview_frame_work;
@@ -215,6 +219,11 @@ bool gui_actions__intent_push(const gui_intent *intent);
  * transition (only GUI_INTENT_OPEN can). */
 bool gui_actions__intent_drain(gui_intent_phase phase);
 bool gui_actions__intent_queued(gui_intent_kind kind);
+/* Exit-time release of what each owner grew: the undrained queue with its owned
+ * payloads, and the grow-only preview frame map. Called only by
+ * gui_actions_shutdown, in that order. */
+void gui_actions__intent_shutdown(void);
+void gui_actions__preview_shutdown(void);
 void gui_actions__rebase_deferred_edits(
     int64_t revision_before,
     int64_t revision_after);

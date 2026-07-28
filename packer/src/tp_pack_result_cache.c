@@ -478,6 +478,19 @@ bool tp_pack_result_cache_contains(const tp_pack_result_cache *cache,
     return find_entry(cache, hash) != NULL;
 }
 
+const struct tp_result *tp_pack_result_cache_peek(
+    const tp_pack_result_cache *cache, tp_id128 hash) {
+    if (!cache) {
+        return NULL;
+    }
+    const cache_entry *entry = find_entry(cache, hash);
+    /* `result` is the flavour discriminator this read cares about: a retained-pin
+     * entry always has one, a serialized entry only while it is the active pin.
+     * Either way, handing it back changes nothing -- the touch clock, the active
+     * pin, the selection, and inactive_bytes are all untouched by design. */
+    return entry ? entry->result : NULL;
+}
+
 void tp_pack_result_cache_select(tp_pack_result_cache *cache, tp_id128 hash) {
     if (!cache) {
         return;

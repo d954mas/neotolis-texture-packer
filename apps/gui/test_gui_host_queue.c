@@ -63,7 +63,11 @@ static void reduce_current_observation(
 }
 
 void setUp(void) {}
-void tearDown(void) {}
+/* tearDown owns every armed seam (as packer/tests/test_job_worker_process.c
+ * does): Unity longjmps out of a failing assert, so a seam cleared only on the
+ * last line of its own test would stay armed for every test after the first
+ * failure and turn one red case into a cascade. */
+void tearDown(void) { gui_host_queue__test_fail_cancels(0U); }
 
 void test_open_queue_deep_copies_start_payload_and_assigns_identity(void) {
     gui_host_queue queue;
@@ -581,7 +585,6 @@ void test_failing_cancel_admission_does_not_wedge_drain(void) {
     TEST_ASSERT_EQUAL_INT(
         GUI_HOST_READY_TO_CUTOVER,
         gui_host_queue_lifecycle(&queue));
-    gui_host_queue__test_fail_cancels(0U);
     tp_session_destroy(session);
 }
 

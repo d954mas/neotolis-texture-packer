@@ -146,6 +146,20 @@ bool gui_actions__intent_push(const gui_intent *intent) {
     return true;
 }
 
+/* Teardown of the queue itself. Whatever is still queued at exit will never be
+ * drained, so its owned payload (the copied frame refs and animation name an
+ * intent carries) is disposed exactly as a drain would have, and the array the
+ * pushes grew is released. */
+void gui_actions__intent_shutdown(void) {
+    for (int i = 0; i < s_actions.intent_count; ++i) {
+        intent_payload_dispose(&s_actions.intents[i]);
+    }
+    free(s_actions.intents);
+    s_actions.intents = NULL;
+    s_actions.intent_count = 0;
+    s_actions.intent_cap = 0;
+}
+
 /* Drops every queued intent whose kind is in [first,last], destroying payloads. */
 static void intent_clear_range(gui_intent_kind first, gui_intent_kind last) {
     int kept = 0;
@@ -168,6 +182,12 @@ static void intent_add_atlas(void) {
         return;
     }
     gui_view_select_atlas(created.created_id);
+    /* The selection just moved to the new atlas, and the animation player resolves
+     * its frames against the VIEWED atlas' packed result -- so it stops here, the
+     * same way every other atlas switch stops it (gui_view_lists' reset_selection).
+     * Without this the player stayed armed on the previous atlas and kept reading
+     * a result the canvas is no longer bound to. */
+    preview_stop();
     const tp_snapshot_atlas *added =
         !tp_id128_is_nil(created.created_id)
             ? tp_session_snapshot_atlas_by_id(gui_project_snapshot(),

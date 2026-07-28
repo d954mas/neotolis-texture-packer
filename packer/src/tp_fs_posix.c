@@ -96,6 +96,20 @@ bool tp_fs_stat(const char *path_utf8, tp_fs_info *out) {
     return stat_to_info(&value, out);
 }
 
+tp_fs_create_dir_result tp_fs_create_dir_exclusive(const char *path_utf8) {
+    if (!tp_fs_path_is_valid_utf8(path_utf8)) {
+        return TP_FS_CREATE_DIR_ERROR;
+    }
+    if (path_utf8[0] == '\0') {
+        errno = EINVAL;
+        return TP_FS_CREATE_DIR_ERROR;
+    }
+    if (mkdir(path_utf8, 0755) == 0) {
+        return TP_FS_CREATE_DIR_OK;
+    }
+    return errno == EEXIST ? TP_FS_CREATE_DIR_EXISTS : TP_FS_CREATE_DIR_ERROR;
+}
+
 bool tp_fs_create_dir(const char *path_utf8) {
     if (!tp_fs_path_is_valid_utf8(path_utf8)) {
         return false;

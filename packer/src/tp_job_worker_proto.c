@@ -325,9 +325,9 @@ static tp_status copy_text(wire_reader *reader, uint32_t length, size_t cap,
 }
 
 static tp_status copy_fixed_text(wire_reader *reader, uint32_t length,
-                                 char out[256], const char *label,
+                                 char *out, size_t cap, const char *label,
                                  tp_error *err) {
-  if (length > TP_JOB_WORKER_PROTO_MAX_ERROR_BYTES) {
+  if ((size_t)length > cap) {
     return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
                         "tp_job_worker_proto: oversized %s", label);
   }
@@ -536,8 +536,7 @@ static tp_status error_wire_lengths(const tp_error *error,
     return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
                         "tp_job_worker_proto: invalid file I/O phase");
   }
-  const char *path = error->file_io.path ? error->file_io.path : "";
-  return validate_text(path, TP_JOB_WORKER_PROTO_MAX_PATH_BYTES, true,
+  return validate_text(error->file_io.path, TP_FILE_IO_PATH_MAX - 1U, true,
                        "error path", path_length, err);
 }
 
@@ -553,28 +552,23 @@ static tp_status read_error_bytes(wire_reader *reader, uint32_t message_length,
                                   uint32_t path_length, int32_t phase,
                                   int32_t native_code, tp_error *out,
                                   tp_error *err) {
-  if (!valid_file_phase(phase) ||
-      (size_t)path_length > TP_JOB_WORKER_PROTO_MAX_PATH_BYTES) {
+  if (!valid_file_phase(phase)) {
     return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
                         "tp_job_worker_proto: invalid encoded error");
   }
   tp_status status =
-      copy_fixed_text(reader, message_length, out->msg, "error message", err);
+      copy_fixed_text(reader, message_length, out->msg, sizeof out->msg - 1U,
+                      "error message", err);
   if (status != TP_STATUS_OK) {
     return status;
   }
-  const char *path = NULL;
-  status = copy_text(reader, path_length, TP_JOB_WORKER_PROTO_MAX_PATH_BYTES,
-                     true, "error path", &path, err);
+  status = copy_fixed_text(reader, path_length, out->file_io.path,
+                           sizeof out->file_io.path - 1U, "error path", err);
   if (status != TP_STATUS_OK) {
     return status;
   }
   out->file_io.phase = (tp_file_io_phase)phase;
   out->file_io.native_code = native_code;
-  out->file_io.path = path_length > 0U ? path : NULL;
-  if (path_length == 0U) {
-    free((void *)path);
-  }
   return TP_STATUS_OK;
 }
 
@@ -582,9 +576,7 @@ void tp_job_worker_proto_response_free(tp_job_worker_proto_response *response) {
   if (!response) {
     return;
   }
-  free((void *)response->error.file_io.path);
   if (response->kind == TP_SESSION_JOB_PACK) {
-    free((void *)response->pack.freshness_error.file_io.path);
     if (response->pack.names) {
       for (uint32_t i = 0U; i < response->pack.name_count; ++i) {
         free((void *)response->pack.names[i].name);
@@ -991,6 +983,7 @@ tp_status tp_job_worker_proto_decode_response(const uint8_t *bytes, size_t len,
     }
     status =
         copy_fixed_text(&reader, first_error_len, export_result->first_error,
+                        sizeof export_result->first_error - 1U,
                         "Export first error", err);
     if (status != TP_STATUS_OK) {
       goto fail;

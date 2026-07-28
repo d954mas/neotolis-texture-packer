@@ -335,6 +335,7 @@ bool gui_pack_publish_native(tp_session_job_result *job_result,
     size_t ref_index_cap = 0U;
     if (!pack_ref_index_build(pack->result, &ref_index, &ref_index_cap)) {
         if (out) {
+            out->status = TP_STATUS_OOM;
             (void)snprintf(out->err, sizeof out->err,
                            "out of memory building canonical sprite lookup");
         }
@@ -460,6 +461,22 @@ void gui_pack_clear(int atlas_index) {
 
 const tp_result *gui_pack_result(int atlas_index) {
     return pack_slot_reside(pack_slot_for_atlas_index(atlas_index));
+}
+
+const tp_result *gui_pack_result_peek(int atlas_index) {
+    const pack_slot *slot = pack_slot_for_atlas_index(atlas_index);
+    if (!slot || !slot->valid) {
+        return NULL;
+    }
+    /* The resident IS the store's active entry, so the fast path returns the same
+     * pointer without the table walk. Neither path mutates anything -- and a miss
+     * deliberately does NOT retire the slot, because retiring is a residency
+     * decision and this is only a read (gui_pack_result_version already reports an
+     * evicted entry as version 0). */
+    if (s_resident_result && tp_id128_eq(slot->cache_key, s_resident_key)) {
+        return s_resident_result;
+    }
+    return tp_pack_result_cache_peek(s_cache, slot->cache_key);
 }
 
 uint64_t gui_pack_result_version(int atlas_index) {

@@ -525,15 +525,6 @@ static tp_status run_pack(const tp_job_worker_proto_request *request,
         response->pack.freshness_token = request->input_token;
         response->pack.freshness_status = freshness_status;
         response->pack.freshness_error = freshness_error;
-        response->pack.freshness_error.file_io.path =
-            worker_strdup(freshness_error.file_io.path);
-        if (freshness_error.file_io.path &&
-            !response->pack.freshness_error.file_io.path) {
-            response->pack.freshness_status = TP_STATUS_OOM;
-            (void)tp_error_set(
-                &response->pack.freshness_error, TP_STATUS_OOM,
-                "job worker freshness error path allocation failed");
-        }
         if (tp_id128_is_nil(input_hash)) {
             response->pack.freshness = TP_PACK_FRESHNESS_STALE;
             response->pack.freshness_reason =
@@ -809,13 +800,6 @@ int tp_job_worker_main_request(const uint8_t *bytes, size_t length) {
     }
     response.status = status;
     response.error = error;
-    response.error.file_io.path = worker_strdup(error.file_io.path);
-    if (error.file_io.path && !response.error.file_io.path) {
-        response.status = TP_STATUS_OOM;
-        (void)tp_error_set(
-            &response.error, TP_STATUS_OOM,
-            "job worker error path allocation failed");
-    }
     response.state =
         response.status == TP_STATUS_CANCELLED
             ? TP_SESSION_JOB_CANCELLED
@@ -862,9 +846,7 @@ int tp_job_worker_main_request(const uint8_t *bytes, size_t length) {
          * last owner of the file and its private directory. */
         remove_request_dir_of(response.pack.artifact_path);
     }
-    free((void *)response.error.file_io.path);
     if (response.kind == TP_SESSION_JOB_PACK) {
-        free((void *)response.pack.freshness_error.file_io.path);
         free_pack_names(
             (tp_job_worker_proto_name *)response.pack.names,
             response.pack.name_count);

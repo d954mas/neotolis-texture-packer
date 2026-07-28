@@ -151,7 +151,9 @@ void tp_session_job_result_destroy(tp_session_job_result *result);
  * still holding (the serialized project JSON, request/work-dir paths, preview
  * exporter id) and destroys the exited worker process handle, which retains a
  * second encoded copy of that JSON plus OS handles. Every value field of
- * `result` -- including pack.result and its pages -- stays valid, and
+ * `result` -- including pack.result and its pages, and the tp_error/file_io
+ * context, which is value-owned precisely so destroying the response frame
+ * cannot dangle it -- stays valid, and
  * tp_session_job_result_destroy remains the single, exactly-once release.
  * Only a result returned by tp_session_job_take_result may be compacted (an
  * owner-less result is a no-op); a caller that keeps the receipt alive long

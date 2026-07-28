@@ -140,7 +140,16 @@ tp_status tp_export_write_and_publish_set(const tp_exporter *exp,
         char staged[TP_FS_ATOMIC_TEMP_PATH_MAX];
         if (!tp_fs_stage_child_path(out_dir, staging, output_files[f], staged,
                                     sizeof staged)) {
-            continue; /* not staged: the writer already published it per-file */
+            /* Not stageable: the writer published this one per-file, so it sits
+             * outside the whole-set guarantee. Say so instead of degrading
+             * silently (tp_core/tp_export.h contract). */
+            (void)tp_export_notice_add_ex(
+                notices, TP_NOTICE_FIELD_SET_ATOMICITY,
+                TP_NOTICE_REASON_PATH_NOT_STAGEABLE, NULL, exp->id,
+                "'%s' bypassed whole-set staging and was published on its own; "
+                "it is not covered by the export's all-or-nothing guarantee",
+                output_files[f]);
+            continue;
         }
         if (!tp_fs_exists(staged)) {
             tp_fs_remove_tree(staging);
@@ -156,6 +165,48 @@ tp_status tp_export_write_and_publish_set(const tp_exporter *exp,
                                 "(existing outputs are untouched)",
                                 output_files[f]);
         }
+    }
+
+    /* A staged file the enumeration missed is an output that would silently
+     * vanish with the staging dir. It is part of preflight, not cleanup: found
+     * after the promote loop it would report "not published" over an already
+     * republished set, so the whole staging dir is matched against the listed
+     * set BEFORE the first rename. */
+    bool leftover = false;
+    char leftover_name[TP_FS_NAME_MAX];
+    leftover_name[0] = '\0';
+    tp_fs_dir *dir = tp_fs_dir_open(staging);
+    if (dir) {
+        tp_fs_dir_entry entry;
+        while (!leftover && tp_fs_dir_next(dir, &entry) == TP_FS_DIR_ENTRY) {
+            char entry_path[TP_FS_ATOMIC_TEMP_PATH_MAX];
+            const int n = snprintf(entry_path, sizeof entry_path, "%s/%s",
+                                   staging, entry.name);
+            bool listed = false;
+            if (n > 0 && (size_t)n < sizeof entry_path) {
+                for (int f = 0; f < output_file_count && !listed; f++) {
+                    char staged[TP_FS_ATOMIC_TEMP_PATH_MAX];
+                    listed = tp_fs_stage_child_path(out_dir, staging,
+                                                    output_files[f], staged,
+                                                    sizeof staged) &&
+                             strcmp(staged, entry_path) == 0;
+                }
+            }
+            if (!listed) {
+                leftover = true;
+                (void)snprintf(leftover_name, sizeof leftover_name, "%s",
+                               entry.name);
+            }
+        }
+        tp_fs_dir_close(dir);
+    }
+    if (leftover) {
+        tp_fs_remove_tree(staging);
+        return tp_error_set(err, TP_STATUS_BAD_PROJECT,
+                            "exporter '%s' produced '%s' outside its declared "
+                            "output list; nothing was published (existing "
+                            "outputs are untouched)",
+                            exp->id, leftover_name);
     }
 
     int promoted = 0;
@@ -175,28 +226,6 @@ tp_status tp_export_write_and_publish_set(const tp_exporter *exp,
         }
         promoted++;
     }
-
-    /* A staged leftover is an output the writer produced but the enumeration
-     * missed -- it would silently vanish with the staging dir, so surface it. */
-    bool leftover = false;
-    char leftover_name[TP_FS_NAME_MAX];
-    leftover_name[0] = '\0';
-    tp_fs_dir *dir = tp_fs_dir_open(staging);
-    if (dir) {
-        tp_fs_dir_entry entry;
-        if (tp_fs_dir_next(dir, &entry) == TP_FS_DIR_ENTRY) {
-            leftover = true;
-            (void)snprintf(leftover_name, sizeof leftover_name, "%s",
-                           entry.name);
-        }
-        tp_fs_dir_close(dir);
-    }
     tp_fs_remove_tree(staging);
-    if (leftover) {
-        return tp_error_set(err, TP_STATUS_BAD_PROJECT,
-                            "exporter '%s' produced '%s' outside its declared "
-                            "output list; the unlisted file was not published",
-                            exp->id, leftover_name);
-    }
     return TP_STATUS_OK;
 }

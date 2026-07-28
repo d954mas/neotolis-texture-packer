@@ -453,12 +453,25 @@ function(_arch_report_debt rule note)
     endforeach()
 endfunction()
 
-# USA-25 owner: gate. Spec §16's "boundary checks reject mutation, filesystem,
-# platform, and business policy in views" is a statement ABOUT a build check, so
-# its owner is this file's four VIEW_* rules -- there is no runtime test that can
-# prove it. apps/gui/test_gui_canonical_identity.c carries the closest
-# behavioural companion (no source decode on the UI thread), but a companion is
-# not an owner. scripts/check_boundaries.sh R22 reads this line.
+# USA-25 partial: owner: gate. Spec §16's "boundary checks reject mutation,
+# filesystem, platform, and business policy in views" is a statement ABOUT a
+# build check, so its owner is this file's four VIEW_* rules -- there is no
+# runtime test that can prove it. apps/gui/test_gui_canonical_identity.c carries
+# the closest behavioural companion (no source decode on the UI thread), but a
+# companion is not an owner. scripts/check_boundaries.sh R22 reads this line.
+#
+# "partial:" is load-bearing here, exactly as on a test-class tag: only two of
+# the four rules are hard assertions (VIEW_ADMISSION for mutation, VIEW_IO for
+# filesystem). VIEW_PLATFORM and VIEW_MODEL_POLICY are debt REPORTS, and their
+# per-symbol allowances below permit the very residue USA-25 forbids:
+#   - platform policy in a view: gui_view_chrome.c reaches windows.h, the
+#     clipboard seam, `system`, and ShellExecute* directly;
+#   - model/business policy in a view: gui_view_canvas.c, gui_view_chrome.c and
+#     gui_view_settings.c read the exporter registry, tp_validate, pack results,
+#     and the effective-shape projection.
+# Those sites are pinned per symbol (a NEW symbol of either family still fails),
+# so the id has not lost its owner -- but the gate proves USA-25 for every view
+# EXCEPT that allowlist, which the PLATFORM-SEAM / SR-BASE cuts retire.
 _arch_assert_rule(VIEW_ADMISSION "A2c/A2d")
 # A7: zero debt by construction. The deferred-intent queue is private to the
 # actions layer, so the names this rule forbids have no external linkage at

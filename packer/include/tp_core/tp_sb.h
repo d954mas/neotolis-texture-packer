@@ -19,6 +19,19 @@
 extern "C" {
 #endif
 
+/* Test-only allocation-failure seam, deliberately narrower than
+ * TP_ENABLE_TEST_SEAMS (same per-binary shape as the CLI's inspect/arena fault
+ * seams): only a TU compiled with TP_SB_ALLOC_FAULT_SEAM gains the check, and
+ * that TU's own binary supplies the predicate. tp_core and every shipping
+ * target are built without the macro, so a shipped build contains neither the
+ * branch nor an undefined symbol. It exists because tp_sb is header-only static
+ * inline: without it, a fault binary can only pre-poison the individual
+ * builders it can name, which silently narrows an "every allocation fails"
+ * fault to a handful of call sites. */
+#if defined(TP_SB_ALLOC_FAULT_SEAM)
+bool tp_sb_alloc_fault_active(void);
+#endif
+
 typedef struct tp_sb {
     char *buf;
     size_t len;
@@ -71,6 +84,12 @@ static inline void tp_sb_write(tp_sb *sb, const char *s, size_t n) {
             new_cap > sb->limit + 1U) {
             new_cap = sb->limit + 1U;
         }
+#if defined(TP_SB_ALLOC_FAULT_SEAM)
+        if (tp_sb_alloc_fault_active()) {
+            sb->oom = true;
+            return;
+        }
+#endif
         char *nb = (char *)realloc(sb->buf, new_cap);
         if (!nb) {
             sb->oom = true;

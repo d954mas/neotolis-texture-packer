@@ -30,16 +30,55 @@ shipping_srcs() {
 
 # 1. No sprite-name extension stripping outside tp_core (tp_sprite_export_key is
 #    the single owner). Project-FILENAME helpers must carry a boundary-ok note.
-r1=$(app_srcs | xargs grep -nE "strrchr\([^,]+, *'\.'\)" 2>/dev/null | grep -v 'boundary-ok:')
+_r1_extstrip="strrchr\([^,]+, *'\.'\)"
+r1=$(app_srcs | xargs grep -nE "$_r1_extstrip" 2>/dev/null | grep -v 'boundary-ok:')
 [ -n "$r1" ] && hit "R1 ext-strip outside tp_core" "$r1"
 
 # 2. No exporter-id string literals in frontends (use TP_EXPORTER_ID_* / registry).
-r2=$(app_srcs | xargs grep -nE '"(json-neotolis|defold)"' 2>/dev/null | grep -v 'boundary-ok:')
+_r2_exporter_id='"(json-neotolis|defold)"'
+r2=$(app_srcs | xargs grep -nE "$_r2_exporter_id" 2>/dev/null | grep -v 'boundary-ok:')
 [ -n "$r2" ] && hit "R2 exporter-id literal in frontend" "$r2"
 
 # 3. No pack-desc assembly in frontends (tp_pack_input_build owns encoding).
-r3=$(app_srcs | xargs grep -nE 'ov_mask|TP_PACK_OV_' 2>/dev/null | grep -v 'boundary-ok:')
+_r3_desc_assembly='ov_mask|TP_PACK_OV_'
+r3=$(app_srcs | xargs grep -nE "$_r3_desc_assembly" 2>/dev/null | grep -v 'boundary-ok:')
 [ -n "$r3" ] && hit "R3 desc assembly in frontend" "$r3"
+
+# Self-test: R1/R2/R3 are the three oldest detectors and were the only ones left
+# without a seeded violation. Like every rule below, they now fail closed -- a
+# future edit that breaks one of the regexes is caught here, not by a silently
+# green tree -- and are pinned against false-positives on the legitimate
+# registry/constant forms they exist to steer callers toward.
+if ! printf "    const char *dot = strrchr(name, '.');\n" | grep -qE "$_r1_extstrip"; then
+    hit "R1-selftest" "R1 detector failed to catch a seeded extension strip"
+fi
+if printf '    tp_sprite_export_key(name, key, sizeof key);\n' | grep -qE "$_r1_extstrip"; then
+    hit "R1-selftest" "R1 detector false-positives on the tp_core export-key owner"
+fi
+for _seed in \
+    '    if (strcmp(id, "json-neotolis") == 0) {' \
+    '    const char *fallback = "defold";'
+do
+    if ! printf '%s\n' "$_seed" | grep -qE "$_r2_exporter_id"; then
+        hit "R2-selftest" "R2 detector failed to catch a seeded exporter-id literal: $_seed"
+    fi
+done
+if printf '    const char *id = TP_EXPORTER_ID_DEFOLD;\n    tp_exporter_at(i);\n' |
+    grep -qE "$_r2_exporter_id"; then
+    hit "R2-selftest" "R2 detector false-positives on the exporter-id constant / registry form"
+fi
+for _seed in \
+    '    desc.ov_mask |= TP_PACK_OV_PADDING;' \
+    '    settings.ov_mask = 0U;'
+do
+    if ! printf '%s\n' "$_seed" | grep -qE "$_r3_desc_assembly"; then
+        hit "R3-selftest" "R3 detector failed to catch a seeded pack-desc assembly: $_seed"
+    fi
+done
+if printf '    tp_pack_input_build(snapshot, atlas_id, &input, &err);\n' |
+    grep -qE "$_r3_desc_assembly"; then
+    hit "R3-selftest" "R3 detector false-positives on the tp_pack_input_build owner"
+fi
 
 # 4. Public tp_core headers name no engine types (comments stripped first).
 r4=$(for f in packer/include/tp_core/*.h; do
@@ -757,9 +796,11 @@ fi
 #       gate -- a registry line in a build check (cmake/, scripts/) carrying both
 #               the id and the literal marker `owner: gate`, for the handful of
 #               requirements whose proof IS a build gate and not a runtime test.
-#     Partial coverage is recorded in the tag with a "partial:" note and still
-#     counts as owned -- the gate proves a requirement has not silently lost its
-#     last owner, not that the owner is exhaustive.
+#     Partial coverage is recorded with a "partial:" note -- in the test tag, or
+#     on the gate registry line for a gate-class owner -- and still counts as
+#     owned: the gate proves a requirement has not silently lost its last owner,
+#     not that the owner is exhaustive. A gate owner whose rule carries
+#     per-symbol debt allowances is partial by construction and says so.
 #
 #     The corpus used to be a bare `grep -r USA- apps packer/tests`, which any
 #     production comment, CMakeLists note, or the gate's own self-test text
@@ -779,8 +820,12 @@ _usa_missing() {
             printf '%s\n' "$_usa_id"
     done
 }
+# Both app test-file spellings are corpus: apps/gui uses `test_*.c`, apps/cli
+# uses `*_test.c` (cli_out_contract_test.c), so a tag placed under the CLI
+# convention is visible to this gate instead of silently unowned.
 _usa_test_sources() {
-    ls apps/*/test_*.c apps/gui/gui_selftest.c packer/tests/*.c 2>/dev/null
+    ls apps/*/test_*.c apps/*/*_test.c apps/gui/gui_selftest.c packer/tests/*.c \
+        2>/dev/null
 }
 # Ids claimed by a tag adjacent to the `void test_` definition it owns. A tag
 # with no test under it (deleted owner) contributes nothing, and neither does a
@@ -788,6 +833,26 @@ _usa_test_sources() {
 # when the file also carries a call site for the claimed function -- the
 # trailing `name);` of a RUN_TEST(name); (same-line or wrapped) or a bare
 # direct call `name();`. Prototypes (`void name(void);`) match neither form.
+#
+# The call scan is textual, so a call site that the COMPILER never sees must be
+# removed before it is recorded, or the tag keeps crediting a test that no
+# longer runs. Two such forms are stripped here: text inside a /* ... */ block
+# comment (and after a // line comment), and text inside an `#if 0 ... #endif`
+# region (nesting tracked; the `#else` branch of an `#if 0` is live code and is
+# NOT stripped). Only the literal `#if 0` is treated as dead -- this is a
+# greppable gate, not a preprocessor, so no other condition is evaluated.
+# Tag scanning deliberately reads the RAW line, because the `/* USA-nn */` tags
+# themselves live in comments; only `#if 0` regions drop out of both scans.
+#
+# Known limits (documented rather than detected -- each needs analysis this gate
+# does not do):
+#   - dead call graph: a `RUN_TEST(test_foo);` inside a function that main()
+#     never calls still counts. Proving otherwise needs whole-file call-graph
+#     analysis, and a runner file's entry point is not a fixed name here;
+#   - conditional compilation other than `#if 0` (e.g. a registration under
+#     `#ifdef _WIN32`) counts on every platform;
+#   - a call site in a DIFFERENT file than the definition is not seen, so a
+#     shared runner would read as unregistered.
 _usa_test_owned() {
     awk '
         function flush_file(   fn, n, i, part) {
@@ -798,6 +863,50 @@ _usa_test_owned() {
                         if (part[i] != "") print part[i]
                 }
             split("", claim); split("", called)
+        }
+        # Removes commented-out text, carrying /* ... */ state across lines.
+        function strip_comments(line,   out, idx) {
+            out = ""
+            while (length(line) > 0) {
+                if (in_comment) {
+                    idx = index(line, "*/")
+                    if (idx == 0) { line = ""; break }
+                    in_comment = 0
+                    line = substr(line, idx + 2)
+                    continue
+                }
+                idx = index(line, "/*")
+                if (idx == 0) { out = out line; break }
+                out = out substr(line, 1, idx - 1)
+                in_comment = 1
+                line = substr(line, idx + 2)
+            }
+            idx = index(out, "//")
+            if (idx > 0) out = substr(out, 1, idx - 1)
+            return out
+        }
+        # Tracks `#if 0` regions on already-comment-stripped text. Returns 1 for
+        # a preprocessor directive line (never a call site itself).
+        function track_dead_regions(line,   t) {
+            t = line
+            sub(/^[ \t]*/, "", t)
+            if (t !~ /^#/) return 0
+            if (t ~ /^#[ \t]*(if|ifdef|ifndef)([^A-Za-z0-9_]|$)/) {
+                cond_depth++
+                if (dead_depth == 0 && t ~ /^#[ \t]*if[ \t]+0[ \t]*$/)
+                    dead_depth = cond_depth
+                return 1
+            }
+            if (t ~ /^#[ \t]*endif([^A-Za-z0-9_]|$)/) {
+                if (dead_depth == cond_depth) dead_depth = 0
+                if (cond_depth > 0) cond_depth--
+                return 1
+            }
+            if (t ~ /^#[ \t]*(else|elif)([^A-Za-z0-9_]|$)/) {
+                if (dead_depth == cond_depth) dead_depth = 0
+                return 1
+            }
+            return 0
         }
         function record_calls(line,   s, m) {
             s = line
@@ -819,9 +928,16 @@ _usa_test_owned() {
                 s = substr(s, RSTART + RLENGTH)
             }
         }
-        FNR == 1 { flush_file(); p1 = ""; p2 = ""; p3 = "" }
+        FNR == 1 {
+            flush_file()
+            p1 = ""; p2 = ""; p3 = ""
+            in_comment = 0; cond_depth = 0; dead_depth = 0
+        }
         {
-            record_calls($0)
+            code = strip_comments($0)
+            directive = track_dead_regions(code)
+            if (dead_depth > 0 || directive) { p3 = p2; p2 = p1; p1 = $0; next }
+            record_calls(code)
             if (match($0, /(^|[^A-Za-z0-9_])void[ \t]+test_[A-Za-z0-9_]*[ \t]*\(/)) {
                 d = substr($0, RSTART, RLENGTH)
                 sub(/.*void[ \t]+/, "", d)
@@ -861,6 +977,14 @@ else
         >"$_r22_dir/test_wrapped.c"
     printf '/* USA-77 tagged, defined, but its RUN_TEST line was deleted. */\nvoid test_unregistered(void) {\n}\n' \
         >"$_r22_dir/test_unregistered.c"
+    printf '/* USA-77 tagged, but its registration is compiled out. */\nvoid test_if0(void) {\n}\nvoid run_all(void) {\n#if 0\n    RUN_TEST(test_if0);\n#endif\n}\n' \
+        >"$_r22_dir/test_if0.c"
+    printf '/* USA-77 tagged, but its registration is inside a nested dead region. */\nvoid test_if0_nested(void) {\n}\nvoid run_all(void) {\n#if 0\n#ifdef _WIN32\n    RUN_TEST(test_if0_nested);\n#endif\n#endif\n}\n' \
+        >"$_r22_dir/test_if0_nested.c"
+    printf '/* USA-77 tagged, but its registration is commented out. */\nvoid test_blockcomment(void) {\n}\nvoid run_all(void) {\n    /* RUN_TEST(test_blockcomment); */\n    /*\n    test_blockcomment();\n    */\n    // RUN_TEST(test_blockcomment);\n}\n' \
+        >"$_r22_dir/test_blockcomment.c"
+    printf '/* USA-77 owned via the LIVE else branch of an #if 0. */\nvoid test_if0_else(void) {\n}\nvoid run_all(void) {\n#if 0\n    test_never();\n#else\n    RUN_TEST(test_if0_else);\n#endif\n}\n' \
+        >"$_r22_dir/test_if0_else.c"
     printf '/* USA-77: the test that owned this was deleted. */\n' \
         >"$_r22_dir/test_orphan.c"
     printf 'void helper(void) { /* USA-77 in production prose */ }\n' \
@@ -876,6 +1000,14 @@ else
         hit "R22-selftest" "R22 failed to credit a wrapped RUN_TEST or bare-call registration"
     [ -n "$(_usa_test_owned "$_r22_dir/test_unregistered.c")" ] &&
         hit "R22-selftest" "R22 credited a defined-but-unregistered test (deleted RUN_TEST line)"
+    [ -n "$(_usa_test_owned "$_r22_dir/test_if0.c")" ] &&
+        hit "R22-selftest" "R22 credited a registration inside an #if 0 region"
+    [ -n "$(_usa_test_owned "$_r22_dir/test_if0_nested.c")" ] &&
+        hit "R22-selftest" "R22 credited a registration inside a nested #if 0 region"
+    [ -n "$(_usa_test_owned "$_r22_dir/test_blockcomment.c")" ] &&
+        hit "R22-selftest" "R22 credited a commented-out registration"
+    [ "$(_usa_test_owned "$_r22_dir/test_if0_else.c")" = "USA-77" ] ||
+        hit "R22-selftest" "R22 dropped a registration in the LIVE #else branch of an #if 0"
     [ -n "$(_usa_test_owned "$_r22_dir/test_orphan.c")" ] &&
         hit "R22-selftest" "R22 credited a tag whose owning test disappeared"
     [ -n "$(_usa_test_owned "$_r22_dir/prod.c")" ] &&

@@ -58,11 +58,27 @@ bool gui_pack_atlas(int atlas_index, double *out_ms, char *err, size_t err_cap, 
  * freshness-neutral by construction, because nothing on the freshness path
  * (input tokens, pack_input_hash, the stale bit) is touched by residency.
  *
- * Reading a result makes its atlas the resident one. Two atlases are therefore
- * never resident at once, and a result pointer stays valid until its entry
- * leaves the store (eviction, gui_pack_clear, or a repack of the same inputs) --
- * never merely because another atlas was read. */
+ * This read MUTATES residency: it makes `atlas_index` the resident atlas, which
+ * demotes the previously resident one into the byte-budget LRU and may evict it.
+ * Two atlases are therefore never resident at once, and the returned pointer is
+ * valid only until the next residency change -- a gui_pack_result for a DIFFERENT
+ * atlas (anyone's, not just this caller's), a published Pack, gui_pack_clear, or
+ * shutdown. It is a within-operation borrow: never hold it across a frame, and
+ * never hold two atlases' results at once. A caller that must read a SECOND
+ * atlas' result without taking the pin away from the one on screen uses
+ * gui_pack_result_peek below. */
 const tp_result *gui_pack_result(int atlas_index);
+/* The same result, read WITHOUT changing residency: no reside, no demotion, no
+ * LRU touch, no eviction. This is the read for a consumer that is not the one
+ * driving what the canvas shows (the animation preview player), so two such
+ * consumers can never fight over the single active pin frame after frame.
+ *
+ * NULL when the atlas was never packed or its entry was evicted -- the same
+ * §10.4 cache-miss presentation as gui_pack_result, except that a miss here does
+ * not retire the presentation slot (a read decides nothing about residency).
+ * The pointer carries the SAME lifetime rule as gui_pack_result's: it survives
+ * only until the next residency change, so it is a within-operation borrow. */
+const tp_result *gui_pack_result_peek(int atlas_index);
 /* Changes whenever a successful Pack publishes a new result into this atlas slot. */
 uint64_t gui_pack_result_version(int atlas_index);
 

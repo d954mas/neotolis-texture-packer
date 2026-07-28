@@ -9,13 +9,19 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Test-only binary: the mutation/error payload builders below start poisoned, so
- * a render takes its allocation-free fallback and the process-level exit/payload
- * contract is exercised without an allocator hook in the shared builder. */
+/* Test-only binary (ntpacker_output_fault): every CLI string-builder growth
+ * fails, so EVERY payload builder in this binary -- pack, inspect, validate,
+ * mutate, version, help, and the three below -- takes its real sb.oom branch
+ * and the process-level exit/payload contract is exercised end to end.
+ *
+ * This is one predicate behind tp_core's TP_SB_ALLOC_FAULT_SEAM rather than a
+ * per-builder poison, because tp_sb is header-only static inline: poisoning
+ * only the instances this file can name would silently narrow "every
+ * allocation fails" to three call sites and leave every other sb.oom ->
+ * CLI_EXIT_INTERNAL branch uninjectable. tp_core and the shipped ntpacker are
+ * compiled without the macro, so neither has the branch or the symbol. */
 #if defined(NTPACKER_CLI_OUT_FAULT_SEAM)
-#define CLI_SB_INIT {.oom = true}
-#else
-#define CLI_SB_INIT {0}
+bool tp_sb_alloc_fault_active(void) { return true; }
 #endif
 
 void cli_out_stdout(const tp_sb *sb) {
@@ -35,7 +41,7 @@ static void emit_error_message(bool json, bool quiet, const char *id,
                                const tp_file_io_context *file_io,
                                const char *msg) {
     if (json) {
-        tp_sb sb = CLI_SB_INIT;
+        tp_sb sb = {0};
         tp_sb_str(&sb, "{\"schema\":1,\"error\":{\"id\":");
         tp_sb_json_string(&sb, id);
         tp_sb_str(&sb, ",\"message\":");
@@ -50,7 +56,7 @@ static void emit_error_message(bool json, bool quiet, const char *id,
             tp_sb_str(&sb, ",\"phase\":");
             tp_sb_json_string(&sb, tp_file_io_phase_id(file_io->phase));
             tp_sb_str(&sb, ",\"path\":");
-            tp_sb_json_string(&sb, file_io->path ? file_io->path : "");
+            tp_sb_json_string(&sb, file_io->path);
             tp_sb_str(&sb, ",\"native_code\":");
             tp_sb_int(&sb, file_io->native_code);
         }
@@ -105,7 +111,7 @@ void cli_emit_reject(bool json, bool quiet, const char *id, const char *field, i
 
 bool cli_emit_mutation(const char *verb, int count,
                        const tp_session_save_result *save_result) {
-    tp_sb sb = CLI_SB_INIT;
+    tp_sb sb = {0};
     tp_sb_str(&sb, "{\"schema\":1,\"ok\":true,\"verb\":");
     tp_sb_json_string(&sb, verb);
     tp_sb_str(&sb, ",\"count\":");
@@ -176,7 +182,7 @@ bool cli_emit_mutation_preview(const char *command,
                                const tp_id128 *generated_ids,
                                int generated_count,
                                const char *generated_ids_semantics) {
-    tp_sb sb = CLI_SB_INIT;
+    tp_sb sb = {0};
     tp_sb_str(&sb, "{\"schema\":2,\"command\":");
     tp_sb_json_string(&sb, command);
     tp_sb_str(&sb, ",\"dry_run\":true,\"would_change\":");

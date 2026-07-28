@@ -136,6 +136,11 @@ void gui_edit_target_exporter(const gui_target_ref *target,
 
 /* --- deferred semantic ingress: commits blur edits and drains action queues --- */
 void apply_pending(void);
+/* Releases the action layer's own heap at exit: every intent still queued (with
+ * the frame refs / names it owns) and the preview frame map. Session, pack and
+ * row state are NOT touched -- each of those owners has its own shutdown, and
+ * this one holds no reference to any of them, so it runs first. */
+void gui_actions_shutdown(void);
 /* Consumes only host-classified Pack/Export completions after the frame's
  * atomic observation has reduced them. */
 void gui_actions_poll_host_completion(void);

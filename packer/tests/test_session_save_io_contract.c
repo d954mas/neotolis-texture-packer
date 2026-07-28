@@ -156,10 +156,10 @@ static void assert_session_outcome(const session_save_fault *fault,
     TEST_ASSERT_EQUAL_INT(0, save_result.target_path[0]);
     TEST_ASSERT_TRUE(tp_id128_is_nil(save_result.file_fingerprint));
     TEST_ASSERT_EQUAL_INT(fault->phase, error.file_io.phase);
+    /* The reported path is the PUBLIC one the caller passed, not the private
+     * canonical buffer the save path built. It is owned by value, so it stays
+     * readable no matter what happens to either of those buffers. */
     TEST_ASSERT_EQUAL_STRING(attempted_path, error.file_io.path);
-    if (fault->create_only) {
-        TEST_ASSERT_EQUAL_PTR(attempted_path, error.file_io.path);
-    }
 
     tp_session_snapshot *after_failure = NULL;
     TEST_ASSERT_EQUAL_INT(

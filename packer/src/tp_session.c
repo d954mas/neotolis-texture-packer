@@ -841,7 +841,8 @@ tp_status tp_session_redo(tp_session *session, tp_error *err) {
 static void remap_save_error_path(tp_status status, const char *public_path,
                                   tp_error *err) {
     if (status == TP_STATUS_FILE_IO_FAILED && err) {
-        err->file_io.path = public_path;
+        (void)snprintf(err->file_io.path, sizeof err->file_io.path, "%s",
+                       public_path ? public_path : "");
     }
 }
 

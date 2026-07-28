@@ -24,12 +24,20 @@ typedef enum tp_file_io_phase {
     TP_FILE_IO_PHASE_ATOMIC_CREATE
 } tp_file_io_phase;
 
+/* Diagnostic path capacity, including the NUL. Deliberately the same bound as
+ * `msg`: the path is operator/agent context, every producer already interpolates
+ * it into that equally bounded message, and a longer path is truncated here for
+ * exactly the reason it is truncated there. */
+#define TP_FILE_IO_PATH_MAX 256
+
 typedef struct tp_file_io_context {
     tp_file_io_phase phase;
-    /* Borrowed from the Save caller and valid for the same lifetime as that
-     * input path. Session boundaries remap private canonical buffers before
-     * returning the error to their caller. */
-    const char *path;
+    /* Owned BY VALUE. tp_error crosses process, job and session boundaries as a
+     * plain struct assignment, so this must never be a borrow: a pointer here
+     * outlived by its owner is a use-after-free the copy cannot see. Empty means
+     * "no path". Session boundaries overwrite private canonical buffers with the
+     * public path before returning the error to their caller. */
+    char path[TP_FILE_IO_PATH_MAX];
     /* errno-compatible cause captured before cleanup can overwrite it. */
     int native_code;
 } tp_file_io_context;
@@ -155,7 +163,8 @@ typedef enum tp_status {
     TP_STATUS_CANCELLED
 } tp_status;
 
-/* No heap, safe to embed by value on the stack. The single anonymous aggregate
+/* No heap and no borrowed pointers, so a plain struct copy of a tp_error stays
+ * valid for as long as the destination does. The single anonymous aggregate
  * preserves the long-standing `tp_error error = {{0}}` initializer under the
  * project's -Wmissing-field-initializers -Werror policy. */
 typedef union tp_error {
@@ -178,7 +187,7 @@ static inline tp_status tp_error_set(tp_error *err, tp_status status, const char
 static inline tp_status tp_error_set(tp_error *err, tp_status status, const char *fmt, ...) {
     if (err) {
         err->file_io.phase = TP_FILE_IO_PHASE_NONE;
-        err->file_io.path = NULL;
+        err->file_io.path[0] = '\0';
         err->file_io.native_code = 0;
         if (fmt) {
             va_list args;
@@ -201,7 +210,8 @@ static inline tp_status tp_error_set_file_io(
     const char *fmt, ...) {
     if (err) {
         err->file_io.phase = phase;
-        err->file_io.path = path;
+        (void)snprintf(err->file_io.path, sizeof err->file_io.path, "%s",
+                       path ? path : "");
         err->file_io.native_code = native_code;
         if (fmt) {
             va_list args;

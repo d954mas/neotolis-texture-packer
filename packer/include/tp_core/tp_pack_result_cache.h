@@ -139,6 +139,25 @@ tp_status tp_pack_result_cache_store_retained(
 bool tp_pack_result_cache_contains(const tp_pack_result_cache *cache,
                                    tp_id128 hash);
 
+/* READ-ONLY lookup of the result `hash` already holds decompressed. Nothing about
+ * residency moves: no selection, no promotion to active, no demotion of whoever is
+ * active, no LRU touch, no eviction pass. It is the read for a caller that must
+ * observe a second entry WITHOUT taking the one active pin away from the entry
+ * that owns the presentation.
+ *
+ * NULL when the hash is absent -- and also when the entry is a SERIALIZED one that
+ * is currently inactive: it gave up its decompressed arena on demotion and only
+ * tp_pack_result_cache_authoritative can re-inflate it. A RETAINED-PIN entry keeps
+ * its result for the whole life of the entry, so a peek hits for it whether it is
+ * active or not, which is what makes this read useful to a frontend.
+ *
+ * LIFETIME. The pointer is BORROWED and only as stable as the entry behind it: any
+ * later store, store_retained, forget, authoritative, or destroy on this cache may
+ * release that entry's pin and free the result. Use it inside the operation that
+ * asked for it; never retain it across one. */
+const struct tp_result *tp_pack_result_cache_peek(
+    const tp_pack_result_cache *cache, tp_id128 hash);
+
 /* Drops `hash` if present, releasing its arena (serialized entry) or its owner
  * (retained-pin entry) exactly once, and clears an explicit selection that named
  * it. Used when the thing a cached result describes is gone for good -- the atlas

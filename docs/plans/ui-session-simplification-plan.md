@@ -734,6 +734,50 @@ per-atlas freshness work (master-spec item 5), whose off-UI-thread constraint a
 quick undo-time `tp_session_pack_input_hash` probe (a full synchronous decode)
 would violate.
 
+**S21 — fresh-review round 3 (`be71372..690bd42`: three zone reviewers, two
+adversarial verifiers).** No confirmed P0/P1. The headline GUI claim — canvas
+use-after-free via a preview-driven cache eviction — was REFUTED as a live bug
+(every interactive atlas switch stops the player, and a demoted entry is the
+LRU *survivor*, not the victim), but the protection was ordering luck over an
+unstated invariant, and the one reachable divergence state (`intent_add_atlas`)
+flipped cache residency twice per frame. Fixed in three zones:
+
+- *A read stops mutating residency (gui).* New `tp_pack_result_cache_peek`
+  (no select, no demotion, no LRU touch, no eviction) + `gui_pack_result_peek`;
+  the animation player observes through it, so two consumers can no longer
+  fight over the single active pin frame after frame. `intent_add_atlas` stops
+  the player like every other switch path; a result that was playing and then
+  disappeared stops the player with a warning instead of silently re-arming
+  the pack hint; `gui_pack.h` now states the real lifetime rule (the mutating
+  read, and when its pointer dies). Publish's index-OOM branch reports
+  `TP_STATUS_OOM` instead of a PACK_FAIL carrying OK; the action layer owns an
+  exit shutdown (queued intent payloads + the preview frame map); the `--shot`
+  pack latch is a success latch like its selection sibling.
+- *`tp_error` owns its path by value (core).* `file_io.path` is a fixed
+  256-byte array, so the latent compact/response-free aliasing and the
+  worker's freshness-path strdup/OOM-fallback/free plumbing vanish
+  structurally (net deletion; the "No heap" comment on the type is true
+  again). Export preflight matches the staging dir against the listed set
+  BEFORE the first rename — an unlisted leftover no longer reports "nothing
+  published" over a fully republished set. Staging dirs are claimed by an
+  atomic exclusive create (`tp_fs_create_dir_exclusive`) — a leftover or
+  foreign name is genuinely never adopted, with no check-then-create window. A
+  not-stageable output raises `TP_NOTICE_FIELD_SET_ATOMICITY` /
+  `TP_NOTICE_REASON_PATH_NOT_STAGEABLE` instead of degrading silently.
+- *Gates fail closed harder (tests/cli).* R22 strips block/line comments and
+  `#if 0` regions before crediting a `RUN_TEST` call site (self-test seeds
+  every stripped form; the dead-call-graph case is a documented known limit)
+  and the corpus now sees `apps/*/*_test.c`. The CLI output-OOM fault covers
+  every payload builder again via a `TP_SB_ALLOC_FAULT_SEAM` hook compiled
+  only into the fault binary's CLI TUs (+4 contract ctests for the previously
+  uninjectable branches). USA-25's gate owner carries `partial:` naming the
+  allowlisted residue. The wire-offset proto tests discover their field by
+  diffing two encodings instead of hardcoding offsets. The host-queue fault
+  seam resets in `tearDown`. R1/R2/R3 gained the seeded-violation self-tests
+  every other rule already had. Duplicate `tp_obj_key` copies deleted.
+
+Battery: debug 159/159, release 158/158 (clean builds), boundaries OK.
+
 ## Decision records
 
 - **Escape after a deferred gesture commit is accepted as-is.** `frame()` runs

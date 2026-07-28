@@ -31,6 +31,7 @@ gui_preview_frame_work gui_preview_frame_work_get(void) {
 void preview_stop(void) {
     s_preview_active = false;
     memset(&s_actions.preview_animation_ref, 0, sizeof s_actions.preview_animation_ref);
+    s_actions.preview_had_result = false;
     s_preview_playing = false;
     s_preview_finished = false;
     s_preview_time = 0.0;
@@ -363,6 +364,9 @@ void open_preview_ref(const gui_animation_ref *ref) {
     s_preview_playing = true;
     s_preview_finished = false;
     s_preview_time = 0.0;
+    /* A fresh arming has never seen a result yet, so a not-yet-packed atlas keeps
+     * showing the hint instead of being reported as a released result. */
+    s_actions.preview_had_result = false;
     if (!gui_pack_result(atlas_index)) {
         set_status("Pack (Ctrl+P) to preview the animation on packed regions.");
     } else {
@@ -411,6 +415,11 @@ static bool preview_frames_reserve(int needed) {
     s_actions.preview_frames.indices = grown;
     s_actions.preview_frames.capacity = capacity;
     return true;
+}
+
+void gui_actions__preview_shutdown(void) {
+    free(s_actions.preview_frames.indices);
+    memset(&s_actions.preview_frames, 0, sizeof s_actions.preview_frames);
 }
 
 static void preview_frames_rebuild(const tp_session_snapshot *snapshot,
@@ -492,12 +501,43 @@ void update_preview(void) {
                                           : NULL;
     const int atlas_index = gui_actions__snapshot_atlas_index_by_id(
         snapshot, s_actions.preview_animation_ref.atlas_id);
-    const tp_result *pr = gui_pack_result(atlas_index);
+    /* PEEK, not a residency-taking read: the atlas the canvas shows owns the one
+     * active pin, and the player only observes. Reading it the mutating way made
+     * every frame of a preview whose atlas is not the viewed one flip residency
+     * twice (two index rebuilds + two LRU passes per frame), and under budget
+     * pressure could evict the very result the canvas had just bound. */
+    const tp_result *pr = gui_pack_result_peek(atlas_index);
     const uint64_t result_version = gui_pack_result_version(atlas_index);
     s_canvas.anim_sprite = -1;
     s_preview_frame_count = 0;
-    if (!an || !pr || result_version == 0U) {
+    if (!an) {
         return; /* declare_canvas draws the "Pack to preview" hint */
+    }
+    if (!pr || result_version == 0U) {
+        /* Never packed -> the hint is the honest presentation (open_preview_ref
+         * says so). But a result that was PLAYING and then disappeared -- the
+         * byte-budget store evicted it, or the atlas was cleared -- would leave
+         * the player armed on a hint nobody asked for, so it stops for real.
+         * This is a fact about the preview's OWN atlas, so it is decided before
+         * the canvas-binding guard below. */
+        if (s_actions.preview_had_result) {
+            preview_stop();
+            set_status_ex(STATUS_WARNING,
+                          "Preview stopped: the packed result was released. "
+                          "Pack (Ctrl+P) to preview again.");
+        }
+        return;
+    }
+    s_actions.preview_had_result = true;
+    /* Everything below indexes the result the CANVAS is bound to, and the canvas
+     * binds the VIEWED atlas' result (preview_target_result) -- including the
+     * canonical frame lookup, which resolves against the resident atlas. Every
+     * switch path stops the player, so this holds by construction; a divergence
+     * would resolve one atlas' regions out of another atlas' result, so it is
+     * checked rather than assumed. */
+    if (!tp_id128_eq(s_actions.preview_animation_ref.atlas_id,
+                     gui_view_atlas_id())) {
+        return;
     }
     const uint64_t model_generation =
         tp_session_snapshot_model_generation(snapshot);

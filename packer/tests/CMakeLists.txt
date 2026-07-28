@@ -393,6 +393,13 @@ tp_add_test(NAME export_png LIBS tp_build unity stb_image
     MAKE_DIRS "${CMAKE_BINARY_DIR}/tp_export_png_test"
     ARGS "${CMAKE_BINARY_DIR}/tp_export_png_test")
 
+# Export output-SET publication: exclusive staging-dir create, unlisted-output
+# preflight before the first rename, and the bypassed-staging notice. Drives
+# tp_export_write_and_publish_set directly over a fixture exporter (no pack).
+tp_add_test(NAME export_set_publish LIBS tp_core unity PRIVATE_SRC
+    MAKE_DIRS "${CMAKE_BINARY_DIR}/tp_export_set_publish_test"
+    ARGS "${CMAKE_BINARY_DIR}/tp_export_set_publish_test")
+
 # Phase 2 per-target packing: test-only capability-restricted descriptors prove
 # effective-settings repack, shared runs, and metadata-loss notices.
 tp_add_test(NAME export_run

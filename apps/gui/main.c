@@ -1252,6 +1252,10 @@ static int gui_main_utf8(int argc, char *argv[]) {
         gui_project_lifecycle_force_close();
     }
 
+    /* Above canvas/pack/rows/project and holding no reference to any of them:
+     * whatever the user left queued never runs now, so its payloads are disposed
+     * before the owners below start tearing their own state down. */
+    gui_actions_shutdown();
     gui_canvas_shutdown(&s_canvas);
     gui_pack_shutdown();
     gui_rows_shutdown();

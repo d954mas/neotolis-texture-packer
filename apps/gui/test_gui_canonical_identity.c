@@ -444,6 +444,9 @@ void tearDown(void) {
     tp_journal__test_set_record_limit(0U);
     tp_journal__test_set_file_limit(0U);
     multi_sel_clear();
+    /* The action layer owns heap of its own (undrained intents + the preview
+     * frame map); releasing it between cases is what the app does at exit. */
+    gui_actions_shutdown();
     gui_pack_shutdown();
     gui_project_test_shutdown(true);
     gui_scan_shutdown();
@@ -1443,6 +1446,143 @@ void test_failed_resident_switch_never_serves_the_evicted_resident(void) {
     TEST_ASSERT_EQUAL_INT(1, second->sprite_count);
 }
 
+/* Arms the animation player on a one-frame animation of `atlas_index` (the frame
+ * matters: resolving it is what reads the pack result a second time). */
+static void arm_preview_on_atlas(int atlas_index) {
+    const tp_session_snapshot *snapshot = gui_project_snapshot();
+    const tp_snapshot_atlas *atlas =
+        tp_session_snapshot_atlas_at(snapshot, atlas_index);
+    TEST_ASSERT_NOT_NULL(atlas);
+    /* The create clone-swaps the project under `atlas`. */
+    const tp_id128 atlas_id = atlas->id;
+    const tp_snapshot_source *source =
+        tp_session_snapshot_source_at(snapshot, atlas_id, 0);
+    TEST_ASSERT_NOT_NULL(source);
+    const tp_op_sprite_ref frames[1] = {{source->id, "coin.png"}};
+    const gui_project_create_result created = gui_project_create_animation(
+        atlas_id, tp_session_snapshot_revision(snapshot), "preview-anim", frames,
+        1);
+    TEST_ASSERT_TRUE(created.committed);
+    const gui_animation_ref ref = {
+        atlas_id, created.created_id,
+        tp_session_snapshot_revision(gui_project_snapshot())};
+    open_preview_ref(&ref);
+    TEST_ASSERT_TRUE(s_preview_active);
+}
+
+/* S21: the animation player READS the pack store, it does not own residency. A
+ * player armed on one atlas while the canvas shows another used to call the
+ * residency-taking read every frame -- two residency flips, two canonical-index
+ * rebuilds and two LRU passes per frame, and under budget pressure an eviction of
+ * the result the canvas had just bound. The read is a peek, and the frame indices
+ * (which index the CANVAS' result) are not applied to a foreign atlas' result. */
+void test_preview_result_read_never_moves_the_active_pack_pin(void) {
+    (void)add_coin_source_to_atlas(0);
+    TEST_ASSERT_EQUAL_INT(1, gui_project_add_atlas().visible_index);
+    const tp_id128 second_atlas_id = add_coin_source_to_atlas(1);
+    TEST_ASSERT_TRUE(gui_pack_init(TP_GUI_IDENTITY_TEST_DIR));
+
+    const tp_session_snapshot *snapshot = gui_project_snapshot();
+    const tp_snapshot_atlas *first = tp_session_snapshot_atlas_at(snapshot, 0);
+    TEST_ASSERT_NOT_NULL(first);
+    gui_view_select_atlas(first->id);
+    do_pack_blocking();
+    TEST_ASSERT_NOT_NULL(gui_pack_result(0));
+    arm_preview_on_atlas(0);
+
+    /* The view moves to the second atlas and packs it: that atlas now owns the
+     * active pin while the player is still armed on the first one. */
+    gui_view_select_atlas(second_atlas_id);
+    do_pack_blocking();
+    TEST_ASSERT_NOT_NULL(gui_pack_result(1));
+
+    tp_pack_result_cache_stats before;
+    gui_pack__test_result_cache_stats(&before);
+    TEST_ASSERT_EQUAL_INT(2, before.entry_count);
+    TEST_ASSERT_TRUE(before.has_active);
+
+    for (int frame = 0; frame < 3; ++frame) {
+        update_preview();
+    }
+
+    tp_pack_result_cache_stats after;
+    gui_pack__test_result_cache_stats(&after);
+    TEST_ASSERT_TRUE_MESSAGE(
+        tp_id128_eq(before.active_hash, after.active_hash),
+        "the preview read must not take the active pin from the atlas on screen");
+    TEST_ASSERT_EQUAL_UINT64(before.inactive_bytes, after.inactive_bytes);
+    TEST_ASSERT_EQUAL_INT(before.entry_count, after.entry_count);
+    TEST_ASSERT_EQUAL_UINT64(before.evicted, after.evicted);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        -1, s_canvas.anim_sprite,
+        "frame indices index the canvas' result, so none may be applied while "
+        "the canvas is bound to another atlas");
+
+    /* The peek still SEES the demoted entry -- it is a non-mutating hit, not the
+     * cache miss an evicted entry would report. */
+    TEST_ASSERT_NOT_NULL(gui_pack_result_peek(0));
+    gui_pack__test_result_cache_stats(&after);
+    TEST_ASSERT_TRUE(tp_id128_eq(before.active_hash, after.active_hash));
+    TEST_ASSERT_EQUAL_UINT64(before.evicted, after.evicted);
+}
+
+/* S21: adding an atlas selects it, so it is an atlas SWITCH and stops the player
+ * exactly like every other switch path (gui_view_lists' reset_selection). It was
+ * the one path that moved the selection while leaving the player armed on the
+ * atlas the canvas no longer shows. */
+void test_adding_an_atlas_stops_the_armed_animation_preview(void) {
+    (void)add_coin_source_to_atlas(0);
+    TEST_ASSERT_TRUE(gui_pack_init(TP_GUI_IDENTITY_TEST_DIR));
+    const tp_session_snapshot *snapshot = gui_project_snapshot();
+    const tp_snapshot_atlas *first = tp_session_snapshot_atlas_at(snapshot, 0);
+    TEST_ASSERT_NOT_NULL(first);
+    const tp_id128 first_id = first->id;
+    gui_view_select_atlas(first_id);
+    do_pack_blocking();
+    TEST_ASSERT_NOT_NULL(gui_pack_result(0));
+    arm_preview_on_atlas(0);
+
+    gui_request_add_atlas();
+    apply_pending();
+
+    TEST_ASSERT_FALSE_MESSAGE(tp_id128_eq(gui_view_atlas_id(), first_id),
+                              "adding an atlas selects the new atlas");
+    TEST_ASSERT_FALSE_MESSAGE(
+        s_preview_active,
+        "the player must not stay armed on the atlas the view left");
+    TEST_ASSERT_EQUAL_INT(-1, s_canvas.anim_sprite);
+}
+
+/* S21: a publication that fails on the canonical-index allocation is an OOM, and
+ * the typed completion must SAY so -- it used to report PACK_FAIL carrying
+ * TP_STATUS_OK, which is the status of the successful job it just lost. */
+void test_publish_index_oom_reports_the_typed_oom_status(void) {
+    (void)add_coin_source_to_atlas(0);
+    TEST_ASSERT_TRUE(gui_pack_init(TP_GUI_IDENTITY_TEST_DIR));
+    char error[256] = {0};
+    TEST_ASSERT_TRUE(gui_pack_async_start(0, error, sizeof error));
+
+    gui_pack_result_info info = {0};
+    gui_pack_done done = GUI_PACK_DONE_NONE;
+    for (int attempt = 0; attempt < 5000 && done == GUI_PACK_DONE_NONE;
+         ++attempt) {
+        /* Re-armed every iteration because only the publishing frame consumes
+         * the one-shot, and which frame that is is a host-timing detail. */
+        gui_pack__test_fail_next_ref_index_build();
+        done = pump_pack_frame(&info);
+        if (done == GUI_PACK_DONE_NONE) {
+            nt_time_sleep(0.001);
+        }
+    }
+    TEST_ASSERT_EQUAL_INT(GUI_PACK_DONE_PACK_FAIL, done);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OOM, info.status,
+        "a failed publication must not report the completed job's OK status");
+    TEST_ASSERT_NOT_NULL(strstr(info.err, "out of memory"));
+    TEST_ASSERT_NULL_MESSAGE(gui_pack_result(0),
+                             "a failed publication publishes nothing");
+}
+
 /* Freshness is not residency: restoring a demoted result touches nothing on the
  * freshness path, so a preview that was out of date before the atlas switch is
  * still out of date after it. (Freshness itself is still the project-wide
@@ -2364,6 +2504,9 @@ int main(int argc, char **argv) {
     RUN_TEST(test_switching_atlas_demotes_the_inactive_result_into_the_store);
     RUN_TEST(test_evicted_pack_result_reads_as_unpacked_without_autopacking);
     RUN_TEST(test_failed_resident_switch_never_serves_the_evicted_resident);
+    RUN_TEST(test_preview_result_read_never_moves_the_active_pack_pin);
+    RUN_TEST(test_adding_an_atlas_stops_the_armed_animation_preview);
+    RUN_TEST(test_publish_index_oom_reports_the_typed_oom_status);
     RUN_TEST(test_restored_pack_result_keeps_its_freshness_verdict);
     RUN_TEST(test_pack_result_follows_stable_atlas_across_index_shift);
     RUN_TEST(test_recovery_notice_is_sticky_exact_and_clears_after_save_heals);

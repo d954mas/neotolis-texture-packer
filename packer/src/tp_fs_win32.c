@@ -334,6 +334,23 @@ bool tp_fs_stat(const char *path_utf8, tp_fs_info *out) {
     return win32_info_from_data(&data, out);
 }
 
+tp_fs_create_dir_result tp_fs_create_dir_exclusive(const char *path_utf8) {
+    wchar_t *path = tp_fs_win32_path_alloc(path_utf8);
+    if (!path) {
+        return TP_FS_CREATE_DIR_ERROR;
+    }
+    if (CreateDirectoryW(path, NULL)) {
+        free(path);
+        return TP_FS_CREATE_DIR_OK;
+    }
+    DWORD error = GetLastError();
+    free(path);
+    win32_error_to_errno(error);
+    return (error == ERROR_ALREADY_EXISTS || error == ERROR_FILE_EXISTS)
+               ? TP_FS_CREATE_DIR_EXISTS
+               : TP_FS_CREATE_DIR_ERROR;
+}
+
 bool tp_fs_create_dir(const char *path_utf8) {
     wchar_t *path = tp_fs_win32_path_alloc(path_utf8);
     if (!path) {

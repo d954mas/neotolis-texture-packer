@@ -776,6 +776,11 @@ void apply_pending(void) {
     gui_actions__clear_pending();
 }
 
+void gui_actions_shutdown(void) {
+    gui_actions__intent_shutdown();
+    gui_actions__preview_shutdown();
+}
+
 void gui_actions_poll_host_completion(void) {
     gui_actions__poll_pack();
 }

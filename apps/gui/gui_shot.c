@@ -158,7 +158,6 @@ void gui_shot_pre_pin_tick(void) {
      * frame must not skip the pack forever, and a frame that never reached the
      * render block must not count toward "resources are bound". */
     if (s_shot_rendered >= 6 && !s_shot_packed) { /* resources are bound; pack the selected atlas like Ctrl+P would (blocking) */
-        s_shot_packed = true;
         const tp_session_snapshot *snapshot =
             gui_project_snapshot();
         /* One adoption rule for the whole GUI: the shot asks the view owner to
@@ -167,9 +166,14 @@ void gui_shot_pre_pin_tick(void) {
         gui_view_adopt_default_atlas(snapshot);
         const int atlas_index =
             gui_view_atlas_index(snapshot);
-        if (atlas_index >= 0 &&
-            !gui_pack_result(atlas_index)) {
-            do_pack_blocking();
+        /* SUCCESS latch, like the selection latch in gui_shot_tick: consuming it
+         * on a frame with no adopted atlas yet would burn the one pack attempt
+         * and capture an unpacked canvas; retrying costs nothing. */
+        if (atlas_index >= 0) {
+            s_shot_packed = true;
+            if (!gui_pack_result(atlas_index)) {
+                do_pack_blocking();
+            }
         }
     }
 }

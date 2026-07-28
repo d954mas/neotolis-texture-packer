@@ -144,7 +144,9 @@ bool tp_fs_stage_child_path(const char *final_dir_utf8,
 
 /* The serial keeps two staged sets in one process apart; the pid keeps two
  * processes exporting into a shared output directory apart. A leftover or
- * foreign name is skipped, never adopted. */
+ * foreign name is skipped, never adopted: the exclusive create is the single
+ * atomic step that decides it, so there is no check-then-create window a
+ * concurrent exporter could slip into. */
 bool tp_fs_stage_dir_create(const char *parent_utf8, char *out, size_t out_cap) {
     if (!parent_utf8 || !out) {
         errno = EINVAL;
@@ -164,15 +166,12 @@ bool tp_fs_stage_dir_create(const char *parent_utf8, char *out, size_t out_cap) 
             errno = ENAMETOOLONG;
             return false;
         }
-        if (tp_fs_exists(out)) {
-            continue;
-        }
-        errno = 0;
-        if (tp_fs_create_dir(out)) {
+        const tp_fs_create_dir_result created = tp_fs_create_dir_exclusive(out);
+        if (created == TP_FS_CREATE_DIR_OK) {
             return true;
         }
-        if (errno == EEXIST) {
-            continue; /* lost a create race: try the next serial */
+        if (created == TP_FS_CREATE_DIR_EXISTS) {
+            continue; /* leftover or a lost race: try the next serial */
         }
         return false; /* unwritable parent / real error: fail closed */
     }

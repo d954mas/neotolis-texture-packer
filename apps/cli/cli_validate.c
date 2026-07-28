@@ -12,19 +12,11 @@
 #include "tp_core/tp_session.h"
 #include "tp_core/tp_validate.h"
 
-static void key(tp_sb *sb, int depth, bool *first, const char *name) {
-    tp_sb_str(sb, *first ? "\n" : ",\n");
-    *first = false;
-    tp_sb_indent(sb, depth);
-    tp_sb_json_string(sb, name);
-    tp_sb_str(sb, ": ");
-}
-
 static void emit_context(tp_sb *sb, int depth, bool *first, const char *name, const char *value) {
     if (value[0] == '\0') {
         return;
     }
-    key(sb, depth, first, name);
+    tp_obj_key(sb, depth, first, name);
     tp_sb_json_string(sb, value);
 }
 
@@ -37,7 +29,7 @@ static bool emit_id_context(tp_sb *sb, int depth, bool *first,
     if (tp_id_format(kind, id, text, sizeof text, NULL) != TP_STATUS_OK) {
         return false;
     }
-    key(sb, depth, first, name);
+    tp_obj_key(sb, depth, first, name);
     tp_sb_json_string(sb, text);
     return true;
 }
@@ -47,10 +39,10 @@ static bool build_validate_json(tp_sb *sb,
     bool first = true;
     bool ids_ok = true;
     tp_sb_char(sb, '{');
-    key(sb, 1, &first, "schema");
+    tp_obj_key(sb, 1, &first, "schema");
     tp_sb_int(sb, CLI_VALIDATE_SCHEMA);
 
-    key(sb, 1, &first, "findings");
+    tp_obj_key(sb, 1, &first, "findings");
     if (report->finding_count == 0U) {
         tp_sb_str(sb, "[]");
     } else {
@@ -61,11 +53,11 @@ static bool build_validate_json(tp_sb *sb,
             tp_sb_indent(sb, 2);
             bool finding_first = true;
             tp_sb_char(sb, '{');
-            key(sb, 3, &finding_first, "severity");
+            tp_obj_key(sb, 3, &finding_first, "severity");
             tp_sb_json_string(sb, finding->severity == TP_VALIDATION_ERROR ? "error" : "warning");
-            key(sb, 3, &finding_first, "code");
+            tp_obj_key(sb, 3, &finding_first, "code");
             tp_sb_json_string(sb, finding->code);
-            key(sb, 3, &finding_first, "message");
+            tp_obj_key(sb, 3, &finding_first, "message");
             tp_sb_json_string(sb, finding->message);
             emit_context(sb, 3, &finding_first, "atlas", finding->atlas);
             if (!emit_id_context(sb, 3, &finding_first, "atlas_id",
@@ -99,13 +91,13 @@ static bool build_validate_json(tp_sb *sb,
         tp_sb_char(sb, ']');
     }
 
-    key(sb, 1, &first, "counts");
+    tp_obj_key(sb, 1, &first, "counts");
     {
         bool counts_first = true;
         tp_sb_char(sb, '{');
-        key(sb, 2, &counts_first, "error");
+        tp_obj_key(sb, 2, &counts_first, "error");
         tp_sb_size(sb, report->error_count);
-        key(sb, 2, &counts_first, "warning");
+        tp_obj_key(sb, 2, &counts_first, "warning");
         tp_sb_size(sb, report->warning_count);
         tp_sb_str(sb, "\n");
         tp_sb_indent(sb, 1);

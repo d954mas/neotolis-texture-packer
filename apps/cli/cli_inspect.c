@@ -20,16 +20,6 @@
 #include "tp_core/tp_session.h"
 #include "tp_core/tp_sprite_index.h" /* resolved sprite index: sprite_id + owning source */
 
-/* Emits `,\n` (or `\n` for the first entry) + indent + "key": -- the same
- * first-tracking pattern tp_project.c's writer uses, so nesting stays balanced. */
-static void key(tp_sb *sb, int depth, bool *first, const char *k) {
-    tp_sb_str(sb, *first ? "\n" : ",\n");
-    *first = false;
-    tp_sb_indent(sb, depth);
-    tp_sb_json_string(sb, k);
-    tp_sb_str(sb, ": ");
-}
-
 static void emit_num_array2(tp_sb *sb, double a, double b) {
     tp_sb_char(sb, '[');
     tp_sb_num(sb, a);
@@ -42,25 +32,25 @@ static void emit_settings(tp_sb *sb, int depth, const tp_snapshot_atlas *a) {
     bool first = true;
     tp_sb_char(sb, '{');
     /* All knobs AS STORED (not the export-path clamp) -- the raw project state. */
-    key(sb, depth + 1, &first, "max_size");
+    tp_obj_key(sb, depth + 1, &first, "max_size");
     tp_sb_int(sb, a->max_size);
-    key(sb, depth + 1, &first, "padding");
+    tp_obj_key(sb, depth + 1, &first, "padding");
     tp_sb_int(sb, a->padding);
-    key(sb, depth + 1, &first, "margin");
+    tp_obj_key(sb, depth + 1, &first, "margin");
     tp_sb_int(sb, a->margin);
-    key(sb, depth + 1, &first, "extrude");
+    tp_obj_key(sb, depth + 1, &first, "extrude");
     tp_sb_int(sb, a->extrude);
-    key(sb, depth + 1, &first, "alpha_threshold");
+    tp_obj_key(sb, depth + 1, &first, "alpha_threshold");
     tp_sb_int(sb, a->alpha_threshold);
-    key(sb, depth + 1, &first, "max_vertices");
+    tp_obj_key(sb, depth + 1, &first, "max_vertices");
     tp_sb_int(sb, a->max_vertices);
-    key(sb, depth + 1, &first, "shape");
+    tp_obj_key(sb, depth + 1, &first, "shape");
     tp_sb_int(sb, a->shape);
-    key(sb, depth + 1, &first, "allow_transform");
+    tp_obj_key(sb, depth + 1, &first, "allow_transform");
     tp_sb_str(sb, a->allow_transform ? "true" : "false");
-    key(sb, depth + 1, &first, "power_of_two");
+    tp_obj_key(sb, depth + 1, &first, "power_of_two");
     tp_sb_str(sb, a->power_of_two ? "true" : "false");
-    key(sb, depth + 1, &first, "pixels_per_unit");
+    tp_obj_key(sb, depth + 1, &first, "pixels_per_unit");
     tp_sb_num(sb, (double)a->pixels_per_unit);
     tp_sb_str(sb, "\n");
     tp_sb_indent(sb, depth);
@@ -91,15 +81,15 @@ static void emit_source(tp_sb *sb, int depth, const tp_session_snapshot *snapsho
     ntpacker_fmt_shape_id(idtext, sizeof idtext, TP_ID_KIND_SOURCE, s->id);
     bool first = true;
     tp_sb_char(sb, '{');
-    key(sb, depth + 1, &first, "id"); /* structural shape-ID (persistent) */
+    tp_obj_key(sb, depth + 1, &first, "id"); /* structural shape-ID (persistent) */
     tp_sb_json_string(sb, idtext);
-    key(sb, depth + 1, &first, "path");
+    tp_obj_key(sb, depth + 1, &first, "path");
     tp_sb_json_string(sb, s->path);
-    key(sb, depth + 1, &first, "abs");
+    tp_obj_key(sb, depth + 1, &first, "abs");
     tp_sb_json_string(sb, abs);
-    key(sb, depth + 1, &first, "stored_kind"); /* persisted folder/file classification */
+    tp_obj_key(sb, depth + 1, &first, "stored_kind"); /* persisted folder/file classification */
     tp_sb_json_string(sb, s->kind == TP_SNAPSHOT_SOURCE_FILE ? "file" : "folder");
-    key(sb, depth + 1, &first, "kind"); /* runtime disk state: file/dir/missing */
+    tp_obj_key(sb, depth + 1, &first, "kind"); /* runtime disk state: file/dir/missing */
     tp_sb_json_string(sb, kind);
     tp_sb_str(sb, "\n");
     tp_sb_indent(sb, depth);
@@ -119,29 +109,29 @@ static void emit_sprite(tp_sb *sb, int depth, const tp_session_snapshot *snapsho
     ntpacker_fmt_shape_id(srcid, sizeof srcid, TP_ID_KIND_SOURCE, r->source_id);
     bool first = true;
     tp_sb_char(sb, '{');
-    key(sb, depth + 1, &first, "abs");
+    tp_obj_key(sb, depth + 1, &first, "abs");
     tp_sb_json_string(sb, r->abs_path ? r->abs_path : "");
-    key(sb, depth + 1, &first, "key");
+    tp_obj_key(sb, depth + 1, &first, "key");
     tp_sb_json_string(sb, keybuf);
-    key(sb, depth + 1, &first, "name");
+    tp_obj_key(sb, depth + 1, &first, "name");
     tp_sb_json_string(sb, r->raw_name);
-    key(sb, depth + 1, &first, "source"); /* owning source structural shape-ID */
+    tp_obj_key(sb, depth + 1, &first, "source"); /* owning source structural shape-ID */
     tp_sb_json_string(sb, srcid);
-    key(sb, depth + 1, &first, "sprite_id"); /* derived deterministic id (source + key) */
+    tp_obj_key(sb, depth + 1, &first, "sprite_id"); /* derived deterministic id (source + key) */
     tp_sb_json_string(sb, spid);
     const tp_snapshot_sprite *ov = tp_session_snapshot_sprite_by_key(
         snapshot, atlas_id, r->source_id, r->source_key);
     if (ov) {
         if (ov->rename) {
-            key(sb, depth + 1, &first, "rename");
+            tp_obj_key(sb, depth + 1, &first, "rename");
             tp_sb_json_string(sb, ov->rename);
         }
         if (ov->origin_x != 0.5f || ov->origin_y != 0.5f) {
-            key(sb, depth + 1, &first, "origin");
+            tp_obj_key(sb, depth + 1, &first, "origin");
             emit_num_array2(sb, (double)ov->origin_x, (double)ov->origin_y);
         }
         if (ov->slice9_lrtb[0] || ov->slice9_lrtb[1] || ov->slice9_lrtb[2] || ov->slice9_lrtb[3]) {
-            key(sb, depth + 1, &first, "slice9");
+            tp_obj_key(sb, depth + 1, &first, "slice9");
             tp_sb_char(sb, '[');
             for (int k = 0; k < 4; k++) {
                 if (k) {
@@ -154,23 +144,23 @@ static void emit_sprite(tp_sb *sb, int depth, const tp_session_snapshot *snapsho
         /* Overrides carry the INHERIT sentinel when unset (never emitted). shape/
          * margin/etc. are the stored atlas-shape-semantics values. */
         if (ov->override_shape != -1) {
-            key(sb, depth + 1, &first, "shape");
+            tp_obj_key(sb, depth + 1, &first, "shape");
             tp_sb_int(sb, (long)ov->override_shape);
         }
         if (ov->override_allow_rotate != -1) {
-            key(sb, depth + 1, &first, "allow_rotate");
+            tp_obj_key(sb, depth + 1, &first, "allow_rotate");
             tp_sb_int(sb, (long)ov->override_allow_rotate);
         }
         if (ov->override_max_vertices != -1) {
-            key(sb, depth + 1, &first, "max_vertices");
+            tp_obj_key(sb, depth + 1, &first, "max_vertices");
             tp_sb_int(sb, (long)ov->override_max_vertices);
         }
         if (ov->override_margin != -1) {
-            key(sb, depth + 1, &first, "margin");
+            tp_obj_key(sb, depth + 1, &first, "margin");
             tp_sb_int(sb, (long)ov->override_margin);
         }
         if (ov->override_extrude != -1) {
-            key(sb, depth + 1, &first, "extrude");
+            tp_obj_key(sb, depth + 1, &first, "extrude");
             tp_sb_int(sb, (long)ov->override_extrude);
         }
     }
@@ -185,19 +175,19 @@ static void emit_anim(tp_sb *sb, int depth, const tp_session_snapshot *snapshot,
     tp_sb_char(sb, '{');
     char idtext[TP_ID_TEXT_CAP];
     ntpacker_fmt_shape_id(idtext, sizeof idtext, TP_ID_KIND_ANIM, an->id);
-    key(sb, depth + 1, &first, "id"); /* structural shape-ID */
+    tp_obj_key(sb, depth + 1, &first, "id"); /* structural shape-ID */
     tp_sb_json_string(sb, idtext);
-    key(sb, depth + 1, &first, "name"); /* logical/display name (name-keyed) */
+    tp_obj_key(sb, depth + 1, &first, "name"); /* logical/display name (name-keyed) */
     tp_sb_json_string(sb, an->name);
-    key(sb, depth + 1, &first, "fps");
+    tp_obj_key(sb, depth + 1, &first, "fps");
     tp_sb_num(sb, (double)an->fps);
-    key(sb, depth + 1, &first, "playback");
+    tp_obj_key(sb, depth + 1, &first, "playback");
     tp_sb_int(sb, an->playback);
-    key(sb, depth + 1, &first, "flip_h");
+    tp_obj_key(sb, depth + 1, &first, "flip_h");
     tp_sb_str(sb, an->flip_h ? "true" : "false");
-    key(sb, depth + 1, &first, "flip_v");
+    tp_obj_key(sb, depth + 1, &first, "flip_v");
     tp_sb_str(sb, an->flip_v ? "true" : "false");
-    key(sb, depth + 1, &first, "frames");
+    tp_obj_key(sb, depth + 1, &first, "frames");
     if (an->frame_count == 0) {
         tp_sb_str(sb, "[]");
     } else {
@@ -223,13 +213,13 @@ static void emit_target(tp_sb *sb, int depth, const tp_snapshot_target *t) {
     tp_sb_char(sb, '{');
     char idtext[TP_ID_TEXT_CAP];
     ntpacker_fmt_shape_id(idtext, sizeof idtext, TP_ID_KIND_TARGET, t->id);
-    key(sb, depth + 1, &first, "id"); /* structural shape-ID */
+    tp_obj_key(sb, depth + 1, &first, "id"); /* structural shape-ID */
     tp_sb_json_string(sb, idtext);
-    key(sb, depth + 1, &first, "exporter_id");
+    tp_obj_key(sb, depth + 1, &first, "exporter_id");
     tp_sb_json_string(sb, t->exporter_id);
-    key(sb, depth + 1, &first, "out_path");
+    tp_obj_key(sb, depth + 1, &first, "out_path");
     tp_sb_json_string(sb, t->out_path);
-    key(sb, depth + 1, &first, "enabled");
+    tp_obj_key(sb, depth + 1, &first, "enabled");
     tp_sb_str(sb, t->enabled ? "true" : "false");
     tp_sb_str(sb, "\n");
     tp_sb_indent(sb, depth);
@@ -261,16 +251,16 @@ static tp_status emit_atlas(tp_sb *sb, int depth,
 
     char idtext[TP_ID_TEXT_CAP];
     ntpacker_fmt_shape_id(idtext, sizeof idtext, TP_ID_KIND_ATLAS, a->id);
-    key(sb, depth + 1, &first, "id"); /* structural shape-ID */
+    tp_obj_key(sb, depth + 1, &first, "id"); /* structural shape-ID */
     tp_sb_json_string(sb, idtext);
 
-    key(sb, depth + 1, &first, "name");
+    tp_obj_key(sb, depth + 1, &first, "name");
     tp_sb_json_string(sb, a->name);
 
-    key(sb, depth + 1, &first, "settings");
+    tp_obj_key(sb, depth + 1, &first, "settings");
     emit_settings(sb, depth + 1, a);
 
-    key(sb, depth + 1, &first, "sources");
+    tp_obj_key(sb, depth + 1, &first, "sources");
     if (a->source_count == 0) {
         tp_sb_str(sb, "[]");
     } else {
@@ -287,7 +277,7 @@ static tp_status emit_atlas(tp_sb *sb, int depth,
 
     /* Sprites: resolved index (same iteration a pack uses) carries each sprite's
      * derived identity (sprite_id + owning source) alongside its keys/paths. */
-    key(sb, depth + 1, &first, "sprites");
+    tp_obj_key(sb, depth + 1, &first, "sprites");
     tp_sprite_index idx;
     tp_status bst = inspect_build_sprite_index(snapshot, ai, &idx, err);
     if (bst != TP_STATUS_OK) {
@@ -309,7 +299,7 @@ static tp_status emit_atlas(tp_sb *sb, int depth,
     }
     tp_sprite_index_free(&idx);
 
-    key(sb, depth + 1, &first, "animations");
+    tp_obj_key(sb, depth + 1, &first, "animations");
     if (a->animation_count == 0) {
         tp_sb_str(sb, "[]");
     } else {
@@ -325,7 +315,7 @@ static tp_status emit_atlas(tp_sb *sb, int depth,
         tp_sb_char(sb, ']');
     }
 
-    key(sb, depth + 1, &first, "targets");
+    tp_obj_key(sb, depth + 1, &first, "targets");
     if (a->target_count == 0) {
         tp_sb_str(sb, "[]");
     } else {
@@ -351,25 +341,25 @@ static tp_status build_inspect(tp_sb *sb, const tp_session_snapshot *snapshot,
                                const char *path, tp_error *err) {
     bool first = true;
     tp_sb_char(sb, '{');
-    key(sb, 1, &first, "schema");
+    tp_obj_key(sb, 1, &first, "schema");
     tp_sb_int(sb, CLI_INSPECT_SCHEMA);
 
-    key(sb, 1, &first, "project");
+    tp_obj_key(sb, 1, &first, "project");
     {
         bool pf = true;
         tp_sb_char(sb, '{');
-        key(sb, 2, &pf, "path");
+        tp_obj_key(sb, 2, &pf, "path");
         tp_sb_json_string(sb, path);
-        key(sb, 2, &pf, "schema_version");
+        tp_obj_key(sb, 2, &pf, "schema_version");
         tp_sb_int(sb, tp_session_snapshot_project_schema_version(snapshot));
-        key(sb, 2, &pf, "project_dir");
+        tp_obj_key(sb, 2, &pf, "project_dir");
         tp_sb_json_string(sb, tp_session_snapshot_project_dir(snapshot));
         tp_sb_str(sb, "\n");
         tp_sb_indent(sb, 1);
         tp_sb_char(sb, '}');
     }
 
-    key(sb, 1, &first, "atlases");
+    tp_obj_key(sb, 1, &first, "atlases");
     const int atlas_count = tp_session_snapshot_atlas_count(snapshot);
     if (atlas_count == 0) {
         tp_sb_str(sb, "[]");

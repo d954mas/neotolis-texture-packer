@@ -74,7 +74,23 @@ void tp_fs_remove_tree(const char *path_utf8);
 bool tp_fs_stat(const char *path_utf8, tp_fs_info *out);
 bool tp_fs_exists(const char *path_utf8);
 bool tp_fs_is_dir(const char *path_utf8);
+/* Creates the directory, ADOPTING an existing one (an already-present directory
+ * is success). Use tp_fs_create_dir_exclusive when adoption is not allowed. */
 bool tp_fs_create_dir(const char *path_utf8);
+
+typedef enum tp_fs_create_dir_result {
+    TP_FS_CREATE_DIR_OK = 0,
+    TP_FS_CREATE_DIR_EXISTS, /* the name is already taken, by anything */
+    TP_FS_CREATE_DIR_ERROR
+} tp_fs_create_dir_result;
+
+/* Exclusive create: only a directory this call brought into existence reports
+ * OK. Any pre-existing name -- directory, file, dangling link -- is EXISTS and
+ * is never adopted, so a caller that must own what it creates (the export
+ * staging dir) can retry under a different name instead of writing into a
+ * stranger's directory. Backed by the one atomic primitive each host has
+ * (CreateDirectoryW / mkdir), so it is race-free, not check-then-create. */
+tp_fs_create_dir_result tp_fs_create_dir_exclusive(const char *path_utf8);
 bool tp_fs_remove_file(const char *path_utf8);
 bool tp_fs_remove_dir(const char *path_utf8); /* removes an empty directory */
 

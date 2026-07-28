@@ -30,6 +30,43 @@ static void put_u32_le(uint8_t *bytes, uint32_t value) {
   }
 }
 
+static void put_u64_le(uint8_t *bytes, uint64_t value) {
+  for (unsigned int i = 0U; i < 8U; ++i) {
+    bytes[i] = (uint8_t)(value >> (i * 8U));
+  }
+}
+
+/* Locates a field on the wire by DIFFING two encodings that differ only in that
+ * field, so a corruption test aims at the field it names instead of a literal
+ * offset that a layout change silently redirects onto a neighbour. Asserts both
+ * encodings are the same length and that exactly one CONTIGUOUS run of
+ * `expected_run` bytes differs, then returns that run's offset -- so layout
+ * drift fails here, loudly, rather than letting the test keep passing for the
+ * wrong reason. */
+static size_t locate_field_offset(const uint8_t *a, size_t a_len,
+                                  const uint8_t *b, size_t b_len,
+                                  size_t expected_run) {
+  TEST_ASSERT_EQUAL_UINT64((uint64_t)a_len, (uint64_t)b_len);
+  size_t start = 0U;
+  size_t end = 0U;
+  size_t differing = 0U;
+  for (size_t i = 0U; i < a_len; ++i) {
+    if (a[i] != b[i]) {
+      if (differing == 0U) {
+        start = i;
+      }
+      end = i;
+      ++differing;
+    }
+  }
+  TEST_ASSERT_EQUAL_UINT64_MESSAGE((uint64_t)expected_run, (uint64_t)differing,
+                                   "wire layout drift: unexpected diff width");
+  TEST_ASSERT_EQUAL_UINT64_MESSAGE((uint64_t)differing,
+                                   (uint64_t)(end - start + 1U),
+                                   "wire layout drift: diff is not contiguous");
+  return start;
+}
+
 static void assert_id_equal(tp_id128 expected, tp_id128 actual) {
   TEST_ASSERT_EQUAL_MEMORY(expected.bytes, actual.bytes, sizeof expected.bytes);
 }
@@ -142,7 +179,7 @@ void test_request_roundtrip_pack_and_export(void) {
 void test_pack_terminal_roundtrip_owns_artifact_path_and_utf8_name_map(void) {
   tp_job_worker_proto_response input = sample_pack_response();
   input.error.file_io.phase = TP_FILE_IO_PHASE_TEMP_OPEN;
-  input.error.file_io.path = "C:/source/a.png";
+  memcpy(input.error.file_io.path, "C:/source/a.png", 16U);
   memcpy(input.error.msg, "read detail", 12U);
   input.pack.freshness_error.file_io.phase = TP_FILE_IO_PHASE_NONE;
   memcpy(input.pack.freshness_error.msg, "fresh", 6U);
@@ -173,6 +210,54 @@ void test_pack_terminal_roundtrip_owns_artifact_path_and_utf8_name_map(void) {
   TEST_ASSERT_EQUAL_STRING(input.pack.artifact_path, output.pack.artifact_path);
   TEST_ASSERT_NOT_EQUAL(input.pack.artifact_path, output.pack.artifact_path);
   tp_job_worker_proto_response_free(&output);
+  free(bytes);
+}
+
+/* The host does not keep the decoded response: job_publish_response struct-copies
+ * the terminal error out (tp_job.c:648) and tp_session_job_result_compact copies
+ * the Pack freshness error the same way (:702), and only then is the response the
+ * decoder owns freed. Both copies outlive that free, so this test runs the exact
+ * copy-then-free sequence and asserts the paths still read back byte for byte --
+ * a path that ever becomes a borrow again fails HERE instead of in a host that
+ * reports a freed buffer. */
+void test_decoded_error_paths_survive_the_response_free(void) {
+  tp_job_worker_proto_response input = sample_pack_response();
+  input.error.file_io.phase = TP_FILE_IO_PHASE_TEMP_WRITE;
+  input.error.file_io.native_code = 28;
+  memcpy(input.error.file_io.path, "C:/work/atlas.ntpack.tmp", 25U);
+  memcpy(input.error.msg, "temp write failed", 18U);
+  input.pack.freshness_error.file_io.phase = TP_FILE_IO_PHASE_TEMP_OPEN;
+  input.pack.freshness_error.file_io.native_code = 2;
+  memcpy(input.pack.freshness_error.file_io.path, "C:/source/b.png", 16U);
+  memcpy(input.pack.freshness_error.msg, "freshness probe failed", 23U);
+
+  uint8_t *bytes = NULL;
+  size_t length = 0U;
+  tp_error err = {{0}};
+  TEST_ASSERT_EQUAL_INT_MESSAGE(
+      TP_STATUS_OK,
+      tp_job_worker_proto_encode_response(&input, &bytes, &length, &err),
+      err.msg);
+  tp_job_worker_proto_response output;
+  TEST_ASSERT_EQUAL_INT_MESSAGE(
+      TP_STATUS_OK,
+      tp_job_worker_proto_decode_response(bytes, length, &output, &err),
+      err.msg);
+
+  const tp_error terminal_error = output.error;
+  const tp_error freshness_error = output.pack.freshness_error;
+  tp_job_worker_proto_response_free(&output);
+
+  TEST_ASSERT_EQUAL_STRING("C:/work/atlas.ntpack.tmp",
+                           terminal_error.file_io.path);
+  TEST_ASSERT_EQUAL_STRING("temp write failed", terminal_error.msg);
+  TEST_ASSERT_EQUAL_INT(TP_FILE_IO_PHASE_TEMP_WRITE,
+                        terminal_error.file_io.phase);
+  TEST_ASSERT_EQUAL_INT(28, terminal_error.file_io.native_code);
+  TEST_ASSERT_EQUAL_STRING("C:/source/b.png", freshness_error.file_io.path);
+  TEST_ASSERT_EQUAL_STRING("freshness probe failed", freshness_error.msg);
+  TEST_ASSERT_EQUAL_INT(TP_FILE_IO_PHASE_TEMP_OPEN,
+                        freshness_error.file_io.phase);
   free(bytes);
 }
 
@@ -464,18 +549,94 @@ void test_encode_caps_reject_oversized_project_names_counts_and_path(void) {
   TEST_ASSERT_NULL(bytes);
 }
 
+/* A diagnostic path travels in a fixed TP_FILE_IO_PATH_MAX buffer, so the wire
+ * cap is TP_FILE_IO_PATH_MAX - 1: the far side has to hold the path AND its NUL.
+ * A path that fills the buffer without terminating it is not a bounded string at
+ * all, so encode refuses the whole response rather than shipping a silently
+ * truncated path the host would report as the file the worker failed on. */
+void test_encode_rejects_an_error_path_past_the_context_bound(void) {
+  tp_job_worker_proto_response response = sample_pack_response();
+  response.error.file_io.phase = TP_FILE_IO_PHASE_TEMP_OPEN;
+  memset(response.error.file_io.path, 'a',
+         sizeof response.error.file_io.path - 1U);
+  response.error.file_io.path[sizeof response.error.file_io.path - 1U] = '\0';
+  uint8_t *bytes = NULL;
+  size_t length = 0U;
+  tp_error err = {{0}};
+  /* Exactly the cap still encodes, so the rejection below is the bound and not
+   * an off-by-one short of it. */
+  TEST_ASSERT_EQUAL_INT_MESSAGE(
+      TP_STATUS_OK,
+      tp_job_worker_proto_encode_response(&response, &bytes, &length, &err),
+      err.msg);
+  free(bytes);
+  bytes = NULL;
+
+  memset(response.error.file_io.path, 'a', sizeof response.error.file_io.path);
+  TEST_ASSERT_EQUAL_INT(
+      TP_STATUS_INVALID_ARGUMENT,
+      tp_job_worker_proto_encode_response(&response, &bytes, &length, &err));
+  TEST_ASSERT_NULL(bytes);
+
+  /* The Pack freshness error carries a second path through the same bound. */
+  response = sample_pack_response();
+  response.pack.freshness_error.file_io.phase = TP_FILE_IO_PHASE_TEMP_OPEN;
+  memset(response.pack.freshness_error.file_io.path, 'b',
+         sizeof response.pack.freshness_error.file_io.path);
+  TEST_ASSERT_EQUAL_INT(
+      TP_STATUS_INVALID_ARGUMENT,
+      tp_job_worker_proto_encode_response(&response, &bytes, &length, &err));
+  TEST_ASSERT_NULL(bytes);
+}
+
 /* The wire artifact size is a u64 from another process; decode must reject one
  * past the cap instead of handing the host an allocation it cannot make. */
+/* Encodes a Pack response whose artifact_size is `size` and nothing else. */
+static uint8_t *encode_pack_with_artifact_size(uint64_t size, size_t *out_len) {
+  tp_job_worker_proto_response response = sample_pack_response();
+  response.pack.artifact_size = size;
+  uint8_t *bytes = NULL;
+  tp_error err = {{0}};
+  TEST_ASSERT_EQUAL_INT_MESSAGE(
+      TP_STATUS_OK,
+      tp_job_worker_proto_encode_response(&response, &bytes, out_len, &err),
+      err.msg);
+  return bytes;
+}
+
 void test_decoded_artifact_size_past_the_cap_is_rejected(void) {
   size_t length = 0U;
   uint8_t *bytes = encode_pack(&length);
+  const uint64_t sample_size = sample_pack_response().pack.artifact_size;
   tp_error err = {{0}};
-  /* artifact_size (u64) follows name_count(180) and artifact_path_len(184). */
-  const uint64_t oversized = TP_JOB_WORKER_PROTO_MAX_ARTIFACT_BYTES + 1U;
-  for (unsigned int i = 0U; i < 8U; ++i) {
-    bytes[188U + i] = (uint8_t)(oversized >> (i * 8U));
-  }
+
+  /* Find artifact_size instead of trusting a literal offset. A +1 probe moves
+   * only its low byte, and a +(1<<24) probe only byte 3, so the two together
+   * pin the field's start AND its little-endian order; a decode round-trip of a
+   * full-width marker then proves the located region really is artifact_size
+   * before the test corrupts it. */
+  size_t probe_len = 0U;
+  uint8_t *probe = encode_pack_with_artifact_size(sample_size + 1U, &probe_len);
+  const size_t offset = locate_field_offset(bytes, length, probe, probe_len, 1U);
+  free(probe);
+  probe = encode_pack_with_artifact_size(sample_size + (UINT64_C(1) << 24U),
+                                         &probe_len);
+  TEST_ASSERT_EQUAL_UINT64(
+      (uint64_t)(offset + 3U),
+      (uint64_t)locate_field_offset(bytes, length, probe, probe_len, 1U));
+  free(probe);
+  TEST_ASSERT_TRUE(offset + 8U <= length);
+
+  const uint64_t marker = UINT64_C(0x000000007f6e5d4c);
+  TEST_ASSERT_TRUE(marker <= TP_JOB_WORKER_PROTO_MAX_ARTIFACT_BYTES);
+  put_u64_le(bytes + offset, marker);
   tp_job_worker_proto_response out;
+  TEST_ASSERT_EQUAL_INT_MESSAGE(
+      TP_STATUS_OK,
+      tp_job_worker_proto_decode_response(bytes, length, &out, &err), err.msg);
+  TEST_ASSERT_EQUAL_UINT64(marker, out.pack.artifact_size);
+
+  put_u64_le(bytes + offset, TP_JOB_WORKER_PROTO_MAX_ARTIFACT_BYTES + 1U);
   TEST_ASSERT_EQUAL_INT(
       TP_STATUS_INVALID_ARGUMENT,
       tp_job_worker_proto_decode_response(bytes, length, &out, &err));
@@ -491,9 +652,31 @@ void test_decoded_request_without_host_pid_is_rejected(void) {
   tp_error err = {{0}};
   TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_job_worker_proto_encode_request(
                                           &request, &bytes, &length, &err));
-  /* host_pid: frame(12) + kind(4) + gen(8) + request(8) + four u32 lengths. */
-  put_u32_le(bytes + 48U, 0U);
+
+  /* Find host_pid instead of trusting a literal offset: a probe whose pid
+   * differs in ALL FOUR bytes makes the field show up as one contiguous 4-byte
+   * run, which pins both its start and its width. A layout shift fails the
+   * discovery asserts loudly instead of zeroing whatever now sits there. */
+  tp_job_worker_proto_request probe_request = request;
+  probe_request.host_pid = 0x11223344U;
+  uint8_t *probe = NULL;
+  size_t probe_len = 0U;
+  TEST_ASSERT_EQUAL_INT_MESSAGE(
+      TP_STATUS_OK,
+      tp_job_worker_proto_encode_request(&probe_request, &probe, &probe_len,
+                                         &err),
+      err.msg);
+  const size_t offset = locate_field_offset(bytes, length, probe, probe_len, 4U);
+  free(probe);
+
   tp_job_worker_proto_request out;
+  put_u32_le(bytes + offset, 0x11223344U);
+  TEST_ASSERT_EQUAL_INT_MESSAGE(
+      TP_STATUS_OK,
+      tp_job_worker_proto_decode_request(bytes, length, &out, &err), err.msg);
+  TEST_ASSERT_EQUAL_UINT32(0x11223344U, out.host_pid);
+
+  put_u32_le(bytes + offset, 0U);
   TEST_ASSERT_EQUAL_INT(
       TP_STATUS_INVALID_ARGUMENT,
       tp_job_worker_proto_decode_request(bytes, length, &out, &err));
@@ -535,6 +718,7 @@ int main(void) {
   UNITY_BEGIN();
   RUN_TEST(test_request_roundtrip_pack_and_export);
   RUN_TEST(test_pack_terminal_roundtrip_owns_artifact_path_and_utf8_name_map);
+  RUN_TEST(test_decoded_error_paths_survive_the_response_free);
   RUN_TEST(test_multi_page_artifact_beyond_the_old_cap_roundtrips);
   RUN_TEST(test_export_terminal_roundtrip_counts_and_flags);
   RUN_TEST(test_progress_roundtrip_is_fixed_and_bounded);
@@ -543,6 +727,7 @@ int main(void) {
   RUN_TEST(test_bad_magic_version_and_oversized_fields_fail_closed);
   RUN_TEST(test_invalid_utf8_name_is_rejected_on_encode);
   RUN_TEST(test_encode_caps_reject_oversized_project_names_counts_and_path);
+  RUN_TEST(test_encode_rejects_an_error_path_past_the_context_bound);
   RUN_TEST(test_decoded_artifact_size_past_the_cap_is_rejected);
   RUN_TEST(test_decoded_request_without_host_pid_is_rejected);
   RUN_TEST(test_stream_cumulative_and_progress_count_caps_fail_closed);

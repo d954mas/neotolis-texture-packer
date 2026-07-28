@@ -173,6 +173,7 @@ static const char *notice_field_name(int field_id) {
         case TP_NOTICE_FIELD_PIVOT: return "pivot";
         case TP_NOTICE_FIELD_ALIAS: return "alias";
         case TP_NOTICE_FIELD_MULTIPAGE: return "multipage";
+        case TP_NOTICE_FIELD_SET_ATOMICITY: return "set_atomicity";
         default: return "none";
     }
 }
@@ -180,6 +181,7 @@ static const char *notice_field_name(int field_id) {
 static const char *notice_reason_name(int reason_id) {
     switch (reason_id) {
         case TP_NOTICE_REASON_CAPS_UNSUPPORTED: return "caps_unsupported";
+        case TP_NOTICE_REASON_PATH_NOT_STAGEABLE: return "path_not_stageable";
         default: return "none";
     }
 }
@@ -187,14 +189,6 @@ static const char *notice_reason_name(int reason_id) {
 /* ------------------------------------------------------------------ */
 /* JSON emission                                                      */
 /* ------------------------------------------------------------------ */
-
-static void key(tp_sb *sb, int depth, bool *first, const char *k) {
-    tp_sb_str(sb, *first ? "\n" : ",\n");
-    *first = false;
-    tp_sb_indent(sb, depth);
-    tp_sb_json_string(sb, k);
-    tp_sb_str(sb, ": ");
-}
 
 static void emit_pages(tp_sb *sb, int depth, const tp_export_report_run *run) {
     if (!run || run->page_count == 0) {
@@ -208,13 +202,13 @@ static void emit_pages(tp_sb *sb, int depth, const tp_export_report_run *run) {
         tp_sb_indent(sb, depth + 1);
         bool pf = true;
         tp_sb_char(sb, '{');
-        key(sb, depth + 2, &pf, "index");
+        tp_obj_key(sb, depth + 2, &pf, "index");
         tp_sb_int(sb, pg->index);
-        key(sb, depth + 2, &pf, "w");
+        tp_obj_key(sb, depth + 2, &pf, "w");
         tp_sb_int(sb, pg->w);
-        key(sb, depth + 2, &pf, "h");
+        tp_obj_key(sb, depth + 2, &pf, "h");
         tp_sb_int(sb, pg->h);
-        key(sb, depth + 2, &pf, "occupancy_pct");
+        tp_obj_key(sb, depth + 2, &pf, "occupancy_pct");
         tp_sb_num(sb, pg->occupancy_pct);
         tp_sb_str(sb, "\n");
         tp_sb_indent(sb, depth + 1);
@@ -228,19 +222,19 @@ static void emit_pages(tp_sb *sb, int depth, const tp_export_report_run *run) {
 static void emit_notice(tp_sb *sb, int depth, const tp_export_notice *nt) {
     bool nf = true;
     tp_sb_char(sb, '{');
-    key(sb, depth + 1, &nf, "field");
+    tp_obj_key(sb, depth + 1, &nf, "field");
     tp_sb_json_string(sb, notice_field_name(nt->field_id));
-    key(sb, depth + 1, &nf, "reason");
+    tp_obj_key(sb, depth + 1, &nf, "reason");
     tp_sb_json_string(sb, notice_reason_name(nt->reason_id));
     if (nt->sprite) {
-        key(sb, depth + 1, &nf, "sprite");
+        tp_obj_key(sb, depth + 1, &nf, "sprite");
         tp_sb_json_string(sb, nt->sprite);
     }
     if (nt->target) {
-        key(sb, depth + 1, &nf, "target");
+        tp_obj_key(sb, depth + 1, &nf, "target");
         tp_sb_json_string(sb, nt->target);
     }
-    key(sb, depth + 1, &nf, "message");
+    tp_obj_key(sb, depth + 1, &nf, "message");
     tp_sb_json_string(sb, nt->msg);
     tp_sb_str(sb, "\n");
     tp_sb_indent(sb, depth);
@@ -267,29 +261,29 @@ static void emit_target(tp_sb *sb, int depth, const tp_export_report_target *rt,
                         bool dry_run) {
     bool tf = true;
     tp_sb_char(sb, '{');
-    key(sb, depth + 1, &tf, "exporter_id");
+    tp_obj_key(sb, depth + 1, &tf, "exporter_id");
     tp_sb_json_string(sb, rt->exporter_id ? rt->exporter_id : "");
-    key(sb, depth + 1, &tf, "out_path");
+    tp_obj_key(sb, depth + 1, &tf, "out_path");
     tp_sb_json_string(sb, rt->out_path ? rt->out_path : "");
-    key(sb, depth + 1, &tf, "pack_run");
+    tp_obj_key(sb, depth + 1, &tf, "pack_run");
     tp_sb_int(sb, rt->pack_run);
-    key(sb, depth + 1, &tf, "status");
+    tp_obj_key(sb, depth + 1, &tf, "status");
     tp_sb_json_string(sb, rt->ok ? "ok" : "failed");
     if (!rt->ok) {
-        key(sb, depth + 1, &tf, "error");
+        tp_obj_key(sb, depth + 1, &tf, "error");
         tp_sb_json_string(sb, rt->error ? rt->error
                                       : "export target failed (error detail unavailable)");
     }
     /* written_files is always present (empty on a dry run); would_write is added
      * only on a dry run -- the paths that WOULD be produced (docs/formats/cli-report.md). */
-    key(sb, depth + 1, &tf, "written_files");
+    tp_obj_key(sb, depth + 1, &tf, "written_files");
     emit_str_array(sb, depth + 1, rt->written_files, rt->written_file_count);
     if (dry_run) {
-        key(sb, depth + 1, &tf, "would_write");
+        tp_obj_key(sb, depth + 1, &tf, "would_write");
         emit_str_array(sb, depth + 1, rt->would_write, rt->would_write_count);
     }
 
-    key(sb, depth + 1, &tf, "notices");
+    tp_obj_key(sb, depth + 1, &tf, "notices");
     int nb = rt->notice_begin;
     int ne = rt->notice_end;
     if (!notices || ne <= nb) {
@@ -320,27 +314,27 @@ static void emit_atlas(tp_sb *sb, int depth, const char *name, int sprite_count,
                        bool dry_run) {
     bool af = true;
     tp_sb_char(sb, '{');
-    key(sb, depth + 1, &af, "name");
+    tp_obj_key(sb, depth + 1, &af, "name");
     tp_sb_json_string(sb, name);
-    key(sb, depth + 1, &af, "sprite_count");
+    tp_obj_key(sb, depth + 1, &af, "sprite_count");
     tp_sb_int(sb, sprite_count);
-    key(sb, depth + 1, &af, "missing_sources");
+    tp_obj_key(sb, depth + 1, &af, "missing_sources");
     tp_sb_int(sb, missing_sources);
     if (note) {
-        key(sb, depth + 1, &af, "note");
+        tp_obj_key(sb, depth + 1, &af, "note");
         tp_sb_json_string(sb, note);
     }
     if (skip_notice_id) {
-        key(sb, depth + 1, &af, "notices");
+        tp_obj_key(sb, depth + 1, &af, "notices");
         tp_sb_str(sb, "[\n");
         tp_sb_indent(sb, depth + 2);
         bool nf = true;
         tp_sb_char(sb, '{');
-        key(sb, depth + 3, &nf, "id");
+        tp_obj_key(sb, depth + 3, &nf, "id");
         tp_sb_json_string(sb, skip_notice_id);
-        key(sb, depth + 3, &nf, "atlas");
+        tp_obj_key(sb, depth + 3, &nf, "atlas");
         tp_sb_json_string(sb, name);
-        key(sb, depth + 3, &nf, "message");
+        tp_obj_key(sb, depth + 3, &nf, "message");
         tp_sb_json_string(sb, note ? note : "");
         tp_sb_str(sb, "\n");
         tp_sb_indent(sb, depth + 2);
@@ -349,14 +343,14 @@ static void emit_atlas(tp_sb *sb, int depth, const char *name, int sprite_count,
         tp_sb_char(sb, ']');
     }
     if (error_status != TP_STATUS_OK) {
-        key(sb, depth + 1, &af, "error");
+        tp_obj_key(sb, depth + 1, &af, "error");
         bool ef = true;
         tp_sb_char(sb, '{');
-        key(sb, depth + 2, &ef, "id");
+        tp_obj_key(sb, depth + 2, &ef, "id");
         tp_sb_json_string(sb, tp_status_id(error_status));
-        key(sb, depth + 2, &ef, "atlas");
+        tp_obj_key(sb, depth + 2, &ef, "atlas");
         tp_sb_json_string(sb, name);
-        key(sb, depth + 2, &ef, "message");
+        tp_obj_key(sb, depth + 2, &ef, "message");
         tp_sb_json_string(
             sb, error && error->msg[0] ? error->msg
                                       : tp_status_str(error_status));
@@ -364,14 +358,14 @@ static void emit_atlas(tp_sb *sb, int depth, const char *name, int sprite_count,
         tp_sb_indent(sb, depth + 1);
         tp_sb_char(sb, '}');
     }
-    key(sb, depth + 1, &af, "pack_runs");
+    tp_obj_key(sb, depth + 1, &af, "pack_runs");
     tp_sb_int(sb, report ? report->run_count : 0);
 
-    key(sb, depth + 1, &af, "pages");
+    tp_obj_key(sb, depth + 1, &af, "pages");
     const tp_export_report_run *primary = (report && report->run_count > 0) ? &report->runs[0] : NULL;
     emit_pages(sb, depth + 1, primary);
 
-    key(sb, depth + 1, &af, "targets");
+    tp_obj_key(sb, depth + 1, &af, "targets");
     if (!report || report->target_count == 0) {
         tp_sb_str(sb, "[]");
     } else {
@@ -550,11 +544,11 @@ int cmd_pack(const char *project_path, const char *opt_atlas, const char *opt_ta
     if (json) {
         bool rf = true;
         tp_sb_char(&sb, '{');
-        key(&sb, 1, &rf, "schema");
+        tp_obj_key(&sb, 1, &rf, "schema");
         tp_sb_int(&sb, CLI_PACK_SCHEMA);
-        key(&sb, 1, &rf, "dry_run");
+        tp_obj_key(&sb, 1, &rf, "dry_run");
         tp_sb_str(&sb, dry_run ? "true" : "false");
-        key(&sb, 1, &rf, "atlases");
+        tp_obj_key(&sb, 1, &rf, "atlases");
         tp_sb_char(&sb, '[');
     }
     bool any_atlas_emitted = false;
@@ -730,25 +724,25 @@ int cmd_pack(const char *project_path, const char *opt_atlas, const char *opt_ta
         }
         tp_sb_char(&sb, ']');
         bool tf = false; /* root object already has schema+atlases -> comma needed */
-        key(&sb, 1, &tf, "totals");
+        tp_obj_key(&sb, 1, &tf, "totals");
         {
             bool cf = true;
             tp_sb_char(&sb, '{');
-            key(&sb, 2, &cf, "targets_ok");
+            tp_obj_key(&sb, 2, &cf, "targets_ok");
             tp_sb_int(&sb, total_targets_ok);
-            key(&sb, 2, &cf, "targets_failed");
+            tp_obj_key(&sb, 2, &cf, "targets_failed");
             tp_sb_int(&sb, total_targets_failed);
-            key(&sb, 2, &cf, "files_written");
+            tp_obj_key(&sb, 2, &cf, "files_written");
             tp_sb_int(&sb, total_files);
             tp_sb_str(&sb, "\n");
             tp_sb_indent(&sb, 1);
             tp_sb_char(&sb, '}');
         }
-        key(&sb, 1, &tf, "timings_ms");
+        tp_obj_key(&sb, 1, &tf, "timings_ms");
         {
             bool mf = true;
             tp_sb_char(&sb, '{');
-            key(&sb, 2, &mf, "total");
+            tp_obj_key(&sb, 2, &mf, "total");
             tp_sb_num(&sb, elapsed);
             tp_sb_str(&sb, "\n");
             tp_sb_indent(&sb, 1);
