@@ -176,20 +176,25 @@ tp_status tp_export_write_and_publish_set(const tp_exporter *exp,
         }
         if (!tp_fs_exists(staged)) {
             tp_fs_remove_tree(staging);
+            /* The publication-state clause precedes the path in every message
+             * below: msg is a 256-byte buffer, an output path can be longer on
+             * its own, and of the two it is the state clause a caller must not
+             * lose to truncation. */
             return tp_error_set(err, TP_STATUS_BAD_PROJECT,
-                                "exporter '%s' listed '%s' but did not produce "
-                                "it (%s)",
-                                exp->id, output_files[f],
+                                "exporter '%s' listed an output it did not "
+                                "produce (%s): '%s'",
+                                exp->id,
                                 publish_intact_clause(bypassed, intact,
-                                                      sizeof intact));
+                                                      sizeof intact),
+                                output_files[f]);
         }
         if (tp_fs_is_dir(output_files[f])) {
             tp_fs_remove_tree(staging);
             return tp_error_set(err, TP_STATUS_BAD_PROJECT,
-                                "export destination '%s' is a directory (%s)",
-                                output_files[f],
+                                "export destination is a directory (%s): '%s'",
                                 publish_intact_clause(bypassed, intact,
-                                                      sizeof intact));
+                                                      sizeof intact),
+                                output_files[f]);
         }
     }
 
@@ -240,10 +245,9 @@ tp_status tp_export_write_and_publish_set(const tp_exporter *exp,
     if (unreadable) {
         tp_fs_remove_tree(staging);
         return tp_error_set(err, TP_STATUS_BAD_PROJECT,
-                            "the export staging directory could not be read, so "
-                            "the set exporter '%s' produced could not be "
-                            "verified against its declared output list; nothing "
-                            "was promoted (%s)",
+                            "exporter '%s': the export staging directory could "
+                            "not be read, so its output set could not be "
+                            "verified; nothing was promoted (%s)",
                             exp->id,
                             publish_intact_clause(bypassed, intact,
                                                   sizeof intact));

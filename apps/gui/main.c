@@ -1095,7 +1095,7 @@ static int gui_main_utf8(int argc, char *argv[]) {
                 set_statusf_ex(STATUS_WARNING, "project not found: %s", proj_arg);
             }
             break;
-        case GUI_STARTUP_OPEN:
+        case GUI_STARTUP_OPEN: { /* block scope: a label may not be followed by a declaration (C17) */
             tp_error open_error = {{0}};
             gui_project_lifecycle_kind
                 open_completed =
@@ -1129,6 +1129,7 @@ static int gui_main_utf8(int argc, char *argv[]) {
                 set_statusf_ex(STATUS_ERROR, "Open '%s' failed: %s", proj_arg, err);
             }
             break;
+        }
         case GUI_STARTUP_IDLE:
             break; /* unreachable with proj_arg != NULL; listed for switch exhaustiveness */
         }
