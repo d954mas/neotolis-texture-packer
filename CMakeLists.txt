@@ -33,6 +33,18 @@ if(EMSCRIPTEN)
 endif()
 add_subdirectory(external/neotolis-engine/tools/builder nt_builder)
 
+# nt_resource calls the http/fs implementations behind the engine's *_interface
+# pattern, which deliberately leaves the impl choice to the final link -- so the
+# engine declares no edge and CMake emits the archives in whatever order the
+# consumer listed. An ELF linker never rescans an archive, and tp_build's
+# nt_builder closure appends a SECOND nt_resource occurrence after any stub the
+# consumer listed, so nt_resource objects pulled there dangle (undefined
+# nt_http_*/nt_fs_* on Linux/macOS; lld-link on Windows is order-insensitive).
+# This build uses exactly one impl everywhere, so declare the edge here
+# (CMP0079): the topological sort then places the impls after EVERY
+# nt_resource occurrence in every target.
+target_link_libraries(nt_resource INTERFACE nt_http_stub nt_fs)
+
 enable_testing()
 # Shared tp_add_test()/tp_add_gui_test() so every first-party test target gets the
 # same executable/link/warning/CRT/ctest shape (see the file header).
