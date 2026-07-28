@@ -431,6 +431,229 @@ void test_cancellation_leaves_prior_authoritative(void) {
     tp_pack_result_cache_destroy(cache);
 }
 
+/* ---- S18: retained-pin entries ------------------------------------------- */
+
+/* A retained-pin entry is owned by an opaque receipt the store may only release
+ * through the caller's hook. These cases stand in for the session Pack receipt
+ * the GUI stores (apps/gui/gui_pack.c), counting releases the same way
+ * test_session_job_observation counts owned-job destroys, so "released exactly
+ * once" is asserted rather than left to the leak checker. */
+typedef struct fake_pin {
+    int releases;
+    tp_result result;
+} fake_pin;
+
+static void fake_pin_release(void *owner) {
+    ((fake_pin *)owner)->releases++;
+}
+
+static void fake_pin_init(fake_pin *pin, const char *atlas_name) {
+    memset(pin, 0, sizeof *pin);
+    pin->result.atlas_name = atlas_name;
+}
+
+static tp_status store_retained(tp_pack_result_cache *cache, tp_id128 hash,
+                                uint64_t seq, fake_pin *pin, uint64_t bytes) {
+    tp_error e = {{0}};
+    return tp_pack_result_cache_store_retained(cache, hash, seq, &pin->result,
+                                               bytes, pin, fake_pin_release,
+                                               &e);
+}
+
+/* Demotion of a retained entry keeps the pin: there is no cheaper representation
+ * to fall back to, so switching away only starts charging it to the budget, and
+ * switching back hands the SAME result pointer back with no inflate. */
+void test_retained_pin_demotes_without_releasing_or_reinflating(void) {
+    fake_pin a;
+    fake_pin b;
+    fake_pin_init(&a, "retained-a");
+    fake_pin_init(&b, "retained-b");
+
+    tp_pack_result_cache *cache = tp_pack_result_cache_create(1U << 20);
+    TEST_ASSERT_NOT_NULL(cache);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          store_retained(cache, id_of(1U), 1U, &a, 1024U));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          store_retained(cache, id_of(2U), 2U, &b, 2048U));
+
+    tp_pack_result_cache_stats st;
+    tp_pack_result_cache_stats_get(cache, &st);
+    TEST_ASSERT_EQUAL_INT(2, st.entry_count);
+    TEST_ASSERT_TRUE(tp_id128_eq(st.active_hash, id_of(2U)));
+    /* A demoted to inactive: counted, still held. */
+    TEST_ASSERT_EQUAL_UINT64(1024U, st.inactive_bytes);
+    TEST_ASSERT_EQUAL_INT(0, a.releases);
+    TEST_ASSERT_EQUAL_INT(0, b.releases);
+
+    tp_pack_result_cache_select(cache, id_of(1U));
+    const tp_result *r = NULL;
+    tp_id128 h = tp_id128_nil();
+    tp_error e = {{0}};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_pack_result_cache_authoritative(
+                                            cache, &h, &r, NULL, &e));
+    TEST_ASSERT_TRUE(tp_id128_eq(h, id_of(1U)));
+    TEST_ASSERT_EQUAL_PTR(&a.result, r);
+    tp_pack_result_cache_stats_get(cache, &st);
+    TEST_ASSERT_TRUE(tp_id128_eq(st.active_hash, id_of(1U)));
+    TEST_ASSERT_EQUAL_UINT64(2048U, st.inactive_bytes);
+    TEST_ASSERT_EQUAL_UINT64(0U, st.dropped_corrupt);
+    TEST_ASSERT_EQUAL_INT(0, a.releases);
+    TEST_ASSERT_EQUAL_INT(0, b.releases);
+
+    tp_pack_result_cache_destroy(cache);
+    TEST_ASSERT_EQUAL_INT(1, a.releases);
+    TEST_ASSERT_EQUAL_INT(1, b.releases);
+}
+
+/* Budget pressure evicts the least-recently-used inactive entry and releases its
+ * owner EXACTLY once -- the release hook is the only path that destroys the Pack
+ * arena behind a retained pin. Retained and serialized entries share one budget. */
+void test_retained_pin_eviction_releases_the_owner_exactly_once(void) {
+    fake_pin a;
+    fake_pin b;
+    fake_pin c;
+    fake_pin_init(&a, "evict-a");
+    fake_pin_init(&b, "evict-b");
+    fake_pin_init(&c, "evict-c");
+
+    tp_pack_result_cache *cache = tp_pack_result_cache_create(1024U);
+    TEST_ASSERT_NOT_NULL(cache);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          store_retained(cache, id_of(1U), 1U, &a, 1024U));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          store_retained(cache, id_of(2U), 2U, &b, 1024U));
+    /* A inactive at exactly the budget: nothing evicted yet. */
+    tp_pack_result_cache_stats st;
+    tp_pack_result_cache_stats_get(cache, &st);
+    TEST_ASSERT_EQUAL_UINT64(0U, st.evicted);
+    TEST_ASSERT_EQUAL_INT(0, a.releases);
+
+    /* C becomes active and max-sequence, demoting B: A is now the LRU victim. */
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          store_retained(cache, id_of(3U), 3U, &c, 1024U));
+    tp_pack_result_cache_stats_get(cache, &st);
+    TEST_ASSERT_EQUAL_UINT64(1U, st.evicted);
+    TEST_ASSERT_EQUAL_INT(2, st.entry_count);
+    TEST_ASSERT_EQUAL_UINT64(1024U, st.inactive_bytes);
+    TEST_ASSERT_FALSE(tp_pack_result_cache_contains(cache, id_of(1U)));
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, a.releases,
+                                  "eviction releases the pin exactly once");
+    TEST_ASSERT_EQUAL_INT(0, b.releases);
+    TEST_ASSERT_EQUAL_INT(0, c.releases);
+
+    tp_pack_result_cache_destroy(cache);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, a.releases,
+                                  "destroy must not re-release an evicted pin");
+    TEST_ASSERT_EQUAL_INT(1, b.releases);
+    TEST_ASSERT_EQUAL_INT(1, c.releases);
+}
+
+/* The other two release paths: re-storing a hash releases the pin it supersedes,
+ * and forget() drops an entry outright. Neither may release twice or leak. */
+void test_restore_and_forget_release_the_superseded_pin_once(void) {
+    fake_pin old_pin;
+    fake_pin new_pin;
+    fake_pin_init(&old_pin, "superseded");
+    fake_pin_init(&new_pin, "replacement");
+
+    tp_pack_result_cache *cache = tp_pack_result_cache_create(1U << 20);
+    TEST_ASSERT_NOT_NULL(cache);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK, store_retained(cache, id_of(7U), 1U, &old_pin, 512U));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK, store_retained(cache, id_of(7U), 2U, &new_pin, 512U));
+    TEST_ASSERT_EQUAL_INT(1, old_pin.releases);
+    TEST_ASSERT_EQUAL_INT(0, new_pin.releases);
+
+    tp_pack_result_cache_stats st;
+    tp_pack_result_cache_stats_get(cache, &st);
+    TEST_ASSERT_EQUAL_INT(1, st.entry_count);
+    TEST_ASSERT_EQUAL_UINT64(0U, st.inactive_bytes);
+
+    tp_pack_result_cache_forget(cache, id_of(7U));
+    TEST_ASSERT_FALSE(tp_pack_result_cache_contains(cache, id_of(7U)));
+    TEST_ASSERT_EQUAL_INT(1, new_pin.releases);
+    tp_pack_result_cache_stats_get(cache, &st);
+    TEST_ASSERT_EQUAL_INT(0, st.entry_count);
+    TEST_ASSERT_FALSE(st.has_active);
+    TEST_ASSERT_EQUAL_UINT64(0U, st.inactive_bytes);
+
+    /* Forgetting an absent hash is a no-op, and the store stays usable. */
+    tp_pack_result_cache_forget(cache, id_of(7U));
+    TEST_ASSERT_EQUAL_INT(1, new_pin.releases);
+    tp_error e = {{0}};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_NOT_FOUND,
+        tp_pack_result_cache_authoritative(cache, NULL, NULL, NULL, &e));
+
+    tp_pack_result_cache_destroy(cache);
+    TEST_ASSERT_EQUAL_INT(1, old_pin.releases);
+    TEST_ASSERT_EQUAL_INT(1, new_pin.releases);
+}
+
+/* A rejected retained store leaves the pin with the CALLER: it must not be
+ * released, or the caller's own release would be the second one. */
+void test_rejected_retained_store_leaves_the_pin_with_the_caller(void) {
+    fake_pin pin;
+    fake_pin_init(&pin, "rejected");
+    tp_pack_result_cache *cache = tp_pack_result_cache_create(1U << 20);
+    tp_error e = {{0}};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_ARGUMENT,
+                          tp_pack_result_cache_store_retained(
+                              cache, id_of(1U), 1U, &pin.result, 512U, &pin,
+                              NULL, &e));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_ARGUMENT,
+                          tp_pack_result_cache_store_retained(
+                              cache, id_of(1U), 1U, NULL, 512U, &pin,
+                              fake_pin_release, &e));
+    TEST_ASSERT_EQUAL_INT(0, pin.releases);
+    tp_pack_result_cache_stats st;
+    tp_pack_result_cache_stats_get(cache, &st);
+    TEST_ASSERT_EQUAL_INT(0, st.entry_count);
+    tp_pack_result_cache_destroy(cache);
+    TEST_ASSERT_EQUAL_INT(0, pin.releases);
+}
+
+/* Retained and serialized entries mix in one store and one budget: a serialized
+ * entry still demotes to its retained bytes and re-inflates, while the retained
+ * neighbour keeps its pin -- and forget() picks the right release for each. */
+void test_retained_and_serialized_entries_share_one_budget(void) {
+    packed_atlas serialized;
+    pack_one("mixed", 1U, &serialized);
+    const uint64_t serialized_size = (uint64_t)serialized.size;
+    fake_pin pin;
+    fake_pin_init(&pin, "mixed-retained");
+
+    tp_pack_result_cache *cache = tp_pack_result_cache_create(1U << 20);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, store(cache, id_of(1U), 1U, &serialized));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          store_retained(cache, id_of(2U), 2U, &pin, 4096U));
+    free(serialized.bytes);
+
+    tp_pack_result_cache_stats st;
+    tp_pack_result_cache_stats_get(cache, &st);
+    TEST_ASSERT_EQUAL_UINT64(serialized_size, st.inactive_bytes);
+
+    /* Re-inflating the serialized entry demotes the retained one by ITS measure. */
+    tp_pack_result_cache_select(cache, id_of(1U));
+    const tp_result *r = NULL;
+    tp_error e = {{0}};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_pack_result_cache_authoritative(
+                                            cache, NULL, &r, NULL, &e));
+    TEST_ASSERT_EQUAL_STRING(serialized.atlas_name, r->atlas_name);
+    tp_pack_result_cache_stats_get(cache, &st);
+    TEST_ASSERT_EQUAL_UINT64(4096U, st.inactive_bytes);
+    TEST_ASSERT_EQUAL_INT(0, pin.releases);
+
+    tp_pack_result_cache_forget(cache, id_of(2U));
+    TEST_ASSERT_EQUAL_INT(1, pin.releases);
+    tp_pack_result_cache_stats_get(cache, &st);
+    TEST_ASSERT_EQUAL_INT(1, st.entry_count);
+    TEST_ASSERT_EQUAL_UINT64(0U, st.inactive_bytes);
+    tp_pack_result_cache_destroy(cache);
+    TEST_ASSERT_EQUAL_INT(1, pin.releases);
+}
+
 /* ---- T6 (Undo/Redo cache probe; presentation deferred to phase U) -------- */
 
 static int deterministic_fill(void *ctx, uint8_t *out, size_t len) {
@@ -593,6 +816,11 @@ int main(int argc, char **argv) {
     RUN_TEST(test_corrupt_retained_entry_is_contained);
     RUN_TEST(test_selection_by_sequence_ignores_store_order);
     RUN_TEST(test_cancellation_leaves_prior_authoritative);
+    RUN_TEST(test_retained_pin_demotes_without_releasing_or_reinflating);
+    RUN_TEST(test_retained_pin_eviction_releases_the_owner_exactly_once);
+    RUN_TEST(test_restore_and_forget_release_the_superseded_pin_once);
+    RUN_TEST(test_rejected_retained_store_leaves_the_pin_with_the_caller);
+    RUN_TEST(test_retained_and_serialized_entries_share_one_budget);
     RUN_TEST(test_undo_redo_cache_probe_never_autopacks);
     return UNITY_END();
 }

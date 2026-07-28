@@ -10,7 +10,23 @@
  * canonical lookup below; human/export names remain presentation only.
  *
  * gui_pack_atlas/gui_pack_export are synchronous adapters used by selftest/shot; they drain the
- * same session-owned typed jobs as interactive use. */
+ * same session-owned typed jobs as interactive use.
+ *
+ * RESULT RESIDENCY (packet S18, master spec §10.4). Native results are not held
+ * one-per-atlas forever. They live in a session-lifetime `tp_pack_result_cache`
+ * behind this adapter: the atlas the presentation reads is the store's PINNED
+ * active result, and every other packed atlas is an INACTIVE entry in a
+ * byte-budget LRU. Switching atlas demotes the outgoing result rather than
+ * dropping it, so switching back is a store hit and never repacks; the store
+ * pins each result through the session Pack receipt, and releases that receipt
+ * -- destroying the Pack arena exactly once -- when the LRU evicts the entry.
+ *
+ * The store is behind this boundary on purpose: no view, and no caller of the
+ * functions below, sees a cache, a budget, or a residency state. What a caller
+ * must know is that an evicted result reads as "not packed" (NULL result,
+ * version 0) exactly like an atlas that was never packed -- which is the §10.4
+ * cache-miss presentation: the preview is out of date and the user runs Pack.
+ * Nothing here ever auto-packs. */
 
 #include <stddef.h>
 #include <stdbool.h>
@@ -36,8 +52,16 @@ bool gui_pack_init(const char *work_dir);
  * fills `err` (nullable). An atlas with zero usable sprites is a failure (nothing to show). */
 bool gui_pack_atlas(int atlas_index, double *out_ms, char *err, size_t err_cap, char *notice, size_t notice_cap);
 
-/* The last successful result for `atlas_index`, or NULL if never packed. A
- * failed Pack leaves it intact; gui_project reports freshness separately. */
+/* The last successful result for `atlas_index`, or NULL if it was never packed
+ * or its cached entry has been evicted. A failed Pack leaves it intact;
+ * gui_project reports freshness separately -- restoring a demoted result is
+ * freshness-neutral by construction, because nothing on the freshness path
+ * (input tokens, pack_input_hash, the stale bit) is touched by residency.
+ *
+ * Reading a result makes its atlas the resident one. Two atlases are therefore
+ * never resident at once, and a result pointer stays valid until its entry
+ * leaves the store (eviction, gui_pack_clear, or a repack of the same inputs) --
+ * never merely because another atlas was read. */
 const tp_result *gui_pack_result(int atlas_index);
 /* Changes whenever a successful Pack publishes a new result into this atlas slot. */
 uint64_t gui_pack_result_version(int atlas_index);
@@ -77,8 +101,8 @@ uint64_t gui_pack_preview_diff_rebuilds(void);
 bool gui_pack_export(int atlas_index, int *out_targets, int *out_notices, char *err, size_t err_cap, char *notice,
                      size_t notice_cap);
 
-/* Drops the stored result for one atlas (or all with index < 0) and releases
- * its retained session-job result owner. Call on project new/open and before a repack. */
+/* Drops the stored result for one atlas (or the whole store with index < 0) and
+ * releases its retained session-job result owner. Call on project new/open. */
 void gui_pack_clear(int atlas_index);
 
 /* --- export-target preview (packet EXP-PREVIEW) --------------------------------------------------

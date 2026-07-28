@@ -1285,6 +1285,120 @@ void test_undo_redo_keep_last_successful_pack_result(void) {
     TEST_ASSERT_TRUE(gui_project_is_stale());
 }
 
+/* S18 / master spec §10.4: switching away from a packed atlas neither retains it
+ * forever nor drops it -- the result becomes an INACTIVE entry in the
+ * byte-budget store, and switching back is a store hit that hands the same
+ * pinned result back without a second Pack. */
+void test_switching_atlas_demotes_the_inactive_result_into_the_store(void) {
+    (void)add_coin_source_to_atlas(0);
+    TEST_ASSERT_TRUE(gui_pack_init(TP_GUI_IDENTITY_TEST_DIR));
+    do_pack_blocking();
+    const tp_result *first = gui_pack_result(0);
+    TEST_ASSERT_NOT_NULL(first);
+
+    tp_pack_result_cache_stats stats;
+    gui_pack__test_result_cache_stats(&stats);
+    TEST_ASSERT_EQUAL_INT(1, stats.entry_count);
+    TEST_ASSERT_TRUE(stats.has_active);
+    TEST_ASSERT_EQUAL_UINT64_MESSAGE(
+        0U, stats.inactive_bytes,
+        "the atlas on screen is the pinned active result, exempt from the budget");
+    const tp_id128 first_key = stats.active_hash;
+
+    TEST_ASSERT_EQUAL_INT(1, gui_project_add_atlas().visible_index);
+    const tp_id128 second_atlas_id = add_coin_source_to_atlas(1);
+    gui_view_select_atlas(second_atlas_id);
+    do_pack_blocking();
+    TEST_ASSERT_NOT_NULL(gui_pack_result(1));
+
+    gui_pack__test_result_cache_stats(&stats);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        2, stats.entry_count, "the atlas switched away from is still resident");
+    TEST_ASSERT_FALSE(tp_id128_eq(stats.active_hash, first_key));
+    TEST_ASSERT_TRUE_MESSAGE(stats.inactive_bytes > 0U,
+                             "the demoted result is charged to the byte budget");
+    TEST_ASSERT_EQUAL_UINT64(0U, stats.evicted);
+
+    /* Switching back restores from the store: same result, no new Pack job. */
+    TEST_ASSERT_FALSE(gui_project_job_busy());
+    TEST_ASSERT_EQUAL_PTR(first, gui_pack_result(0));
+    TEST_ASSERT_FALSE_MESSAGE(gui_project_job_busy(),
+                              "a store hit must never start a Pack");
+    gui_pack__test_result_cache_stats(&stats);
+    TEST_ASSERT_TRUE(tp_id128_eq(stats.active_hash, first_key));
+    TEST_ASSERT_EQUAL_INT(2, stats.entry_count);
+    TEST_ASSERT_EQUAL_UINT64(0U, stats.evicted);
+}
+
+/* Budget pressure evicts the least recently used inactive result and releases
+ * its session receipt (the exactly-once release counting lives in the store's
+ * own suite, test_pack_result_cache.c). The presentation of an evicted result is
+ * the §10.4 cache miss: honestly not packed, and nothing auto-packs. */
+void test_evicted_pack_result_reads_as_unpacked_without_autopacking(void) {
+    /* One byte of budget: any demoted result is immediately over it. */
+    gui_pack__test_set_result_budget(1U);
+    (void)add_coin_source_to_atlas(0);
+    TEST_ASSERT_TRUE(gui_pack_init(TP_GUI_IDENTITY_TEST_DIR));
+    do_pack_blocking();
+    TEST_ASSERT_NOT_NULL(gui_pack_result(0));
+    const uint64_t packed_version = gui_pack_result_version(0);
+    TEST_ASSERT_TRUE(packed_version != 0U);
+
+    TEST_ASSERT_EQUAL_INT(1, gui_project_add_atlas().visible_index);
+    const tp_id128 second_atlas_id = add_coin_source_to_atlas(1);
+    gui_view_select_atlas(second_atlas_id);
+    do_pack_blocking();
+    TEST_ASSERT_NOT_NULL(gui_pack_result(1));
+
+    tp_pack_result_cache_stats stats;
+    gui_pack__test_result_cache_stats(&stats);
+    TEST_ASSERT_EQUAL_UINT64_MESSAGE(1U, stats.evicted,
+                                     "the demoted result exceeded the budget");
+    TEST_ASSERT_EQUAL_INT(1, stats.entry_count);
+
+    TEST_ASSERT_NULL_MESSAGE(gui_pack_result(0),
+                             "an evicted result reads as not packed");
+    TEST_ASSERT_EQUAL_UINT64(0U, gui_pack_result_version(0));
+    TEST_ASSERT_FALSE_MESSAGE(gui_project_job_busy(),
+                              "a store miss must never start a Pack");
+    /* The atlas still on screen is untouched by the neighbour's eviction. */
+    TEST_ASSERT_NOT_NULL(gui_pack_result(1));
+}
+
+/* Freshness is not residency: restoring a demoted result touches nothing on the
+ * freshness path, so a preview that was out of date before the atlas switch is
+ * still out of date after it. (Freshness itself is still the project-wide
+ * preview_stale bit, so this pins the S18 property -- restore is
+ * freshness-NEUTRAL -- not a per-atlas verdict that does not exist yet.) */
+void test_restored_pack_result_keeps_its_freshness_verdict(void) {
+    const tp_id128 atlas_id = add_coin_source_to_atlas(0);
+    TEST_ASSERT_TRUE(gui_pack_init(TP_GUI_IDENTITY_TEST_DIR));
+    do_pack_blocking();
+    TEST_ASSERT_NOT_NULL(gui_pack_result(0));
+    TEST_ASSERT_FALSE(gui_project_is_stale());
+
+    TEST_ASSERT_EQUAL_INT(1, gui_project_add_atlas().visible_index);
+    const tp_id128 second_atlas_id = add_coin_source_to_atlas(1);
+    gui_view_select_atlas(second_atlas_id);
+    do_pack_blocking();
+    TEST_ASSERT_NOT_NULL(gui_pack_result(1));
+    TEST_ASSERT_FALSE(gui_project_is_stale());
+
+    /* Edit while the first atlas is demoted: the preview is now out of date. */
+    const tp_session_snapshot *snapshot = gui_project_snapshot();
+    TEST_ASSERT_TRUE(test_submit_atlas_name(
+        atlas_id, tp_session_snapshot_revision(snapshot),
+        "edited-while-demoted"));
+    TEST_ASSERT_TRUE(gui_project_is_stale());
+
+    gui_view_select_atlas(atlas_id);
+    TEST_ASSERT_NOT_NULL(gui_pack_result(0));
+    TEST_ASSERT_TRUE_MESSAGE(
+        gui_project_is_stale(),
+        "restoring a demoted result must not present it as current");
+    TEST_ASSERT_FALSE(gui_project_job_busy());
+}
+
 void test_pack_result_follows_stable_atlas_across_index_shift(void) {
     const tp_session_snapshot *snapshot = gui_project_snapshot();
     const tp_snapshot_atlas *first = tp_session_snapshot_atlas_at(snapshot, 0);
@@ -2169,6 +2283,9 @@ int main(int argc, char **argv) {
     RUN_TEST(test_recovery_entry_keeps_core_path_capacity);
     RUN_TEST(test_canvas_cache_key_keeps_core_path_capacity);
     RUN_TEST(test_undo_redo_keep_last_successful_pack_result);
+    RUN_TEST(test_switching_atlas_demotes_the_inactive_result_into_the_store);
+    RUN_TEST(test_evicted_pack_result_reads_as_unpacked_without_autopacking);
+    RUN_TEST(test_restored_pack_result_keeps_its_freshness_verdict);
     RUN_TEST(test_pack_result_follows_stable_atlas_across_index_shift);
     RUN_TEST(test_recovery_notice_is_sticky_exact_and_clears_after_save_heals);
     RUN_TEST(

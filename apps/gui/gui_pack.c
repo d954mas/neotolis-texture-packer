@@ -8,10 +8,28 @@
 
 #include "tp_core/tp_input.h"
 #include "tp_core/tp_names.h"
+#include "tp_core/tp_pack_result_cache.h"
 
 #include "gui_project.h"
 
 #define GUI_PACK_MAX_ATLASES 64
+
+/* Inactive-result byte budget (packet S18). Master spec §10.4 fixes the SHAPE --
+ * one pinned active result, every inactive one in a separate byte-budget LRU --
+ * and leaves "concrete budgets and compression details" to implementation
+ * policy, so this constant is that policy and the only place it is written down.
+ *
+ * 256 MiB, measured in RAW RGBA8 page bytes (what a Pack result actually holds;
+ * see result_page_bytes). At the owner's calibration scale (30 atlases / 5000
+ * sprites, §61.1) a 2048x2048 page is 16 MiB, so the budget keeps ~16 recently
+ * visited atlas pages warm -- switching between the handful of atlases anyone
+ * works on at once never repacks -- while a pathological 4096x4096 page (64 MiB)
+ * still leaves room for four. Retaining every result instead, which is what the
+ * GUI did before this packet, costs 30x that at the same scale with no ceiling.
+ *
+ * The true resident ceiling is budget + the active pin + the highest-sequence
+ * entry: both are exempt from eviction by the store contract (decision 0004). */
+#define GUI_PACK_RESULT_BUDGET_BYTES (256ULL * 1024ULL * 1024ULL)
 
 typedef struct pack_ref_entry {
     uint64_t hash;
@@ -20,18 +38,31 @@ typedef struct pack_ref_entry {
     bool occupied;
 } pack_ref_entry;
 
+/* Presentation slot for one atlas. It owns no result memory: the result lives in
+ * the byte-budget store under `cache_key`, pinned there by the session Pack
+ * receipt, and the slot is only the atlas -> cache-key binding plus the version
+ * consumers watch. A slot whose entry has been evicted reads as "not packed",
+ * which is the §10.4 cache-miss presentation (existing preview out of date; the
+ * user runs Pack explicitly, nothing auto-packs). */
 typedef struct {
-    tp_result *result;
-    tp_session_job_result_handle *result_owner;
-    pack_ref_entry *ref_index;
-    size_t ref_index_cap;
     tp_id128 atlas_id;
+    tp_id128 cache_key;
     uint64_t version;
     bool valid;
 } pack_slot;
 
 static pack_slot s_slots[GUI_PACK_MAX_ATLASES];
 static uint64_t s_next_result_version;
+
+/* The store, and the ONE decompressed result the presentation borrows from it:
+ * its active pin. The canonical sprite index follows that one result, so an
+ * atlas switch rebuilds it once instead of every atlas carrying its own. */
+static tp_pack_result_cache *s_cache;
+static uint64_t s_pack_sequence;
+static tp_id128 s_resident_key;
+static const tp_result *s_resident_result;
+static pack_ref_entry *s_ref_index;
+static size_t s_ref_index_cap;
 
 #ifdef NTPACKER_GUI_SELFTEST
 static gui_pack_ref_index_work s_ref_index_work;
@@ -45,6 +76,19 @@ gui_pack_ref_index_work gui_pack_ref_index_work_get(void) {
 }
 #endif
 
+#ifdef TP_ENABLE_TEST_SEAMS
+static uint64_t s_budget_override;
+
+void gui_pack__test_result_cache_stats(tp_pack_result_cache_stats *out) {
+    tp_pack_result_cache_stats_get(s_cache, out);
+}
+
+void gui_pack__test_set_result_budget(uint64_t byte_budget) {
+    gui_pack_clear(-1);
+    s_budget_override = byte_budget;
+}
+#endif
+
 static uint64_t pack_ref_hash(const char *text) {
     uint64_t hash = UINT64_C(1469598103934665603);
     for (const unsigned char *p = (const unsigned char *)text; *p; ++p) {
@@ -54,10 +98,12 @@ static uint64_t pack_ref_hash(const char *text) {
     return hash;
 }
 
-static void pack_ref_index_free(pack_slot *slot) {
-    free(slot->ref_index);
-    slot->ref_index = NULL;
-    slot->ref_index_cap = 0U;
+static void pack_resident_clear(void) {
+    free(s_ref_index);
+    s_ref_index = NULL;
+    s_ref_index_cap = 0U;
+    s_resident_key = tp_id128_nil();
+    s_resident_result = NULL;
 }
 
 static bool pack_ref_index_build(const tp_result *result,
@@ -110,12 +156,67 @@ static bool pack_ref_index_build(const tp_result *result,
     return true;
 }
 
+/* Releases the session Pack receipt the store pinned for us. This is the ONLY
+ * release path for a published native result, so the receipt -- and with it the
+ * Pack arena -- is destroyed exactly once, by whichever of eviction, re-store,
+ * forget, or store destruction reaches it first. */
+static void pack_receipt_release(void *owner) {
+    tp_session_job_result owned = {0};
+    owned._owner = (tp_session_job_result_handle *)owner;
+    tp_session_job_result_destroy(&owned);
+}
+
+/* What one pinned result costs: its raw RGBA8 pages. Metadata/name bytes are not
+ * counted, exactly as the store does not count its own name lists, so the budget
+ * stays an honest sum of the memory that actually matters. */
+static uint64_t result_page_bytes(const tp_result *result) {
+    uint64_t bytes = 0U;
+    for (int i = 0; result && i < result->page_count; ++i) {
+        const tp_page *page = &result->pages[i];
+        if (page->w > 0 && page->h > 0) {
+            bytes += (uint64_t)page->w * (uint64_t)page->h * 4ULL;
+        }
+    }
+    return bytes;
+}
+
+static tp_pack_result_cache *pack_cache(void) {
+    if (!s_cache) {
+        uint64_t budget = GUI_PACK_RESULT_BUDGET_BYTES;
+#ifdef TP_ENABLE_TEST_SEAMS
+        if (s_budget_override != 0U) {
+            budget = s_budget_override;
+        }
+#endif
+        s_cache = tp_pack_result_cache_create(budget);
+    }
+    return s_cache;
+}
+
+/* The store is keyed by pack_input_hash, which is content-addressed: two atlases
+ * whose packed result would be byte-identical legitimately share one entry. They
+ * may then also share its lifetime, so a slot only forgets an entry no OTHER
+ * live slot is still bound to. */
+static bool pack_key_is_shared(const pack_slot *slot) {
+    for (int i = 0; i < GUI_PACK_MAX_ATLASES; ++i) {
+        const pack_slot *other = &s_slots[i];
+        if (other != slot && other->valid &&
+            tp_id128_eq(other->cache_key, slot->cache_key)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Drops the slot's binding AND the store entry behind it. Used when the atlas'
+ * result must be gone for good (project new/open, atlas removed, explicit
+ * clear); an ordinary atlas switch demotes instead and keeps the entry. */
 static void pack_slot_clear(pack_slot *slot) {
-    pack_ref_index_free(slot);
-    if (slot->result_owner) {
-        tp_session_job_result owned = {0};
-        owned._owner = slot->result_owner;
-        tp_session_job_result_destroy(&owned);
+    if (slot->valid && s_cache && !pack_key_is_shared(slot)) {
+        if (tp_id128_eq(slot->cache_key, s_resident_key)) {
+            pack_resident_clear();
+        }
+        tp_pack_result_cache_forget(s_cache, slot->cache_key);
     }
     memset(slot, 0, sizeof *slot);
 }
@@ -200,6 +301,15 @@ bool gui_pack_publish_native(tp_session_job_result *job_result,
         return false;
     }
     tp_session_pack_job_result *pack = &job_result->pack;
+    tp_pack_result_cache *cache = pack_cache();
+    if (!cache) {
+        if (out) {
+            out->status = TP_STATUS_OOM;
+            (void)snprintf(out->err, sizeof out->err,
+                           "out of memory creating the pack-result store");
+        }
+        return false;
+    }
     pack_ref_entry *ref_index = NULL;
     size_t ref_index_cap = 0U;
     if (!pack_ref_index_build(pack->result, &ref_index, &ref_index_cap)) {
@@ -209,22 +319,95 @@ bool gui_pack_publish_native(tp_session_job_result *job_result,
         }
         return false;
     }
+    /* Keyed by the canonical pack_input_hash (§10.2-10.3), which is what makes a
+     * later Undo/Redo probe find this exact result. A nil hash means the core
+     * could not compute one (unreadable source): it must never become a shared
+     * key, and it never matches a current hash anyway, so such a result is filed
+     * under the atlas' own stable ID instead. */
+    const tp_id128 key = tp_id128_is_nil(pack->pack_input_hash)
+                             ? pack->atlas_id
+                             : pack->pack_input_hash;
+    /* Resolve the slot BEFORE storing: recycling a slot whose atlas is gone must
+     * release that atlas' entry, and doing it after the store would clear the
+     * residency this publication is about to install. A slot reused for the SAME
+     * atlas keeps its previous entry on purpose -- an earlier hash of this atlas
+     * is exactly what an Undo/Redo probe looks for, and the LRU bounds it. */
     pack_slot *slot = pack_slot_for_publish(atlas_index, pack->atlas_id);
-    pack_slot_clear(slot);
-    slot->result = pack->result;
-    slot->result_owner = job_result->_owner;
-    slot->ref_index = ref_index;
-    slot->ref_index_cap = ref_index_cap;
-    slot->atlas_id = pack->atlas_id;
-    slot->version = next_result_version();
-    slot->valid = true;
+    if (slot->valid && !tp_id128_eq(slot->atlas_id, pack->atlas_id)) {
+        pack_slot_clear(slot);
+    }
+    tp_result *result = pack->result;
+    tp_error error = {{0}};
+    if (tp_pack_result_cache_store_retained(
+            cache, key, ++s_pack_sequence, result, result_page_bytes(result),
+            job_result->_owner, pack_receipt_release, &error) != TP_STATUS_OK) {
+        free(ref_index);
+        if (out) {
+            out->status = TP_STATUS_OOM;
+            (void)snprintf(out->err, sizeof out->err, "%s", error.msg);
+        }
+        return false; /* store failed -> the caller still owns the receipt */
+    }
+    /* The receipt now belongs to the store, which pinned this result ACTIVE and
+     * demoted whatever was active before into the byte-budget LRU. */
     job_result->_owner = NULL;
     pack->arena = NULL;
     pack->result = NULL;
+
+    pack_resident_clear();
+    s_ref_index = ref_index;
+    s_ref_index_cap = ref_index_cap;
+    s_resident_key = key;
+    s_resident_result = result;
+    slot->atlas_id = pack->atlas_id;
+    slot->cache_key = key;
+    slot->version = next_result_version();
+    slot->valid = true;
     nt_log_info("gui_pack(async): atlas '%s' packed %d sprite(s), %d page(s) in %.1f ms",
-                slot->result->atlas_name, slot->result->sprite_count,
-                slot->result->page_count, elapsed_ms);
+                result->atlas_name, result->sprite_count, result->page_count,
+                elapsed_ms);
     return true;
+}
+
+/* Makes the slot's cached result the resident (pinned) one and returns it.
+ *
+ * This is the atlas-switch path: selecting another atlas' entry demotes the
+ * outgoing one into the byte-budget LRU instead of dropping it, so switching
+ * back is a store hit and never a repack. A miss means the LRU evicted the entry
+ * under budget pressure -- the slot is retired and the atlas honestly reads as
+ * not packed (§10.4: on a miss the preview is out of date; nothing auto-packs). */
+static const tp_result *pack_slot_reside(pack_slot *slot) {
+    if (!slot || !slot->valid) {
+        return NULL;
+    }
+    if (s_resident_result && tp_id128_eq(slot->cache_key, s_resident_key)) {
+        return s_resident_result;
+    }
+    if (!s_cache || !tp_pack_result_cache_contains(s_cache, slot->cache_key)) {
+        memset(slot, 0, sizeof *slot);
+        return NULL;
+    }
+    tp_pack_result_cache_select(s_cache, slot->cache_key);
+    const tp_result *result = NULL;
+    tp_id128 hash = tp_id128_nil();
+    tp_error error = {{0}};
+    if (tp_pack_result_cache_authoritative(s_cache, &hash, &result, NULL,
+                                           &error) != TP_STATUS_OK ||
+        !result || !tp_id128_eq(hash, slot->cache_key)) {
+        memset(slot, 0, sizeof *slot);
+        return NULL;
+    }
+    pack_ref_entry *ref_index = NULL;
+    size_t ref_index_cap = 0U;
+    if (!pack_ref_index_build(result, &ref_index, &ref_index_cap)) {
+        return NULL; /* the entry stays cached; the lookup index is retried */
+    }
+    pack_resident_clear();
+    s_ref_index = ref_index;
+    s_ref_index_cap = ref_index_cap;
+    s_resident_key = slot->cache_key;
+    s_resident_result = result;
+    return result;
 }
 
 void gui_pack_clear(int atlas_index) {
@@ -234,9 +417,13 @@ void gui_pack_clear(int atlas_index) {
             pack_slot_clear(slot);
         }
     } else {
-        for (int i = 0; i < GUI_PACK_MAX_ATLASES; i++) {
-            pack_slot_clear(&s_slots[i]);
-        }
+        /* Whole-store reset (project new/open, shutdown): destroying the store
+         * releases every pinned receipt, including entries whose slot was
+         * already recycled, so nothing survives a project boundary. */
+        memset(s_slots, 0, sizeof s_slots);
+        pack_resident_clear();
+        tp_pack_result_cache_destroy(s_cache);
+        s_cache = NULL;
     }
     if (atlas_index < 0 || gui_pack_preview_belongs_to(atlas_index)) {
         gui_pack_preview_clear();
@@ -244,8 +431,7 @@ void gui_pack_clear(int atlas_index) {
 }
 
 const tp_result *gui_pack_result(int atlas_index) {
-    const pack_slot *slot = pack_slot_for_atlas_index(atlas_index);
-    return slot ? slot->result : NULL;
+    return pack_slot_reside(pack_slot_for_atlas_index(atlas_index));
 }
 
 uint64_t gui_pack_result_version(int atlas_index) {
@@ -297,19 +483,9 @@ int gui_pack_find_sprite_ref(int atlas_index, tp_id128 source_id,
     if (atlas_index < 0 || atlas_index >= GUI_PACK_MAX_ATLASES) {
         return -1;
     }
-    static const pack_slot *last_slot;
-    const tp_session_snapshot *snapshot = gui_project_snapshot();
-    const tp_snapshot_atlas *atlas =
-        snapshot ? tp_session_snapshot_atlas_at(snapshot, atlas_index) : NULL;
-    if (!atlas) {
-        return -1;
-    }
-    const pack_slot *slot = last_slot;
-    if (!slot || !slot->valid || !tp_id128_eq(slot->atlas_id, atlas->id)) {
-        slot = pack_slot_for_atlas_id(atlas->id);
-        last_slot = slot;
-    }
-    if (!slot) {
+    /* The canonical index follows the ONE resident result, so making the atlas
+     * resident is what binds this lookup to the right result. */
+    if (!gui_pack_result(atlas_index)) {
         return -1;
     }
     char canonical_name[TP_PACK_INTERNAL_NAME_CAP];
@@ -321,14 +497,14 @@ int gui_pack_find_sprite_ref(int atlas_index, tp_id128 source_id,
 #ifdef NTPACKER_GUI_SELFTEST
     s_ref_index_work.lookup_calls++;
 #endif
-    if (!slot->ref_index || slot->ref_index_cap == 0U) {
+    if (!s_ref_index || s_ref_index_cap == 0U) {
         return -1;
     }
     const uint64_t hash = pack_ref_hash(canonical_name);
-    const size_t mask = slot->ref_index_cap - 1U;
+    const size_t mask = s_ref_index_cap - 1U;
     size_t at = (size_t)hash & mask;
-    for (size_t probe = 0U; probe < slot->ref_index_cap; ++probe) {
-        const pack_ref_entry *entry = &slot->ref_index[at];
+    for (size_t probe = 0U; probe < s_ref_index_cap; ++probe) {
+        const pack_ref_entry *entry = &s_ref_index[at];
 #ifdef NTPACKER_GUI_SELFTEST
         s_ref_index_work.lookup_probes++;
 #endif

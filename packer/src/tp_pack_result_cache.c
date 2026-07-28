@@ -8,21 +8,32 @@
 #include "tp_name_map.h"
 #include "tp_pack_read.h"
 
-/* One stored Pack result. INVARIANT: exactly the `active` entry (if any) has a
- * non-NULL `arena`; every other entry is inactive and holds only its retained
- * `ntpack` bytes + `names` (the inflate key list). `ntpack_size` is the only
- * byte-budget-accounted quantity (names/struct overhead are not counted, so the
- * budget number is an EXACT sum of inactive artifact sizes). */
+/* One stored Pack result, in one of the two flavours the header describes.
+ *
+ * SERIALIZED (pin_release == NULL). INVARIANT: exactly the `active` entry (if
+ * any) has a non-NULL `arena`; every other entry is inactive and holds only its
+ * retained `ntpack` bytes + `names` (the inflate key list). `ntpack_size` is its
+ * budget-accounted quantity (names/struct overhead are not counted, so the budget
+ * number is an EXACT sum of inactive artifact sizes).
+ *
+ * RETAINED-PIN (pin_release != NULL). `arena` is ALWAYS NULL -- the arena belongs
+ * to `pin_owner`, which the store only ever releases through `pin_release`, never
+ * dismantles -- and `result` stays valid for the whole life of the entry, active
+ * or not. It holds no `ntpack`/`names` because nothing is ever re-inflated, and
+ * its budget-accounted quantity is the caller-supplied `retained_bytes`. */
 typedef struct cache_entry {
     tp_id128 hash;
     uint8_t *ntpack;    /* owned copy of the serialized artifact */
-    size_t ntpack_size; /* budget-accounted retained bytes */
+    size_t ntpack_size; /* budget-accounted retained bytes (serialized) */
     char **names;       /* owned inflate name list (atlas name + sprite names) */
     int name_count;
     uint64_t sequence; /* monotonic completion sequence */
     uint64_t touch;    /* LRU clock: larger = more recently used */
-    struct tp_arena *arena;    /* non-NULL only while ACTIVE (pinned) */
-    struct tp_result *result;  /* borrowed into `arena` while ACTIVE */
+    struct tp_arena *arena;    /* serialized: non-NULL only while ACTIVE */
+    struct tp_result *result;  /* borrowed from `arena` / from `pin_owner` */
+    void *pin_owner;                     /* retained-pin: opaque receipt */
+    void (*pin_release)(void *owner);    /* retained-pin: flavour discriminator */
+    uint64_t retained_bytes;             /* retained-pin: budget-accounted */
 } cache_entry;
 
 struct tp_pack_result_cache {
@@ -91,13 +102,39 @@ static tp_status collect_names(const tp_result *result, char ***out_names,
     return TP_STATUS_OK;
 }
 
+static bool entry_is_retained(const cache_entry *entry) {
+    return entry->pin_release != NULL;
+}
+
+/* The quantity the byte-budget LRU counts for this entry while it is inactive. */
+static uint64_t entry_budget_bytes(const cache_entry *entry) {
+    return entry_is_retained(entry) ? entry->retained_bytes
+                                    : (uint64_t)entry->ntpack_size;
+}
+
+/* Gives up the entry's decompressed residency for good: the arena it owns
+ * (serialized) or the caller's receipt (retained pin), exactly once. NOT the
+ * demotion path -- a retained entry keeps its pin across demotion. */
+static void entry_release_pin(cache_entry *entry) {
+    if (entry_is_retained(entry)) {
+        entry->pin_release(entry->pin_owner);
+        entry->pin_owner = NULL;
+        entry->pin_release = NULL;
+        entry->retained_bytes = 0U;
+    } else {
+        tp_arena_destroy(entry->arena);
+    }
+    entry->arena = NULL;
+    entry->result = NULL;
+}
+
 static void entry_free(cache_entry *entry) {
     if (!entry) {
         return;
     }
     free(entry->ntpack);
     names_free(entry->names, entry->name_count);
-    tp_arena_destroy(entry->arena);
+    entry_release_pin(entry);
     free(entry);
 }
 
@@ -176,8 +213,11 @@ static void evict_over_budget(tp_pack_result_cache *cache) {
         cache_entry *victim = NULL;
         for (int i = 0; i < cache->count; i++) {
             cache_entry *e = cache->entries[i];
-            if (e->arena != NULL || e == keep) {
-                continue; /* active pin + highest sequence are never evicted */
+            /* Active pin + highest sequence are never evicted. The pin test is
+             * `is the active entry`, not `holds an arena`: a retained-pin entry
+             * has no arena of its own even while it is the active one. */
+            if (e == cache->active || e == keep) {
+                continue;
             }
             if (!victim || e->touch < victim->touch) {
                 victim = e;
@@ -186,10 +226,29 @@ static void evict_over_budget(tp_pack_result_cache *cache) {
         if (!victim) {
             break; /* only the active + highest-sequence entries remain */
         }
-        cache->inactive_bytes -= victim->ntpack_size;
+        cache->inactive_bytes -= entry_budget_bytes(victim);
         remove_entry(cache, victim);
         cache->evicted++;
     }
+}
+
+/* Demotes the currently active entry into the byte-budget LRU. A serialized
+ * entry gives up its decompressed arena and falls back to its retained bytes; a
+ * retained-pin entry keeps its receipt (there is nothing cheaper to fall back
+ * to) and only starts being counted against the budget. */
+static void demote_active(tp_pack_result_cache *cache) {
+    cache_entry *prev = cache->active;
+    if (!prev) {
+        return;
+    }
+    if (!entry_is_retained(prev)) {
+        tp_arena_destroy(prev->arena);
+        prev->arena = NULL;
+        prev->result = NULL;
+    }
+    prev->touch = ++cache->touch_clock;
+    cache->inactive_bytes += entry_budget_bytes(prev);
+    cache->active = NULL;
 }
 
 static tp_status inflate_entry(cache_entry *entry, tp_error *err) {
@@ -290,13 +349,11 @@ tp_status tp_pack_result_cache_store(tp_pack_result_cache *cache, tp_id128 hash,
         /* Refresh in place. If it was inactive its retained bytes were counted;
          * it is about to become active, so drop that contribution. */
         if (entry != cache->active) {
-            cache->inactive_bytes -= entry->ntpack_size;
+            cache->inactive_bytes -= entry_budget_bytes(entry);
         }
         free(entry->ntpack);
         names_free(entry->names, entry->name_count);
-        tp_arena_destroy(entry->arena);
-        entry->arena = NULL;
-        entry->result = NULL;
+        entry_release_pin(entry);
         entry->ntpack = payload;
         entry->ntpack_size = ntpack_size;
         entry->names = names;
@@ -329,18 +386,88 @@ tp_status tp_pack_result_cache_store(tp_pack_result_cache *cache, tp_id128 hash,
     entry->arena = result_arena; /* ADOPT: ownership transferred */
     entry->result = (tp_result *)result;
 
-    if (cache->active && cache->active != entry) {
-        cache_entry *prev = cache->active;
-        tp_arena_destroy(prev->arena);
-        prev->arena = NULL;
-        prev->result = NULL;
-        prev->touch = ++cache->touch_clock;
-        cache->inactive_bytes += prev->ntpack_size;
+    if (cache->active != entry) {
+        demote_active(cache);
     }
     cache->active = entry;
 
     evict_over_budget(cache);
     return TP_STATUS_OK;
+}
+
+tp_status tp_pack_result_cache_store_retained(
+    tp_pack_result_cache *cache, tp_id128 hash, uint64_t sequence,
+    const struct tp_result *result, uint64_t retained_bytes, void *pin_owner,
+    void (*pin_release)(void *pin_owner), tp_error *err) {
+    if (!cache || !result || !pin_release) {
+        return tp_error_set(
+            err, TP_STATUS_INVALID_ARGUMENT,
+            "tp_pack_result_cache: retained store requires cache, result, and a "
+            "release hook");
+    }
+
+    /* Adopt the pin only once nothing else can fail: on every error return above
+     * and below, the caller still owns `pin_owner` and must release it. */
+    cache_entry *entry = find_entry(cache, hash);
+    if (entry) {
+        if (entry != cache->active) {
+            cache->inactive_bytes -= entry_budget_bytes(entry);
+        }
+        free(entry->ntpack);
+        entry->ntpack = NULL;
+        entry->ntpack_size = 0U;
+        names_free(entry->names, entry->name_count);
+        entry->names = NULL;
+        entry->name_count = 0;
+        entry_release_pin(entry); /* releases the SUPERSEDED pin, not this one */
+    } else {
+        entry = calloc(1U, sizeof *entry);
+        if (!entry) {
+            return tp_error_set(err, TP_STATUS_OOM,
+                                "tp_pack_result_cache: entry alloc failed");
+        }
+        entry->hash = hash;
+        if (!entries_push(cache, entry)) {
+            free(entry);
+            return tp_error_set(err, TP_STATUS_OOM,
+                                "tp_pack_result_cache: entry table grow failed");
+        }
+    }
+
+    entry->sequence = sequence;
+    if (sequence > cache->seq_clock) {
+        cache->seq_clock = sequence;
+    }
+    entry->touch = ++cache->touch_clock;
+    entry->pin_owner = pin_owner; /* ADOPT: released exactly once from now on */
+    entry->pin_release = pin_release;
+    entry->retained_bytes = retained_bytes;
+    entry->result = (tp_result *)result;
+
+    if (cache->active != entry) {
+        demote_active(cache);
+    }
+    cache->active = entry;
+
+    evict_over_budget(cache);
+    return TP_STATUS_OK;
+}
+
+void tp_pack_result_cache_forget(tp_pack_result_cache *cache, tp_id128 hash) {
+    if (!cache) {
+        return;
+    }
+    cache_entry *entry = find_entry(cache, hash);
+    if (!entry) {
+        return;
+    }
+    if (entry != cache->active) {
+        cache->inactive_bytes -= entry_budget_bytes(entry);
+    }
+    if (cache->has_selection && tp_id128_eq(cache->selected_hash, hash)) {
+        cache->has_selection = false;
+    }
+    remove_entry(cache, entry);
 }
 
 bool tp_pack_result_cache_contains(const tp_pack_result_cache *cache,
@@ -396,27 +523,24 @@ tp_status tp_pack_result_cache_authoritative(tp_pack_result_cache *cache,
                                 "tp_pack_result_cache: no cached result");
         }
         if (target != cache->active) {
-            tp_status st = inflate_entry(target, err);
-            if (st != TP_STATUS_OK) {
-                /* Contained failure: drop the corrupt entry and retry. */
-                cache->dropped_corrupt++;
-                if (cache->has_selection &&
-                    tp_id128_eq(cache->selected_hash, target->hash)) {
-                    cache->has_selection = false;
+            /* A retained-pin entry never gave up its decompressed result, so
+             * there is nothing to inflate and nothing that can be corrupt. */
+            if (!entry_is_retained(target)) {
+                tp_status st = inflate_entry(target, err);
+                if (st != TP_STATUS_OK) {
+                    /* Contained failure: drop the corrupt entry and retry. */
+                    cache->dropped_corrupt++;
+                    if (cache->has_selection &&
+                        tp_id128_eq(cache->selected_hash, target->hash)) {
+                        cache->has_selection = false;
+                    }
+                    cache->inactive_bytes -= entry_budget_bytes(target);
+                    remove_entry(cache, target);
+                    continue;
                 }
-                cache->inactive_bytes -= target->ntpack_size;
-                remove_entry(cache, target);
-                continue;
             }
-            cache->inactive_bytes -= target->ntpack_size;
-            if (cache->active) {
-                cache_entry *prev = cache->active;
-                tp_arena_destroy(prev->arena);
-                prev->arena = NULL;
-                prev->result = NULL;
-                prev->touch = ++cache->touch_clock;
-                cache->inactive_bytes += prev->ntpack_size;
-            }
+            cache->inactive_bytes -= entry_budget_bytes(target);
+            demote_active(cache);
             cache->active = target;
             target->touch = ++cache->touch_clock;
             evict_over_budget(cache);

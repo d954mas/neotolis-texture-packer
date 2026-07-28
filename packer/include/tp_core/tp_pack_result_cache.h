@@ -12,6 +12,26 @@
  * (INACTIVE) entry holds only its retained bytes and is managed by a byte-budget
  * LRU. A hit re-inflates the retained bytes through tp_pack_read_memory.
  *
+ * ENTRY FLAVOURS. An entry is stored one of two ways, and the two mix freely in
+ * one store because the difference is purely how ONE entry owns its memory:
+ *
+ *   SERIALIZED (tp_pack_result_cache_store) -- the caller owns the .ntpack bytes
+ *   and the result arena. Demotion frees the decompressed arena and keeps only
+ *   the bytes; a later hit re-inflates them. This is the §10.4 shape and the
+ *   cheapest inactive footprint.
+ *
+ *   RETAINED-PIN (tp_pack_result_cache_store_retained) -- the result lives behind
+ *   an opaque, already-refcounted OWNER the store must not dismantle (the session
+ *   Pack receipt, tp_session_job_result::_owner, which is what pins the Pack
+ *   arena). The store never touches that arena directly: it releases the owner
+ *   through the caller's release hook, exactly once, on eviction/refresh/destroy.
+ *   A retained entry keeps its decompressed tp_result for its whole life, so
+ *   demotion costs nothing and a hit needs no inflate -- it trades the smaller
+ *   inactive footprint for zero restore work and stable result pointers.
+ *   A live GUI has no serialized artifact to hand over (the host deletes the
+ *   worker's .ntpack the moment it inflates it, §10.6) and does not own the
+ *   arena, so a frontend uses this flavour.
+ *
  * TRANSIENT PEAK. An active-entry swap (a store, or authoritative resolution
  * switching winners) holds TWO fully decompressed results at once for the span of
  * the swap: the incoming/inflated winner AND the outgoing active result before it
@@ -89,11 +109,41 @@ tp_status tp_pack_result_cache_store(tp_pack_result_cache *cache, tp_id128 hash,
                                      const struct tp_result *result,
                                      tp_error *err);
 
+/* Stores a completed Pack result whose memory is owned by `pin_owner` -- an
+ * opaque, already-refcounted receipt the store cannot adopt or take apart -- and
+ * pins it ACTIVE. This is the frontend entry point (packet S18): a GUI holds the
+ * session Pack receipt (`tp_session_job_result::_owner`), which is what keeps the
+ * Pack arena alive, and has no serialized artifact to hand over.
+ *
+ * `result` is BORROWED for the whole life of the entry: it must stay valid until
+ * `pin_release(pin_owner)` runs, and the store hands it straight back from
+ * tp_pack_result_cache_authoritative without any inflate, so a caller's result
+ * pointer stays stable while the entry is present. `pin_release` is required and
+ * is invoked EXACTLY ONCE per successful store -- on eviction, on a re-store of
+ * the same hash, on tp_pack_result_cache_forget, or on destroy. On any error the
+ * caller keeps the pin and must release it itself.
+ *
+ * `retained_bytes` is the caller's measure of the memory this pin holds (for a
+ * Pack receipt: the raw RGBA8 page bytes). It is what the byte-budget LRU counts
+ * while the entry is inactive; the active pin is exempt exactly as it is for a
+ * serialized entry. `sequence` has the same monotonic-completion meaning as in
+ * tp_pack_result_cache_store. */
+tp_status tp_pack_result_cache_store_retained(
+    tp_pack_result_cache *cache, tp_id128 hash, uint64_t sequence,
+    const struct tp_result *result, uint64_t retained_bytes, void *pin_owner,
+    void (*pin_release)(void *pin_owner), tp_error *err);
+
 /* True iff an entry with `hash` is present (active or inactive). This is the
  * Undo/Redo cache probe: a hit means the previous preview is available; a miss
  * means keep the current preview and mark it stale -- it never starts a Pack. */
 bool tp_pack_result_cache_contains(const tp_pack_result_cache *cache,
                                    tp_id128 hash);
+
+/* Drops `hash` if present, releasing its arena (serialized entry) or its owner
+ * (retained-pin entry) exactly once, and clears an explicit selection that named
+ * it. Used when the thing a cached result describes is gone for good -- the atlas
+ * was deleted, or its presentation slot was cleared. Absent hash: no-op. */
+void tp_pack_result_cache_forget(tp_pack_result_cache *cache, tp_id128 hash);
 
 /* Explicit selection by hash (decision 0004). If `hash` is present, subsequent
  * authoritative resolution returns it; a nil hash or an absent hash clears the

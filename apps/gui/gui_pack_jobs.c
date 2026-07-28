@@ -591,6 +591,12 @@ bool gui_pack_preview_async_start(int atlas_index, const char *exporter_id,
 void gui_pack_shutdown(void) {
     gui_pack_clear(-1);
     gui_pack_preview_clear();
+#ifdef TP_ENABLE_TEST_SEAMS
+    /* The store's byte budget is a compile-time policy constant everywhere else;
+     * a test that shrinks it owns it only for its own run, so shutdown -- which
+     * every suite already calls between cases -- restores the shipped value. */
+    gui_pack__test_set_result_budget(0U);
+#endif
 }
 
 bool gui_pack_atlas(int atlas_index, double *out_ms, char *err,
