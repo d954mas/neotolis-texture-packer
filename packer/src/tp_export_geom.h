@@ -2,8 +2,8 @@
 #define TP_CORE_SRC_TP_EXPORT_GEOM_H
 
 /* Shared hull-shape predicate for the format writers. Header-only static inline
- * (like tp_sb.h / tp_strutil.h) so every exporter answers "is this hull just the
- * trim rect?" with ONE definition -- the json-neotolis and Defold writers used to
+ * (like tp_core/tp_sb.h) so every exporter answers "is this hull just the trim
+ * rect?" with ONE definition -- the json-neotolis and Defold writers used to
  * carry byte-identical private copies, which is exactly how the two formats would
  * drift on the polygon/rect decision. A private packer/src header, not public API. */
 

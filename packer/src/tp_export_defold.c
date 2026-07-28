@@ -8,7 +8,7 @@
 #include "tp_fs_internal.h"
 #include "tp_strutil.h" /* shared tp_path_basename (one core definition) */
 
-#include "tp_sb.h"
+#include "tp_core/tp_sb.h"
 
 /* Defold exporter: emits the extension-texturepacker `.tpinfo` (packed layout,
  * protobuf TEXT format) + a starter `.tpatlas` (animation wrapper) + straight-

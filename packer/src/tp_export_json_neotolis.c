@@ -8,7 +8,7 @@
 #include "tp_fs_internal.h"
 #include "tp_strutil.h" /* shared tp_path_basename (one core definition) */
 
-#include "tp_sb.h"
+#include "tp_core/tp_sb.h"
 
 /* Full-fidelity json-neotolis writer. Deterministic (tp_project.c conventions:
  * "version" first then ascending keys, 2-space indent, LF, %.9g, trailing

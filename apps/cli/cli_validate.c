@@ -12,23 +12,23 @@
 #include "tp_core/tp_session.h"
 #include "tp_core/tp_validate.h"
 
-static void key(cli_sb *sb, int depth, bool *first, const char *name) {
-    cli_sb_str(sb, *first ? "\n" : ",\n");
+static void key(tp_sb *sb, int depth, bool *first, const char *name) {
+    tp_sb_str(sb, *first ? "\n" : ",\n");
     *first = false;
-    cli_sb_indent(sb, depth);
-    cli_sb_json_str(sb, name);
-    cli_sb_str(sb, ": ");
+    tp_sb_indent(sb, depth);
+    tp_sb_json_string(sb, name);
+    tp_sb_str(sb, ": ");
 }
 
-static void emit_context(cli_sb *sb, int depth, bool *first, const char *name, const char *value) {
+static void emit_context(tp_sb *sb, int depth, bool *first, const char *name, const char *value) {
     if (value[0] == '\0') {
         return;
     }
     key(sb, depth, first, name);
-    cli_sb_json_str(sb, value);
+    tp_sb_json_string(sb, value);
 }
 
-static bool emit_id_context(cli_sb *sb, int depth, bool *first,
+static bool emit_id_context(tp_sb *sb, int depth, bool *first,
                             const char *name, tp_id_kind kind, tp_id128 id) {
     if (tp_id128_is_nil(id)) {
         return true;
@@ -38,35 +38,35 @@ static bool emit_id_context(cli_sb *sb, int depth, bool *first,
         return false;
     }
     key(sb, depth, first, name);
-    cli_sb_json_str(sb, text);
+    tp_sb_json_string(sb, text);
     return true;
 }
 
-static bool build_validate_json(cli_sb *sb,
+static bool build_validate_json(tp_sb *sb,
                                 const tp_validation_report *report) {
     bool first = true;
     bool ids_ok = true;
-    cli_sb_putc(sb, '{');
+    tp_sb_char(sb, '{');
     key(sb, 1, &first, "schema");
-    cli_sb_int(sb, CLI_VALIDATE_SCHEMA);
+    tp_sb_int(sb, CLI_VALIDATE_SCHEMA);
 
     key(sb, 1, &first, "findings");
     if (report->finding_count == 0U) {
-        cli_sb_str(sb, "[]");
+        tp_sb_str(sb, "[]");
     } else {
-        cli_sb_putc(sb, '[');
+        tp_sb_char(sb, '[');
         for (size_t i = 0; i < report->finding_count; i++) {
             const tp_validation_finding *finding = &report->findings[i];
-            cli_sb_str(sb, i == 0U ? "\n" : ",\n");
-            cli_sb_indent(sb, 2);
+            tp_sb_str(sb, i == 0U ? "\n" : ",\n");
+            tp_sb_indent(sb, 2);
             bool finding_first = true;
-            cli_sb_putc(sb, '{');
+            tp_sb_char(sb, '{');
             key(sb, 3, &finding_first, "severity");
-            cli_sb_json_str(sb, finding->severity == TP_VALIDATION_ERROR ? "error" : "warning");
+            tp_sb_json_string(sb, finding->severity == TP_VALIDATION_ERROR ? "error" : "warning");
             key(sb, 3, &finding_first, "code");
-            cli_sb_json_str(sb, finding->code);
+            tp_sb_json_string(sb, finding->code);
             key(sb, 3, &finding_first, "message");
-            cli_sb_json_str(sb, finding->message);
+            tp_sb_json_string(sb, finding->message);
             emit_context(sb, 3, &finding_first, "atlas", finding->atlas);
             if (!emit_id_context(sb, 3, &finding_first, "atlas_id",
                                  TP_ID_KIND_ATLAS, finding->atlas_id)) {
@@ -90,28 +90,28 @@ static bool build_validate_json(cli_sb *sb,
                                  TP_ID_KIND_TARGET, finding->target_id)) {
                 ids_ok = false;
             }
-            cli_sb_str(sb, "\n");
-            cli_sb_indent(sb, 2);
-            cli_sb_putc(sb, '}');
+            tp_sb_str(sb, "\n");
+            tp_sb_indent(sb, 2);
+            tp_sb_char(sb, '}');
         }
-        cli_sb_str(sb, "\n");
-        cli_sb_indent(sb, 1);
-        cli_sb_putc(sb, ']');
+        tp_sb_str(sb, "\n");
+        tp_sb_indent(sb, 1);
+        tp_sb_char(sb, ']');
     }
 
     key(sb, 1, &first, "counts");
     {
         bool counts_first = true;
-        cli_sb_putc(sb, '{');
+        tp_sb_char(sb, '{');
         key(sb, 2, &counts_first, "error");
-        cli_sb_size(sb, report->error_count);
+        tp_sb_size(sb, report->error_count);
         key(sb, 2, &counts_first, "warning");
-        cli_sb_size(sb, report->warning_count);
-        cli_sb_str(sb, "\n");
-        cli_sb_indent(sb, 1);
-        cli_sb_putc(sb, '}');
+        tp_sb_size(sb, report->warning_count);
+        tp_sb_str(sb, "\n");
+        tp_sb_indent(sb, 1);
+        tp_sb_char(sb, '}');
     }
-    cli_sb_str(sb, "\n}");
+    tp_sb_str(sb, "\n}");
     return ids_ok;
 }
 
@@ -142,10 +142,10 @@ int cmd_validate(const char *path, bool json, bool quiet, bool strict) {
     }
 
     if (json) {
-        cli_sb sb = {0};
+        tp_sb sb = {0};
         const bool ids_ok = build_validate_json(&sb, &report);
         if (!ids_ok) {
-            cli_sb_free(&sb);
+            tp_sb_free(&sb);
             tp_validation_report_free(&report);
             cli_emit_error(true, false,
                            tp_status_id(TP_STATUS_ID_MALFORMED),
@@ -153,13 +153,13 @@ int cmd_validate(const char *path, bool json, bool quiet, bool strict) {
             return CLI_EXIT_INTERNAL;
         }
         if (sb.oom) {
-            cli_sb_free(&sb);
+            tp_sb_free(&sb);
             tp_validation_report_free(&report);
             cli_emit_error(true, false, "oom", "out of memory building validate payload");
             return CLI_EXIT_INTERNAL;
         }
         cli_out_stdout(&sb);
-        cli_sb_free(&sb);
+        tp_sb_free(&sb);
     } else {
         print_validate_human(&report, path);
     }

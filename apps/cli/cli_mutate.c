@@ -299,34 +299,34 @@ static tp_status emit_selector_error(
         cli_emit_error(json, quiet, tp_status_id(status), "%s", message);
         return status;
     }
-    cli_sb sb = {0};
-    cli_sb_str(&sb, "{\"schema\":1,\"error\":{\"id\":");
-    cli_sb_json_str(&sb, tp_status_id(status));
-    cli_sb_str(&sb, ",\"message\":");
-    cli_sb_json_str(&sb, message);
-    cli_sb_str(&sb, ",\"candidates\":[");
+    tp_sb sb = {0};
+    tp_sb_str(&sb, "{\"schema\":1,\"error\":{\"id\":");
+    tp_sb_json_string(&sb, tp_status_id(status));
+    tp_sb_str(&sb, ",\"message\":");
+    tp_sb_json_string(&sb, message);
+    tp_sb_str(&sb, ",\"candidates\":[");
     for (int i = 0; i < candidates->count; ++i) {
         const tp_selector_candidate *candidate = &candidates->v[i];
         if (i > 0) {
-            cli_sb_putc(&sb, ',');
+            tp_sb_char(&sb, ',');
         }
-        cli_sb_str(&sb, "{\"id\":");
-        cli_sb_json_str(&sb, candidate->idtext);
-        cli_sb_str(&sb, ",\"kind\":");
-        cli_sb_json_str(&sb, tp_selector_kind_token(candidate->kind));
-        cli_sb_str(&sb, ",\"label\":");
-        cli_sb_json_str(&sb, candidate->label);
-        cli_sb_putc(&sb, '}');
+        tp_sb_str(&sb, "{\"id\":");
+        tp_sb_json_string(&sb, candidate->idtext);
+        tp_sb_str(&sb, ",\"kind\":");
+        tp_sb_json_string(&sb, tp_selector_kind_token(candidate->kind));
+        tp_sb_str(&sb, ",\"label\":");
+        tp_sb_json_string(&sb, candidate->label);
+        tp_sb_char(&sb, '}');
     }
-    cli_sb_str(&sb, "]}}");
+    tp_sb_str(&sb, "]}}");
     if (sb.oom) {
-        cli_sb_free(&sb);
+        tp_sb_free(&sb);
         cli_emit_error(true, false, "oom",
                        "out of memory rendering selector candidates");
         return TP_STATUS_OOM;
     }
     cli_out_stdout(&sb);
-    cli_sb_free(&sb);
+    tp_sb_free(&sb);
     return status;
 }
 

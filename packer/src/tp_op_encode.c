@@ -1,6 +1,6 @@
 /*
  * Determinism: canonical BYTE-STABLE encoders for an operation and an apply
- * result. Same conventions as the tp_project writer (src/tp_sb.h): 2-space indent,
+ * result. Same conventions as the tp_project writer (tp_core/tp_sb.h): 2-space indent,
  * LF, %.9g floats, keys ASCENDING with the "op" discriminator first, a trailing
  * newline. Endian-independent (no reinterpret), so goldens are byte-identical on
  * every OS. Sparse: a SET op emits only the fields its presence mask selects.
@@ -14,7 +14,7 @@
 #include "tp_core/tp_id.h"
 #include "tp_encode_internal.h"
 #include "tp_op_internal.h"
-#include "tp_sb.h"
+#include "tp_core/tp_sb.h"
 
 typedef enum { FT_ID, FT_STR, FT_INT, FT_NUM, FT_BOOL, FT_ARR, FT_REF, FT_REFS } ftype;
 

@@ -1,6 +1,6 @@
 /*
  * Canonical BYTE-STABLE encode of a transaction request
- * and result. Same conventions as the tp_project writer (src/tp_sb.h): 2-space
+ * and result. Same conventions as the tp_project writer (tp_core/tp_sb.h): 2-space
  * indent, LF, keys ASCENDING with the discriminator ("schema" at the envelope, "op"
  * in an operation) first, a trailing newline; integral 64-bit numbers via PRId64
  * (no decimal point), fractional via "%.9g"; label/author sparse-omitted. Goldens
@@ -20,7 +20,7 @@
 #include "tp_core/tp_id.h"
 #include "tp_encode_internal.h"
 #include "tp_op_internal.h"
-#include "tp_sb.h"
+#include "tp_core/tp_sb.h"
 
 static _Thread_local size_t s_test_request_encode_calls;
 static _Thread_local size_t s_test_last_measure_allocations;
