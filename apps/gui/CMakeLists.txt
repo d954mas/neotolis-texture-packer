@@ -48,14 +48,17 @@ endif()
 # nt_builder, so the read/model/edit core comes transitively. gui_pack.c is a thin adapter over
 # session-owned typed Pack/Export jobs. Source-preview raster ingress is shared
 # with pack jobs through tp_core (strict UTF-8 path + bounded memory decode).
+# Interface-impl stubs last, same rule and reason as _tp_gui_headless_libs below:
+# an archive listed before tp_build cannot satisfy an undefined that tp_build's
+# closure introduces, and ELF linkers do not rescan.
 target_link_libraries(ntpacker-gui PRIVATE
     nt_core nt_app nt_input nt_window nt_math nt_log nt_time nt_resource
     nt_material nt_shared nt_atlas
     nt_sprite_renderer nt_text_renderer nt_font nt_ui
     nt_render nt_hash nt_mem_scratch nt_shape_renderer
-    nt_gfx nt_http_stub nt_fs nt_clipboard
     tp_build tinyfiledialogs
     tinycthread # thread-safe GUI log sink; already in-closure via nt_builder
+    nt_gfx nt_http_stub nt_fs nt_clipboard
 )
 # D2 crash handler: MiniDumpWriteDump (gui_crash.c) needs DbgHelp on Windows. Target-scoped link
 # addition only (no preset/toolchain change); POSIX uses libc backtrace, no extra lib.
@@ -271,13 +274,19 @@ endif()
 # The headless harness link set and include path: the production GUI TUs above
 # pull the engine UI stack even without a window, so every headless target links
 # and includes exactly the same thing.
+# The concrete impls for the engine's *_interface deps (nt_gfx, nt_http_stub,
+# nt_fs, nt_clipboard) come LAST: their consumers reach them through interface
+# targets, so CMake cannot see the dependency and emits the list as written --
+# and an ELF linker never rescans an archive. tp_build's nt_builder closure can
+# pull nt_resource objects late, so a stub listed before tp_build is a
+# Linux/macOS undefined-reference (first caught by CI run 30392773049).
 set(_tp_gui_headless_libs
     nt_core nt_app nt_window nt_input nt_math nt_log nt_time nt_resource
     nt_material nt_shared nt_atlas
     nt_sprite_renderer nt_text_renderer nt_font nt_ui
     nt_render nt_hash nt_mem_scratch nt_shape_renderer
-    nt_gfx nt_http_stub nt_fs nt_clipboard
-    tp_build stb_image tinyfiledialogs tinycthread unity)
+    tp_build stb_image tinyfiledialogs tinycthread unity
+    nt_gfx nt_http_stub nt_fs nt_clipboard)
 set(_tp_gui_headless_includes
     "${CMAKE_SOURCE_DIR}/packer/src"
     "${CMAKE_SOURCE_DIR}/apps/common")
