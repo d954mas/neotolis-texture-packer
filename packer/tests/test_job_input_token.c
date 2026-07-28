@@ -127,7 +127,10 @@ static void add_file_source(tp_session *session, tp_id128 atlas_id,
     const int length = snprintf(
         path, sizeof path, "%s/job_src.png", work_dir);
     TEST_ASSERT_TRUE(length > 0 && (size_t)length < sizeof path);
-    FILE *file = fopen(path, "wb");
+    /* tp_fs_fopen, not fopen: work_dir may exceed the classic Win32 MAX_PATH
+     * (the deep-work_dir test below), and only tp_fs goes through the extended
+     * "\\?\" spelling there. */
+    FILE *file = tp_fs_fopen(path, "wb");
     TEST_ASSERT_NOT_NULL(file);
     TEST_ASSERT_EQUAL_size_t(
         sizeof k_png_4x4,
@@ -649,6 +652,102 @@ void test_worker_timeout_is_a_structured_terminal_failure(void) {
     remove_tree(work_dir);
 }
 
+/* Compaction drops the request-side retention of a taken Pack receipt (the
+ * serialized project JSON, the worker process with its second encoded copy,
+ * the request paths) while the arena-backed result stays fully readable, and
+ * destroy afterwards is still the clean, exactly-once release (the ASan
+ * battery is what proves no double free / no leak here). */
+void test_compacted_pack_result_keeps_pages_and_destroys_cleanly(void) {
+    tp_session *session = make_session();
+    char work_dir[1024];
+    scratch_dir(work_dir, sizeof work_dir);
+    remove_tree(work_dir);
+    tp_mkdirs(work_dir);
+    const tp_id128 atlas_id = default_atlas_id(session);
+    add_file_source(session, atlas_id, work_dir);
+
+    const tp_pack_job_request request = {
+        .atlas_id = atlas_id,
+        .work_dir = work_dir,
+    };
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_session_pack_job_start(session, &request, &error),
+        error.msg);
+    tp_session_job_result result = wait_for_result(session);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_SESSION_JOB_SUCCEEDED, result.state, result.error.msg);
+    TEST_ASSERT_NOT_NULL(result.pack.result);
+
+    tp_session_job_result_compact(&result);
+    const tp_result *packed = result.pack.result;
+    TEST_ASSERT_NOT_NULL(packed);
+    TEST_ASSERT_EQUAL_STRING("atlas1", packed->atlas_name);
+    TEST_ASSERT_TRUE(packed->sprite_count > 0);
+    TEST_ASSERT_NOT_NULL(packed->sprites[0].name);
+    TEST_ASSERT_TRUE(packed->page_count > 0);
+    uint64_t pixel_sum = 0U;
+    for (int p = 0; p < packed->page_count; ++p) {
+        const tp_page *page = &packed->pages[p];
+        TEST_ASSERT_NOT_NULL(page->rgba);
+        const size_t bytes = (size_t)page->w * (size_t)page->h * 4U;
+        for (size_t i = 0U; i < bytes; ++i) {
+            pixel_sum += page->rgba[i]; /* every page byte stays readable */
+        }
+    }
+    (void)pixel_sum;
+    tp_session_job_result_compact(&result); /* idempotent */
+    TEST_ASSERT_NOT_NULL(result.pack.result);
+    TEST_ASSERT_EQUAL_INT(
+        0, count_request_dirs(work_dir));
+    tp_session_job_result_destroy(&result);
+    TEST_ASSERT_NULL(result._owner);
+    tp_session_destroy(session);
+    remove_tree(work_dir);
+}
+
+/* A real contained artifact whose adoption dies between the containment check
+ * and the stored path used to be settled without being deleted -- invisible to
+ * both discard paths until a later app instance's reaper. Every terminal that
+ * rejects the artifact must leave neither the `.ntpack` nor its private
+ * request directory behind, in THIS run. */
+void test_artifact_path_allocation_failure_leaves_no_orphan(void) {
+    tp_session *session = make_session();
+    char work_dir[1024];
+    scratch_dir(work_dir, sizeof work_dir);
+    remove_tree(work_dir);
+    tp_mkdirs(work_dir);
+    const tp_id128 atlas_id = default_atlas_id(session);
+    add_file_source(session, atlas_id, work_dir);
+
+    const tp_pack_job_request request = {
+        .atlas_id = atlas_id,
+        .work_dir = work_dir,
+    };
+    tp_error error = {{0}};
+    tp_job__test_fail_next_artifact_path_allocation();
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_session_pack_job_start(session, &request, &error),
+        error.msg);
+    tp_session_job_result result = wait_for_result(session);
+    TEST_ASSERT_EQUAL_INT(TP_SESSION_JOB_FAILED, result.state);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OOM, result.status);
+    TEST_ASSERT_TRUE(result.error.msg[0] != '\0');
+    TEST_ASSERT_NULL(result.pack.arena);
+    TEST_ASSERT_NULL(result.pack.result);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        0, count_pack_artifacts(work_dir),
+        "a rejected artifact must be deleted even when its path cannot be stored");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        0, count_request_dirs(work_dir),
+        "and its private request directory with it");
+    tp_session_job_result_destroy(&result);
+    tp_session_destroy(session);
+    remove_tree(work_dir);
+}
+
 void test_export_target_allocation_failure_is_fail_atomic(void) {
     tp_session *session = make_session();
     char work_dir[1024];
@@ -699,6 +798,71 @@ void test_export_target_allocation_failure_is_fail_atomic(void) {
     remove_tree(work_dir);
 }
 
+/* The contract admits a work_dir up to TP_IDENTITY_PATH_MAX-1 (host and proto
+ * both accept it), but the worker used to cap it at ~512 through three fixed
+ * buffers, so an install a few hundred characters deep failed EVERY Pack with
+ * "path is too long" while Export on the same work_dir worked. Pin the fix with
+ * a work_dir past the old 544-byte cap: the Pack must succeed end to end
+ * through the real worker process and clean its private req- directory up.
+ * If this filesystem cannot create the deep tree at all, skip -- the buffers
+ * are then untestable here, not wrong. */
+void test_pack_succeeds_under_a_work_dir_deeper_than_the_old_buffers(void) {
+    char base[1024];
+    scratch_dir(base, sizeof base);
+    remove_tree(base);
+
+    char work_dir[1024];
+    int length = snprintf(work_dir, sizeof work_dir, "%s", base);
+    TEST_ASSERT_TRUE(length > 0 && (size_t)length < sizeof work_dir);
+    size_t used = (size_t)length;
+    while (used < 600U) {
+        length = snprintf(
+            work_dir + used, sizeof work_dir - used,
+            "/d2345678901234567890123456789012");
+        TEST_ASSERT_TRUE(
+            length > 0 && (size_t)length < sizeof work_dir - used);
+        used += (size_t)length;
+    }
+    TEST_ASSERT_TRUE(used > 544U);
+    tp_mkdirs(work_dir);
+    tp_fs_info info;
+    if (!tp_fs_stat(work_dir, &info) ||
+        info.kind != TP_FS_KIND_DIRECTORY) {
+        remove_tree(base);
+        TEST_IGNORE_MESSAGE(
+            "this filesystem refused a ~600-char work_dir; deep-path pinning skipped");
+    }
+
+    tp_session *session = make_session();
+    const tp_id128 atlas_id = default_atlas_id(session);
+    add_file_source(session, atlas_id, work_dir);
+
+    const tp_pack_job_request request = {
+        .atlas_id = atlas_id,
+        .work_dir = work_dir,
+    };
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_session_pack_job_start(session, &request, &error),
+        error.msg);
+    tp_session_job_result result = wait_for_result(session);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_SESSION_JOB_SUCCEEDED, result.state, result.error.msg);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, result.status);
+    TEST_ASSERT_NOT_NULL(result.pack.result);
+    TEST_ASSERT_EQUAL_STRING("atlas1", result.pack.result->atlas_name);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        0, count_request_dirs(work_dir),
+        "an adopted deep-path Pack must not leave its private request directory");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        0, count_pack_artifacts(base),
+        "an adopted deep-path Pack must not leave an artifact behind");
+    tp_session_job_result_destroy(&result);
+    tp_session_destroy(session);
+    remove_tree(base);
+}
+
 int main(int argc, char **argv) {
     if (tp_build_is_worker_invocation(argc, argv)) {
         return tp_build_worker_main();
@@ -712,6 +876,9 @@ int main(int argc, char **argv) {
     RUN_TEST(test_rename_during_pack_keeps_the_packed_labels);
     RUN_TEST(test_damaged_pack_artifact_is_a_structured_terminal_failure);
     RUN_TEST(test_worker_timeout_is_a_structured_terminal_failure);
+    RUN_TEST(test_compacted_pack_result_keeps_pages_and_destroys_cleanly);
+    RUN_TEST(test_artifact_path_allocation_failure_leaves_no_orphan);
     RUN_TEST(test_export_target_allocation_failure_is_fail_atomic);
+    RUN_TEST(test_pack_succeeds_under_a_work_dir_deeper_than_the_old_buffers);
     return UNITY_END();
 }

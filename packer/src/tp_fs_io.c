@@ -1,7 +1,12 @@
 #include "tp_fs_internal.h"
 
 #include <errno.h>
+#include <stdatomic.h>
+#include <stdint.h>
 #include <stdio.h>
+#include <string.h>
+
+#include "core/nt_assert.h"
 
 #ifdef _WIN32
 #include <process.h>
@@ -86,14 +91,140 @@ bool tp_fs_write_file(const char *path_utf8, const void *data, size_t size) {
     return wrote && closed;
 }
 
+static bool fs_is_sep(char c) {
+    return c == '/' || c == '\\';
+}
+
+/* Thread-local so a redirect brackets exactly one writer invocation on its own
+ * thread; the strings are borrowed and must outlive the armed window. */
+static _Thread_local const char *s_stage_final_dir;
+static _Thread_local const char *s_stage_dir;
+
+void tp_fs_stage_redirect_begin(const char *final_dir_utf8,
+                                const char *staging_dir_utf8) {
+    NT_ASSERT(final_dir_utf8 != NULL && staging_dir_utf8 != NULL);
+    NT_ASSERT(s_stage_final_dir == NULL && s_stage_dir == NULL);
+    s_stage_final_dir = final_dir_utf8;
+    s_stage_dir = staging_dir_utf8;
+}
+
+void tp_fs_stage_redirect_end(void) {
+    s_stage_final_dir = NULL;
+    s_stage_dir = NULL;
+}
+
+bool tp_fs_stage_child_path(const char *final_dir_utf8,
+                            const char *staging_dir_utf8,
+                            const char *path_utf8, char *out, size_t out_cap) {
+    if (!final_dir_utf8 || !staging_dir_utf8 || !path_utf8 || !out) {
+        errno = EINVAL;
+        return false;
+    }
+    const size_t dir_len = strlen(final_dir_utf8);
+    NT_ASSERT(dir_len == 0U || fs_is_sep(final_dir_utf8[dir_len - 1U]));
+    if (strncmp(path_utf8, final_dir_utf8, dir_len) != 0) {
+        return false;
+    }
+    const char *name = path_utf8 + dir_len;
+    if (name[0] == '\0') {
+        return false;
+    }
+    for (const char *c = name; *c; c++) {
+        if (fs_is_sep(*c)) {
+            return false; /* deeper than a direct child: not covered */
+        }
+    }
+    const int n = snprintf(out, out_cap, "%s/%s", staging_dir_utf8, name);
+    if (n <= 0 || (size_t)n >= out_cap) {
+        errno = ENAMETOOLONG;
+        return false;
+    }
+    return true;
+}
+
+/* The serial keeps two staged sets in one process apart; the pid keeps two
+ * processes exporting into a shared output directory apart. A leftover or
+ * foreign name is skipped, never adopted. */
+bool tp_fs_stage_dir_create(const char *parent_utf8, char *out, size_t out_cap) {
+    if (!parent_utf8 || !out) {
+        errno = EINVAL;
+        return false;
+    }
+    const size_t parent_len = strlen(parent_utf8);
+    NT_ASSERT(parent_len == 0U || fs_is_sep(parent_utf8[parent_len - 1U]));
+    static _Atomic uint32_t counter;
+    const unsigned long pid = (unsigned long)tp_fs_getpid();
+    for (unsigned int attempt = 0U; attempt < 256U; attempt++) {
+        const uint32_t serial =
+            atomic_fetch_add_explicit(&counter, 1U, memory_order_relaxed) + 1U;
+        const int n = snprintf(out, out_cap, "%s.tp-stage-%08lx-%08lx",
+                               parent_utf8, pid & 0xffffffffUL,
+                               (unsigned long)serial);
+        if (n <= 0 || (size_t)n >= out_cap) {
+            errno = ENAMETOOLONG;
+            return false;
+        }
+        if (tp_fs_exists(out)) {
+            continue;
+        }
+        errno = 0;
+        if (tp_fs_create_dir(out)) {
+            return true;
+        }
+        if (errno == EEXIST) {
+            continue; /* lost a create race: try the next serial */
+        }
+        return false; /* unwritable parent / real error: fail closed */
+    }
+    return false;
+}
+
+void tp_fs_remove_tree(const char *path_utf8) {
+    tp_fs_dir *dir = tp_fs_dir_open(path_utf8);
+    if (dir) {
+        tp_fs_dir_entry entry;
+        for (;;) {
+            if (tp_fs_dir_next(dir, &entry) != TP_FS_DIR_ENTRY) {
+                break;
+            }
+            char child[TP_FS_ATOMIC_TEMP_PATH_MAX];
+            if ((size_t)snprintf(child, sizeof child, "%s/%s", path_utf8,
+                                 entry.name) >= sizeof child) {
+                continue;
+            }
+            if (entry.info.kind == TP_FS_KIND_DIRECTORY && !entry.info.reparse) {
+                tp_fs_remove_tree(child);
+            } else if (entry.info.kind == TP_FS_KIND_DIRECTORY) {
+                /* Junction / dir-symlink: remove the link itself, never descend
+                 * into and delete its target's contents. */
+                (void)tp_fs_remove_dir(child);
+            } else {
+                (void)tp_fs_remove_file(child);
+            }
+        }
+        tp_fs_dir_close(dir);
+    }
+    (void)tp_fs_remove_dir(path_utf8);
+}
+
 /* Sibling temp + one replace. The pid keeps two processes exporting to a shared
  * output directory off each other's temp; within one process the writers are
- * sequential, so the name is simply reused. */
+ * sequential, so the name is simply reused. An armed stage redirect (above)
+ * takes precedence for direct children of its final dir: those bytes go to the
+ * staging sibling as one plain write, and publication becomes the caller's
+ * whole-set replace pass. */
 bool tp_fs_write_file_atomic(const char *path_utf8, const void *data,
                              size_t size) {
     if (!path_utf8) {
         errno = EINVAL;
         return false;
+    }
+    if (s_stage_final_dir) {
+        char staged[TP_FS_ATOMIC_TEMP_PATH_MAX];
+        if (tp_fs_stage_child_path(s_stage_final_dir, s_stage_dir, path_utf8,
+                                   staged, sizeof staged)) {
+            return tp_fs_write_file(staged, data, size);
+        }
     }
     char tmp[TP_FS_ATOMIC_TEMP_PATH_MAX];
     const int length = snprintf(tmp, sizeof tmp, "%s.tp-tmp-%08lx", path_utf8,

@@ -3044,7 +3044,9 @@ void selftest_pre_frame(void) {
          * VISUAL phases (1-15: outline pixel probe, touch-on-render, overflow/scissor sweeps) cannot
          * run -- they read back the drawn framebuffer / declared UI bboxes. Jump straight to phase 16
          * (async-shutdown-while-busy), which is GL-independent logic. These phases stay HARD locally on
-         * a real GPU: no preset sets NTPACKER_GUI_HEADLESS_CI, only the CI job's configure line does. */
+         * a real GPU: every preset PINS NTPACKER_GUI_HEADLESS_CI to OFF (so a build dir once configured
+         * with it cannot keep it across a plain preset reconfigure); only the CI job's -D configure
+         * override turns it ON. */
         nt_log_info("SELFTEST: headless CI -> skipping GL render/layout phases 1-15 (no GL context)");
         s_st_phase = 16;
         s_st_pf = 0;

@@ -374,7 +374,8 @@ static const sprite_row *row_for_source(tp_id128 source_id) {
     return NULL;
 }
 
-static tp_id128 add_coin_source_to_atlas(int atlas_index) {
+static tp_id128 add_sprite_source_to_atlas(int atlas_index,
+                                           const char *file_name) {
     const tp_session_snapshot *snapshot = gui_project_snapshot();
     const tp_snapshot_atlas *atlas = snapshot
                                          ? tp_session_snapshot_atlas_at(snapshot,
@@ -384,14 +385,18 @@ static tp_id128 add_coin_source_to_atlas(int atlas_index) {
     const tp_id128 atlas_id = atlas->id;
     char source_path[1024];
     (void)snprintf(source_path, sizeof source_path,
-                   "%s/apps/cli/testdata/sprites/coin.png",
-                   TP_TEST_SOURCE_DIR);
+                   "%s/apps/cli/testdata/sprites/%s",
+                   TP_TEST_SOURCE_DIR, file_name);
     TEST_ASSERT_EQUAL_INT(
         GUI_ADD_ADDED,
         gui_project_add_source_kind(atlas_id,
                                     tp_session_snapshot_revision(snapshot),
                                     source_path, TP_SOURCE_KIND_FILE));
     return atlas_id;
+}
+
+static tp_id128 add_coin_source_to_atlas(int atlas_index) {
+    return add_sprite_source_to_atlas(atlas_index, "coin.png");
 }
 
 static tp_id128 add_coin_source(void) {
@@ -1356,6 +1361,10 @@ void test_evicted_pack_result_reads_as_unpacked_without_autopacking(void) {
                                      "the demoted result exceeded the budget");
     TEST_ASSERT_EQUAL_INT(1, stats.entry_count);
 
+    TEST_ASSERT_EQUAL_UINT64_MESSAGE(
+        0U, gui_pack_result_version(0),
+        "an evicted entry's version must read 0 even before a result read "
+        "retires its slot");
     TEST_ASSERT_NULL_MESSAGE(gui_pack_result(0),
                              "an evicted result reads as not packed");
     TEST_ASSERT_EQUAL_UINT64(0U, gui_pack_result_version(0));
@@ -1363,6 +1372,75 @@ void test_evicted_pack_result_reads_as_unpacked_without_autopacking(void) {
                               "a store miss must never start a Pack");
     /* The atlas still on screen is untouched by the neighbour's eviction. */
     TEST_ASSERT_NOT_NULL(gui_pack_result(1));
+}
+
+/* A resident switch whose eviction already ran but whose sprite-index build
+ * failed must leave NO resident: selecting another atlas' entry can evict --
+ * and thereby FREE -- exactly the result the resident pointers still describe,
+ * so a stale resident is a freed result the reside fast path would then hand
+ * straight back (ASan-visible before the fix). */
+void test_failed_resident_switch_never_serves_the_evicted_resident(void) {
+    /* Atlases A(0) and C(2) carry two sprites, B(1) one, so a budget of
+     * size(A)+size(B) holds inactive {B,C} while A is resident but NOT
+     * inactive {A,C} while B is: the switch to B is itself what evicts A. */
+    (void)add_sprite_source_to_atlas(0, "coin.png");
+    (void)add_sprite_source_to_atlas(0, "hero.png");
+    TEST_ASSERT_EQUAL_INT(1, gui_project_add_atlas().visible_index);
+    (void)add_sprite_source_to_atlas(1, "coin.png");
+    TEST_ASSERT_EQUAL_INT(2, gui_project_add_atlas().visible_index);
+    (void)add_sprite_source_to_atlas(2, "coin.png");
+    (void)add_sprite_source_to_atlas(2, "hero.png");
+    TEST_ASSERT_TRUE(gui_pack_init(TP_GUI_IDENTITY_TEST_DIR));
+
+    /* Measure the three retained sizes under the default (never-evicting)
+     * budget; the budget below is derived, not guessed. */
+    char error[256] = {0};
+    TEST_ASSERT_TRUE_MESSAGE(
+        gui_pack_atlas(0, NULL, error, sizeof error, NULL, 0U), error);
+    TEST_ASSERT_TRUE_MESSAGE(
+        gui_pack_atlas(1, NULL, error, sizeof error, NULL, 0U), error);
+    tp_pack_result_cache_stats stats;
+    gui_pack__test_result_cache_stats(&stats);
+    const uint64_t size_a = stats.inactive_bytes;
+    TEST_ASSERT_TRUE_MESSAGE(
+        gui_pack_atlas(2, NULL, error, sizeof error, NULL, 0U), error);
+    gui_pack__test_result_cache_stats(&stats);
+    const uint64_t size_b = stats.inactive_bytes - size_a;
+    TEST_ASSERT_NOT_NULL(gui_pack_result(0));
+    gui_pack__test_result_cache_stats(&stats);
+    const uint64_t size_c = stats.inactive_bytes - size_b;
+    TEST_ASSERT_TRUE_MESSAGE(
+        size_b > 0U && size_b < size_c && size_c <= size_a,
+        "fixture must yield a budget that holds {B,C} but not {A,C}");
+
+    gui_pack__test_set_result_budget(size_a + size_b);
+    TEST_ASSERT_TRUE_MESSAGE(
+        gui_pack_atlas(0, NULL, error, sizeof error, NULL, 0U), error);
+    TEST_ASSERT_TRUE_MESSAGE(
+        gui_pack_atlas(1, NULL, error, sizeof error, NULL, 0U), error);
+    TEST_ASSERT_TRUE_MESSAGE(
+        gui_pack_atlas(2, NULL, error, sizeof error, NULL, 0U), error);
+    TEST_ASSERT_NOT_NULL(gui_pack_result(0)); /* A is the resident result */
+    gui_pack__test_result_cache_stats(&stats);
+    TEST_ASSERT_EQUAL_INT(3, stats.entry_count);
+    TEST_ASSERT_EQUAL_UINT64(0U, stats.evicted);
+
+    gui_pack__test_fail_next_ref_index_build();
+    TEST_ASSERT_NULL(gui_pack_result(1));
+    gui_pack__test_result_cache_stats(&stats);
+    TEST_ASSERT_EQUAL_UINT64_MESSAGE(
+        1U, stats.evicted,
+        "selecting B must have evicted -- and freed -- the demoted A");
+    TEST_ASSERT_NULL_MESSAGE(
+        gui_pack_result(0),
+        "the failed switch must not leave the freed previous resident "
+        "reachable through the reside fast path");
+    TEST_ASSERT_EQUAL_UINT64(0U, gui_pack_result_version(0));
+
+    /* Only the lookup index failed, so B's entry stayed cached: retried. */
+    const tp_result *second = gui_pack_result(1);
+    TEST_ASSERT_NOT_NULL(second);
+    TEST_ASSERT_EQUAL_INT(1, second->sprite_count);
 }
 
 /* Freshness is not residency: restoring a demoted result touches nothing on the
@@ -2285,6 +2363,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_undo_redo_keep_last_successful_pack_result);
     RUN_TEST(test_switching_atlas_demotes_the_inactive_result_into_the_store);
     RUN_TEST(test_evicted_pack_result_reads_as_unpacked_without_autopacking);
+    RUN_TEST(test_failed_resident_switch_never_serves_the_evicted_resident);
     RUN_TEST(test_restored_pack_result_keeps_its_freshness_verdict);
     RUN_TEST(test_pack_result_follows_stable_atlas_across_index_shift);
     RUN_TEST(test_recovery_notice_is_sticky_exact_and_clears_after_save_heals);

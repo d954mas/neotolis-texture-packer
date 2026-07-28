@@ -274,7 +274,9 @@ static void remove_request_dir_of(const char *artifact_path) {
         return;
     }
     const size_t length = (size_t)(separator - artifact_path);
-    char directory[544];
+    /* Holds the request directory of any admissible artifact path: work_dir up
+     * to TP_IDENTITY_PATH_MAX-1 plus the 31-char "/req-..." component. */
+    char directory[TP_IDENTITY_PATH_MAX + 32];
     if (length == 0U || length >= sizeof directory) {
         return;
     }
@@ -347,10 +349,17 @@ static tp_status run_pack(const tp_job_worker_proto_request *request,
         }
         settings = effective;
     }
-    /* work_dir alone may be a full TP_IDENTITY_PATH_MAX-1 path; the "/req-" +
-     * hexpid + '-' + hex request id component adds 31 more. 512 made a long but
-     * perfectly legal work_dir indistinguishable from an unwritable one. */
-    char request_dir[544];
+    /* work_dir alone may be a full TP_IDENTITY_PATH_MAX-1 path (the host and the
+     * proto admit it up to that bound); the "/req-" + hexpid + '-' + hex request
+     * id component adds 31 more, so the buffer must exceed TP_IDENTITY_PATH_MAX
+     * by that component. A 544 cap made a long but perfectly legal work_dir fail
+     * every Pack as "path is too long" while Export on the same work_dir worked.
+     * The END-TO-END admissible work_dir is still tighter than this buffer: the
+     * artifact REPLY path (request_dir + '/' + atlas_name + ".ntpack") must stay
+     * under TP_JOB_WORKER_PROTO_MAX_PATH_BYTES and the host's containment cap
+     * (both TP_IDENTITY_PATH_MAX-1), so work_dir is effectively bounded by
+     * TP_IDENTITY_PATH_MAX-1 minus 38 fixed chars minus strlen(atlas_name). */
+    char request_dir[TP_IDENTITY_PATH_MAX + 32];
     bool request_dir_too_long = false;
     if (!make_request_dir(request->work_dir, request->request_id,
                           request->host_pid, request_dir, sizeof request_dir,
@@ -426,7 +435,10 @@ static tp_status run_pack(const tp_job_worker_proto_request *request,
      * the single parse, so a tp_pack_read here would cost a second full decode
      * of every page for a tp_result nobody in this process looks at. */
     pack_hash_collect collect = {image_hashes, input.count};
-    char artifact_path[512];
+    /* Sized for the reply-path bound (see the request_dir comment): the proto
+     * refuses to encode an artifact path past TP_IDENTITY_PATH_MAX-1 bytes, so
+     * a smaller buffer here only manufactured an earlier "path too long". */
+    char artifact_path[TP_IDENTITY_PATH_MAX];
     (void)publish_progress(request->request_id, 0, 1,
                            TP_JOB_WORKER_PHASE_BUILD);
     status = tp_pack_produce_observed(

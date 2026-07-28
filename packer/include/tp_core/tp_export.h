@@ -317,6 +317,27 @@ typedef struct tp_exporter {
     tp_export_list_outputs_fn list_outputs; /* nullable; NULL => "<base>.<ext>" + page PNGs */
 } tp_exporter;
 
+/* Two-phase output-SET publication: runs `exp->write` with every write that
+ * targets out_path_base's own directory redirected into a private same-volume
+ * staging dir, and only after the writer succeeded and every destination passed
+ * preflight (staged file present, destination not a directory) promotes the
+ * whole set, one rename per file in `output_files` order. Any failure before
+ * the promote loop leaves every previously published file byte-identical; a
+ * rename failure inside the promote loop is the only residual mixed-set window
+ * and its error names the file. `output_files` is the target's complete
+ * enumerated output list (the run layer's collect step); an output the writer
+ * produced but the list missed is a structured error, never a silent drop.
+ * Files outside out_path_base's directory (no built-in exporter emits any)
+ * bypass staging and keep the per-file atomic write. The staging dir is
+ * removed on every path. */
+tp_status tp_export_write_and_publish_set(const tp_exporter *exp,
+                                          const tp_export_prepared *prep,
+                                          const char *out_path_base,
+                                          const char *const *output_files,
+                                          int output_file_count,
+                                          tp_export_notices *notices,
+                                          tp_error *err);
+
 /* Lookup by id across built-in + runtime-registered exporters. NULL on miss. */
 const tp_exporter *tp_exporter_find(const char *id);
 

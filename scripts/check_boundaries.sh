@@ -747,7 +747,13 @@ fi
 # 22. Spec §16 verification-id traceability. Every USA-01..USA-32 must be OWNED,
 #     and ownership has exactly two classes:
 #       test -- a `/* USA-nn ... */` tag within 3 lines of the `void test_`
-#               definition it claims, in a TEST source file;
+#               definition it claims, in a TEST source file, AND that function
+#               must be invoked somewhere in the same file (RUN_TEST(name); --
+#               same-line or with the name wrapped to the next line -- or a bare
+#               name();). Test functions are non-static, so deleting only the
+#               RUN_TEST line compiles warning-free; without the call-site
+#               requirement the tag would keep crediting a test that no longer
+#               runs;
 #       gate -- a registry line in a build check (cmake/, scripts/) carrying both
 #               the id and the literal marker `owner: gate`, for the handful of
 #               requirements whose proof IS a build gate and not a runtime test.
@@ -777,20 +783,58 @@ _usa_test_sources() {
     ls apps/*/test_*.c apps/gui/gui_selftest.c packer/tests/*.c 2>/dev/null
 }
 # Ids claimed by a tag adjacent to the `void test_` definition it owns. A tag
-# with no test under it (deleted owner) contributes nothing.
+# with no test under it (deleted owner) contributes nothing, and neither does a
+# definition that is never invoked in its own file: the id is credited only
+# when the file also carries a call site for the claimed function -- the
+# trailing `name);` of a RUN_TEST(name); (same-line or wrapped) or a bare
+# direct call `name();`. Prototypes (`void name(void);`) match neither form.
 _usa_test_owned() {
     awk '
-        FNR == 1 { p1 = ""; p2 = ""; p3 = "" }
+        function flush_file(   fn, n, i, part) {
+            for (fn in claim)
+                if (fn in called) {
+                    n = split(claim[fn], part, " ")
+                    for (i = 1; i <= n; i++)
+                        if (part[i] != "") print part[i]
+                }
+            split("", claim); split("", called)
+        }
+        function record_calls(line,   s, m) {
+            s = line
+            while (match(s, /test_[A-Za-z0-9_]*[ \t]*\)[ \t]*;/)) {
+                if (RSTART == 1 || substr(s, RSTART - 1, 1) !~ /[A-Za-z0-9_]/) {
+                    m = substr(s, RSTART, RLENGTH)
+                    sub(/[ \t]*\).*/, "", m)
+                    called[m] = 1
+                }
+                s = substr(s, RSTART + RLENGTH)
+            }
+            s = line
+            while (match(s, /test_[A-Za-z0-9_]*[ \t]*\([ \t]*\)[ \t]*;/)) {
+                if (RSTART == 1 || substr(s, RSTART - 1, 1) !~ /[A-Za-z0-9_]/) {
+                    m = substr(s, RSTART, RLENGTH)
+                    sub(/[ \t]*\(.*/, "", m)
+                    called[m] = 1
+                }
+                s = substr(s, RSTART + RLENGTH)
+            }
+        }
+        FNR == 1 { flush_file(); p1 = ""; p2 = ""; p3 = "" }
         {
-            if ($0 ~ /(^|[^A-Za-z0-9_])void[ \t]+test_[A-Za-z0-9_]*[ \t]*\(/) {
+            record_calls($0)
+            if (match($0, /(^|[^A-Za-z0-9_])void[ \t]+test_[A-Za-z0-9_]*[ \t]*\(/)) {
+                d = substr($0, RSTART, RLENGTH)
+                sub(/.*void[ \t]+/, "", d)
+                sub(/[ \t]*\(/, "", d)
                 s = p3 " " p2 " " p1 " " $0
                 while (match(s, /USA-[0-9][0-9]/)) {
-                    print substr(s, RSTART, RLENGTH)
+                    claim[d] = claim[d] " " substr(s, RSTART, RLENGTH)
                     s = substr(s, RSTART + RLENGTH)
                 }
             }
             p3 = p2; p2 = p1; p1 = $0
         }
+        END { flush_file() }
     ' "$@" 2>/dev/null | sort -u
 }
 # Ids explicitly registered as build-gate-owned.
@@ -811,8 +855,12 @@ if [ -z "$_r22_dir" ] || [ ! -d "$_r22_dir" ]; then
     hit "R22-selftest" "R22 self-test could not create a scratch dir (mktemp failed)"
 else
     trap 'rm -rf "$_r22_dir"' EXIT
-    printf '/* USA-77 partial: owned. */\nvoid test_owned(void) {\n}\n' \
+    printf '/* USA-77 partial: owned. */\nvoid test_owned(void) {\n}\nRUN_TEST(test_owned);\n' \
         >"$_r22_dir/test_owned.c"
+    printf '/* USA-77 owned via wrapped registration. */\nvoid test_wrapped(void) {\n}\n/* USA-77 owned via bare call. */\nvoid test_bare(void) {\n}\nvoid run_all(void) {\n    RUN_TEST(\n        test_wrapped);\n    test_bare();\n}\n' \
+        >"$_r22_dir/test_wrapped.c"
+    printf '/* USA-77 tagged, defined, but its RUN_TEST line was deleted. */\nvoid test_unregistered(void) {\n}\n' \
+        >"$_r22_dir/test_unregistered.c"
     printf '/* USA-77: the test that owned this was deleted. */\n' \
         >"$_r22_dir/test_orphan.c"
     printf 'void helper(void) { /* USA-77 in production prose */ }\n' \
@@ -824,6 +872,10 @@ else
 
     [ "$(_usa_test_owned "$_r22_dir/test_owned.c")" = "USA-77" ] ||
         hit "R22-selftest" "R22 failed to credit a tag adjacent to its owning test"
+    [ "$(_usa_test_owned "$_r22_dir/test_wrapped.c")" = "USA-77" ] ||
+        hit "R22-selftest" "R22 failed to credit a wrapped RUN_TEST or bare-call registration"
+    [ -n "$(_usa_test_owned "$_r22_dir/test_unregistered.c")" ] &&
+        hit "R22-selftest" "R22 credited a defined-but-unregistered test (deleted RUN_TEST line)"
     [ -n "$(_usa_test_owned "$_r22_dir/test_orphan.c")" ] &&
         hit "R22-selftest" "R22 credited a tag whose owning test disappeared"
     [ -n "$(_usa_test_owned "$_r22_dir/prod.c")" ] &&

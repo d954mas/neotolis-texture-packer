@@ -146,6 +146,18 @@ tp_status tp_session_job_take_result(tp_session *session,
                                      tp_session_job_result *out,
                                      tp_error *err);
 void tp_session_job_result_destroy(tp_session_job_result *result);
+/* Shrinks a TAKEN result's receipt to what it actually has to retain: the
+ * arena behind `pack.result`. Frees the request-side buffers the live job was
+ * still holding (the serialized project JSON, request/work-dir paths, preview
+ * exporter id) and destroys the exited worker process handle, which retains a
+ * second encoded copy of that JSON plus OS handles. Every value field of
+ * `result` -- including pack.result and its pages -- stays valid, and
+ * tp_session_job_result_destroy remains the single, exactly-once release.
+ * Only a result returned by tp_session_job_take_result may be compacted (an
+ * owner-less result is a no-op); a caller that keeps the receipt alive long
+ * term (e.g. pinning it in a result cache) MUST compact first, or the pin
+ * silently retains the whole request. Idempotent. */
+void tp_session_job_result_compact(tp_session_job_result *result);
 
 /* Returns the typed core freshness verdict for a completed Pack result. A live
  * token newer than the worker's verified snapshot always yields STALE with

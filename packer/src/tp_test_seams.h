@@ -22,6 +22,7 @@ int tp_scan__test_visited_entries(void);
 void tp_scan__test_reset_all(void);
 
 void tp_job__test_fail_next_observation_target_allocation(void);
+void tp_job__test_fail_next_artifact_path_allocation(void);
 void tp_job__test_set_worker_timeout_ms(int timeout_ms);
 void tp_job__test_set_worker_cancel_grace_ms(int grace_ms);
 void tp_job__test_reset_all(void);

@@ -650,7 +650,8 @@ reports), `gui_log_file.c` (no writable app-data dir needed), and `gui_bench.c`
 (`--bench-perf` frame timing has nothing to measure without GL). `<stdlib.h>`
 dropped from `gui_log_file.c`/`gui_bench.c` — `getenv` was its only user there.
 
-No preset sets the flag, so a local `native-tests-debug` selftest keeps the hard
+The base preset pins the flag OFF (S20: a reused build dir must not keep a stray
+ON in the CMake cache), so a local `native-tests-debug` selftest keeps the hard
 visual phases on a real GPU; CI passes `-DNTPACKER_GUI_HEADLESS_CI=ON` on the
 configure line of the two jobs that need it (`gui-selftest`, and `perf-probes`
 alongside its existing `-DNTPACKER_GUI_DEV_SEAMS=ON`) — job-local overrides, so
@@ -666,6 +667,72 @@ release `ntpacker-gui.exe` finds zero occurrences of the string
 `ntpacker_gui_selftest` run green, proving the CI path without CI. The shipped
 `ntpacker-gui` now has **zero** environment-controlled behaviour, matching
 `ntpacker` (S-P1, per-binary seam macros).
+
+**S20 — Codex round-2 review triage ("merge with fixes" on `be71372..72fbec3`).**
+Three independent verification agents re-derived every finding from code before
+anything was fixed. Confirmed and fixed (four concurrent zones):
+
+- *Resident switch use-after-free (P1, `gui_pack.c`).* `authoritative()` can
+  evict — and free — the outgoing resident mid-switch; an index-build OOM then
+  left `s_resident_result` dangling for the fast path. The resident is now
+  cleared BEFORE the store can evict, so every exit leaves the new resident or
+  none. New one-shot seam `gui_pack__test_fail_next_ref_index_build` + a
+  derived-budget test that makes the switch itself do the eviction (a fixed tiny
+  budget frees the victim at publish, never during the switch — measured sizes
+  are the only deterministic construction). Red-before/green-after verified.
+- *Cache retained the whole live job (P1, `tp_job.c`).* The retained pin held
+  `project_json`, the worker-process object (with the encoded request embedding
+  the project JSON a second time) and the exited child's OS handles — all
+  invisible to the 256 MiB page-byte budget. New `tp_session_job_result_compact`
+  frees them at GUI publication; the pinned receipt now retains only the arena
+  the budget counts. The review's "serialized inactive representation" was NOT
+  adopted — S18's ledger entry already records why retaining artifact bytes was
+  rejected; compaction captures the uncounted memory without reversing that.
+- *Prepared-candidate session leak on force-close (P1, `gui_session_client.c`).*
+  `cancel_prepared` released the observation but not `prepared->session` — the
+  only pointer to the candidate after `begin_replace` takes ownership. Cancel
+  now owns the whole bundle; the drain-failure double-destroy in
+  `gui_host_binding.c` is deleted. First binding-level `force_close` test.
+- *Export SET atomicity (P1, `tp_export_*`).* S10 was per-FILE only; a mid-set
+  failure left new pages under an old `.tpatlas`. Now per-target two-phase
+  publish: a thread-local stage redirect inside `tp_fs_write_file_atomic` sends
+  direct children of the output dir into a `.tp-stage-*` sibling (exporters see
+  byte-identical inputs — repointing `out_path_base` would change the `.tpatlas`
+  `file:` ref, which walks the REAL tree for `game.project`), then a preflighted
+  promote loop replaces the enumerated set. Divergence between the declared and
+  produced set is now a structured error in both directions. Pinning test:
+  mid-set failure keeps every previously published byte. Residual window: a
+  `tp_fs_replace` failing inside the promote loop (error names the file); a
+  crash can orphan one recognizable `.tp-stage-*` dir (no reaper — follow-up).
+- *Worker path buffers (P1-by-contract, `tp_job_worker_main.c`).* Three fixed
+  512/544-byte buffers capped work_dir far below the `TP_IDENTITY_PATH_MAX`
+  contract the host and proto admit (the host does NOT pre-reject — verified);
+  Pack failed where Export worked. Buffers now sized from the contract; the
+  comment states the true end-to-end bound (reply path ≤ 4095). Deep-path test
+  red-before/green-after; test-harness `fopen` → `tp_fs_fopen` (long-path safe).
+- *Orphaned artifact on early adoption failure (P3, `tp_job.c`).* The path is
+  stored the moment containment trusts it, so the size-gate failure cleans file
+  and request dir; the strdup-OOM branch deletes through the wire path. New
+  seam + zero-req-dirs test.
+- *Gates (P2, all four sub-fixes).* Bash-less machines now get a fail-closed
+  red `tp_boundaries_grep` stub instead of silent non-registration; the
+  `#if defined(TP_ENABLE_TEST_SEAMS)` fence pattern is end-anchored (compound
+  conditions rejected, negative fixture proves the anchor is load-bearing); a
+  `USA-nn` tag is credited only with an in-file `RUN_TEST`/call site (seeded
+  self-test: a defined-but-unregistered function now fails R22); the base
+  preset pins `NTPACKER_GUI_HEADLESS_CI=OFF` (CI's job-local `-D` wins,
+  proven empirically).
+
+Refuted, no change: the field registry "layout leak" (`op_off`/`rec_off`
+describe already-public structs; `op_off` is load-bearing for the CLI's
+registry-driven parser) and the evicted-slot stale version as a defect (lazy
+retire is bounded to ≤1 frame by the frame loop; a 2-line `contains` hardening
+was added as polish anyway). Knowingly deferred, recorded not fixed: undo/redo
+does not reselect a cached result by CURRENT input hash — identical to pre-S18
+behaviour, scoped out by the S18 entry above; its honest completion is the
+per-atlas freshness work (master-spec item 5), whose off-UI-thread constraint a
+quick undo-time `tp_session_pack_input_hash` probe (a full synchronous decode)
+would violate.
 
 ## Decision records
 
@@ -683,7 +750,8 @@ release `ntpacker-gui.exe` finds zero occurrences of the string
 
 - Unifying the four cancel representations (host flag / pipe byte /
   `tp_cancel_token` / `out_cancelled`) — best follow-up packet.
-- Export partial-output staging (`tp_fs_replace` per export file).
+- ~~Export partial-output staging (`tp_fs_replace` per export file).~~ Landed in
+  S20 (per-target staged set publish).
 - Pending-map capacity trim after replay deletion.
 - In-process builder behind an upstream fallible builder API (master spec
   already names the exit condition).

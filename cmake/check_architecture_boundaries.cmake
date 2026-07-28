@@ -267,6 +267,82 @@ foreach(_source IN LISTS _arch_sources)
     endif()
 endforeach()
 
+# A6 seam-fence walker (rationale and the real-tree invocations sit at the
+# bottom of this file; defined here so the SEAM_FENCE fixture dispatch below
+# can call it). Half 1 of A6 used to be a whole-file substring search for
+# "TP_ENABLE_TEST_SEAMS", which any unrelated seam elsewhere in the file
+# satisfied — including the very comment describing the rule. This check is
+# bound to the symbol instead: the file is walked with a conditional-directive
+# depth counter, and every non-comment line naming the symbol must sit inside
+# a live `#ifdef TP_ENABLE_TEST_SEAMS` (or `#if defined(TP_ENABLE_TEST_SEAMS)`)
+# region. The depth model is deliberately simple — it tracks nesting and treats
+# an `#else`/`#elif` at the guard's own depth as leaving the fence — and both
+# guard forms are matched whole-line (end-anchored): a compound condition such
+# as `#if defined(TP_ENABLE_TEST_SEAMS) || X` is NOT a fence (it can compile
+# the seam into every build), so a symbol under it reads as unfenced and fails.
+function(_arch_assert_seam_fenced relative_path symbol why)
+    set(_path "${_arch_root}/${relative_path}")
+    if(NOT EXISTS "${_path}")
+        message(FATAL_ERROR
+            "${why} guard lost its file: ${relative_path} does not exist.")
+    endif()
+    file(STRINGS "${_path}" _lines)
+    set(_depth 0)
+    set(_seam_depths "")
+    set(_found false)
+    set(_line_number 0)
+    foreach(_line IN LISTS _lines)
+        math(EXPR _line_number "${_line_number} + 1")
+        string(STRIP "${_line}" _trimmed)
+        if(_trimmed MATCHES "^#[ \t]*(if|ifdef|ifndef)([^A-Za-z0-9_]|$)")
+            math(EXPR _depth "${_depth} + 1")
+            if(_trimmed MATCHES "^#[ \t]*ifdef[ \t]+TP_ENABLE_TEST_SEAMS[ \t]*$"
+               OR _trimmed MATCHES "^#[ \t]*if[ \t]+defined[ \t]*\\([ \t]*TP_ENABLE_TEST_SEAMS[ \t]*\\)[ \t]*$")
+                list(APPEND _seam_depths "${_depth}")
+            endif()
+        elseif(_trimmed MATCHES "^#[ \t]*endif")
+            list(REMOVE_ITEM _seam_depths "${_depth}")
+            if(_depth GREATER 0)
+                math(EXPR _depth "${_depth} - 1")
+            endif()
+        elseif(_trimmed MATCHES "^#[ \t]*(else|elif)")
+            list(REMOVE_ITEM _seam_depths "${_depth}")
+        elseif(_trimmed MATCHES "^(//|/\\*|\\*)")
+            # comment line: never a declaration site
+        elseif(_trimmed MATCHES
+               "(^|[^A-Za-z0-9_])${symbol}([^A-Za-z0-9_]|$)")
+            set(_found true)
+            if(NOT _seam_depths)
+                message(FATAL_ERROR
+                    "${why}: ${relative_path}:${_line_number} names "
+                    "${symbol} OUTSIDE a #ifdef TP_ENABLE_TEST_SEAMS fence, "
+                    "so the seam is reachable from a shipping build.")
+            endif()
+        endif()
+    endforeach()
+    if(NOT _found)
+        message(FATAL_ERROR
+            "${why}: ${relative_path} no longer names ${symbol}, so the fence "
+            "around it proves nothing. Retarget or delete the rule.")
+    endif()
+endfunction()
+
+# SEAM_FENCE negative fixture: proves the walker REJECTS a compound guard
+# condition. The fixture file guards the seam symbol only with
+# `#if defined(TP_ENABLE_TEST_SEAMS) || ...`, so the expected (passing) outcome
+# is the walker's OUTSIDE-a-fence FATAL_ERROR; the registering ctest asserts
+# that message via PASS_REGULAR_EXPRESSION. Reaching the message below means
+# the walker accepted the compound form as a fence — the regression this
+# fixture exists to catch.
+if(DEFINED ARCH_EXPECT_RULE AND ARCH_EXPECT_RULE STREQUAL "SEAM_FENCE")
+    set(_arch_root "${_arch_scan_root}")
+    _arch_assert_seam_fenced("seam_compound.c" "tp_session_job_attach_internal"
+        "A6 seam-fence negative fixture")
+    message(FATAL_ERROR
+        "SEAM_FENCE fixture: the walker ACCEPTED a compound #if condition, "
+        "so an always-true guard would pass as a seam fence.")
+endif()
+
 if(DEFINED ARCH_EXPECT_RULE AND NOT ARCH_EXPECT_RULE STREQUAL "")
     if(NOT ARCH_EXPECT_RULE IN_LIST _arch_rules)
         message(FATAL_ERROR "unknown ARCH_EXPECT_RULE=${ARCH_EXPECT_RULE}")
@@ -913,64 +989,9 @@ _arch_assert_absent(
 #
 # Two halves, because either one alone can be satisfied trivially:
 # 1. the guarded SYMBOL is inside a TP_ENABLE_TEST_SEAMS conditional in each of
-#    the four files that own the seam, and
+#    the four files that own the seam (the `_arch_assert_seam_fenced` walker,
+#    defined above the fixture dispatch), and
 # 2. no other shipping TU names either symbol.
-#
-# Half 1 used to be a whole-file substring search for "TP_ENABLE_TEST_SEAMS",
-# which any unrelated seam elsewhere in the file satisfied — including the very
-# comment describing the rule. The check below is bound to the symbol instead:
-# the file is walked with a conditional-directive depth counter, and every
-# non-comment line naming the symbol must sit inside a live
-# `#ifdef TP_ENABLE_TEST_SEAMS` (or `#if defined(TP_ENABLE_TEST_SEAMS)`) region.
-# The depth model is deliberately simple — it tracks nesting and treats an
-# `#else`/`#elif` at the guard's own depth as leaving the fence — and it does not
-# evaluate compound conditions beyond a leading `defined(...)` test.
-function(_arch_assert_seam_fenced relative_path symbol why)
-    set(_path "${_arch_root}/${relative_path}")
-    if(NOT EXISTS "${_path}")
-        message(FATAL_ERROR
-            "${why} guard lost its file: ${relative_path} does not exist.")
-    endif()
-    file(STRINGS "${_path}" _lines)
-    set(_depth 0)
-    set(_seam_depths "")
-    set(_found false)
-    set(_line_number 0)
-    foreach(_line IN LISTS _lines)
-        math(EXPR _line_number "${_line_number} + 1")
-        string(STRIP "${_line}" _trimmed)
-        if(_trimmed MATCHES "^#[ \t]*(if|ifdef|ifndef)([^A-Za-z0-9_]|$)")
-            math(EXPR _depth "${_depth} + 1")
-            if(_trimmed MATCHES "^#[ \t]*ifdef[ \t]+TP_ENABLE_TEST_SEAMS[ \t]*$"
-               OR _trimmed MATCHES "^#[ \t]*if[ \t]+defined[ \t]*\\([ \t]*TP_ENABLE_TEST_SEAMS[ \t]*\\)")
-                list(APPEND _seam_depths "${_depth}")
-            endif()
-        elseif(_trimmed MATCHES "^#[ \t]*endif")
-            list(REMOVE_ITEM _seam_depths "${_depth}")
-            if(_depth GREATER 0)
-                math(EXPR _depth "${_depth} - 1")
-            endif()
-        elseif(_trimmed MATCHES "^#[ \t]*(else|elif)")
-            list(REMOVE_ITEM _seam_depths "${_depth}")
-        elseif(_trimmed MATCHES "^(//|/\\*|\\*)")
-            # comment line: never a declaration site
-        elseif(_trimmed MATCHES
-               "(^|[^A-Za-z0-9_])${symbol}([^A-Za-z0-9_]|$)")
-            set(_found true)
-            if(NOT _seam_depths)
-                message(FATAL_ERROR
-                    "${why}: ${relative_path}:${_line_number} names "
-                    "${symbol} OUTSIDE a #ifdef TP_ENABLE_TEST_SEAMS fence, "
-                    "so the seam is reachable from a shipping build.")
-            endif()
-        endif()
-    endforeach()
-    if(NOT _found)
-        message(FATAL_ERROR
-            "${why}: ${relative_path} no longer names ${symbol}, so the fence "
-            "around it proves nothing. Retarget or delete the rule.")
-    endif()
-endfunction()
 
 foreach(_path IN ITEMS packer/src/tp_session.c
                        packer/src/tp_job_owner_internal.h)

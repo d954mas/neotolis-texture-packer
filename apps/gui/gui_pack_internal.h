@@ -29,6 +29,11 @@ void gui_pack__test_result_cache_stats(tp_pack_result_cache_stats *out);
  * 0 restores the shipped budget, which gui_pack_shutdown does on every teardown
  * so an override can never outlive the case that asked for it. */
 void gui_pack__test_set_result_budget(uint64_t byte_budget);
+/* Test-only, one-shot: the next canonical sprite-index build reports OOM. This
+ * is the only way to reach a resident switch whose eviction already ran but
+ * whose index build failed -- the exit that must leave NO resident behind.
+ * Disarmed by gui_pack__test_set_result_budget, i.e. on every shutdown. */
+void gui_pack__test_fail_next_ref_index_build(void);
 #endif
 
 #endif /* NTPACKER_GUI_PACK_INTERNAL_H */

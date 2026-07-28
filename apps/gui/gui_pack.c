@@ -78,14 +78,22 @@ gui_pack_ref_index_work gui_pack_ref_index_work_get(void) {
 
 #ifdef TP_ENABLE_TEST_SEAMS
 static uint64_t s_budget_override;
+static bool s_fail_next_ref_index_build;
 
 void gui_pack__test_result_cache_stats(tp_pack_result_cache_stats *out) {
     tp_pack_result_cache_stats_get(s_cache, out);
 }
 
+void gui_pack__test_fail_next_ref_index_build(void) {
+    s_fail_next_ref_index_build = true;
+}
+
 void gui_pack__test_set_result_budget(uint64_t byte_budget) {
     gui_pack_clear(-1);
     s_budget_override = byte_budget;
+    /* Shutdown funnels through here between cases, so an armed one-shot can
+     * never leak into the next case. */
+    s_fail_next_ref_index_build = false;
 }
 #endif
 
@@ -126,6 +134,12 @@ static bool pack_ref_index_build(const tp_result *result,
         }
         capacity *= 2U;
     }
+#ifdef TP_ENABLE_TEST_SEAMS
+    if (s_fail_next_ref_index_build) {
+        s_fail_next_ref_index_build = false;
+        return false;
+    }
+#endif
     pack_ref_entry *entries = calloc(capacity, sizeof *entries);
     if (!entries) {
         return false;
@@ -301,6 +315,13 @@ bool gui_pack_publish_native(tp_session_job_result *job_result,
         return false;
     }
     tp_session_pack_job_result *pack = &job_result->pack;
+    /* The receipt the store is about to pin retains the whole live-job
+     * wrapper. Only the arena behind `pack->result` has to survive the pin, so
+     * the request-side baggage -- the serialized project JSON, the worker
+     * process handle with its second encoded copy of that JSON, the request
+     * paths -- is dropped NOW, before the entry starts a cache lifetime the
+     * byte budget accounts only in page bytes. */
+    tp_session_job_result_compact(job_result);
     tp_pack_result_cache *cache = pack_cache();
     if (!cache) {
         if (out) {
@@ -387,6 +408,14 @@ static const tp_result *pack_slot_reside(pack_slot *slot) {
         memset(slot, 0, sizeof *slot);
         return NULL;
     }
+    /* The switch below can FREE the outgoing resident: authoritative() demotes
+     * it into the byte-budget LRU, which may evict it and release its pin --
+     * and the Pack arena the resident pointers describe dies with that pin.
+     * The resident is therefore cleared BEFORE the store can evict, so every
+     * exit below, success or failure, leaves either the new resident or none;
+     * a stale resident would be handed out by the fast path above as freed
+     * memory. */
+    pack_resident_clear();
     tp_pack_result_cache_select(s_cache, slot->cache_key);
     const tp_result *result = NULL;
     tp_id128 hash = tp_id128_nil();
@@ -402,7 +431,6 @@ static const tp_result *pack_slot_reside(pack_slot *slot) {
     if (!pack_ref_index_build(result, &ref_index, &ref_index_cap)) {
         return NULL; /* the entry stays cached; the lookup index is retried */
     }
-    pack_resident_clear();
     s_ref_index = ref_index;
     s_ref_index_cap = ref_index_cap;
     s_resident_key = slot->cache_key;
@@ -436,7 +464,13 @@ const tp_result *gui_pack_result(int atlas_index) {
 
 uint64_t gui_pack_result_version(int atlas_index) {
     const pack_slot *slot = pack_slot_for_atlas_index(atlas_index);
-    return slot ? slot->version : 0U;
+    /* A slot whose entry the LRU already evicted is only retired by the next
+     * result read; its version must not outlive the entry it numbered. */
+    if (!slot ||
+        (s_cache && !tp_pack_result_cache_contains(s_cache, slot->cache_key))) {
+        return 0U;
+    }
+    return slot->version;
 }
 
 bool gui_pack_sprite_matches_ref(int atlas_index, int sprite_index,

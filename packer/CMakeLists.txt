@@ -121,8 +121,10 @@ enable_testing()
 # Both boundary gates are ctests, so `ctest --preset <p>` is the single entry point
 # on every platform and neither gate needs a bespoke CI step. The grep gate
 # (scripts/check_boundaries.sh, rule ids R1..R22) needs a POSIX shell; bash is
-# present on all three CI runners. A machine without bash still configures -- the
-# gate is simply not registered there instead of failing the configure.
+# present on all three CI runners. A machine without bash still configures -- but
+# the gate is registered as a FAILING stand-in there (fail-closed), so the missing
+# prerequisite is a red tp_boundaries_grep at ctest time instead of R1..R22
+# silently vanishing from the test list.
 find_program(TP_BASH NAMES bash)
 if(TP_BASH)
     add_test(NAME tp_boundaries_grep
@@ -131,9 +133,15 @@ if(TP_BASH)
         WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
         LABELS "architecture")
 else()
-    message(STATUS
-        "bash not found: scripts/check_boundaries.sh is NOT registered as a ctest "
-        "in this tree. The gate still runs wherever bash exists (all CI runners).")
+    # The stand-in prints the reason and FAIL_REGULAR_EXPRESSION turns that
+    # output into a test failure (cmake -E echo itself exits 0), keeping the
+    # command portable with zero shell dependencies.
+    add_test(NAME tp_boundaries_grep
+        COMMAND "${CMAKE_COMMAND}" -E echo
+            "bash not found: scripts/check_boundaries.sh (R1..R22) cannot run on this machine. Install bash so the boundary gate can execute.")
+    set_tests_properties(tp_boundaries_grep PROPERTIES
+        LABELS "architecture"
+        FAIL_REGULAR_EXPRESSION "bash not found")
 endif()
 
 # The CMake gate (rule ids A1a..A6) owns the view/core/async structural rules.
@@ -196,5 +204,20 @@ add_test(NAME tp_architecture_negative_unclassified_view
 set_tests_properties(tp_architecture_negative_unclassified_view PROPERTIES
     LABELS "architecture"
     PASS_REGULAR_EXPRESSION "unclassified view TU: apps/gui/gui_view_ghost\\.c")
+
+# A6 seam-fence walker fixture: a COMPOUND guard condition
+# (#if defined(TP_ENABLE_TEST_SEAMS) || ...) is not a fence -- it can compile
+# the seam into every build -- so the walker must report the symbol under it as
+# unfenced. The fixture asserts that exact abort message; a silent pass (the
+# walker accepting the compound form) fails this test.
+add_test(NAME tp_architecture_negative_seam_fence_compound
+    COMMAND "${CMAKE_COMMAND}"
+        "-DARCH_ROOT=${CMAKE_SOURCE_DIR}"
+        "-DARCH_SCAN_ROOT=${CMAKE_SOURCE_DIR}/cmake/fixtures/architecture_boundaries/seam_fence_compound"
+        "-DARCH_EXPECT_RULE=SEAM_FENCE"
+        -P "${TP_ARCHITECTURE_CHECK}")
+set_tests_properties(tp_architecture_negative_seam_fence_compound PROPERTIES
+    LABELS "architecture"
+    PASS_REGULAR_EXPRESSION "OUTSIDE a #ifdef TP_ENABLE_TEST_SEAMS fence")
 
 add_subdirectory(tests)

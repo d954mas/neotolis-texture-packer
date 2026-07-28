@@ -81,3 +81,122 @@ tp_status tp_export_write_pages(const tp_result *result, const char *out_path_ba
     }
     return TP_STATUS_OK;
 }
+
+/* Contract in tp_core/tp_export.h. Lives beside the shared page writer because
+ * this TU already owns the exporters' tp_fs boundary (R18): the run layer must
+ * stay out of tp_fs internals. */
+tp_status tp_export_write_and_publish_set(const tp_exporter *exp,
+                                          const tp_export_prepared *prep,
+                                          const char *out_path_base,
+                                          const char *const *output_files,
+                                          int output_file_count,
+                                          tp_export_notices *notices,
+                                          tp_error *err) {
+    if (!exp || !exp->write || !prep || !out_path_base ||
+        (!output_files && output_file_count > 0) || output_file_count < 0) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "set publication requires exporter, prep, base, "
+                            "and the enumerated output list");
+    }
+
+    /* The whole set lands in out_path_base's own directory: every output is
+     * "<base><suffix>". "" (no separator) means cwd-relative outputs. */
+    char out_dir[TP_IDENTITY_PATH_MAX];
+    size_t cut = 0;
+    for (size_t i = 0; out_path_base[i]; i++) {
+        if (out_path_base[i] == '/' || out_path_base[i] == '\\') {
+            cut = i + 1;
+        }
+    }
+    if (cut >= sizeof out_dir) {
+        return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
+                            "export output directory exceeds the canonical path limit");
+    }
+    memcpy(out_dir, out_path_base, cut);
+    out_dir[cut] = '\0';
+
+    char staging[TP_FS_ATOMIC_TEMP_PATH_MAX];
+    if (!tp_fs_stage_dir_create(cut > 0 ? out_dir : "./", staging,
+                                sizeof staging)) {
+        return tp_error_set(err, TP_STATUS_BAD_PROJECT,
+                            "cannot create the export staging directory under "
+                            "'%s' (existing outputs are untouched)",
+                            cut > 0 ? out_dir : ".");
+    }
+
+    tp_fs_stage_redirect_begin(out_dir, staging);
+    tp_status st = exp->write(prep, &exp->caps, out_path_base, notices, err);
+    tp_fs_stage_redirect_end();
+    if (st != TP_STATUS_OK) {
+        tp_fs_remove_tree(staging);
+        return st;
+    }
+
+    /* Preflight the complete set before the first irreversible replace: every
+     * staged file must exist (the enumeration and the writer agree) and no
+     * destination may be a directory (the one replace failure a caller can
+     * cause that is detectable up front). */
+    for (int f = 0; f < output_file_count; f++) {
+        char staged[TP_FS_ATOMIC_TEMP_PATH_MAX];
+        if (!tp_fs_stage_child_path(out_dir, staging, output_files[f], staged,
+                                    sizeof staged)) {
+            continue; /* not staged: the writer already published it per-file */
+        }
+        if (!tp_fs_exists(staged)) {
+            tp_fs_remove_tree(staging);
+            return tp_error_set(err, TP_STATUS_BAD_PROJECT,
+                                "exporter '%s' listed '%s' but did not produce "
+                                "it (existing outputs are untouched)",
+                                exp->id, output_files[f]);
+        }
+        if (tp_fs_is_dir(output_files[f])) {
+            tp_fs_remove_tree(staging);
+            return tp_error_set(err, TP_STATUS_BAD_PROJECT,
+                                "export destination '%s' is a directory "
+                                "(existing outputs are untouched)",
+                                output_files[f]);
+        }
+    }
+
+    int promoted = 0;
+    for (int f = 0; f < output_file_count; f++) {
+        char staged[TP_FS_ATOMIC_TEMP_PATH_MAX];
+        if (!tp_fs_stage_child_path(out_dir, staging, output_files[f], staged,
+                                    sizeof staged)) {
+            continue;
+        }
+        if (!tp_fs_replace(staged, output_files[f])) {
+            tp_fs_remove_tree(staging);
+            return tp_error_set(err, TP_STATUS_BAD_PROJECT,
+                                "export publish failed replacing '%s' (%d of "
+                                "%d files promoted); the output set may mix "
+                                "old and new files",
+                                output_files[f], promoted, output_file_count);
+        }
+        promoted++;
+    }
+
+    /* A staged leftover is an output the writer produced but the enumeration
+     * missed -- it would silently vanish with the staging dir, so surface it. */
+    bool leftover = false;
+    char leftover_name[TP_FS_NAME_MAX];
+    leftover_name[0] = '\0';
+    tp_fs_dir *dir = tp_fs_dir_open(staging);
+    if (dir) {
+        tp_fs_dir_entry entry;
+        if (tp_fs_dir_next(dir, &entry) == TP_FS_DIR_ENTRY) {
+            leftover = true;
+            (void)snprintf(leftover_name, sizeof leftover_name, "%s",
+                           entry.name);
+        }
+        tp_fs_dir_close(dir);
+    }
+    tp_fs_remove_tree(staging);
+    if (leftover) {
+        return tp_error_set(err, TP_STATUS_BAD_PROJECT,
+                            "exporter '%s' produced '%s' outside its declared "
+                            "output list; the unlisted file was not published",
+                            exp->id, leftover_name);
+    }
+    return TP_STATUS_OK;
+}

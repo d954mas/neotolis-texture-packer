@@ -46,6 +46,31 @@ bool tp_fs_write_file(const char *path_utf8, const void *data, size_t size);
 bool tp_fs_write_file_atomic(const char *path_utf8, const void *data,
                              size_t size);
 
+/* Staged output-SET publish (export set-atomicity). A staging dir is a private
+ * ".tp-stage-<pid>-<serial>" child of `parent_utf8` -- the same directory (and
+ * therefore volume) as the files it will replace, so promotion stays a pure
+ * rename. `parent_utf8` must be "" or end with a path separator; "" means the
+ * current directory. While a redirect is armed on the calling thread,
+ * tp_fs_write_file_atomic calls whose destination is a DIRECT child of
+ * `final_dir_utf8` write a plain file of the same name into `staging_dir_utf8`
+ * instead (per-file temp+replace inside a private dir buys nothing); every
+ * other path keeps the sibling-temp behavior. The publish pass is the caller's:
+ * one tp_fs_replace per staged file, and the staging tree must be removed on
+ * every exit path. Redirects do not nest. */
+bool tp_fs_stage_dir_create(const char *parent_utf8, char *out, size_t out_cap);
+void tp_fs_stage_redirect_begin(const char *final_dir_utf8,
+                                const char *staging_dir_utf8);
+void tp_fs_stage_redirect_end(void);
+/* Maps a DIRECT child of `final_dir_utf8` ("" or trailing-separator form, as
+ * above) to its staged sibling under `staging_dir_utf8`. False when `path_utf8`
+ * is not a direct child or the result would overflow `out_cap`. The redirect
+ * and the caller's publish pass share this one mapping rule. */
+bool tp_fs_stage_child_path(const char *final_dir_utf8,
+                            const char *staging_dir_utf8,
+                            const char *path_utf8, char *out, size_t out_cap);
+/* Best-effort recursive removal; never follows directory reparse points. */
+void tp_fs_remove_tree(const char *path_utf8);
+
 bool tp_fs_stat(const char *path_utf8, tp_fs_info *out);
 bool tp_fs_exists(const char *path_utf8);
 bool tp_fs_is_dir(const char *path_utf8);

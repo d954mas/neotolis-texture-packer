@@ -496,6 +496,9 @@ void gui_session_client_cancel_prepared(
     }
     tp_session_observation_destroy(
         prepared->initial);
+    /* Cancel owns the WHOLE bundle: after a successful prepare the bundle
+     * holds the only pointer to the candidate session. */
+    tp_session_destroy(prepared->session);
     memset(prepared, 0, sizeof *prepared);
 }
 

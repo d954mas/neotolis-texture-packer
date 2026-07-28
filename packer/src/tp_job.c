@@ -90,9 +90,14 @@ typedef struct tp_live_job {
 
 #ifdef TP_ENABLE_TEST_SEAMS
 static bool s_fail_next_observation_target_allocation;
+static bool s_fail_next_artifact_path_allocation;
 
 void tp_job__test_fail_next_observation_target_allocation(void) {
     s_fail_next_observation_target_allocation = true;
+}
+
+void tp_job__test_fail_next_artifact_path_allocation(void) {
+    s_fail_next_artifact_path_allocation = true;
 }
 
 void tp_job__test_set_worker_timeout_ms(int timeout_ms) {
@@ -105,6 +110,7 @@ void tp_job__test_set_worker_cancel_grace_ms(int grace_ms) {
 
 void tp_job__test_reset_all(void) {
     s_fail_next_observation_target_allocation = false;
+    s_fail_next_artifact_path_allocation = false;
     tp_job_worker__test_reset();
 }
 #endif
@@ -162,6 +168,16 @@ static char *job_strdup(const char *text) {
         memcpy(copy, text, length);
     }
     return copy;
+}
+
+static char *job_artifact_path_strdup(const char *text) {
+#ifdef TP_ENABLE_TEST_SEAMS
+    if (s_fail_next_artifact_path_allocation) {
+        s_fail_next_artifact_path_allocation = false;
+        return NULL;
+    }
+#endif
+    return job_strdup(text);
 }
 
 static bool job_request_cancel(tp_live_job *job) {
@@ -472,12 +488,28 @@ static bool job_artifact_open(tp_live_job *job,
                                 "Pack worker returned no artifact path");
         return false;
     }
-    /* Containment first: nothing is stored before it passes, so the failure path
-     * has no path to delete. */
+    /* Containment first: a path that fails it is UNTRUSTED and is never
+     * stored, opened, or removed. */
     if (!job_artifact_path_is_contained(job, pack->artifact_path)) {
         (void)job_artifact_fail(
             job, TP_STATUS_BUILDER_FAILED,
             "Pack artifact path is outside this job's private request directory");
+        return false;
+    }
+    /* The path is stored the moment it is trusted: job_artifact_fail deletes
+     * the file and its request directory THROUGH the stored path, so every
+     * later failure in this adoption cleans up a real contained artifact
+     * instead of orphaning it -- job_artifact_fail settles the artifact, which
+     * disarms the destroy-time unadopted backstop for this job. */
+    job->artifact_path = job_artifact_path_strdup(pack->artifact_path);
+    if (!job->artifact_path) {
+        /* The one failure that trusts the path but has nowhere to store it:
+         * delete through the wire path directly, exactly what the backstop
+         * this fail() disarms would have done. */
+        (void)tp_fs_remove_file(pack->artifact_path);
+        job_remove_request_dir(pack->artifact_path);
+        (void)job_artifact_fail(job, TP_STATUS_OOM,
+                                "Pack artifact path allocation failed");
         return false;
     }
     /* Below four bytes the magic check would be skipped, and above the cap the
@@ -487,12 +519,6 @@ static bool job_artifact_open(tp_live_job *job,
         (void)job_artifact_fail(
             job, TP_STATUS_BUILDER_FAILED,
             "Pack artifact size is too small to be a pack file or exceeds the host cap");
-        return false;
-    }
-    job->artifact_path = job_strdup(pack->artifact_path);
-    if (!job->artifact_path) {
-        (void)job_artifact_fail(job, TP_STATUS_OOM,
-                                "Pack artifact path allocation failed");
         return false;
     }
     tp_fs_info info;
@@ -1114,6 +1140,36 @@ void tp_session_job_result_destroy(tp_session_job_result *result) {
             (tp_session_owned_job *)result->_owner);
     }
     memset(result, 0, sizeof *result);
+}
+
+void tp_session_job_result_compact(tp_session_job_result *result) {
+    tp_live_job *job =
+        result ? (tp_live_job *)result->_owner : NULL;
+    if (!job) {
+        return;
+    }
+    /* An artifact the worker published but nothing adopted is named only by
+     * the wire path inside the process's response frame; it must be taken
+     * BEFORE the process -- and that frame with it -- goes away. Both discards
+     * need job->work_dir/artifact_path still intact, so they run first. */
+    job_discard_unadopted_artifact(
+        job, tp_job_worker_process_response(job->process));
+    job_discard_artifact(job);
+    tp_job_worker_process_destroy(job->process);
+    job->process = NULL;
+    free(job->project_json);
+    job->project_json = NULL;
+    job->project_json_len = 0U;
+    free(job->project_dir);
+    job->project_dir = NULL;
+    free(job->work_dir);
+    job->work_dir = NULL;
+    free(job->preview_exporter_id);
+    job->preview_exporter_id = NULL;
+    /* The arena, terminal_result, and the observation descriptor (which the
+     * observed job state still borrows) stay untouched: job_destroy_owned
+     * remains the exactly-once release for them, and every pointer freed above
+     * is NULL so that destroy stays a no-op for it. */
 }
 
 tp_pack_freshness tp_session_pack_result_freshness(

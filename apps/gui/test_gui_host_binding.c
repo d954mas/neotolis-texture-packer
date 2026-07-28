@@ -534,6 +534,62 @@ void test_active_job_completion_is_consumed_before_session_cutover(void) {
             &binding));
 }
 
+/* Force-close during a replacement that never cuts over. The binding's prepared
+ * bundle holds the ONLY pointer to the candidate session, so force_close must
+ * release it (pre-fix this leaked the candidate under ASan) and must leave the
+ * CLOSED state from which a fresh initial attach works. */
+void test_force_close_mid_replace_releases_candidate_and_allows_fresh_attach(void) {
+    gui_host_binding binding;
+    gui_host_transition_kind completed =
+        GUI_HOST_TRANSITION_NONE;
+    tp_error error = {{0}};
+    gui_host_binding_init(&binding);
+    tp_session *old_session = make_session();
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_host_binding_attach_initial(
+            &binding, old_session, &error));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_host_binding_begin_replace(
+            &binding, make_session(), true,
+            &error));
+    TEST_ASSERT_EQUAL_PTR(
+        old_session,
+        gui_session_client_attached_session(&binding.client));
+
+    gui_host_binding_force_close(&binding);
+    TEST_ASSERT_EQUAL_INT(
+        GUI_HOST_CLOSED,
+        gui_host_binding_lifecycle(&binding));
+    TEST_ASSERT_NULL(
+        gui_session_client_attached_session(&binding.client));
+
+    tp_session *fresh = make_session();
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_host_binding_attach_initial(
+            &binding, fresh, &error));
+    TEST_ASSERT_EQUAL_PTR(
+        fresh,
+        gui_session_client_attached_session(&binding.client));
+    TEST_ASSERT_EQUAL_INT(
+        GUI_HOST_OPEN,
+        gui_host_binding_lifecycle(&binding));
+
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_host_binding_begin_shutdown(
+            &binding, true, &error));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_host_binding_pump(
+            &binding, &completed, &error));
+    TEST_ASSERT_EQUAL_INT(
+        GUI_HOST_TRANSITION_SHUTDOWN,
+        completed);
+}
+
 int main(int argc, char **argv) {
     if (tp_build_is_worker_invocation(
             argc, argv)) {
@@ -552,5 +608,7 @@ int main(int argc, char **argv) {
         test_failed_prepare_preserves_receipt_and_cutover_clears_it);
     RUN_TEST(
         test_active_job_completion_is_consumed_before_session_cutover);
+    RUN_TEST(
+        test_force_close_mid_replace_releases_candidate_and_allows_fresh_attach);
     return UNITY_END();
 }

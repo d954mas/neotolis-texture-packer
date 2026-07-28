@@ -1189,6 +1189,179 @@ static void test_atomic_export_replace_failure_keeps_the_old_file(void) {
     (void)tp_fs_remove_dir(page);
 }
 
+/* Export set-atomicity leaves no private staging dir behind on any path. */
+static bool any_stage_dir_left_in(const char *directory) {
+    tp_fs_dir *dir = tp_fs_dir_open(directory);
+    if (!dir) {
+        return false;
+    }
+    bool found = false;
+    tp_fs_dir_entry entry;
+    while (!found && tp_fs_dir_next(dir, &entry) == TP_FS_DIR_ENTRY) {
+        found = strstr(entry.name, ".tp-stage-") != NULL;
+    }
+    tp_fs_dir_close(dir);
+    return found;
+}
+
+/* The output SET is atomic per target: a re-export that fails mid-set (page 1's
+ * destination is a directory here) must leave EVERY previously published file
+ * byte-identical -- page 0 and the metadata keep their old bytes even though
+ * they were re-encoded fine. A subsequent clean re-export over those old files
+ * publishes the complete new set. */
+static void test_export_set_failure_leaves_previous_outputs_byte_identical(void) {
+    static uint8_t page_a[100 * 100 * 4];
+    static uint8_t page_b[100 * 100 * 4];
+    fill(page_a, 100 * 100, 250, 10, 10);
+    fill(page_b, 100 * 100, 10, 250, 10);
+
+    char base[1100];
+    char page0[1200];
+    char page1[1200];
+    char json[1200];
+    char sentinel[1300];
+    TEST_ASSERT_TRUE(snprintf(base, sizeof base, "%s/set_atomic", g_dir) > 0);
+    TEST_ASSERT_TRUE(snprintf(page0, sizeof page0, "%s-0.png", base) > 0);
+    TEST_ASSERT_TRUE(snprintf(page1, sizeof page1, "%s-1.png", base) > 0);
+    TEST_ASSERT_TRUE(snprintf(json, sizeof json, "%s.json", base) > 0);
+    TEST_ASSERT_TRUE(snprintf(sentinel, sizeof sentinel, "%s/keep.txt", page1) > 0);
+
+    /* A reused ctest dir may hold a previous run's obstacle course. */
+    (void)remove(sentinel);
+    (void)tp_fs_remove_dir(page1);
+    (void)remove(page0);
+    (void)remove(page1);
+    (void)remove(json);
+
+    tp_project *project = make_single_target_project(base);
+    TEST_ASSERT_NOT_NULL(project);
+    tp_project_get_atlas(project, 0)->max_size = 128; /* forces two pages */
+    tp_pack_sprite_desc sprites[2];
+    memset(sprites, 0, sizeof sprites);
+    sprites[0] = (tp_pack_sprite_desc){
+        .name = "red", .rgba = page_a, .w = 100, .h = 100,
+        .origin_x = 0.5F, .origin_y = 0.5F};
+    sprites[1] = (tp_pack_sprite_desc){
+        .name = "green", .rgba = page_b, .w = 100, .h = 100,
+        .origin_x = 0.5F, .origin_y = 0.5F};
+
+    /* --- pre-publish a full 2-page export --- */
+    {
+        tp_arena *arena = tp_arena_create(0);
+        TEST_ASSERT_NOT_NULL(arena);
+        tp_export_notices notices;
+        tp_export_notices_init(&notices);
+        tp_error error = {{0}};
+        TEST_ASSERT_EQUAL_INT_MESSAGE(
+            TP_STATUS_OK,
+            tp_export_run(project, 0, sprites, 2, g_dir, arena, &notices, NULL,
+                          &error),
+            error.msg);
+        tp_export_notices_free(&notices);
+        tp_arena_destroy(arena);
+    }
+    TEST_ASSERT_TRUE_MESSAGE(tp_fs_exists(page1),
+                             "the fixture needs a real 2-page export");
+
+    /* Substitute recognizable "previous export" bytes, then make page 1's
+     * destination an obstacle no rename can replace. */
+    static const char stale_page[] = "STALE-PAGE-0-FROM-A-PREVIOUS-EXPORT";
+    static const char stale_json[] = "STALE-JSON-FROM-A-PREVIOUS-EXPORT";
+    TEST_ASSERT_TRUE(tp_fs_write_file(page0, stale_page, sizeof stale_page - 1U));
+    TEST_ASSERT_TRUE(tp_fs_write_file(json, stale_json, sizeof stale_json - 1U));
+    TEST_ASSERT_TRUE(tp_fs_remove_file(page1));
+    TEST_ASSERT_TRUE(tp_fs_create_dir(page1));
+    static const char keep[] = "OLD";
+    TEST_ASSERT_TRUE(tp_fs_write_file(sentinel, keep, sizeof keep - 1U));
+
+    /* --- the failing re-export: NOTHING previously published may change --- */
+    {
+        tp_arena *arena = tp_arena_create(0);
+        TEST_ASSERT_NOT_NULL(arena);
+        tp_export_notices notices;
+        tp_export_notices_init(&notices);
+        tp_export_report report;
+        memset(&report, 0, sizeof report);
+        const tp_export_run_opts opts = {.report = &report};
+        tp_error error = {{0}};
+        TEST_ASSERT_EQUAL_INT(
+            TP_STATUS_BAD_PROJECT,
+            tp_export_run_ex(project, 0, sprites, 2, g_dir, arena, &notices,
+                             NULL, &opts, &error));
+        TEST_ASSERT_EQUAL_INT(1, report.target_count);
+        TEST_ASSERT_FALSE(report.targets[0].ok);
+        TEST_ASSERT_EQUAL_INT(TP_EXPORT_WRITER_FAILED,
+                              report.targets[0].writer_outcome);
+        tp_export_notices_free(&notices);
+        tp_arena_destroy(arena);
+    }
+    size_t got = 0U;
+    uint8_t *bytes = read_whole_file(page0, &got);
+    TEST_ASSERT_NOT_NULL(bytes);
+    TEST_ASSERT_EQUAL_size_t_MESSAGE(sizeof stale_page - 1U, got,
+                                     "page 0 must keep the previous export's bytes");
+    TEST_ASSERT_EQUAL_INT(0, memcmp(bytes, stale_page, got));
+    free(bytes);
+    bytes = read_whole_file(json, &got);
+    TEST_ASSERT_NOT_NULL(bytes);
+    TEST_ASSERT_EQUAL_size_t_MESSAGE(sizeof stale_json - 1U, got,
+                                     "metadata must keep the previous export's bytes");
+    TEST_ASSERT_EQUAL_INT(0, memcmp(bytes, stale_json, got));
+    free(bytes);
+    TEST_ASSERT_TRUE(tp_fs_is_dir(page1));
+    TEST_ASSERT_FALSE_MESSAGE(any_atomic_temp_left_in(g_dir),
+                              "a failed set publish left a sibling temp behind");
+    TEST_ASSERT_FALSE_MESSAGE(any_stage_dir_left_in(g_dir),
+                              "a failed set publish left its staging dir behind");
+
+    /* --- obstacle removed: a clean re-export publishes the COMPLETE new set --- */
+    TEST_ASSERT_TRUE(tp_fs_remove_file(sentinel));
+    TEST_ASSERT_TRUE(tp_fs_remove_dir(page1));
+    {
+        tp_arena *arena = tp_arena_create(0);
+        TEST_ASSERT_NOT_NULL(arena);
+        tp_export_notices notices;
+        tp_export_notices_init(&notices);
+        tp_export_report report;
+        memset(&report, 0, sizeof report);
+        const tp_export_run_opts opts = {.report = &report};
+        tp_error error = {{0}};
+        TEST_ASSERT_EQUAL_INT_MESSAGE(
+            TP_STATUS_OK,
+            tp_export_run_ex(project, 0, sprites, 2, g_dir, arena, &notices,
+                             NULL, &opts, &error),
+            error.msg);
+        TEST_ASSERT_EQUAL_INT(1, report.target_count);
+        TEST_ASSERT_TRUE(report.targets[0].ok);
+        TEST_ASSERT_EQUAL_INT(TP_EXPORT_WRITER_SUCCEEDED,
+                              report.targets[0].writer_outcome);
+        tp_export_notices_free(&notices);
+        tp_arena_destroy(arena);
+    }
+    static const uint8_t png_magic[4] = {0x89U, 0x50U, 0x4EU, 0x47U};
+    const char *pages[2] = {page0, page1};
+    for (int p = 0; p < 2; p++) {
+        bytes = read_whole_file(pages[p], &got);
+        TEST_ASSERT_NOT_NULL_MESSAGE(bytes, pages[p]);
+        TEST_ASSERT_TRUE(got > sizeof png_magic);
+        TEST_ASSERT_EQUAL_INT_MESSAGE(
+            0, memcmp(bytes, png_magic, sizeof png_magic),
+            "a successful re-export must publish the new page");
+        free(bytes);
+    }
+    cJSON *root = load_json(base);
+    TEST_ASSERT_NOT_NULL_MESSAGE(root,
+                                 "a successful re-export must publish the new metadata");
+    cJSON_Delete(root);
+    TEST_ASSERT_FALSE(any_atomic_temp_left_in(g_dir));
+    TEST_ASSERT_FALSE(any_stage_dir_left_in(g_dir));
+
+    tp_project_destroy(project);
+    (void)remove(page0);
+    (void)remove(page1);
+    (void)remove(json);
+}
+
 static bool cancel_export_run(void *ctx) {
     (void)ctx;
     return true;
@@ -1414,6 +1587,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_report_page_oom_leaves_no_partial_runs);
     RUN_TEST(test_atomic_export_overwrite_publishes_the_new_content);
     RUN_TEST(test_atomic_export_replace_failure_keeps_the_old_file);
+    RUN_TEST(test_export_set_failure_leaves_previous_outputs_byte_identical);
     RUN_TEST(test_export_run_honors_cancel_before_safe_pack_phase);
     RUN_TEST(test_export_run_cancels_the_pack_worker_before_artifact_publication);
     RUN_TEST(test_snapshot_export_polls_cancel_before_each_output_directory_creation);

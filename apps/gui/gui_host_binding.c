@@ -115,9 +115,10 @@ tp_status gui_host_binding_begin_replace(
         gui_host_queue_begin_drain(
             &binding->queue, err);
     if (drain_status != TP_STATUS_OK) {
+        /* cancel_prepared owns the bundle, candidate included
+         * (prepared.session == candidate here). */
         gui_session_client_cancel_prepared(
             &prepared);
-        tp_session_destroy(candidate);
         return drain_status;
     }
     binding->prepared = prepared;

@@ -699,13 +699,15 @@ tp_status tp_export_run_ex(const tp_project *project, int atlas_index, const tp_
         }
 
         /* Deterministic test seam at the last reversible boundary. Production is
-         * a no-op; after release, poll before invoking the irreversible writer. */
+         * a no-op; after release, poll before staging the irreversible target. */
         export_before_write_gate_wait();
         st = export_cancel_poll(cancel, err);
         if (st != TP_STATUS_OK) {
             return st;
         }
-        st = exp->write(prep, &exp->caps, out_bases[t], notices, err);
+        st = tp_export_write_and_publish_set(exp, prep, out_bases[t],
+                                             output_files, output_file_count,
+                                             notices, err);
         if (rt) {
             rt->writer_outcome = st == TP_STATUS_OK
                                      ? TP_EXPORT_WRITER_SUCCEEDED
