@@ -827,14 +827,25 @@ void test_view_collapse_survives_atlas_switch(void) {
 
     TEST_ASSERT_EQUAL_INT(
         1, gui_project_add_atlas().visible_index); /* A1 at index 1 */
-    const tp_session_snapshot *snap = gui_project_snapshot();
-    const tp_snapshot_atlas *a1 = tp_session_snapshot_atlas_at(snap, 1);
-    TEST_ASSERT_NOT_NULL(a1);
-    TEST_ASSERT_EQUAL_INT(
-        GUI_ADD_ADDED,
-        gui_project_add_source_kind(a1->id, tp_session_snapshot_revision(snap),
-                                    s_pack_dir, TP_SOURCE_KIND_FOLDER));
+    /* Snapshot rows are borrowed from the observation that owns them; the very
+     * next mutation publishes a new observation and frees this one. Copy the
+     * stable id out NOW -- a `tp_snapshot_atlas *` must never outlive the pump. */
+    tp_id128 a1_id = tp_id128_nil();
+    {
+        const tp_session_snapshot *snap = gui_project_snapshot();
+        const tp_snapshot_atlas *a1 = tp_session_snapshot_atlas_at(snap, 1);
+        TEST_ASSERT_NOT_NULL(a1);
+        a1_id = a1->id;
+        TEST_ASSERT_EQUAL_INT(
+            GUI_ADD_ADDED,
+            gui_project_add_source_kind(a1_id,
+                                        tp_session_snapshot_revision(snap),
+                                        s_pack_dir, TP_SOURCE_KIND_FOLDER));
+    }
     gui_project_invalidate_sources();
+    /* The add republished the observation: `snap`/`a1` are gone, the id is not. */
+    TEST_ASSERT_NOT_NULL(
+        tp_session_snapshot_atlas_by_id(gui_project_snapshot(), a1_id));
 
     /* View A0, collapse its folder. */
     select_atlas_index(0);
@@ -846,9 +857,10 @@ void test_view_collapse_survives_atlas_switch(void) {
     TEST_ASSERT_EQUAL_INT(2, s_view_count); /* folder (collapsed) + solo */
 
     /* Switch to A1 (B). Building B must NOT prune A0's collapse id. */
-    gui_view_select_atlas(a1->id);
+    gui_view_select_atlas(a1_id);
     build_rows();
     build_view();
+    TEST_ASSERT_EQUAL_INT(1, gui_view_atlas_index(gui_project_snapshot()));
     TEST_ASSERT_TRUE(gui_rows_is_collapsed(folder0)); /* Survives the switch. */
 
     /* Back to A0: still collapsed, children still hidden. */

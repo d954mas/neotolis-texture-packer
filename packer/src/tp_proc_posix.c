@@ -21,6 +21,7 @@ static bool s_test_fail_next_kill;
 #include <string.h>
 
 #include <poll.h>
+#include <sys/ioctl.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -423,6 +424,18 @@ bool tp_proc_read_stdout(tp_proc *proc, void *buf, size_t cap, size_t *out_len,
     }
 }
 
+/* Does the pipe still hold unread bytes? FIONREAD answers that directly on every
+ * supported host and, unlike POLLIN, means the same thing on Linux and macOS.
+ * If the query fails, fall back to reading POLLIN as "data pending" -- the
+ * conservative answer, which keeps an oversized reply from looking like EOF. */
+static bool stdout_bytes_pending(int fd, short revents) {
+    int pending = 0;
+    if (ioctl(fd, FIONREAD, &pending) == 0) {
+        return pending > 0;
+    }
+    return (revents & POLLIN) != 0;
+}
+
 bool tp_proc_try_read_stdout(tp_proc *proc, void *buf, size_t cap, size_t *out_len,
                              bool *out_eof) {
     if (out_len) {
@@ -451,8 +464,14 @@ bool tp_proc_try_read_stdout(tp_proc *proc, void *buf, size_t cap, size_t *out_l
         return true;
     }
     if (cap == 0U) {
-        if ((fd.revents & POLLHUP) != 0 && (fd.revents & POLLIN) == 0 &&
-            out_eof) {
+        /* No room to read, so poll is the only EOF evidence -- and POLLIN cannot
+         * stand in for "bytes are still pending" here: Linux reports POLLHUP
+         * alone once the writer is gone, while macOS/BSD report POLLIN|POLLHUP
+         * at EOF whether or not the pipe still holds data. Ask the pipe how many
+         * bytes it actually has instead, so an oversized reply stays distinct
+         * from EOF on every host. */
+        if ((fd.revents & POLLHUP) != 0 && out_eof &&
+            !stdout_bytes_pending(proc->stdout_r, fd.revents)) {
             *out_eof = true;
         }
         return true;
