@@ -18,9 +18,11 @@
  * per-builder poison, because tp_sb is header-only static inline: poisoning
  * only the instances this file can name would silently narrow "every
  * allocation fails" to three call sites and leave every other sb.oom ->
- * CLI_EXIT_INTERNAL branch uninjectable. tp_core and the shipped ntpacker are
- * compiled without the macro, so neither has the branch or the symbol. */
-#if defined(NTPACKER_CLI_OUT_FAULT_SEAM)
+ * CLI_EXIT_INTERNAL branch uninjectable. The definition is gated on the same
+ * macro that compiles the check in, so the seam has exactly one switch: a
+ * target either has both the branch and the predicate or neither. tp_core and
+ * the shipped ntpacker are compiled without it, so neither has either. */
+#if defined(TP_SB_ALLOC_FAULT_SEAM)
 bool tp_sb_alloc_fault_active(void) { return true; }
 #endif
 

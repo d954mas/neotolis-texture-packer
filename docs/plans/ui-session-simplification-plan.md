@@ -778,6 +778,55 @@ flipped cache residency twice per frame. Fixed in three zones:
 
 Battery: debug 159/159, release 158/158 (clean builds), boundaries OK.
 
+**S22 — fresh-review round 4 (review of S21 itself, `690bd42..879b161`).** Three
+fresh zone reviewers; no P0, one P1 (gates), the rest P2. Fixed:
+
+- *R22 comment stripping is string-literal-aware (the P1).* The S21 stripper
+  read `/*` inside a string literal (`"%s/*"` — live at two corpus sites) as a
+  comment opener and swallowed ~50 lines of live code including `#else`/
+  `#endif`, desyncing the dead-region depth. No credit was lost at HEAD
+  (verified by an old-vs-new mirror over all 91 corpus files — zero drift), but
+  one moved helper away from going red on good code or silently dropping
+  owners. The stripper now tracks string/char-literal state (escapes handled;
+  literal state is per-line, block-comment state still crosses lines); `#elif
+  0` opens a dead region like `#if 0`; three new seeded fixtures pin all of it.
+  New R0 corpus guard: `app_srcs` must be non-empty and contain both frontend
+  `main.c` sentinels, so an over-matching exclusion can no longer drain every
+  apps/-scoped rule silently.
+- *Truthful export failure wording + fail-closed leftover scan (core).* Once an
+  output bypassed staging (already published per-file, notice raised), later
+  preflight failures no longer claim "existing outputs are untouched" — the
+  message counts the bypassed outputs. An unreadable staging dir (open failure
+  or mid-scan error) now fails the preflight instead of promoting an unverified
+  set. Byte-exact (case-sensitive) name matching is now contract text.
+- *Producer-side UTF-8 truncation repair (core).* `tp_error_set*` trim a
+  trailing incomplete UTF-8 sequence after snprintf/vsnprintf truncation (msg
+  and path), so a truncated diagnostic can no longer make the wire validator
+  reject the whole worker payload. Outer wire bounds for the two error paths
+  now state the real `TP_FILE_IO_PATH_MAX - 1` limit (and the previously
+  missing outer check for `error_path_len` was added).
+- *Parity vocabulary (core).* `client_parity_replay.c` gained `set_atomicity` /
+  `path_not_stageable`, restoring the closed-vocabulary claim vs `cli_pack.c`.
+- *Preview OOM retry restored (gui).* Under S21's peek, an index-build OOM
+  cached an EMPTY frame map as valid, killing the documented retry. The rebuild
+  now bails without caching when the canonical index is unavailable; a genuine
+  zero-resolve with the index present still caches. `gui_actions_shutdown` also
+  releases the refresh fingerprint and disarms the player (test-state bleed),
+  and the headline peek test gained the positive control it lacked (its
+  vacuous-pass mode was demonstrated directly before fixing).
+- *Test hygiene.* Two S21 proto-test leaks freed (successful decode before the
+  corrupting re-decode); the save-io remap assertion pins the public path via a
+  deliberately non-canonical input (red-before proven by disabling the remap);
+  the one seam-macro pair collapsed to `TP_SB_ALLOC_FAULT_SEAM` alone; the four
+  output-OOM ctests assert the exact golden payload instead of a prefix regex.
+
+Known limits recorded, not fixed: `#if 1 ... #else` dead branches and non-zero
+`#elif` conditions still read as live (documented in the rule); the unreadable-
+staging path has no portable test (Windows cannot make the generated dir
+unopenable); fix-4's parity tokens have no reachable emitter yet.
+
+Battery: debug 159/159, release 158/158 (clean builds), boundaries OK.
+
 ## Decision records
 
 - **Escape after a deferred gesture commit is accepted as-is.** `frame()` runs

@@ -82,6 +82,24 @@ tp_status tp_export_write_pages(const tp_result *result, const char *out_path_ba
     return TP_STATUS_OK;
 }
 
+/* Every preflight verdict is reached before the first rename, so the STAGED set
+ * is always intact when one fires. What is not always intact is the rest of the
+ * output set: an output that could not be mapped into staging was published
+ * per-file by the writer (and said so through its own notice), so the usual
+ * "existing outputs are untouched" would be a lie once `bypassed` is non-zero.
+ * `buf` backs the bypassed wording; the zero-bypass wording is a literal, so
+ * that message stays exactly what it always was. */
+static const char *publish_intact_clause(int bypassed, char *buf, size_t cap) {
+    if (bypassed <= 0) {
+        return "existing outputs are untouched";
+    }
+    (void)snprintf(buf, cap,
+                   "%d bypassed output%s already published individually; no "
+                   "staged output was promoted",
+                   bypassed, bypassed == 1 ? " was" : "s were");
+    return buf;
+}
+
 /* Contract in tp_core/tp_export.h. Lives beside the shared page writer because
  * this TU already owns the exporters' tp_fs boundary (R18): the run layer must
  * stay out of tp_fs internals. */
@@ -136,34 +154,42 @@ tp_status tp_export_write_and_publish_set(const tp_exporter *exp,
      * staged file must exist (the enumeration and the writer agree) and no
      * destination may be a directory (the one replace failure a caller can
      * cause that is detectable up front). */
+    char intact[192];
+    int bypassed = 0;
     for (int f = 0; f < output_file_count; f++) {
         char staged[TP_FS_ATOMIC_TEMP_PATH_MAX];
         if (!tp_fs_stage_child_path(out_dir, staging, output_files[f], staged,
                                     sizeof staged)) {
             /* Not stageable: the writer published this one per-file, so it sits
              * outside the whole-set guarantee. Say so instead of degrading
-             * silently (tp_core/tp_export.h contract). */
+             * silently (tp_core/tp_export.h contract). It also means a LATER
+             * preflight failure may no longer claim the outputs are untouched,
+             * so the count travels to every message below. */
             (void)tp_export_notice_add_ex(
                 notices, TP_NOTICE_FIELD_SET_ATOMICITY,
                 TP_NOTICE_REASON_PATH_NOT_STAGEABLE, NULL, exp->id,
                 "'%s' bypassed whole-set staging and was published on its own; "
                 "it is not covered by the export's all-or-nothing guarantee",
                 output_files[f]);
+            bypassed++;
             continue;
         }
         if (!tp_fs_exists(staged)) {
             tp_fs_remove_tree(staging);
             return tp_error_set(err, TP_STATUS_BAD_PROJECT,
                                 "exporter '%s' listed '%s' but did not produce "
-                                "it (existing outputs are untouched)",
-                                exp->id, output_files[f]);
+                                "it (%s)",
+                                exp->id, output_files[f],
+                                publish_intact_clause(bypassed, intact,
+                                                      sizeof intact));
         }
         if (tp_fs_is_dir(output_files[f])) {
             tp_fs_remove_tree(staging);
             return tp_error_set(err, TP_STATUS_BAD_PROJECT,
-                                "export destination '%s' is a directory "
-                                "(existing outputs are untouched)",
-                                output_files[f]);
+                                "export destination '%s' is a directory (%s)",
+                                output_files[f],
+                                publish_intact_clause(bypassed, intact,
+                                                      sizeof intact));
         }
     }
 
@@ -173,12 +199,17 @@ tp_status tp_export_write_and_publish_set(const tp_exporter *exp,
      * republished set, so the whole staging dir is matched against the listed
      * set BEFORE the first rename. */
     bool leftover = false;
+    bool unreadable = false;
     char leftover_name[TP_FS_NAME_MAX];
     leftover_name[0] = '\0';
     tp_fs_dir *dir = tp_fs_dir_open(staging);
-    if (dir) {
+    if (!dir) {
+        unreadable = true;
+    } else {
         tp_fs_dir_entry entry;
-        while (!leftover && tp_fs_dir_next(dir, &entry) == TP_FS_DIR_ENTRY) {
+        tp_fs_dir_result step = TP_FS_DIR_END;
+        while (!leftover &&
+               (step = tp_fs_dir_next(dir, &entry)) == TP_FS_DIR_ENTRY) {
             char entry_path[TP_FS_ATOMIC_TEMP_PATH_MAX];
             const int n = snprintf(entry_path, sizeof entry_path, "%s/%s",
                                    staging, entry.name);
@@ -198,10 +229,35 @@ tp_status tp_export_write_and_publish_set(const tp_exporter *exp,
                                entry.name);
             }
         }
+        /* TP_FS_DIR_END is the only clean way out; TP_FS_DIR_ERROR means the
+         * scan stopped early and the remaining entries were never compared. */
+        unreadable = step == TP_FS_DIR_ERROR;
         tp_fs_dir_close(dir);
+    }
+    /* Nothing has been renamed yet, so an unverifiable staging dir fails CLOSED:
+     * promoting here would publish a set no one checked for the very leftover
+     * this scan exists to catch. */
+    if (unreadable) {
+        tp_fs_remove_tree(staging);
+        return tp_error_set(err, TP_STATUS_BAD_PROJECT,
+                            "the export staging directory could not be read, so "
+                            "the set exporter '%s' produced could not be "
+                            "verified against its declared output list; nothing "
+                            "was promoted (%s)",
+                            exp->id,
+                            publish_intact_clause(bypassed, intact,
+                                                  sizeof intact));
     }
     if (leftover) {
         tp_fs_remove_tree(staging);
+        if (bypassed > 0) {
+            return tp_error_set(err, TP_STATUS_BAD_PROJECT,
+                                "exporter '%s' produced '%s' outside its "
+                                "declared output list; %s",
+                                exp->id, leftover_name,
+                                publish_intact_clause(bypassed, intact,
+                                                      sizeof intact));
+        }
         return tp_error_set(err, TP_STATUS_BAD_PROJECT,
                             "exporter '%s' produced '%s' outside its declared "
                             "output list; nothing was published (existing "

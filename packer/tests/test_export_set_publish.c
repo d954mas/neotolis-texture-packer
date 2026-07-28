@@ -219,6 +219,60 @@ static void test_unstageable_output_is_published_with_a_notice(void) {
     (void)tp_fs_remove_dir(sub);
 }
 
+/* Once an output has bypassed staging it IS published, so a preflight failure
+ * that fires afterwards may not go on claiming the existing outputs are
+ * untouched -- the operator would read "nothing happened" over a directory that
+ * already changed. The whole-set half of the promise is still true and still
+ * said out loud: no staged output was promoted. */
+static void test_a_failure_after_a_bypass_does_not_claim_nothing_happened(void) {
+    char sub[TP_IDENTITY_PATH_MAX];
+    char deep[TP_IDENTITY_PATH_MAX];
+    char missing[TP_IDENTITY_PATH_MAX];
+    TEST_ASSERT_TRUE(snprintf(sub, sizeof sub, "%s/setpub_sub2", g_dir) > 0);
+    TEST_ASSERT_TRUE(snprintf(deep, sizeof deep, "%s/deep.json", sub) > 0);
+    TEST_ASSERT_TRUE(
+        snprintf(missing, sizeof missing, "%s.missing", g_base) > 0);
+    (void)tp_fs_remove_file(deep);
+    (void)tp_fs_remove_dir(sub);
+    TEST_ASSERT_TRUE(tp_fs_create_dir(sub));
+    (void)tp_fs_remove_file(missing);
+
+    /* The bypassed output comes FIRST, so it is already published by the time
+     * the enumeration's second entry turns out never to have been written. */
+    plan_reset();
+    plan_add(deep);
+    const char *outputs[2] = {deep, missing};
+
+    tp_export_prepared prep;
+    memset(&prep, 0, sizeof prep);
+    tp_export_notices notices;
+    tp_export_notices_init(&notices);
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_BAD_PROJECT,
+        tp_export_write_and_publish_set(&g_exp, &prep, g_base, outputs, 2,
+                                        &notices, &error));
+    TEST_ASSERT_TRUE_MESSAGE(
+        file_holds(deep, "NEW"),
+        "the bypassed output really is published, which is why the message "
+        "may not say otherwise");
+    TEST_ASSERT_NULL_MESSAGE(
+        strstr(error.msg, "existing outputs are untouched"),
+        error.msg);
+    TEST_ASSERT_NOT_NULL_MESSAGE(
+        strstr(error.msg, "1 bypassed output was already published "
+                          "individually"),
+        error.msg);
+    TEST_ASSERT_NOT_NULL_MESSAGE(
+        strstr(error.msg, "no staged output was promoted"), error.msg);
+    TEST_ASSERT_FALSE(tp_fs_exists(missing));
+    TEST_ASSERT_FALSE(any_stage_dir_left());
+
+    tp_export_notices_free(&notices);
+    (void)tp_fs_remove_file(deep);
+    (void)tp_fs_remove_dir(sub);
+}
+
 /* The staging dir must own what it creates. tp_fs_create_dir ADOPTS an existing
  * directory (that is its contract and other callers want it), which is exactly
  * why the staging path uses the exclusive primitive instead. */
@@ -276,6 +330,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_listed_set_publishes);
     RUN_TEST(test_unlisted_output_blocks_the_whole_publication);
     RUN_TEST(test_unstageable_output_is_published_with_a_notice);
+    RUN_TEST(test_a_failure_after_a_bypass_does_not_claim_nothing_happened);
     RUN_TEST(test_exclusive_create_never_adopts_an_existing_name);
     RUN_TEST(test_stage_dirs_are_distinct_and_created);
     return UNITY_END();

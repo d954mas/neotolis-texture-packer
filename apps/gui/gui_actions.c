@@ -779,6 +779,10 @@ void apply_pending(void) {
 void gui_actions_shutdown(void) {
     gui_actions__intent_shutdown();
     gui_actions__preview_shutdown();
+    /* The retained refresh fingerprint is action-layer heap too (one strdup'd
+     * absolute path per scanned entry and per source). Its reset reads nothing
+     * but its own arrays, so it is order-free here. */
+    gui_actions_refresh_fingerprint_reset();
 }
 
 void gui_actions_poll_host_completion(void) {

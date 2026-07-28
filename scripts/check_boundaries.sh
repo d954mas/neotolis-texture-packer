@@ -28,6 +28,25 @@ shipping_srcs() {
         \( -name '*.c' -o -name '*.h' \)
 }
 
+# 0. Corpus guard. Every apps/-scoped rule below (R1-R3, R8, R21, and
+#    shipping_srcs' R15/R16a/R17/R18/R20) is only as strong as the file list it
+#    scans, and an over-matching exclusion in app_srcs would drain that list and
+#    turn all of them silently green. No per-regex self-test can see that: they
+#    seed a violation into a printf, not into the real corpus. Assert the list is
+#    non-empty and still names a file that must always be in scope.
+_app_srcs=$(app_srcs)
+if [ -z "$_app_srcs" ]; then
+    hit "R0 app source corpus is empty" \
+        "app_srcs matched no files -- every apps/-scoped rule below is vacuous"
+else
+    for _sentinel in apps/cli/main.c apps/gui/main.c; do
+        if ! printf '%s\n' "$_app_srcs" | grep -qx -- "$_sentinel"; then
+            hit "R0 app source corpus lost a sentinel file" \
+                "$_sentinel is absent from app_srcs -- an exclusion is over-matching"
+        fi
+    done
+fi
+
 # 1. No sprite-name extension stripping outside tp_core (tp_sprite_export_key is
 #    the single owner). Project-FILENAME helpers must carry a boundary-ok note.
 _r1_extstrip="strrchr\([^,]+, *'\.'\)"
@@ -837,9 +856,10 @@ _usa_test_sources() {
 # The call scan is textual, so a call site that the COMPILER never sees must be
 # removed before it is recorded, or the tag keeps crediting a test that no
 # longer runs. Two such forms are stripped here: text inside a /* ... */ block
-# comment (and after a // line comment), and text inside an `#if 0 ... #endif`
-# region (nesting tracked; the `#else` branch of an `#if 0` is live code and is
-# NOT stripped). Only the literal `#if 0` is treated as dead -- this is a
+# comment (and after a // line comment) but NOT inside a string or character
+# literal, and text inside an `#if 0 ... #endif` region (nesting tracked; the
+# `#else` branch of an `#if 0` is live code and is NOT stripped). Only the
+# literal `#if 0` / `#elif 0` conditions are treated as dead -- this is a
 # greppable gate, not a preprocessor, so no other condition is evaluated.
 # Tag scanning deliberately reads the RAW line, because the `/* USA-nn */` tags
 # themselves live in comments; only `#if 0` regions drop out of both scans.
@@ -865,24 +885,49 @@ _usa_test_owned() {
             split("", claim); split("", called)
         }
         # Removes commented-out text, carrying /* ... */ state across lines.
-        function strip_comments(line,   out, idx) {
+        # String and character literals are TEXT, not comment openers: a "%s/*"
+        # glob and a "//server/share" UNC path are both live in this corpus, and
+        # reading either as a comment start swallows the live code that follows
+        # it -- including #else/#endif directives, which desyncs the dead-region
+        # depth counters below. A literal never spans a line here, so literal
+        # state resets per line; the block-comment state deliberately does not.
+        # ("\047" is the apostrophe: this awk program is shell-single-quoted, so
+        # a literal one cannot appear in it.)
+        function strip_comments(line,   out, i, n, c, c2, in_str, in_chr) {
+            if (!in_comment && index(line, "/") == 0 &&
+                index(line, "\"") == 0 && index(line, "\047") == 0)
+                return line
             out = ""
-            while (length(line) > 0) {
+            in_str = 0
+            in_chr = 0
+            n = length(line)
+            i = 1
+            while (i <= n) {
+                c = substr(line, i, 1)
+                c2 = substr(line, i, 2)
                 if (in_comment) {
-                    idx = index(line, "*/")
-                    if (idx == 0) { line = ""; break }
-                    in_comment = 0
-                    line = substr(line, idx + 2)
+                    if (c2 == "*/") { in_comment = 0; i += 2 } else { i++ }
                     continue
                 }
-                idx = index(line, "/*")
-                if (idx == 0) { out = out line; break }
-                out = out substr(line, 1, idx - 1)
-                in_comment = 1
-                line = substr(line, idx + 2)
+                if (in_str || in_chr) {
+                    out = out c
+                    if (c == "\\") {
+                        out = out substr(line, i + 1, 1)
+                        i += 2
+                        continue
+                    }
+                    if (in_str && c == "\"") in_str = 0
+                    else if (in_chr && c == "\047") in_chr = 0
+                    i++
+                    continue
+                }
+                if (c2 == "/*") { in_comment = 1; i += 2; continue }
+                if (c2 == "//") break
+                out = out c
+                if (c == "\"") in_str = 1
+                else if (c == "\047") in_chr = 1
+                i++
             }
-            idx = index(out, "//")
-            if (idx > 0) out = substr(out, 1, idx - 1)
             return out
         }
         # Tracks `#if 0` regions on already-comment-stripped text. Returns 1 for
@@ -904,6 +949,11 @@ _usa_test_owned() {
             }
             if (t ~ /^#[ \t]*(else|elif)([^A-Za-z0-9_]|$)/) {
                 if (dead_depth == cond_depth) dead_depth = 0
+                # A literal `#elif 0` opens a dead branch exactly like `#if 0`;
+                # every other #elif condition stays live (this is a greppable
+                # gate, not a preprocessor).
+                if (dead_depth == 0 && t ~ /^#[ \t]*elif[ \t]+0[ \t]*$/)
+                    dead_depth = cond_depth
                 return 1
             }
             return 0
@@ -985,6 +1035,12 @@ else
         >"$_r22_dir/test_blockcomment.c"
     printf '/* USA-77 owned via the LIVE else branch of an #if 0. */\nvoid test_if0_else(void) {\n}\nvoid run_all(void) {\n#if 0\n    test_never();\n#else\n    RUN_TEST(test_if0_else);\n#endif\n}\n' \
         >"$_r22_dir/test_if0_else.c"
+    printf '/* USA-77 tagged, but its registration is in an #elif 0 branch. */\nvoid test_elif0(void) {\n}\nvoid run_all(void) {\n#if 0\n    test_never();\n#elif 0\n    RUN_TEST(test_elif0);\n#endif\n}\n' \
+        >"$_r22_dir/test_elif0.c"
+    printf '/* USA-77 owned; a string literal above it merely CONTAINS a comment opener. */\nvoid test_string_open(void) {\n}\nvoid run_all(void) {\n    const char *glob = "dir/*";\n    RUN_TEST(test_string_open);\n}\n' \
+        >"$_r22_dir/test_string_open.c"
+    printf '/* USA-77 owned; the registration shares its line with a UNC string literal. */\nvoid test_string_slashes(void) {\n}\nvoid run_all(void) {\n    note("//server/share"); RUN_TEST(test_string_slashes);\n}\n' \
+        >"$_r22_dir/test_string_slashes.c"
     printf '/* USA-77: the test that owned this was deleted. */\n' \
         >"$_r22_dir/test_orphan.c"
     printf 'void helper(void) { /* USA-77 in production prose */ }\n' \
@@ -1008,6 +1064,12 @@ else
         hit "R22-selftest" "R22 credited a commented-out registration"
     [ "$(_usa_test_owned "$_r22_dir/test_if0_else.c")" = "USA-77" ] ||
         hit "R22-selftest" "R22 dropped a registration in the LIVE #else branch of an #if 0"
+    [ -n "$(_usa_test_owned "$_r22_dir/test_elif0.c")" ] &&
+        hit "R22-selftest" "R22 credited a registration inside an #elif 0 branch"
+    [ "$(_usa_test_owned "$_r22_dir/test_string_open.c")" = "USA-77" ] ||
+        hit "R22-selftest" "R22 read a comment opener inside a string literal as a real comment"
+    [ "$(_usa_test_owned "$_r22_dir/test_string_slashes.c")" = "USA-77" ] ||
+        hit "R22-selftest" "R22 read // inside a string literal as a line comment"
     [ -n "$(_usa_test_owned "$_r22_dir/test_orphan.c")" ] &&
         hit "R22-selftest" "R22 credited a tag whose owning test disappeared"
     [ -n "$(_usa_test_owned "$_r22_dir/prod.c")" ] &&

@@ -337,7 +337,14 @@ typedef struct tp_exporter {
  * mixed-set window and its error names the file. `output_files` is the target's
  * complete enumerated output list (the run layer's collect step); an output the
  * writer produced but the list missed is a structured error, never a silent
- * drop.
+ * drop. The leftover match is BYTE-EXACT, including case: an enumerated output
+ * name must equal the name the writer produced byte for byte, or the same file
+ * is reported both as a missing listed output and as an unlisted leftover.
+ *
+ * The leftover scan is itself part of the guarantee, so a staging directory that
+ * cannot be opened or cannot be enumerated to its end fails CLOSED: nothing is
+ * promoted and the caller gets a structured error, because an unverified set is
+ * exactly the set this preflight exists to reject.
  *
  * An output whose path cannot be mapped into the staging dir bypasses staging
  * and keeps the per-file atomic write, so it is NOT covered by the whole-set
@@ -346,7 +353,11 @@ typedef struct tp_exporter {
  * deeper subdirectory), or its staged form would exceed the path limit. The
  * bypass is never silent -- each occurrence appends a
  * TP_NOTICE_FIELD_SET_ATOMICITY / TP_NOTICE_REASON_PATH_NOT_STAGEABLE notice
- * naming the file. The staging dir is removed on every path. */
+ * naming the file. A bypassed output IS already published when a later preflight
+ * failure fires, so those errors report how many bypassed outputs went out
+ * individually instead of claiming the existing outputs are untouched; the
+ * staged half of the set is still all-or-nothing. The staging dir is removed on
+ * every path. */
 tp_status tp_export_write_and_publish_set(const tp_exporter *exp,
                                           const tp_export_prepared *prep,
                                           const char *out_path_base,

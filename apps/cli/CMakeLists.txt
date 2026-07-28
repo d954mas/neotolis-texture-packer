@@ -45,9 +45,7 @@ set_target_properties(ntpacker_inspect_fault PROPERTIES RUNTIME_OUTPUT_DIRECTORY
 # output render failed".
 add_executable(ntpacker_output_fault ${_ntpacker_sources})
 ntpacker_configure_target(ntpacker_output_fault)
-target_compile_definitions(ntpacker_output_fault PRIVATE
-    NTPACKER_CLI_OUT_FAULT_SEAM=1
-    TP_SB_ALLOC_FAULT_SEAM=1)
+target_compile_definitions(ntpacker_output_fault PRIVATE TP_SB_ALLOC_FAULT_SEAM=1)
 set_target_properties(ntpacker_output_fault PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CLI_OUTPUT_DIR}")
 
@@ -90,7 +88,6 @@ add_test(NAME cli_mutation_output_oom_contract COMMAND ${CMAKE_COMMAND}
     -DTD=${CMAKE_CURRENT_SOURCE_DIR}/testdata
     -DWORK=${CMAKE_CURRENT_BINARY_DIR}/cli_mutation_output_oom_contract
     -P "${CMAKE_CURRENT_SOURCE_DIR}/cli_mutation_output_oom_contract.cmake")
-
 
 # Deterministic adapter fixture for the post-publication durability notice. The
 # fault itself is core-tested; this executable pins only the CLI wire payload.
@@ -143,7 +140,9 @@ set(_run "${CMAKE_CURRENT_SOURCE_DIR}/cli_run_expect.cmake")
 # payloads), which stayed uninjectable while the fault seam was a per-builder
 # poison. Every one of them must exit 1 with the allocation-free structured
 # fallback on stdout and nothing on stderr -- never a crash or a truncated
-# payload.
+# payload. The assertion is the exact golden (same mechanism as
+# cli_inspect_index_fault), not a prefix regex: a builder that emitted the
+# fallback and then appended partial payload bytes would satisfy a prefix.
 foreach(_oom_case
         "inspect|inspect ${CMAKE_CURRENT_SOURCE_DIR}/testdata/clean.ntpacker_project --json"
         "validate|validate ${CMAKE_CURRENT_SOURCE_DIR}/testdata/clean.ntpacker_project --json"
@@ -155,7 +154,8 @@ foreach(_oom_case
     add_test(NAME cli_${_oom_name}_output_oom_contract COMMAND ${CMAKE_COMMAND}
         -DEXE=$<TARGET_FILE:ntpacker_output_fault> -DEXPECT=1
         "-DARGS=${_oom_args}"
-        "-DMATCH=^{\"schema\":1,\"error\":{\"id\":\"internal\"}}"
+        -DOUTFILE=${CMAKE_CURRENT_BINARY_DIR}/cli_${_oom_name}_output_oom.json
+        -DEXPECT_FILE=${CMAKE_CURRENT_SOURCE_DIR}/testdata/output-oom.expected.json
         -DEXPECT_STDERR_EMPTY=ON -P "${_run}")
 endforeach()
 

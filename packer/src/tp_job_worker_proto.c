@@ -817,8 +817,13 @@ tp_status tp_job_worker_proto_decode_response(const uint8_t *bytes, size_t len,
   out->state = (tp_session_job_state)state;
   out->status = (tp_status)wire_status;
   memcpy(&out->elapsed_ms, &elapsed_bits, sizeof out->elapsed_ms);
+  /* A diagnostic path rides in a fixed TP_FILE_IO_PATH_MAX buffer, so its real
+   * bound is that buffer minus the NUL -- NOT the much larger identity-path cap
+   * a general path carries. State the real limit here so the outer check reads
+   * as the contract instead of deferring to copy_fixed_text's capacity. */
   if (!valid_job_kind(out->kind) || out->request_id == 0U ||
-      !isfinite(out->elapsed_ms) || out->elapsed_ms < 0.0) {
+      !isfinite(out->elapsed_ms) || out->elapsed_ms < 0.0 ||
+      (size_t)error_path_len > TP_FILE_IO_PATH_MAX - 1U) {
     status = tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
                           "tp_job_worker_proto: invalid response fields");
     goto fail;
@@ -877,7 +882,7 @@ tp_status tp_job_worker_proto_decode_response(const uint8_t *bytes, size_t len,
         !valid_status(freshness_status) ||
         preview_len > TP_JOB_WORKER_PROTO_MAX_EXPORTER_ID_BYTES ||
         fresh_message_len > TP_JOB_WORKER_PROTO_MAX_ERROR_BYTES ||
-        fresh_path_len > TP_JOB_WORKER_PROTO_MAX_PATH_BYTES ||
+        (size_t)fresh_path_len > TP_FILE_IO_PATH_MAX - 1U ||
         !valid_file_phase(fresh_phase) ||
         pack->name_count > TP_JOB_WORKER_PROTO_MAX_NAME_ENTRIES ||
         (size_t)artifact_path_len > TP_JOB_WORKER_PROTO_MAX_PATH_BYTES ||

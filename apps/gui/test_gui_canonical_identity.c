@@ -1490,6 +1490,19 @@ void test_preview_result_read_never_moves_the_active_pack_pin(void) {
     TEST_ASSERT_NOT_NULL(gui_pack_result(0));
     arm_preview_on_atlas(0);
 
+    /* POSITIVE CONTROL, before anything is switched: on its own atlas the armed
+     * animation DOES resolve its frame. Without this the -1 asserted further down
+     * is satisfied by any resolution failure at all -- a fixture whose key never
+     * matched would "pass" the guard it is supposed to be proving. */
+    update_preview();
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        1, s_preview_frame_count,
+        "the armed one-frame animation must resolve against its own packed atlas");
+    TEST_ASSERT_TRUE_MESSAGE(
+        s_canvas.anim_sprite >= 0,
+        "the resolved frame must reach the canvas while the view still shows "
+        "the player's atlas");
+
     /* The view moves to the second atlas and packs it: that atlas now owns the
      * active pin while the player is still armed on the first one. */
     gui_view_select_atlas(second_atlas_id);
@@ -1524,6 +1537,58 @@ void test_preview_result_read_never_moves_the_active_pack_pin(void) {
     gui_pack__test_result_cache_stats(&after);
     TEST_ASSERT_TRUE(tp_id128_eq(before.active_hash, after.active_hash));
     TEST_ASSERT_EQUAL_UINT64(before.evicted, after.evicted);
+}
+
+/* S22: an index-build OOM leaves the cached entry in place precisely so the
+ * canonical index is RETRIED (gui_pack.c: "the entry stays cached; the lookup
+ * index is retried"). The player's frame map used to cache the empty resolution
+ * that OOM produced as VALID -- every frame lookup had returned -1 -- so the
+ * retry became unreachable and the animation stayed frameless until a pack
+ * version or model generation change. */
+void test_preview_frame_map_is_not_cached_when_the_canonical_index_is_missing(
+    void) {
+    (void)add_coin_source_to_atlas(0);
+    TEST_ASSERT_EQUAL_INT(1, gui_project_add_atlas().visible_index);
+    const tp_id128 second_atlas_id = add_coin_source_to_atlas(1);
+    TEST_ASSERT_TRUE(gui_pack_init(TP_GUI_IDENTITY_TEST_DIR));
+
+    const tp_session_snapshot *snapshot = gui_project_snapshot();
+    const tp_snapshot_atlas *first = tp_session_snapshot_atlas_at(snapshot, 0);
+    TEST_ASSERT_NOT_NULL(first);
+    const tp_id128 first_id = first->id;
+    gui_view_select_atlas(first_id);
+    do_pack_blocking();
+    TEST_ASSERT_NOT_NULL(gui_pack_result(0));
+    arm_preview_on_atlas(0);
+
+    /* The second atlas takes the pin WITHOUT moving the view, so the player is
+     * still on the atlas the canvas shows but that atlas is no longer resident:
+     * the next rebuild is what has to reside it -- and build its index. */
+    gui_view_select_atlas(second_atlas_id);
+    do_pack_blocking();
+    TEST_ASSERT_NOT_NULL(gui_pack_result(1));
+    gui_view_select_atlas(first_id);
+    TEST_ASSERT_TRUE(s_preview_active);
+
+    gui_pack__test_fail_next_ref_index_build();
+    update_preview();
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        0, s_preview_frame_count,
+        "no canonical index means nothing resolves this frame");
+    TEST_ASSERT_EQUAL_INT(-1, s_canvas.anim_sprite);
+    TEST_ASSERT_NOT_NULL_MESSAGE(
+        gui_pack_result_peek(0),
+        "the failed index build must leave the packed entry cached");
+
+    /* THE POINT: nothing about the model or the pack changed, so the only way the
+     * frame can come back is a retried rebuild -- which an empty map cached as
+     * valid would have made impossible. */
+    update_preview();
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        1, s_preview_frame_count,
+        "the rebuild must be retried after an index-build failure, not cached "
+        "away as a valid empty frame map");
+    TEST_ASSERT_TRUE(s_canvas.anim_sprite >= 0);
 }
 
 /* S21: adding an atlas selects it, so it is an atlas SWITCH and stops the player
@@ -2505,6 +2570,8 @@ int main(int argc, char **argv) {
     RUN_TEST(test_evicted_pack_result_reads_as_unpacked_without_autopacking);
     RUN_TEST(test_failed_resident_switch_never_serves_the_evicted_resident);
     RUN_TEST(test_preview_result_read_never_moves_the_active_pack_pin);
+    RUN_TEST(
+        test_preview_frame_map_is_not_cached_when_the_canonical_index_is_missing);
     RUN_TEST(test_adding_an_atlas_stops_the_armed_animation_preview);
     RUN_TEST(test_publish_index_oom_reports_the_typed_oom_status);
     RUN_TEST(test_restored_pack_result_keeps_its_freshness_verdict);

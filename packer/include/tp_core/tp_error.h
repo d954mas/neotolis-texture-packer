@@ -7,6 +7,7 @@
 
 #include <stdarg.h>
 #include <stdio.h>
+#include <string.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -180,6 +181,48 @@ typedef union tp_error {
 #define TP_PRINTF_ATTR(fmt_idx, args_idx)
 #endif
 
+/* snprintf/vsnprintf truncate on a BYTE boundary, so a message or path that
+ * overflows its fixed buffer can end mid-codepoint. Downstream that one dangling
+ * byte is not a cosmetic defect: the worker wire validator rejects the whole
+ * payload as invalid UTF-8 and the host loses the entire diagnostic. Truncation
+ * is fixed HERE, at the only producer, by dropping a trailing incomplete
+ * sequence: walk back over the continuation bytes (0b10xxxxxx, at most three) to
+ * their lead byte and cut at the lead unless the sequence is complete. A no-op
+ * for ASCII and for any text that fit. */
+static inline void tp_error_trim_partial_utf8(char *text) {
+    const size_t length = strlen(text);
+    size_t trailing = 0U;
+    while (trailing < 3U && trailing < length &&
+           ((unsigned char)text[length - 1U - trailing] & 0xC0U) == 0x80U) {
+        trailing++;
+    }
+    if (trailing == length) {
+        /* Continuation bytes all the way down: there is no lead byte to keep. */
+        if (length > 0U) {
+            text[0] = '\0';
+        }
+        return;
+    }
+    const size_t lead_index = length - 1U - trailing;
+    const unsigned char lead = (unsigned char)text[lead_index];
+    if (lead < 0x80U) {
+        /* An ASCII byte is complete on its own; anything after it is stray. */
+        text[length - trailing] = '\0';
+        return;
+    }
+    size_t width = 0U;
+    if ((lead & 0xE0U) == 0xC0U) {
+        width = 2U;
+    } else if ((lead & 0xF0U) == 0xE0U) {
+        width = 3U;
+    } else if ((lead & 0xF8U) == 0xF0U) {
+        width = 4U;
+    }
+    if (width != trailing + 1U) {
+        text[lead_index] = '\0';
+    }
+}
+
 /* Formats into err->msg (if err != NULL) and returns status, so call sites can
  * write `return tp_error_set(err, TP_STATUS_X, "...", ...);` in one line. */
 static inline tp_status tp_error_set(tp_error *err, tp_status status, const char *fmt, ...) TP_PRINTF_ATTR(3, 4);
@@ -194,6 +237,7 @@ static inline tp_status tp_error_set(tp_error *err, tp_status status, const char
             va_start(args, fmt);
             (void)vsnprintf(err->msg, sizeof(err->msg), fmt, args);
             va_end(args);
+            tp_error_trim_partial_utf8(err->msg);
         } else {
             err->msg[0] = '\0';
         }
@@ -212,12 +256,14 @@ static inline tp_status tp_error_set_file_io(
         err->file_io.phase = phase;
         (void)snprintf(err->file_io.path, sizeof err->file_io.path, "%s",
                        path ? path : "");
+        tp_error_trim_partial_utf8(err->file_io.path);
         err->file_io.native_code = native_code;
         if (fmt) {
             va_list args;
             va_start(args, fmt);
             (void)vsnprintf(err->msg, sizeof(err->msg), fmt, args);
             va_end(args);
+            tp_error_trim_partial_utf8(err->msg);
         } else {
             err->msg[0] = '\0';
         }

@@ -418,6 +418,14 @@ static bool preview_frames_reserve(int needed) {
 }
 
 void gui_actions__preview_shutdown(void) {
+    /* Freeing the frame map while the player stays ARMED leaves preview state
+     * (active flag, animation ref, had-result) pointing at a session that is
+     * about to go away -- harmless at process exit, but it bleeds straight into
+     * the next case whenever the shutdown is a teardown. preview_stop reads only
+     * s_actions/s_canvas (and merely NULL-tests s_canvas.result), so it is safe
+     * ahead of the pack/session shutdowns that follow this one, and it is a pure
+     * assignment sequence, so calling it twice costs nothing. */
+    preview_stop();
     free(s_actions.preview_frames.indices);
     memset(&s_actions.preview_frames, 0, sizeof s_actions.preview_frames);
 }
@@ -429,6 +437,28 @@ static void preview_frames_rebuild(const tp_session_snapshot *snapshot,
                                    uint64_t result_version) {
 #ifdef NTPACKER_GUI_SELFTEST
     s_actions.preview_frame_work.rebuilds++;
+#endif
+    /* The canonical index this rebuild resolves through belongs to the RESIDENT
+     * atlas, and gui_pack builds it as part of becoming resident. When that build
+     * fails on OOM the entry stays cached on purpose, so the index is RETRIED --
+     * but every lookup until then returns -1. Resolving the frames anyway would
+     * produce an EMPTY map and cache it as valid, which turns "retried" into
+     * "never again until the version or model generation changes". So the missing
+     * index ends the rebuild here, with the map left invalid: nothing is cached
+     * and the next frame tries again.
+     *
+     * This is the one residency-taking read of the rebuild, and it costs nothing
+     * extra: the per-frame lookups below each take the same read, and
+     * update_preview only reaches a rebuild for the atlas the canvas is bound to,
+     * so it is the resident fast path -- never the residency flip S21 removed
+     * from the every-frame path. `result` (the caller's peek of THIS atlas) is
+     * unaffected either way: making an atlas resident cannot evict itself. */
+    if (!gui_pack_result(atlas_index)) {
+        s_actions.preview_frames.count = 0;
+        s_actions.preview_frames.valid = false;
+        return;
+    }
+#ifdef NTPACKER_GUI_SELFTEST
     s_actions.preview_frame_work.frame_span_lookups++;
 #endif
     int frame_count = 0;
@@ -466,6 +496,10 @@ static void preview_frames_rebuild(const tp_session_snapshot *snapshot,
     s_actions.preview_frames.count = count;
     s_actions.preview_frames.ref_w = ref_w;
     s_actions.preview_frames.ref_h = ref_h;
+    /* Zero resolved frames is cacheable from here: the index was available, so
+     * "no packed region for these frames" is a real model/pack answer, not a
+     * missing lookup table, and re-deriving it every frame is exactly the work
+     * this map exists to avoid. */
     s_actions.preview_frames.valid = complete;
 }
 

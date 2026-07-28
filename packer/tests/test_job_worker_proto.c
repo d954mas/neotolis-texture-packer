@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "tp_core/tp_utf8.h"
 #include "tp_job_worker_internal.h"
 #include "unity.h"
 
@@ -213,13 +214,14 @@ void test_pack_terminal_roundtrip_owns_artifact_path_and_utf8_name_map(void) {
   free(bytes);
 }
 
-/* The host does not keep the decoded response: job_publish_response struct-copies
- * the terminal error out (tp_job.c:648) and tp_session_job_result_compact copies
- * the Pack freshness error the same way (:702), and only then is the response the
- * decoder owns freed. Both copies outlive that free, so this test runs the exact
- * copy-then-free sequence and asserts the paths still read back byte for byte --
- * a path that ever becomes a borrow again fails HERE instead of in a host that
- * reports a freed buffer. */
+/* The host does not keep the decoded response: job_copy_pack_metadata
+ * struct-copies the Pack freshness error out (tp_job.c:648) and
+ * job_publish_response struct-copies the terminal error the same way (:702).
+ * tp_session_job_result_compact copies nothing -- it destroys the worker process
+ * and with it the response frame the decoder's buffers came from. Both copies
+ * outlive that teardown, so this test runs the exact copy-then-free sequence and
+ * asserts the paths still read back byte for byte -- a path that ever becomes a
+ * borrow again fails HERE instead of in a host that reports a freed buffer. */
 void test_decoded_error_paths_survive_the_response_free(void) {
   tp_job_worker_proto_response input = sample_pack_response();
   input.error.file_io.phase = TP_FILE_IO_PHASE_TEMP_WRITE;
@@ -589,6 +591,56 @@ void test_encode_rejects_an_error_path_past_the_context_bound(void) {
   TEST_ASSERT_NULL(bytes);
 }
 
+/* snprintf truncates on a BYTE boundary, so a path or message longer than the
+ * fixed diagnostic buffer can end mid-codepoint. One dangling byte is not a
+ * cosmetic defect on this wire: the encoder validates UTF-8 and refuses the
+ * WHOLE response, so the host would lose every diagnostic instead of a few
+ * characters of a path. tp_error_set/tp_error_set_file_io drop the incomplete
+ * trailing sequence at the producer, so what they store is always well-formed
+ * and always encodes. */
+void test_truncated_utf8_diagnostics_stay_encodable(void) {
+  /* 254 ASCII bytes then a 3-byte codepoint: the 255-byte prefix that fits keeps
+   * only the codepoint's lead byte. */
+  char path[TP_FILE_IO_PATH_MAX + 8U];
+  memset(path, 'p', TP_FILE_IO_PATH_MAX - 2U);
+  memcpy(path + TP_FILE_IO_PATH_MAX - 2U, "\xe2\x82\xac", 4U);
+
+  tp_error message_only = {{0}};
+  (void)tp_error_set(&message_only, TP_STATUS_BAD_PROJECT, "%s", path);
+  TEST_ASSERT_TRUE(tp_utf8_is_valid_c_string(message_only.msg));
+  TEST_ASSERT_EQUAL_UINT64((uint64_t)(TP_FILE_IO_PATH_MAX - 2U),
+                           (uint64_t)strlen(message_only.msg));
+
+  tp_error stored = {{0}};
+  TEST_ASSERT_EQUAL_INT(
+      TP_STATUS_FILE_IO_FAILED,
+      tp_error_set_file_io(&stored, TP_FILE_IO_PHASE_TEMP_OPEN, path, 2, "%s",
+                           path));
+  TEST_ASSERT_TRUE(tp_utf8_is_valid_c_string(stored.file_io.path));
+  TEST_ASSERT_TRUE(tp_utf8_is_valid_c_string(stored.msg));
+  TEST_ASSERT_EQUAL_UINT64((uint64_t)(TP_FILE_IO_PATH_MAX - 2U),
+                           (uint64_t)strlen(stored.file_io.path));
+
+  tp_job_worker_proto_response response = sample_pack_response();
+  response.error = stored;
+  uint8_t *bytes = NULL;
+  size_t length = 0U;
+  tp_error err = {{0}};
+  TEST_ASSERT_EQUAL_INT_MESSAGE(
+      TP_STATUS_OK,
+      tp_job_worker_proto_encode_response(&response, &bytes, &length, &err),
+      err.msg);
+  tp_job_worker_proto_response output;
+  TEST_ASSERT_EQUAL_INT_MESSAGE(
+      TP_STATUS_OK,
+      tp_job_worker_proto_decode_response(bytes, length, &output, &err),
+      err.msg);
+  TEST_ASSERT_EQUAL_STRING(stored.file_io.path, output.error.file_io.path);
+  TEST_ASSERT_EQUAL_STRING(stored.msg, output.error.msg);
+  tp_job_worker_proto_response_free(&output);
+  free(bytes);
+}
+
 /* The wire artifact size is a u64 from another process; decode must reject one
  * past the cap instead of handing the host an allocation it cannot make. */
 /* Encodes a Pack response whose artifact_size is `size` and nothing else. */
@@ -635,6 +687,7 @@ void test_decoded_artifact_size_past_the_cap_is_rejected(void) {
       TP_STATUS_OK,
       tp_job_worker_proto_decode_response(bytes, length, &out, &err), err.msg);
   TEST_ASSERT_EQUAL_UINT64(marker, out.pack.artifact_size);
+  tp_job_worker_proto_response_free(&out);
 
   put_u64_le(bytes + offset, TP_JOB_WORKER_PROTO_MAX_ARTIFACT_BYTES + 1U);
   TEST_ASSERT_EQUAL_INT(
@@ -675,6 +728,7 @@ void test_decoded_request_without_host_pid_is_rejected(void) {
       TP_STATUS_OK,
       tp_job_worker_proto_decode_request(bytes, length, &out, &err), err.msg);
   TEST_ASSERT_EQUAL_UINT32(0x11223344U, out.host_pid);
+  tp_job_worker_proto_request_free(&out);
 
   put_u32_le(bytes + offset, 0U);
   TEST_ASSERT_EQUAL_INT(
@@ -728,6 +782,7 @@ int main(void) {
   RUN_TEST(test_invalid_utf8_name_is_rejected_on_encode);
   RUN_TEST(test_encode_caps_reject_oversized_project_names_counts_and_path);
   RUN_TEST(test_encode_rejects_an_error_path_past_the_context_bound);
+  RUN_TEST(test_truncated_utf8_diagnostics_stay_encodable);
   RUN_TEST(test_decoded_artifact_size_past_the_cap_is_rejected);
   RUN_TEST(test_decoded_request_without_host_pid_is_rejected);
   RUN_TEST(test_stream_cumulative_and_progress_count_caps_fail_closed);
