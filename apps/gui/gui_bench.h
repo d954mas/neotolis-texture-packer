@@ -7,7 +7,7 @@
  * GUI interactions (row rebuild, filter, every sort key, selection, edit + undo/redo, refresh) and prints
  * machine-readable `bench_perf ...` lines, asserts the non-blocking hard-gates (async pack request +
  * refresh-does-not-mutate-revision), measures per-frame render time when a real GL context is present
- * (skipped under NTPACKER_GUI_HEADLESS), optionally mirrors the lines to a file, and quits.
+ * (skipped in a NTPACKER_GUI_HEADLESS_CI build), optionally mirrors the lines to a file, and quits.
  *
  * Timing is advisory (a slow number never fails the run -- D decides budgets); only an invariant
  * violation or a hard fixture-load failure makes the process exit non-zero (gui_bench_exit_code).

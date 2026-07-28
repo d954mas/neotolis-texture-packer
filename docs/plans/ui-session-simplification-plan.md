@@ -382,6 +382,44 @@ structured rejection without breaking the FSM (the queue stays OPEN, unstaged
 and drainable and admits work again; the session publishes nothing, leaves the
 refused job unreserved, and admits + observes it once ids are available).
 
+**S15 — one string builder, one sanitization policy.** Three byte-similar JSON
+writers became one. `packer/src/tp_sb.h` moved to `packer/include/tp_core/tp_sb.h`
+(the CLI needs it and `apps/` must not reach into `packer/src`; it is not an
+`*_internal.h`, so the R18 registry needs no row). `tp_project_write.c`'s shadow
+`typedef struct tp_sb` plus its nine same-named statics are gone, and
+`apps/cli/cli_out.c`'s `cli_sb` machinery with them — `cli_out.h`'s "revisited in
+B3" note is discharged. The writer-specific state the project writer used to keep
+inside its builder (`absolute_sources`, `path_context`) is now a two-field
+`tp_write_ctx` passed beside `tp_sb`, so the shared builder stays one general
+writer; its `too_large` flag is the shared `limit_exceeded`, and its allocation /
+peak-capacity probes ride the shared `allocation_count` hook plus a final
+`cap == peak` read.
+
+Sanitization policy (owner decision): invalid UTF-8 in machine OUTPUT is replaced
+with U+FFFD so an emitted document is always decodable, and that behavior — ported
+verbatim from `cli_sb_json_str` — is now THE behavior of `tp_sb_json_string`. It
+therefore covers the CLI `--json` payloads (unchanged), the json-neotolis exporter,
+and the operation/transaction encoders. The persisted round-trip path is the
+deliberate exception: every string `.ntpacker_project` emits is UTF-8-validated by
+`tp_project_validate_canonical` before the first byte, so `tp_project_write.c`
+routes them through a local `tp_emit_json_string()` that `NT_ASSERT`s validity
+instead of laundering corruption into the user's file. The one string with no
+upstream admission — a checkpoint's absolute source path, joined against an
+OS-supplied base dir — is refused as a structured `OUT_OF_BOUNDS` there rather
+than reaching the assert. Defold's `pb_string` keeps its own escaper: it writes
+protobuf text with octal escapes, not JSON.
+
+Two divergences were reconciled rather than preserved: the shared builder reads
+`limit == 0` as "unlimited" (a documented `tp_encode_internal.h` contract) while
+the project writer read it as a hard zero budget, so `tp_write_begin()` poisons
+the builder up front for a zero cap; and the shared `oom`-vs-`limit_exceeded`
+classification of a `SIZE_MAX`-scale length overflow differs from the old
+`too_large`, in a branch unreachable under any real byte limit. `tp_error.h`'s
+twin 43-case `tp_status_str` / `tp_status_id` switches collapsed into one
+`TP_STATUS_LIST` X-macro (prose and machine token on one row, both switches
+generated, still `default`-less so `-Wswitch` catches a new enum value); all 86
+strings verified byte-identical against the pre-refactor header.
+
 **S16 — one deferred-intent queue.** The GUI stored "do this at the next
 between-frame boundary" FOUR ways: 17 mutable extern globals in
 `gui_actions.h`, 17 `s_actions.pending_*` fields, a `target_edit_intent[]`
@@ -493,6 +531,141 @@ enumerations removed ~165 lines; the typed mechanism that replaces them costs
 requires and that replaced nothing). Per AGENTS.md the measurement is inventory,
 not a gate; the deliverable is that a new field is now one table row plus a GUI
 row plus a widget, where it used to be seven edits in seven files.
+
+**S18 — `tp_pack_result_cache` wired into the GUI Pack path.** Owner decision:
+«подключить». The module was fully built and tested with ZERO production callers;
+the GUI meanwhile kept up to 64 Pack results resident forever, one per atlas, each
+pinning a whole page arena through its session receipt. Native results now live in
+one session-lifetime store behind `gui_pack`: the atlas on screen is the store's
+PINNED active result, every other packed atlas is an INACTIVE entry in a
+byte-budget LRU, switching away demotes instead of dropping, and switching back is
+a store hit that never repacks.
+
+**(a) Budget.** Master spec §10.4 names none — "concrete budgets and compression
+details are implementation policy" — so `GUI_PACK_RESULT_BUDGET_BYTES` in
+`gui_pack.c` is that policy and the only place it is written down: **256 MiB**,
+measured in RAW RGBA8 page bytes. At the owner's calibration scale (30 atlases /
+5000 sprites, §61.1) a 2048² page is 16 MiB, so the budget keeps ~16 recently
+visited atlas pages warm — nobody working across a handful of atlases ever
+repacks — while a pathological 4096² page (64 MiB) still leaves room for four.
+Retaining everything, the pre-S18 behaviour, is 30× that at the same scale with no
+ceiling. The true resident ceiling is budget + the active pin + the
+highest-sequence entry, both exempt from eviction by the store contract
+(decision 0004).
+
+**(b) What is cached: the retained result owner, not bytes, not thumbnails.**
+This is the packet's one real design decision, because the module as built stores
+the serialized `.ntpack` artifact and ADOPTS a raw `tp_arena` — and the GUI has
+neither. The host deletes the worker artifact the moment it inflates it (§10.6,
+packet P3/S9: "transient private handoff, not a cache"), and the Pack arena
+belongs to the refcounted `tp_live_job` receipt, not to the frontend. Feeding the
+module its serialized shape would have meant retaining the artifact bytes on every
+job (a memory regression in a lifecycle S9 deliberately tightened, plus 2× the
+page bytes for the active result) *and* would still not have given the store an
+arena it may destroy. So `tp_pack_result_cache` gained a second, additive entry
+point instead: **`tp_pack_result_cache_store_retained(...,  result,
+retained_bytes, pin_owner, pin_release, err)`**, plus
+`tp_pack_result_cache_forget(hash)`. A retained-pin entry keeps its decompressed
+`tp_result` for its whole life and is released ONLY through the caller's hook —
+the GUI passes `tp_session_job_result::_owner` and a hook that calls
+`tp_session_job_result_destroy`, so the Pack arena is still destroyed exactly once
+and the store never touches an arena it does not own. Serialized and retained
+entries mix freely in one store and one budget; every existing serialized
+behaviour (inflate on hit, corrupt-entry containment, zero-budget max-sequence
+exemption) is unchanged and its eight original cases are untouched. The trade the
+retained flavour makes is a larger inactive footprint (decompressed, not the
+§10.4 compressed/serialized representation) for zero restore work and STABLE
+result pointers — switching back hands back literally the same `tp_result *`.
+**Thumbnails (§10.4/§52.3/§61.1) are explicitly NOT in this packet**: cheap
+downscaled page thumbnails need new downscale/render code and a second budget
+class, and belong in the Project-overview canvas packet that will consume them.
+Recorded as follow-up, not silently dropped.
+
+**(c) Freshness.** Restore is freshness-NEUTRAL by construction: residency touches
+no input token, no `pack_input_hash`, and not the `preview_stale` bit, and the
+`tp_session_pack_job_result` freshness verdict is consumed at poll time before
+publication, never re-read from a slot. A result that was out of date when the
+atlas left the screen is still out of date when it comes back, pinned by
+`test_restored_pack_result_keeps_its_freshness_verdict`. Freshness is still the
+project-wide `preview_stale` boolean; retiring it for hash-keyed per-atlas
+current/stale is master-spec-implementation-plan item 5 and stays out of scope.
+
+Store key is the canonical `pack_input_hash`, which is what makes a later
+Undo/Redo probe (`_contains`) find the exact result. A repack under a NEW hash
+leaves the previous entry in the LRU on purpose — that IS the warm Undo/Redo
+cache, and the budget bounds it. Two edges are handled explicitly: a NIL hash
+(core could not read a source) would be a shared key, so such a result is filed
+under the atlas' own stable ID instead; and because the hash is content-addressed,
+two atlases whose result would be byte-identical legitimately share one entry, so
+a slot only forgets an entry no other live slot is still bound to.
+
+Presentation: `gui_pack`'s per-atlas slots stopped owning result memory (they are
+now the atlas→cache-key binding plus the version consumers watch), and the
+canonical sprite index moved from per-slot to ONE index following the one resident
+result — an atlas switch rebuilds it once instead of every atlas carrying its own.
+No view changed, no call site changed, and no observation coupling was added: the
+store, the budget and residency are invisible above `gui_pack.h`. The one contract
+a caller must know is documented there — an EVICTED result reads as "not packed"
+(NULL, version 0) exactly like one that was never packed, which is the §10.4 cache
+miss: the preview is out of date, the user runs Pack, nothing auto-packs.
+
+Battery: 153/153 debug, 152/152 release (delta 0 — the new cases are Unity cases
+inside `tp_pack_result_cache` and `tp_gui_canonical_identity`), zero warnings from
+every TU that includes the changed headers, `check_boundaries.sh` clean,
+standalone CMake checker clean, five frozen oracles byte-identical. Production LOC
+**+391** (+124 store, +50 public header, +217 GUI), tests +345. New cases: five in
+`test_pack_result_cache.c` (demote keeps the pin and re-hands the same pointer;
+LRU eviction releases the owner EXACTLY once and destroy does not re-release, via
+the release-counting pattern `test_session_job_observation` uses; re-store and
+forget each release the superseded pin once; a rejected store leaves the pin with
+the caller; retained and serialized entries share one budget) and three in
+`test_gui_canonical_identity.c` (switch away → still held, inactive, budget-charged;
+switch back → identical result pointer with no Pack started; evicted → reads as
+unpacked and still never auto-packs; plus the freshness case above). Exactly-once
+release is asserted at the store level, where releases can be counted — a GUI test
+cannot fabricate a session receipt, so it asserts the eviction and the miss
+presentation instead.
+
+Deviation: the packet was framed as wiring the module in unchanged; it needed the
+additive retained-pin entry point above, because the module's serialized-plus-raw-
+arena contract is unreachable from a frontend. The alternative (plumbing the
+worker artifact bytes out of `tp_job.c` and retaining them per job) was rejected
+for the memory and lifecycle reasons stated in (b); if a memory serializer for
+`tp_result` ever lands, an inactive GUI entry can migrate to the serialized
+flavour with no change above `gui_pack`.
+
+**S19 — the last environment variable leaves the shipping binary.** Owner
+decision: headless is a CI *build* concern, not a runtime one, so the
+`NTPACKER_GUI_HEADLESS` environment variable is **deleted**. This supersedes the
+P1 packet line "`NTPACKER_GUI_HEADLESS` is a deployment flag and stays" and the
+S14 note "`NTPACKER_GUI_HEADLESS` untouched" above. New CMake option
+`NTPACKER_GUI_HEADLESS_CI` (default OFF, same shape as `NTPACKER_GUI_DEV_SEAMS`:
+option + compile definition on `ntpacker-gui`) turns the four former `getenv`
+sites into `#ifdef`s: `gui_selftest.c` (jump straight to the GL-independent
+phase 16, skipping visual phases 1-15 — xvfb+llvmpipe never brings the engine's
+materials/shaders/font atlas to "ready"), `gui_crash.c` ×2 (`gui_crash_install`
+and the `--selftest-crash` dev seam — ASan/UBSan install their OWN
+SIGSEGV/SIGABRT handlers on CI and overriding them would mask sanitizer
+reports), `gui_log_file.c` (no writable app-data dir needed), and `gui_bench.c`
+(`--bench-perf` frame timing has nothing to measure without GL). `<stdlib.h>`
+dropped from `gui_log_file.c`/`gui_bench.c` — `getenv` was its only user there.
+
+No preset sets the flag, so a local `native-tests-debug` selftest keeps the hard
+visual phases on a real GPU; CI passes `-DNTPACKER_GUI_HEADLESS_CI=ON` on the
+configure line of the two jobs that need it (`gui-selftest`, and `perf-probes`
+alongside its existing `-DNTPACKER_GUI_DEV_SEAMS=ON`) — job-local overrides, so
+`release.yml`, which uses the bare preset, is unaffected. Both `NTPACKER_GUI_HEADLESS`
+env lines are gone from `ci.yml`.
+
+Battery: 153/153 debug (visual phases confirmed still running locally),
+152/152 release, zero warnings from our targets with the flag both OFF and ON,
+`check_boundaries.sh` clean, standalone CMake checker clean. A byte scan of the
+release `ntpacker-gui.exe` finds zero occurrences of the string
+`NTPACKER_GUI_HEADLESS`, and the CI combo (`native-tests-debug` +
+`-DNTPACKER_GUI_HEADLESS_CI=ON`) was configured into a scratch build dir and its
+`ntpacker_gui_selftest` run green, proving the CI path without CI. The shipped
+`ntpacker-gui` now has **zero** environment-controlled behaviour, matching
+`ntpacker` (S-P1, per-binary seam macros).
 
 ## Decision records
 

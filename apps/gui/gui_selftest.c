@@ -733,12 +733,6 @@ static tp_session_snapshot *selftest_snapshot_open_buffer(
     return status == TP_STATUS_OK ? snapshot : NULL;
 }
 
-/* True when the CI job asked us to skip the GL render/layout visual phases: the GitHub Linux runner has
- * no real GL (xvfb+llvmpipe never brings the engine's materials/shaders/font atlas to "ready"), so those
- * phases read back an empty framebuffer / undeclared UI. The logical selftest (run_selftest) is unaffected
- * and stays hard headless; only the render-frame visual phases gate on this. Unset locally -> full run. */
-static bool selftest_headless(void) { return getenv("NTPACKER_GUI_HEADLESS") != NULL; }
-
 /* Writes a tiny valid 2x2 32-bit uncompressed TGA (stb decodes it) -- cheap procedural sprite. */
 static void write_tga_2x2(const char *path) {
     const unsigned char hdr[18] = {0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 2, 0, 32, 0x28};
@@ -1138,7 +1132,7 @@ void run_selftest(void) {
              * sprite, not the previously focused one. Build the row model + view for the packed atlas, seed
              * the stale-focus state a real click starts from (focus/anchor on a DIFFERENT row A), then assert
              * the click re-pins both onto 'a.png'. Headless-reachable (run_selftest), unlike the visual-phase
-             * select_row_for_region callsites which the NTPACKER_GUI_HEADLESS jump to phase 16 skips. */
+             * select_row_for_region callsites which the headless-CI jump to phase 16 skips. */
             NT_ASSERT(selftest_select_atlas(i_rotate));
             build_rows();
             build_view();
@@ -2851,7 +2845,7 @@ void run_selftest(void) {
 
     /* Async == blocking equivalence (spec req 4). Promoted out of visual phase 9
      * so headless CI actually runs it: phase 9 needs a GL context and is skipped
-     * under NTPACKER_GUI_HEADLESS, which left the whole worker-process Pack path
+     * in a NTPACKER_GUI_HEADLESS_CI build, which left the whole worker-process Pack path
      * unverified on CI. Needs no GL -- only the job transport and the result
      * metadata. Phase 9 keeps its copy for local GPU runs. */
     {
@@ -3044,18 +3038,18 @@ static void selftest_assert_no_overflow(float win_w, float win_h) {
 void selftest_pre_frame(void) {
     s_st_pf++;
     if (s_st_phase == 0) {
-        if (selftest_headless()) {
-            /* Headless CI: the GL render pipeline (materials/shaders/font atlas) never reaches "ready"
-             * under xvfb+llvmpipe (can_render stays false -> nothing rasterizes), so the render/layout
-             * VISUAL phases (1-15: outline pixel probe, touch-on-render, overflow/scissor sweeps) cannot
-             * run -- they read back the drawn framebuffer / declared UI bboxes. Jump straight to phase 16
-             * (async-shutdown-while-busy), which is GL-independent logic. These phases stay HARD locally
-             * on a real GPU (env unset). */
-            nt_log_info("SELFTEST: headless CI -> skipping GL render/layout phases 1-15 (no GL context)");
-            s_st_phase = 16;
-            s_st_pf = 0;
-            return;
-        }
+#ifdef NTPACKER_GUI_HEADLESS_CI
+        /* Headless CI build: the GL render pipeline (materials/shaders/font atlas) never reaches "ready"
+         * under xvfb+llvmpipe (can_render stays false -> nothing rasterizes), so the render/layout
+         * VISUAL phases (1-15: outline pixel probe, touch-on-render, overflow/scissor sweeps) cannot
+         * run -- they read back the drawn framebuffer / declared UI bboxes. Jump straight to phase 16
+         * (async-shutdown-while-busy), which is GL-independent logic. These phases stay HARD locally on
+         * a real GPU: no preset sets NTPACKER_GUI_HEADLESS_CI, only the CI job's configure line does. */
+        nt_log_info("SELFTEST: headless CI -> skipping GL render/layout phases 1-15 (no GL context)");
+        s_st_phase = 16;
+        s_st_pf = 0;
+        return;
+#endif
         if (s_st_pf < 12) {
             return; /* warm up: first scene + GL page uploads settle */
         }

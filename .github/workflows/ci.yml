@@ -116,8 +116,16 @@ jobs:
           echo "CMAKE_C_COMPILER_LAUNCHER=ccache" >> $GITHUB_ENV
           echo "CMAKE_CXX_COMPILER_LAUNCHER=ccache" >> $GITHUB_ENV
 
-      - name: Configure
-        run: cmake --preset native-tests-debug
+      # -DNTPACKER_GUI_HEADLESS_CI=ON is a job-local override, NOT a preset change: this runner has no
+      # real GL -- under xvfb+llvmpipe the engine's materials/shaders/font atlas never reach "ready"
+      # (can_render stays false, nothing rasterizes) -- so the self-test's render/layout VISUAL phases
+      # (outline pixel probe, touch-on-render, overflow sweeps) are compiled to a jump straight to the
+      # GL-independent phase 16. It also compiles out the crash handler (ASan+UBSan install their own
+      # signal handlers here) and the file log (no writable app-data dir). The full logical selftest
+      # (journal/undo/recovery/pack/export/rename) still runs under ASan+UBSan; the visual phases stay
+      # hard locally, where the bare native-tests-debug preset leaves this flag OFF.
+      - name: Configure (self-test preset, headless-CI compile flag ON)
+        run: cmake --preset native-tests-debug -DNTPACKER_GUI_HEADLESS_CI=ON
 
       # Every first-party test executable carries both sanitizer compile and link
       # flags. Build the complete Debug graph here so the core/session/recovery
@@ -135,11 +143,8 @@ jobs:
       # modern GL context with no GPU. LSan (part of ASan) is off for now -- the engine/GL driver
       # never free some allocations on a deliberate process exit, which would fail the job on benign
       # leaks; ASan memory-error detection + UBSan (the UAF class we want) stay on. Leak baseline TODO.
-      # NTPACKER_GUI_HEADLESS=1: this runner has no real GL -- under xvfb+llvmpipe the engine's
-      # materials/shaders/font atlas never reach "ready" (can_render stays false, nothing rasterizes),
-      # so the self-test's render/layout VISUAL phases (outline pixel probe, touch-on-render, overflow
-      # sweeps) are skipped. The full logical selftest (journal/undo/recovery/pack/export/rename) and the
-      # GL-independent async-shutdown phase still run under ASan+UBSan; the visual phases stay hard locally.
+      # The headless behaviour itself is compiled in at configure time (-DNTPACKER_GUI_HEADLESS_CI=ON
+      # above), not switched by an environment variable: the shipped binary reads none.
       - name: Run GUI self-test (headless, software GL, ASan+UBSan)
         if: runner.os == 'Linux'
         env:
@@ -147,7 +152,6 @@ jobs:
           GALLIUM_DRIVER: llvmpipe
           ASAN_OPTIONS: "detect_leaks=0"
           UBSAN_OPTIONS: "print_stacktrace=1"
-          NTPACKER_GUI_HEADLESS: "1"
         run: xvfb-run -a ctest --preset native-tests-debug -R ntpacker_gui_selftest --output-on-failure
 
   # U-01 perf harness (impl-plan §U). Two-tier gate: wall-clock latency is PRINTED (advisory --
@@ -198,8 +202,11 @@ jobs:
       # native-release preset (what release.yml ships) keeps the dev seams OFF so the
       # shipped exe carries no --shot/--bench-perf code or argv strings. This probe leg
       # is the one release-configured build that needs --bench-perf compiled in.
-      - name: Configure (native-release, self-test OFF, dev seams ON for --bench-perf)
-        run: cmake --preset native-release -DNTPACKER_GUI_DEV_SEAMS=ON
+      # -DNTPACKER_GUI_HEADLESS_CI=ON is the same shape: this runner has no real GL, so
+      # --bench-perf's per-frame render timing has nothing to measure (it reports
+      # skipped=headless) and the crash handler / file log stay out of the probe run.
+      - name: Configure (native-release, self-test OFF, dev seams + headless-CI ON for --bench-perf)
+        run: cmake --preset native-release -DNTPACKER_GUI_DEV_SEAMS=ON -DNTPACKER_GUI_HEADLESS_CI=ON
 
       - name: Build perf targets
         run: cmake --build --preset native-release --target tp_bench_foundation ntpacker-gui
@@ -216,7 +223,6 @@ jobs:
         env:
           LIBGL_ALWAYS_SOFTWARE: "1"
           GALLIUM_DRIVER: llvmpipe
-          NTPACKER_GUI_HEADLESS: "1"
         run: |
           set -e
           FIXTURE=examples/projects/bench-owner-scale.ntpacker_project

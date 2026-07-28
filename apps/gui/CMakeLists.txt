@@ -104,6 +104,19 @@ if(NTPACKER_GUI_SELFTEST)
     target_include_directories(ntpacker-gui PRIVATE "${CMAKE_SOURCE_DIR}/packer/src")
 endif()
 
+# CI headless build. ON turns three behaviours into compile-time facts instead of runtime environment
+# reads: the self-test skips its GL render/layout VISUAL phases 1-15 (the GitHub Linux runner has no
+# real GL -- under xvfb+llvmpipe the engine's materials/shaders/font atlas never reach "ready"), the
+# crash handler is not installed (the job runs under ASan+UBSan, whose OWN SIGSEGV/SIGABRT handlers
+# must not be overridden), and the file log is not installed (no writable app-data dir needed).
+# OFF by default and set by NO preset -- job-local on CI's configure line, exactly like the
+# NTPACKER_GUI_DEV_SEAMS override in the perf-probes job -- so a local native-tests-debug run keeps
+# the visual phases HARD on a real GPU and the shipped binary has ZERO env-controlled behaviour.
+option(NTPACKER_GUI_HEADLESS_CI "CI headless build: skip the GL visual self-test phases, the crash handler and the file log" OFF)
+if(NTPACKER_GUI_HEADLESS_CI)
+    target_compile_definitions(ntpacker-gui PRIVATE NTPACKER_GUI_HEADLESS_CI=1)
+endif()
+
 # Optional: register the GUI self-test exe as a ctest. It needs NTPACKER_GUI_SELFTEST=ON (the exe then
 # runs the headless self-test + auto-quits) AND a live GL context/display -- so it is OFF by default and
 # GL-less CI runners stay green. Enable locally with:

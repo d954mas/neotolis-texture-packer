@@ -14,7 +14,6 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 
 #include "time/nt_time.h" /* nt_time_now (monotonic seconds) */
@@ -175,7 +174,16 @@ static void bench_write_file(void) {
 }
 
 /* --- probes ------------------------------------------------------------------------------------ */
-static bool bench_headless(void) { return getenv("NTPACKER_GUI_HEADLESS") != NULL; }
+/* Compile-time (CMake option NTPACKER_GUI_HEADLESS_CI): the CI runner has no real GL, so the
+ * per-frame render timing has nothing to measure. Never an environment read -- the binary must not
+ * change behaviour based on the environment it is launched in. */
+static bool bench_headless(void) {
+#ifdef NTPACKER_GUI_HEADLESS_CI
+    return true;
+#else
+    return false;
+#endif
+}
 
 static void bench_sort_projection(row_sort_key key, const char *name) {
     gui_bench_samples samples;

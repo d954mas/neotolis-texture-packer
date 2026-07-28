@@ -12,9 +12,9 @@ extern "C" {
 #endif
 
 /* Install the file sink: resolve <app-data>/logs, rotate if the active log is already over cap, open
- * ntpacker.log for append, and register the nt_log sink. No-op (and NO files/dirs created) when
- * NTPACKER_GUI_HEADLESS is set -- CI runs the GUI selftest headless and must not need a writable
- * app-data dir. Also a graceful no-op if the dir/file can't be created. Call once, near main() start;
+ * ntpacker.log for append, and register the nt_log sink. Compiled to a no-op (and NO files/dirs
+ * created) in a NTPACKER_GUI_HEADLESS_CI build -- CI runs the GUI selftest headless and must not need
+ * a writable app-data dir. Also a graceful no-op if the dir/file can't be created. Call once, near main() start;
  * subsequent lines are then mirrored to the file. */
 void gui_log_file_install(void);
 

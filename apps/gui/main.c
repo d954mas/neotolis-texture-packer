@@ -931,8 +931,8 @@ static int gui_main_utf8(int argc, char *argv[]) {
      * FILE). Crash handler goes in FIRST (before the log) so it protects the log install + the build
      * line too. NOT literally main()'s first statement: a fault before this point falls back to the OS
      * default (identical to not-installed, no ntpacker dump) -- acceptable, since the value is catching
-     * interactive-session crashes, and the dev seams must stay clean. Both no-op under
-     * NTPACKER_GUI_HEADLESS and if the app-data dir can't be created; crash install must NOT call nt_log
+     * interactive-session crashes, and the dev seams must stay clean. Both compile to a no-op in a
+     * NTPACKER_GUI_HEADLESS_CI build and no-op if the app-data dir can't be created; crash install must NOT call nt_log
      * (see gui_crash_install). --selftest-crash is not a --shot arg, so install still runs for it. The
      * --bench-perf probe skips this block too: it must stay side-effect-free and never block on the
      * crash-report native modal. */

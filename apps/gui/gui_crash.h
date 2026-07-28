@@ -21,9 +21,9 @@ extern "C" {
  * in main(), right BEFORE the D1 log install, and only for a real windowed run (NOT the --shot
  * dev seam, which must stay side-effect-free). It is not literally main()'s first statement: a fault
  * before this point falls back to the OS default (same as not-installed) -- acceptable, since the value
- * is catching interactive-session crashes. No-op under NTPACKER_GUI_HEADLESS (CI runs the GUI selftest
- * under sanitizers whose own signal handlers must not be overridden, and headless must not need a
- * writable app-data dir). Degrades gracefully: if the crash dir can't be resolved/created it still
+ * is catching interactive-session crashes. Compiled to a no-op in a NTPACKER_GUI_HEADLESS_CI build (CI
+ * runs the GUI selftest under sanitizers whose own signal handlers must not be overridden, and headless
+ * must not need a writable app-data dir). Degrades gracefully: if the crash dir can't be resolved/created it still
  * installs the handler (a crash re-raises cleanly) but writes no dump/marker; it never aborts startup
  * and never calls nt_log (keep it callable before nt_engine_init). */
 void gui_crash_install(void);
@@ -43,8 +43,8 @@ void gui_crash_clear_marker(void);
 void gui_crash_report_prompt(void);
 
 /* Deliberately fault (deref a volatile null) to exercise the handler end-to-end. Behind the hidden
- * --selftest-crash dev arg ONLY -- never a shipped/live path. Self-guards to a no-op under
- * NTPACKER_GUI_HEADLESS so it can never fire in CI. Dev seam: declared and defined only
+ * --selftest-crash dev arg ONLY -- never a shipped/live path. Self-guards to a no-op in a
+ * NTPACKER_GUI_HEADLESS_CI build so it can never fire in CI. Dev seam: declared and defined only
  * under NTPACKER_GUI_DEV_SEAMS, like the argv branch that is its sole caller. */
 #ifdef NTPACKER_GUI_DEV_SEAMS
 void gui_crash_selftest(void);

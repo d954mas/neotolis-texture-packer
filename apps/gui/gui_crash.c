@@ -191,12 +191,13 @@ void gui_crash_install(void) {
     if (s_installed) {
         return;
     }
+#ifdef NTPACKER_GUI_HEADLESS_CI
     /* Headless CI (GUI selftest #50) runs under ASan+UBSan, which install their OWN SIGSEGV/SIGABRT
      * handlers to print their reports -- overriding those would mask sanitizer diagnostics. Headless
-     * also must not need a writable app-data dir. So skip entirely, exactly like gui_log_file_install. */
-    if (getenv("NTPACKER_GUI_HEADLESS") != NULL) {
-        return;
-    }
+     * also must not need a writable app-data dir. So skip entirely, exactly like gui_log_file_install.
+     * Compile-time (CMake option NTPACKER_GUI_HEADLESS_CI): the shipped binary reads no environment. */
+    return;
+#endif
 
     /* Resolve <app-data>/crash and pre-build every path/string the handler will need. A failure here
      * leaves the marker/dump paths empty -> the handler degrades to a no-op writer, but we still
@@ -364,11 +365,11 @@ void gui_crash_report_prompt(void) {
 #ifdef NTPACKER_GUI_DEV_SEAMS
 /* Dev seam: reachable only through main()'s --selftest-crash argv branch, which is
  * gated on the same flag, so both halves leave the shipped binary together. The
- * NTPACKER_GUI_HEADLESS self-guard below is unchanged. */
+ * headless-CI self-guard below is unchanged in spirit, now compile-time. */
 void gui_crash_selftest(void) {
-    if (getenv("NTPACKER_GUI_HEADLESS") != NULL) {
-        return; /* never fault under headless/CI, even if the hidden arg leaks in */
-    }
+#ifdef NTPACKER_GUI_HEADLESS_CI
+    return; /* never fault in a headless CI build, even if the hidden arg leaks in */
+#endif
     nt_log_error("ntpacker-gui: --selftest-crash -- deliberately faulting to exercise the crash handler");
     /* Deref a volatile null -> SIGSEGV (POSIX) / EXCEPTION_ACCESS_VIOLATION (Windows). volatile so the
      * optimizer cannot elide the store under -O2. */
