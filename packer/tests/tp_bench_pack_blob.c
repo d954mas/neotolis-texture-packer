@@ -76,6 +76,36 @@
  *
  * 4. Recommendation: miniz raw deflate, level 6. See the S27 packet notes.
  *
+ * ---------------------------------------------------------------------------
+ * Packet S28 phase-3: the WIRED cold tier (`coldtier` rows)
+ *
+ * Phase 2 measured codecs in isolation. Phase 3 drives the shipped
+ * tp_pack_result_cache: store a result, switch away (background encode), settle,
+ * then time the atlas switch BACK -- the real promote, decompressing every page
+ * in parallel into fresh buffers. Both realistic atlas scales are covered by
+ * replicating the 4096^2 page record: 1 page = 64 MiB, 4 pages = 256 MiB.
+ *
+ * ANSWER (2026-07-29, native-release, Windows, iterations=5, Kenney fixture):
+ *   pages=1  raw 64 MiB  -> coded 0.449 MiB (142.7x), meta 302.8 KiB,
+ *            background encode 122 ms, promote p50 36.1 ms (1770 MiB/s)
+ *   pages=4  raw 256 MiB -> coded 1.794 MiB (142.7x), meta 303.0 KiB,
+ *            background encode 462 ms, promote p50 45.9 ms (5575 MiB/s)
+ *
+ * The 4-page row is the design's whole point: 4x the pixels for 1.27x the switch
+ * latency, because the pages decode on separate threads. A single-page atlas has
+ * nothing to fan out over and lands on the serial number (36 ms ~= the 33 ms the
+ * phase-2 flate_L6 throughput predicts).
+ *
+ * The 143x ratio here is above the 114x of the phase-2 row because the phase-2
+ * number averages nine DIFFERENT pages while this one replicates page 0; treat
+ * 114x as the fixture's honest ratio and this as the per-page one.
+ *
+ * Geometry cost: 303 KiB of uncompressed metadata for 2000 sprites (~155 bytes
+ * each) -- 0.5% of the raw pages, but ~40% of what the cold entry actually
+ * occupies once the pages are compressed 143x. That is why the store's budget
+ * counts it: a cold entry is charged its blobs AND its geometry, and the split is
+ * still visible as tp_pack_result_cache_stats::cold_meta_bytes.
+ *
  * 5. Caveats the numbers carry:
  *    - The sweep is single-threaded and serial over the pages of one result. A
  *      4-page atlas promoted on 4 threads divides switch_*_ms by ~the page count.
@@ -92,6 +122,7 @@
 #include "tp_core/tp_arena.h"
 #include "tp_core/tp_model.h"
 #include "tp_core/tp_pack.h"
+#include "tp_core/tp_pack_result_cache.h"
 #include "tp_build_driver_internal.h"
 #include "tp_name_map.h"
 #include "tp_pack_read.h"
@@ -505,6 +536,136 @@ static bool run_codec_cfg(const codec_cfg *cfg, const scale_spec *spec,
     return ok;
 }
 
+/* ------------------------------------------------------------------------- */
+/* Phase-3: the WIRED cold tier                                               */
+/*                                                                            */
+/* Phase 2 measured a codec in isolation. This phase measures the shipped      */
+/* tp_pack_result_cache doing the thing the packet exists for: an atlas switch */
+/* onto a cold entry, which is a metadata-copy-free promote plus a per-page    */
+/* parallel decode into fresh buffers. It also reports what the entry costs    */
+/* while cold, including the uncompressed geometry the store keeps beside the  */
+/* blobs.                                                                      */
+/* ------------------------------------------------------------------------- */
+
+/* Neither pin owns anything here: the arena belongs to run_scale, which outlives
+ * the store. The hook only has to be non-NULL and idempotent-safe. */
+static void bench_pin_release(void *owner) { (void)owner; }
+
+static uint64_t bench_raw_bytes(const tp_result *result) {
+    return raw_page_bytes(result);
+}
+
+/* A view of `source` with `pages` page records, all pointing at the same real
+ * page pixels. 4x a 4096^2 page is the 256 MiB atlas the design targets, and
+ * duplicating the record is the honest way to get one without packing 256 MiB of
+ * sprites: the codec and the fork-join both see `pages` independent pages. */
+static tp_result *bench_widen(const tp_result *source, int pages,
+                              tp_arena *arena) {
+    tp_result *wide = (tp_result *)tp_arena_alloc(arena, sizeof *wide);
+    if (!wide) {
+        return NULL;
+    }
+    *wide = *source;
+    wide->page_count = pages;
+    wide->pages = (tp_page *)tp_arena_alloc(arena, (size_t)pages * sizeof *wide->pages);
+    if (!wide->pages) {
+        return NULL;
+    }
+    for (int i = 0; i < pages; ++i) {
+        wide->pages[i] = source->pages[0];
+    }
+    return wide;
+}
+
+static void run_cold_tier(const scale_spec *spec, const tp_result *result,
+                          int runs) {
+    static const int k_page_counts[] = {1, 4}; /* 64 MiB and 256 MiB at 4096^2 */
+    if (result->page_count < 1 || result->pages[0].w <= 0) {
+        return;
+    }
+    for (size_t k = 0; k < sizeof k_page_counts / sizeof k_page_counts[0]; ++k) {
+        const int pages = k_page_counts[k];
+        tp_arena *arena = tp_arena_create(0);
+        if (!arena) {
+            return;
+        }
+        tp_result *wide = bench_widen(result, pages, arena);
+        /* A second entry to switch to, so the first one is demoted and cold. */
+        tp_result *other = bench_widen(result, 1, arena);
+        tp_pack_result_cache *cache = tp_pack_result_cache_create(1ULL << 40);
+        if (!wide || !other || !cache) {
+            tp_pack_result_cache_destroy(cache);
+            tp_arena_destroy(arena);
+            return;
+        }
+        tp_id128 hot = tp_id128_nil();
+        tp_id128 spare = tp_id128_nil();
+        hot.bytes[0] = 1U;
+        spare.bytes[0] = 2U;
+        tp_error err = {{0}};
+        const uint64_t raw = bench_raw_bytes(wide);
+        bool ok = tp_pack_result_cache_store_retained(
+                      cache, hot, 1U, wide, raw, wide, bench_pin_release,
+                      &err) == TP_STATUS_OK &&
+                  tp_pack_result_cache_store_retained(
+                      cache, spare, 2U, other, bench_raw_bytes(other), other,
+                      bench_pin_release, &err) == TP_STATUS_OK;
+
+        /* Encode: settle drains the background queue, so its wall time IS the
+         * single-threaded background encode of the demoted entry. */
+        const double encode_start = tp_bench_now_ms();
+        if (ok) {
+            tp_pack_result_cache_settle(cache);
+        }
+        const double encode_ms = tp_bench_now_ms() - encode_start;
+
+        tp_pack_result_cache_stats stats;
+        tp_pack_result_cache_stats_get(cache, &stats);
+        ok = ok && stats.cold_entries == 1;
+
+        /* Promote: select the cold entry, resolve it (this is the atlas switch),
+         * then switch away again so the next run starts cold once more. */
+        tp_bench_samples promote;
+        tp_bench_samples_init(&promote);
+        for (int run = 0; ok && run < runs; ++run) {
+            tp_pack_result_cache_select(cache, hot);
+            const double start = tp_bench_now_ms();
+            const tp_result *promoted = NULL;
+            ok = tp_pack_result_cache_authoritative(cache, NULL, &promoted, NULL,
+                                                    &err) == TP_STATUS_OK;
+            const double elapsed = tp_bench_now_ms() - start;
+            ok = ok && promoted && promoted->pages[pages - 1].rgba != NULL;
+            ok = ok && tp_bench_samples_record(&promote, true, elapsed);
+            tp_pack_result_cache_select(cache, spare);
+            ok = ok && tp_pack_result_cache_authoritative(cache, NULL, NULL,
+                                                          NULL,
+                                                          &err) == TP_STATUS_OK;
+        }
+
+        if (ok && tp_bench_samples_valid(&promote)) {
+            const double raw_mib = (double)raw / TP_BENCH_MIB;
+            const double promote_ms = tp_bench_samples_percentile(&promote, 50U);
+            (void)printf(
+                "coldtier scale=%s pages=%d raw_MiB=%.1f coded_MiB=%.3f "
+                "meta_KiB=%.1f ratio=%.2f encode_ms=%.1f promote_p50_ms=%.1f "
+                "promote_MiBps=%.1f runs=%d\n",
+                spec->name, pages, raw_mib,
+                (double)stats.cold_coded_bytes / TP_BENCH_MIB,
+                (double)stats.cold_meta_bytes / 1024.0,
+                stats.cold_coded_bytes > 0U
+                    ? (double)stats.cold_raw_bytes / (double)stats.cold_coded_bytes
+                    : 0.0,
+                encode_ms, promote_ms,
+                promote_ms > 0.0 ? raw_mib / (promote_ms / 1000.0) : 0.0, runs);
+        } else {
+            (void)fprintf(stderr, "coldtier scale=%s pages=%d FAILED (%s)\n",
+                          spec->name, pages, err.msg);
+        }
+        tp_pack_result_cache_destroy(cache);
+        tp_arena_destroy(arena);
+    }
+}
+
 static bool run_codec_sweep(const scale_spec *spec, const tp_result *result,
                             int runs) {
     bool ok = true;
@@ -517,6 +678,7 @@ static bool run_codec_sweep(const scale_spec *spec, const tp_result *result,
     /* Leave the globals where the rest of the process expects them. */
     stbi_write_png_compression_level = 8;
     stbi_write_force_png_filter = -1;
+    run_cold_tier(spec, result, runs);
     return ok;
 }
 

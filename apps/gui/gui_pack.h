@@ -12,21 +12,29 @@
  * gui_pack_atlas/gui_pack_export are synchronous adapters used by selftest/shot; they drain the
  * same session-owned typed jobs as interactive use.
  *
- * RESULT RESIDENCY (packet S18, master spec §10.4). Native results are not held
- * one-per-atlas forever. They live in a session-lifetime `tp_pack_result_cache`
- * behind this adapter: the atlas the presentation reads is the store's PINNED
- * active result, and every other packed atlas is an INACTIVE entry in a
- * byte-budget LRU. Switching atlas demotes the outgoing result rather than
- * dropping it, so switching back is a store hit and never repacks; the store
- * pins each result through the session Pack receipt, and releases that receipt
- * -- destroying the Pack arena exactly once -- when the LRU evicts the entry.
+ * RESULT RESIDENCY (packets S18/S28, master spec §10.4). Native results are not
+ * held one-per-atlas forever. They live in a session-lifetime
+ * `tp_pack_result_cache` behind this adapter: the atlas the presentation reads is
+ * the store's PINNED active result, and every other packed atlas is an INACTIVE
+ * entry in a byte-budget LRU. Switching atlas demotes the outgoing result rather
+ * than dropping it, so switching back is a store hit and never repacks; the store
+ * pins each result through the session Pack receipt, and releases that receipt --
+ * destroying the Pack arena exactly once -- when the LRU evicts the entry OR when
+ * the entry's pages have been compressed into the store's own cold tier.
+ *
+ * That cold tier is the reason a demoted atlas can stay resident at all: the
+ * store compresses its pages in the BACKGROUND (one low-priority thread, applied
+ * on the per-frame pump inside gui_pack_poll) and decompresses them in parallel
+ * when the atlas is switched back to. The only thing a caller of the functions
+ * below can observe about it is that switching to a long-untouched atlas costs a
+ * decode (tens of milliseconds for a big atlas) instead of nothing.
  *
  * The store is behind this boundary on purpose: no view, and no caller of the
- * functions below, sees a cache, a budget, or a residency state. What a caller
- * must know is that an evicted result reads as "not packed" (NULL result,
- * version 0) exactly like an atlas that was never packed -- which is the §10.4
- * cache-miss presentation: the preview is out of date and the user runs Pack.
- * Nothing here ever auto-packs. */
+ * functions below, sees a cache, a budget, a compression, or a residency state.
+ * What a caller must know is that an evicted result reads as "not packed" (NULL
+ * result, version 0) exactly like an atlas that was never packed -- which is the
+ * §10.4 cache-miss presentation: the preview is out of date and the user runs
+ * Pack. Nothing here ever auto-packs. */
 
 #include <stddef.h>
 #include <stdbool.h>
@@ -69,13 +77,25 @@ bool gui_pack_atlas(int atlas_index, double *out_ms, char *err, size_t err_cap, 
  * gui_pack_result_peek below. */
 const tp_result *gui_pack_result(int atlas_index);
 /* The same result, read WITHOUT changing residency: no reside, no demotion, no
- * LRU touch, no eviction. This is the read for a consumer that is not the one
- * driving what the canvas shows (the animation preview player), so two such
- * consumers can never fight over the single active pin frame after frame.
+ * LRU touch, no eviction, no decompression. This is the read for a consumer that
+ * is not the one driving what the canvas shows (the animation preview player), so
+ * two such consumers can never fight over the single active pin frame after
+ * frame.
  *
  * NULL when the atlas was never packed or its entry was evicted -- the same
  * §10.4 cache-miss presentation as gui_pack_result, except that a miss here does
  * not retire the presentation slot (a read decides nothing about residency).
+ * An atlas that is merely COLD (demoted long enough for the store to have
+ * compressed it) is NOT a miss and must never read as one: it answers with its
+ * result, so a consumer that latches "the result was released" on NULL cannot
+ * fire on an atlas that is still perfectly available.
+ *
+ * GEOMETRY ONLY. What a peek promises is the sprite/page geometry, not the
+ * pixels: for a cold atlas `pages[i].rgba` is NULL, because inflating the
+ * compressed pages is a residency decision and this read is defined not to make
+ * one. A consumer that needs page pixels (the canvas) uses gui_pack_result, which
+ * resides the atlas and therefore decompresses it.
+ *
  * The pointer carries the SAME lifetime rule as gui_pack_result's: it survives
  * only until the next residency change, so it is a within-operation borrow. */
 const tp_result *gui_pack_result_peek(int atlas_index);

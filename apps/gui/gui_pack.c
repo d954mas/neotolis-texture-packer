@@ -14,22 +14,29 @@
 
 #define GUI_PACK_MAX_ATLASES 64
 
-/* Inactive-result byte budget (packet S18). Master spec §10.4 fixes the SHAPE --
- * one pinned active result, every inactive one in a separate byte-budget LRU --
- * and leaves "concrete budgets and compression details" to implementation
+/* Inactive-result byte budget (packets S18, S28). Master spec §10.4 fixes the
+ * SHAPE -- one pinned active result, every inactive one in a separate byte-budget
+ * LRU -- and leaves "concrete budgets and compression details" to implementation
  * policy, so this constant is that policy and the only place it is written down.
  *
- * 256 MiB, measured in RAW RGBA8 page bytes (what a Pack result actually holds;
- * see result_page_bytes). At the owner's calibration scale (30 atlases / 5000
- * sprites, §61.1) a 2048x2048 page is 16 MiB, so the budget keeps ~16 recently
- * visited atlas pages warm -- switching between the handful of atlases anyone
- * works on at once never repacks -- while a pathological 4096x4096 page (64 MiB)
- * still leaves room for four. Retaining every result instead, which is what the
- * GUI did before this packet, costs 30x that at the same scale with no ceiling.
+ * 512 MiB. Since S28 the store keeps inactive results as COMPRESSED page blobs
+ * (raw deflate, level 6), so this number buys far more atlases than the 256 MiB
+ * it replaces bought in raw pages. Measured (packer/tests/tp_bench_pack_blob.c,
+ * 2026-07-29, 4096x4096 fixtures): real CC0 sprite art compresses 114x, so 512
+ * MiB of cold entries stands for ~57 GiB of raw pages -- far more atlases than
+ * any project has. The number that actually sizes this constant is the
+ * PESSIMISTIC one: deliberately incompressible content measures 1.24x, i.e. below
+ * the store's 1.5x ratio floor, so such an entry is evicted rather than kept, and
+ * anything that DOES clear the floor costs at most 2/3 of its raw pages. The real
+ * worst case is therefore ~768 MiB of raw pages held as 512 MiB of blobs, and the
+ * common case is "every atlas you have ever packed this session, still there".
  *
- * The true resident ceiling is budget + the active pin + the highest-sequence
- * entry: both are exempt from eviction by the store contract (decision 0004). */
-#define GUI_PACK_RESULT_BUDGET_BYTES (256ULL * 1024ULL * 1024ULL)
+ * The budget is also not the peak. A just-demoted result stays RAW until its
+ * background compression lands (the store counts it raw until then), so the true
+ * ceiling is budget + the active pin + the highest-sequence entry + whatever is
+ * still encoding; the active and max-sequence entries are exempt from eviction by
+ * the store contract (decision 0004). */
+#define GUI_PACK_RESULT_BUDGET_BYTES (512ULL * 1024ULL * 1024ULL)
 
 typedef struct pack_ref_entry {
     uint64_t hash;
@@ -82,6 +89,10 @@ static bool s_fail_next_ref_index_build;
 
 void gui_pack__test_result_cache_stats(tp_pack_result_cache_stats *out) {
     tp_pack_result_cache_stats_get(s_cache, out);
+}
+
+void gui_pack__test_result_cache_settle(void) {
+    tp_pack_result_cache_settle(s_cache);
 }
 
 void gui_pack__test_fail_next_ref_index_build(void) {
@@ -192,6 +203,13 @@ static uint64_t result_page_bytes(const tp_result *result) {
         }
     }
     return bytes;
+}
+
+/* Per-frame tick for the store's background page compression (packet S28). The
+ * store is single-threaded and is pumped only from here, on the UI thread that
+ * owns it; nothing else in the GUI knows a compression exists. */
+void gui_pack__cold_pump(void) {
+    tp_pack_result_cache_pump(s_cache);
 }
 
 static tp_pack_result_cache *pack_cache(void) {

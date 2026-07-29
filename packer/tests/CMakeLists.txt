@@ -279,11 +279,17 @@ tp_add_test(NAME pack_input_hash LIBS tp_core unity stb_image_write
     MAKE_DIRS "${CMAKE_BINARY_DIR}/tp_pack_input_hash_test"
     ARGS "${CMAKE_BINARY_DIR}/tp_pack_input_hash_test")
 
-# F3-03 T4/T5/T6: memory-only pack-result cache (byte-budget LRU + selection) and
-# the Undo/Redo cache probe. Links tp_build so it can produce real .ntpack
-# artifacts via tp_pack (the binary is also its own build worker, dispatched in
-# main). Needs a scratch dir (argv[1]).
-tp_add_test(NAME pack_result_cache LIBS tp_build unity PRIVATE_SRC
+# F3-03 T4/T5/T6 + S18 + S28: memory-only pack-result cache (byte-budget LRU +
+# selection + the compressed cold tier) and the Undo/Redo cache probe. Links
+# tp_build so one case can pack a real atlas through tp_pack (the binary is also
+# its own build worker, dispatched in main). Needs a scratch dir (argv[1]).
+# The damaged-blob containment path has no production route -- the store writes
+# and reads its own blobs in one process -- so tp_pack_result_cache.c is
+# recompiled here with TP_ENABLE_TEST_SEAMS (same pattern as
+# tp_test_session_observation recompiling tp_session_observation.c).
+tp_add_test(NAME pack_result_cache
+    SOURCES test_pack_result_cache.c ../src/tp_pack_result_cache.c
+    LIBS tp_build unity PRIVATE_SRC SEAMS
     MAKE_DIRS "${CMAKE_BINARY_DIR}/tp_pack_result_cache_test"
     ARGS "${CMAKE_BINARY_DIR}/tp_pack_result_cache_test")
 

@@ -1293,16 +1293,44 @@ void test_undo_redo_keep_last_successful_pack_result(void) {
     TEST_ASSERT_TRUE(gui_project_is_stale());
 }
 
-/* S18 / master spec §10.4: switching away from a packed atlas neither retains it
- * forever nor drops it -- the result becomes an INACTIVE entry in the
- * byte-budget store, and switching back is a store hit that hands the same
- * pinned result back without a second Pack. */
+/* Sum of the RAW RGBA8 page bytes a result holds -- the quantity the store
+ * charges an inactive entry until its background compression lands, and the one
+ * the budgets below are expressed in. */
+static uint64_t result_raw_page_bytes(const tp_result *result) {
+    uint64_t bytes = 0U;
+    for (int i = 0; result && i < result->page_count; ++i) {
+        if (result->pages[i].w > 0 && result->pages[i].h > 0) {
+            bytes += (uint64_t)result->pages[i].w *
+                     (uint64_t)result->pages[i].h * 4ULL;
+        }
+    }
+    return bytes;
+}
+
+/* S18 / master spec §10.4 + S28: switching away from a packed atlas neither
+ * retains it forever nor drops it -- the result becomes an INACTIVE entry in the
+ * byte-budget store, the store compresses its pages in the background, and
+ * switching back is a store hit that decompresses them again instead of packing
+ * a second time. The bytes that come back are the bytes that went in. */
 void test_switching_atlas_demotes_the_inactive_result_into_the_store(void) {
     (void)add_coin_source_to_atlas(0);
     TEST_ASSERT_TRUE(gui_pack_init(TP_GUI_IDENTITY_TEST_DIR));
     do_pack_blocking();
     const tp_result *first = gui_pack_result(0);
     TEST_ASSERT_NOT_NULL(first);
+
+    /* Copied out before the switch: the store releases the Pack receipt behind
+     * `first` when the entry goes cold, so the comparison below cannot borrow it. */
+    const uint64_t first_raw = result_raw_page_bytes(first);
+    const size_t first_page_bytes = (size_t)first->pages[0].w *
+                                    (size_t)first->pages[0].h * 4U;
+    uint8_t *first_pixels = malloc(first_page_bytes);
+    TEST_ASSERT_NOT_NULL(first_pixels);
+    memcpy(first_pixels, first->pages[0].rgba, first_page_bytes);
+    char first_atlas_name[128];
+    (void)snprintf(first_atlas_name, sizeof first_atlas_name, "%s",
+                   first->atlas_name);
+    const int first_sprites = first->sprite_count;
 
     tp_pack_result_cache_stats stats;
     gui_pack__test_result_cache_stats(&stats);
@@ -1327,11 +1355,46 @@ void test_switching_atlas_demotes_the_inactive_result_into_the_store(void) {
                              "the demoted result is charged to the byte budget");
     TEST_ASSERT_EQUAL_UINT64(0U, stats.evicted);
 
-    /* Switching back restores from the store: same result, no new Pack job. */
+    /* Settle: residency is only deterministic once the background encoder is
+     * quiescent, and this is the state a real session spends its time in. */
+    gui_pack__test_result_cache_settle();
+    gui_pack__test_result_cache_stats(&stats);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        1, stats.cold_entries,
+        "the demoted atlas is held compressed, not raw and not dropped");
+    TEST_ASSERT_EQUAL_INT(2, stats.entry_count);
+    TEST_ASSERT_EQUAL_UINT64(0U, stats.evicted);
+    TEST_ASSERT_TRUE_MESSAGE(
+        stats.cold_coded_bytes < first_raw,
+        "and its pages are now held compressed, not raw");
+    /* What the budget charges is everything the cold entry holds -- the blobs AND
+     * the geometry copy that replaces the caller's pinned arena. On THIS fixture
+     * the pages are 8x8, so the geometry outweighs the pixels and the cold total
+     * can exceed the raw one; on a real atlas the same geometry is ~0.5% of the
+     * raw pages. Either way the number is what the store is holding. */
+    TEST_ASSERT_EQUAL_UINT64_MESSAGE(
+        stats.cold_coded_bytes + stats.cold_meta_bytes, stats.inactive_bytes,
+        "a cold entry is budgeted for its blobs plus its geometry copy");
+
+    /* A demoted-and-compressed atlas is still PRESENT: a peek answers for it and
+     * its version is intact, so nothing downstream may read it as released. */
+    TEST_ASSERT_NOT_NULL_MESSAGE(
+        gui_pack_result_peek(0),
+        "a merely cold atlas must never read as a cache miss");
+    TEST_ASSERT_TRUE(gui_pack_result_version(0) != 0U);
+
+    /* Switching back restores from the store: same content, no new Pack job. */
     TEST_ASSERT_FALSE(gui_project_job_busy());
-    TEST_ASSERT_EQUAL_PTR(first, gui_pack_result(0));
+    const tp_result *restored = gui_pack_result(0);
+    TEST_ASSERT_NOT_NULL(restored);
     TEST_ASSERT_FALSE_MESSAGE(gui_project_job_busy(),
                               "a store hit must never start a Pack");
+    TEST_ASSERT_EQUAL_STRING(first_atlas_name, restored->atlas_name);
+    TEST_ASSERT_EQUAL_INT(first_sprites, restored->sprite_count);
+    TEST_ASSERT_EQUAL_MEMORY_MESSAGE(
+        first_pixels, restored->pages[0].rgba, first_page_bytes,
+        "a cold round trip must reproduce the page byte for byte");
+    free(first_pixels);
     gui_pack__test_result_cache_stats(&stats);
     TEST_ASSERT_TRUE(tp_id128_eq(stats.active_hash, first_key));
     TEST_ASSERT_EQUAL_INT(2, stats.entry_count);
@@ -1383,9 +1446,31 @@ void test_evicted_pack_result_reads_as_unpacked_without_autopacking(void) {
  * so a stale resident is a freed result the reside fast path would then hand
  * straight back (ASan-visible before the fix). */
 void test_failed_resident_switch_never_serves_the_evicted_resident(void) {
-    /* Atlases A(0) and C(2) carry two sprites, B(1) one, so a budget of
-     * size(A)+size(B) holds inactive {B,C} while A is resident but NOT
-     * inactive {A,C} while B is: the switch to B is itself what evicts A. */
+    /* Since S28 the quantity that decides eviction is the RAW transient. A
+     * demoted entry is charged its full pages until the background encoder
+     * catches up; once it is compressed it costs so little that no realistic
+     * budget can be pushed over by it. So the switch that evicts the outgoing
+     * resident is one where that resident is still HOT -- which is exactly the
+     * case an interactive session hits, because an atlas is HOT for as long as it
+     * is the one on screen.
+     *
+     * The script below is written so the store's residency is decided, not
+     * raced. A just-packed atlas is ACTIVE, and an active entry never carries a
+     * compression job, so A is guaranteed HOT when the failing switch demotes it;
+     * nothing between the pack of C and that switch pumps the store, so nothing
+     * can turn A cold underneath the assertions.
+     *
+     * Atlases: A(0) and C(2) carry two sprites, B(1) one, so raw(B) < raw(C) ==
+     * raw(A). The budget is raw(A) + raw(C) - 1: exactly one raw atlas short of
+     * holding both, so every step up to the failing switch fits and the switch
+     * itself -- raw(C) beside raw(A) -- does not, leaving the LRU exactly one
+     * legal victim: A (B is the active pin, C the highest sequence).
+     *
+     * It is derived from the RAW sizes, not from raw(A) + raw(B), because a cold
+     * entry is charged its blobs PLUS its geometry copy and the geometry is not
+     * predictable from the raw pages -- on this toy fixture (8x8 pages) it is in
+     * fact the larger half. The one premise that buys is asserted below rather
+     * than assumed: cold(B) beside one raw atlas must still fit. */
     (void)add_sprite_source_to_atlas(0, "coin.png");
     (void)add_sprite_source_to_atlas(0, "hero.png");
     TEST_ASSERT_EQUAL_INT(1, gui_project_add_atlas().visible_index);
@@ -1395,38 +1480,57 @@ void test_failed_resident_switch_never_serves_the_evicted_resident(void) {
     (void)add_sprite_source_to_atlas(2, "hero.png");
     TEST_ASSERT_TRUE(gui_pack_init(TP_GUI_IDENTITY_TEST_DIR));
 
-    /* Measure the three retained sizes under the default (never-evicting)
-     * budget; the budget below is derived, not guessed. */
+    /* Measure under the default (never-evicting) budget; the budget below is
+     * derived, not guessed. */
     char error[256] = {0};
     TEST_ASSERT_TRUE_MESSAGE(
         gui_pack_atlas(0, NULL, error, sizeof error, NULL, 0U), error);
+    const uint64_t raw_a = result_raw_page_bytes(gui_pack_result(0));
     TEST_ASSERT_TRUE_MESSAGE(
         gui_pack_atlas(1, NULL, error, sizeof error, NULL, 0U), error);
-    tp_pack_result_cache_stats stats;
-    gui_pack__test_result_cache_stats(&stats);
-    const uint64_t size_a = stats.inactive_bytes;
+    const uint64_t raw_b = result_raw_page_bytes(gui_pack_result(1));
     TEST_ASSERT_TRUE_MESSAGE(
         gui_pack_atlas(2, NULL, error, sizeof error, NULL, 0U), error);
-    gui_pack__test_result_cache_stats(&stats);
-    const uint64_t size_b = stats.inactive_bytes - size_a;
-    TEST_ASSERT_NOT_NULL(gui_pack_result(0));
-    gui_pack__test_result_cache_stats(&stats);
-    const uint64_t size_c = stats.inactive_bytes - size_b;
-    TEST_ASSERT_TRUE_MESSAGE(
-        size_b > 0U && size_b < size_c && size_c <= size_a,
-        "fixture must yield a budget that holds {B,C} but not {A,C}");
+    const uint64_t raw_c = result_raw_page_bytes(gui_pack_result(2));
+    char fixture_note[160];
+    (void)snprintf(fixture_note, sizeof fixture_note,
+                   "fixture must order the three atlases by raw page size "
+                   "(B < C <= A); got raw_a=%llu raw_b=%llu raw_c=%llu",
+                   (unsigned long long)raw_a, (unsigned long long)raw_b,
+                   (unsigned long long)raw_c);
+    TEST_ASSERT_TRUE_MESSAGE(raw_b < raw_c && raw_c <= raw_a, fixture_note);
 
-    gui_pack__test_set_result_budget(size_a + size_b);
+    tp_pack_result_cache_stats stats;
+    const uint64_t budget = raw_a + raw_c - 1U;
+    gui_pack__test_set_result_budget(budget);
+    /* B first, and settled: it is the entry the failing switch PROMOTES, and a
+     * cold promote is the interesting one. */
+    TEST_ASSERT_TRUE_MESSAGE(
+        gui_pack_atlas(1, NULL, error, sizeof error, NULL, 0U), error);
     TEST_ASSERT_TRUE_MESSAGE(
         gui_pack_atlas(0, NULL, error, sizeof error, NULL, 0U), error);
+    gui_pack__test_result_cache_settle();
+    gui_pack__test_result_cache_stats(&stats);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, stats.cold_entries,
+                                  "B is held compressed");
+    TEST_ASSERT_EQUAL_UINT64(0U, stats.evicted);
     TEST_ASSERT_TRUE_MESSAGE(
-        gui_pack_atlas(1, NULL, error, sizeof error, NULL, 0U), error);
+        stats.inactive_bytes + raw_a <= budget,
+        "cold(B) -- blobs and geometry -- beside one raw atlas must fit, or the "
+        "pressure the failing switch applies below is not the one under test");
+
+    /* From here NOTHING pumps the store, so A stays HOT all the way to the
+     * failing switch. Packing C demotes the freshly packed A. */
     TEST_ASSERT_TRUE_MESSAGE(
         gui_pack_atlas(2, NULL, error, sizeof error, NULL, 0U), error);
-    TEST_ASSERT_NOT_NULL(gui_pack_result(0)); /* A is the resident result */
+    gui_pack__test_result_cache_stats(&stats);
+    TEST_ASSERT_EQUAL_UINT64_MESSAGE(
+        0U, stats.evicted, "cold(B) + raw(A) still fits the budget");
+    TEST_ASSERT_NOT_NULL(gui_pack_result(0)); /* A is the resident result again */
     gui_pack__test_result_cache_stats(&stats);
     TEST_ASSERT_EQUAL_INT(3, stats.entry_count);
-    TEST_ASSERT_EQUAL_UINT64(0U, stats.evicted);
+    TEST_ASSERT_EQUAL_UINT64_MESSAGE(
+        0U, stats.evicted, "cold(B) + raw(C) still fits the budget");
 
     gui_pack__test_fail_next_ref_index_build();
     TEST_ASSERT_NULL(gui_pack_result(1));
@@ -1536,6 +1640,32 @@ void test_preview_result_read_never_moves_the_active_pack_pin(void) {
     TEST_ASSERT_NOT_NULL(gui_pack_result_peek(0));
     gui_pack__test_result_cache_stats(&after);
     TEST_ASSERT_TRUE(tp_id128_eq(before.active_hash, after.active_hash));
+    TEST_ASSERT_EQUAL_UINT64(before.evicted, after.evicted);
+
+    /* S28: and it still sees it once the store has COMPRESSED it. A cold entry is
+     * present, not gone, so neither the peek nor the version may report the §10.4
+     * cache miss -- otherwise update_preview's had-result latch would stop a
+     * perfectly available animation with "the packed result was released" the
+     * moment the background encoder caught up with the atlas it is armed on. */
+    gui_pack__test_result_cache_settle();
+    gui_pack__test_result_cache_stats(&after);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, after.cold_entries,
+                                  "the player's atlas is held compressed");
+    TEST_ASSERT_NOT_NULL_MESSAGE(
+        gui_pack_result_peek(0),
+        "a cold atlas must not read as a released result");
+    TEST_ASSERT_TRUE_MESSAGE(gui_pack_result_version(0) != 0U,
+                             "nor may its publication version drop to zero");
+    for (int frame = 0; frame < 3; ++frame) {
+        update_preview();
+    }
+    TEST_ASSERT_TRUE_MESSAGE(
+        s_preview_active,
+        "the armed player must survive its atlas going cold");
+    gui_pack__test_result_cache_stats(&after);
+    TEST_ASSERT_TRUE_MESSAGE(
+        tp_id128_eq(before.active_hash, after.active_hash),
+        "and reading a cold entry must still not move the active pin");
     TEST_ASSERT_EQUAL_UINT64(before.evicted, after.evicted);
 }
 

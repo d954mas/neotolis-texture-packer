@@ -3,9 +3,22 @@
 
 #include <stdbool.h>
 
+#include "tp_core/tp_id.h"
+
 #ifndef TP_ENABLE_TEST_SEAMS
 #error "tp_test_seams.h is available only to test-seam builds"
 #endif
+
+struct tp_pack_result_cache;
+
+/* Damages the first page blob of the COLD entry under `hash` so its next promote
+ * fails. There is no production route to a damaged blob -- the store both writes
+ * and reads it in-process, within one arena's lifetime -- but the containment
+ * path it feeds (drop the entry, keep the store usable, fall back to the next
+ * candidate) is a real contract that has to stay executable. False if `hash` is
+ * absent or its entry is not cold. */
+bool tp_pack_result_cache__test_damage_cold_blob(
+    struct tp_pack_result_cache *cache, tp_id128 hash);
 
 void tp_scan__test_set_alloc_fail(int nth);
 void tp_scan__test_set_stat_error(int error);

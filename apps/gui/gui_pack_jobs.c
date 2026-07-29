@@ -234,6 +234,13 @@ gui_pack_done gui_pack_poll(gui_pack_result_info *out) {
     if (out) {
         memset(out, 0, sizeof *out);
     }
+    /* Frame tick for the result store's background page compression (packet
+     * S28): applies whatever the encoder finished since the last frame, which is
+     * a mutex lock and a flag test per in-flight job. It rides this poll because
+     * this is already the once-per-frame call into the pack adapter -- including
+     * the drain loop the blocking adapters spin -- and the store must be pumped
+     * from the one thread that owns it. */
+    gui_pack__cold_pump();
     gui_host_completion completion = {0};
     if (!gui_project_host_take_completion(
             &completion)) {

@@ -13,7 +13,8 @@ add_library(tp_core STATIC
     src/tp_arena.c src/tp_fs_io.c src/tp_image.c src/tp_json_internal.c src/tp_utf8.c src/tp_names.c src/tp_name_map.c src/tp_pack_read.c src/tp_project.c src/tp_project_parse.c src/tp_project_path.c src/tp_project_save.c src/tp_project_write.c src/tp_project_pack_bridge.c
     src/tp_pack_settings.c src/tp_pack_constraints.c src/tp_transform.c src/tp_scan.c src/tp_input.c src/tp_validate.c src/tp_validate_index.c src/tp_validate_report.c src/tp_validate_source.c src/tp_validate_sprite.c src/tp_validate_target_settings.c
     # F3-03: canonical semantic pack_input_hash + per-file image-hash cache, and
-    # the memory-only hash-keyed result store (byte-budget LRU + selection).
+    # the memory-only hash-keyed result store (byte-budget LRU + selection +
+    # the S28 compressed cold tier).
     src/tp_pack_hash.c src/tp_pack_result_cache.c
     src/tp_export.c src/tp_normalize.c src/tp_export_png.c src/tp_export_json_neotolis.c
     src/tp_export_defold.c
@@ -74,6 +75,12 @@ target_link_libraries(tp_core PUBLIC nt_shared nt_hash nt_log PRIVATE Threads::T
 # utf8proc (vendored, MIT) powers src/tp_srckey.c's NFC + case-fold. PRIVATE:
 # tp_srckey.h never exposes utf8proc types; its allocations are freed in-TU.
 target_link_libraries(tp_core PRIVATE cjson stb_image stb_image_write utf8proc)
+# miniz + tinycthread (both engine-vendored, no basisu, no nt_builder) power the
+# pack-result store's compressed cold tier (packet S28): raw deflate for the page
+# blobs, C11 threads for the one background encoder and the fork-join promote.
+# PRIVATE: tp_pack_result_cache.h exposes neither, and every buffer either library
+# touches is allocated and freed inside tp_pack_result_cache.c.
+target_link_libraries(tp_core PRIVATE miniz tinycthread)
 target_compile_definitions(tp_core PRIVATE _CRT_SECURE_NO_WARNINGS)
 # CRT: tp_core no longer links the static-CRT builder, so it DROPS -U_DLL and uses the
 # engine runtime's default CRT -- matching its own deps (nt_hash/nt_log/cjson) and the

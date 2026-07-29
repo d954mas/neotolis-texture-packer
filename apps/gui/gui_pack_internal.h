@@ -15,6 +15,11 @@ bool gui_pack_preview_publish(tp_session_job_result *job_result,
                               gui_pack_result_info *out);
 bool gui_pack_preview_belongs_to(int atlas_index);
 
+/* Frame tick for the result store's background page compression (packet S28),
+ * called once per frame from the pack-job poll. Not a test seam: it is how the
+ * cold tier lands at all. */
+void gui_pack__cold_pump(void);
+
 #ifdef TP_ENABLE_TEST_SEAMS
 /* Test-only observation of the native completion freshness decision. */
 bool gui_pack__test_native_pack_input_changed_since(
@@ -23,6 +28,11 @@ bool gui_pack__test_native_pack_input_changed_since(
  * residency and LRU accounting are not presentation state, so nothing outside a
  * test may read them. Zeroed when no store exists yet. */
 void gui_pack__test_result_cache_stats(tp_pack_result_cache_stats *out);
+/* Test-only: block until the store's background compression is quiescent, then
+ * apply it. Residency numbers are only deterministic once the encoder has been
+ * settled -- otherwise an inactive entry reads RAW or COMPRESSED depending on how
+ * fast a background thread happened to be. */
+void gui_pack__test_result_cache_settle(void);
 /* Test-only: shrink the store's byte budget so an eviction is reachable without
  * packing hundreds of megabytes. Rebuilds an EMPTY store, so every previously
  * published result is released first; callers treat it as gui_pack_clear(-1).
