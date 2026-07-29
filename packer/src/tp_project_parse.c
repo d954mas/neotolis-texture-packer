@@ -478,7 +478,8 @@ static tp_status tp_load_sprite(tp_project_atlas *a, const cJSON *js,
         for (int k = 0; k < 4; k++) {
             int value = 0;
             st = tp_json_int_in_range(cJSON_GetArrayItem(slice9, k),
-                                      "slice9 item", 0, UINT16_MAX, &value,
+                                      "slice9 item", TP_PROJECT_SLICE9_MIN,
+                                      TP_PROJECT_SLICE9_MAX, &value,
                                       err);
             if (st != TP_STATUS_OK) {
                 return st;
@@ -497,14 +498,17 @@ static tp_status tp_load_sprite(tp_project_atlas *a, const cJSON *js,
     } ov_fields[] = {
         {"shape", offsetof(tp_project_sprite, ov_shape), TP_PACK_SHAPE_MIN,
          TP_PACK_SHAPE_MAX, tp_pack_sprite_shape_wire_representable},
-        {"allow_rotate", offsetof(tp_project_sprite, ov_allow_rotate), 0, 0,
+        {"allow_rotate", offsetof(tp_project_sprite, ov_allow_rotate),
+         TP_PACK_OV_ALLOW_ROTATE_OFF, TP_PACK_OV_ALLOW_ROTATE_OFF,
          tp_pack_sprite_rotate_wire_representable},
-        {"max_vertices", offsetof(tp_project_sprite, ov_max_vertices), 1,
-         TP_PACK_MAX_VERTICES,
+        {"max_vertices", offsetof(tp_project_sprite, ov_max_vertices),
+         TP_PACK_MIN_VERTICES, TP_PACK_MAX_VERTICES,
          tp_pack_sprite_max_vertices_wire_representable},
-        {"margin", offsetof(tp_project_sprite, ov_margin), 1, UINT8_MAX,
+        {"margin", offsetof(tp_project_sprite, ov_margin),
+         TP_PACK_SPRITE_SPACING_MIN, TP_PACK_SPRITE_SPACING_MAX,
          tp_pack_sprite_spacing_wire_representable},
-        {"extrude", offsetof(tp_project_sprite, ov_extrude), 1, UINT8_MAX,
+        {"extrude", offsetof(tp_project_sprite, ov_extrude),
+         TP_PACK_SPRITE_SPACING_MIN, TP_PACK_SPRITE_SPACING_MAX,
          tp_pack_sprite_spacing_wire_representable},
     };
     for (size_t i = 0; i < sizeof ov_fields / sizeof ov_fields[0]; i++) {

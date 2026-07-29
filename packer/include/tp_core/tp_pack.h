@@ -32,34 +32,65 @@ struct tp_arena;
 struct tp_result;
 
 /* Canonical packing-knob contract shared by operation admission, saved-project
- * validation, and the defensive Pack boundary. Keep one owner so clients cannot
- * drift from the engine/build cap. */
+ * validation, the defensive Pack boundary, and the machine-readable operation
+ * schema (tp_operation.h field registry, spec §6). Keep one owner so clients
+ * cannot drift from the engine/build cap: the registry REFERENCES these names,
+ * it never restates the numbers. */
+#define TP_PACK_MIN_PAGE_DIM 1
 #ifndef NT_BUILD_MAX_TEXTURE_SIZE
 #define TP_PACK_MAX_PAGE_DIM 4096
 #else
 #define TP_PACK_MAX_PAGE_DIM NT_BUILD_MAX_TEXTURE_SIZE
 #endif
+#define TP_PACK_ALPHA_MIN 0
 #define TP_PACK_ALPHA_MAX 255
+#define TP_PACK_MIN_VERTICES 1
 #define TP_PACK_MAX_VERTICES 16
-#define TP_PACK_SHAPE_MIN 0
-#define TP_PACK_SHAPE_MAX 2
+/* Atlas shape ids. These are also the sprite `ov_shape` override's value domain
+ * (tp_project_sprite documents the same 0/1/2 semantics). */
+#define TP_PACK_SHAPE_RECT 0
+#define TP_PACK_SHAPE_CONVEX_HULL 1
+#define TP_PACK_SHAPE_CONCAVE_CONTOUR 2
+#define TP_PACK_SHAPE_MIN TP_PACK_SHAPE_RECT
+#define TP_PACK_SHAPE_MAX TP_PACK_SHAPE_CONCAVE_CONTOUR
+/* Atlas spacing knobs (padding/margin/extrude): non-negative, and additionally
+ * capped by the atlas's EFFECTIVE max_size (a cross-field rule that stays with
+ * tp_operation_validate; the schema records the static domain + the cap field). */
+#define TP_PACK_ATLAS_SPACING_MIN 0
+/* A sprite margin/extrude OVERRIDE travels in a builder-descriptor byte, and the
+ * engine reads 0 there as "inherit", so an explicit override is [1..255]. */
+#define TP_PACK_SPRITE_SPACING_MIN 1
+#define TP_PACK_SPRITE_SPACING_MAX UINT8_MAX
+/* The only representable allow_rotate override: force no-rotate (the engine has
+ * no force-rotate, so there is no "1"). */
+#define TP_PACK_OV_ALLOW_ROTATE_OFF 0
 /* Current nt_builder vector-packer hard limit.  Keep this public because it is
  * a product capability boundary, not an implementation accident: admission
  * must reject a provably larger job before the assertion-based backend sees it. */
 #define TP_PACK_MAX_PAGES 64
 
 static inline bool tp_pack_max_size_valid(int value) {
-    return value >= 1 && value <= TP_PACK_MAX_PAGE_DIM;
+    return value >= TP_PACK_MIN_PAGE_DIM && value <= TP_PACK_MAX_PAGE_DIM;
 }
-static inline bool tp_pack_nonnegative_valid(int value) { return value >= 0; }
+static inline bool tp_pack_nonnegative_valid(int value) {
+    return value >= TP_PACK_ATLAS_SPACING_MIN;
+}
 static inline bool tp_pack_alpha_threshold_valid(int value) {
-    return value >= 0 && value <= TP_PACK_ALPHA_MAX;
+    return value >= TP_PACK_ALPHA_MIN && value <= TP_PACK_ALPHA_MAX;
 }
 static inline bool tp_pack_max_vertices_valid(int value) {
-    return value >= 1 && value <= TP_PACK_MAX_VERTICES;
+    return value >= TP_PACK_MIN_VERTICES && value <= TP_PACK_MAX_VERTICES;
 }
 static inline bool tp_pack_shape_valid(int value) {
     return value >= TP_PACK_SHAPE_MIN && value <= TP_PACK_SHAPE_MAX;
+}
+/* An explicit sprite margin/extrude override. */
+static inline bool tp_pack_sprite_spacing_valid(int value) {
+    return value >= TP_PACK_SPRITE_SPACING_MIN &&
+           value <= TP_PACK_SPRITE_SPACING_MAX;
+}
+static inline bool tp_pack_sprite_allow_rotate_valid(int value) {
+    return value == TP_PACK_OV_ALLOW_ROTATE_OFF;
 }
 static inline bool tp_pack_pixels_per_unit_valid(float value) {
     return value > 0.0F && value <= FLT_MAX;
