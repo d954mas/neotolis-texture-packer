@@ -843,6 +843,10 @@ static void remap_save_error_path(tp_status status, const char *public_path,
     if (status == TP_STATUS_FILE_IO_FAILED && err) {
         (void)snprintf(err->file_io.path, sizeof err->file_io.path, "%s",
                        public_path ? public_path : "");
+        /* snprintf truncates on bytes, so an over-long path can be cut mid
+         * codepoint and leave the field invalid UTF-8 -- the same reason
+         * tp_error_set_file_io trims. This rewrite must obey the same rule. */
+        tp_error_trim_partial_utf8(err->file_io.path);
     }
 }
 

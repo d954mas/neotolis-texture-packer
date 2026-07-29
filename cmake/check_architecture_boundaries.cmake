@@ -210,31 +210,41 @@ foreach(_source IN LISTS _arch_sources)
     string(REGEX REPLACE "//[^\r\n]*" " " _scan "${_scan}")
     set(_directives "${_scan}")
     string(REGEX REPLACE "\\\\[ \t]*[\r\n]+" "" _directives "${_directives}")
-    if(_is_view
-       AND _directives MATCHES "#[ \t]*include[ \t]*[<\"](tp_core/tp_(session|job)\\.h|gui_project\\.h|gui_session_client\\.h)[>\"]")
-        _arch_hit(VIEW_ADMISSION "${_relative}" "0"
-                  "#include:${CMAKE_MATCH_1}")
-    endif()
-    if(_is_view
-       AND _directives MATCHES "#[ \t]*include[ \t]*[<\"](tp_core/tp_(scan|image|input|pack_hash)\\.h|gui_scan\\.h)[>\"]")
-        _arch_hit(VIEW_IO "${_relative}" "0"
-                  "#include:${CMAKE_MATCH_1}")
-    endif()
-    if(_is_view
-       AND _directives MATCHES "#[ \t]*include[ \t]*[<\"](windows\\.h|clipboard/nt_clipboard\\.h|tinyfiledialogs\\.h)[>\"]")
-        _arch_hit(VIEW_PLATFORM "${_relative}" "0"
-                  "#include:${CMAKE_MATCH_1}")
-    endif()
-    if(_is_view
-       AND _directives MATCHES "#[ \t]*include[ \t]*[<\"](tp_core/tp_(model|project|operation|validate|client_capability|export)\\.h)[>\"]")
-        _arch_hit(VIEW_MODEL_POLICY "${_relative}" "0"
-                  "#include:${CMAKE_MATCH_1}")
-    endif()
-    if(_is_core
-       AND _directives MATCHES "#[ \t]*include[ \t]*[<\"][^>\"]*(apps/|gui_|cli_|mcp_|devapi_|dev_api_|jsonrpc|transport)")
-        _arch_hit(CORE_FRONTEND "${_relative}" "0"
-                  "#include:${CMAKE_MATCH_1}")
-    endif()
+    # EVERY include directive is judged on its own. A single whole-file MATCHES
+    # answers only "does this file contain one?" and reports the FIRST capture,
+    # so the second and later forbidden includes of the same rule were never
+    # recorded -- and a first include covered by a per-symbol debt allowance
+    # therefore muted the whole file. MATCHALL turns the scan into one hit per
+    # directive, so each forbidden include meets the allowances alone.
+    string(REGEX MATCHALL "#[ \t]*include[ \t]*[<\"][^<>\"\r\n]*[>\"]"
+           _include_directives "${_directives}")
+    foreach(_directive IN LISTS _include_directives)
+        if(_is_view
+           AND _directive MATCHES "[<\"](tp_core/tp_(session|job)\\.h|gui_project\\.h|gui_session_client\\.h)[>\"]")
+            _arch_hit(VIEW_ADMISSION "${_relative}" "0"
+                      "#include:${CMAKE_MATCH_1}")
+        endif()
+        if(_is_view
+           AND _directive MATCHES "[<\"](tp_core/tp_(scan|image|input|pack_hash)\\.h|gui_scan\\.h)[>\"]")
+            _arch_hit(VIEW_IO "${_relative}" "0"
+                      "#include:${CMAKE_MATCH_1}")
+        endif()
+        if(_is_view
+           AND _directive MATCHES "[<\"](windows\\.h|clipboard/nt_clipboard\\.h|tinyfiledialogs\\.h)[>\"]")
+            _arch_hit(VIEW_PLATFORM "${_relative}" "0"
+                      "#include:${CMAKE_MATCH_1}")
+        endif()
+        if(_is_view
+           AND _directive MATCHES "[<\"](tp_core/tp_(model|project|operation|validate|client_capability|export)\\.h)[>\"]")
+            _arch_hit(VIEW_MODEL_POLICY "${_relative}" "0"
+                      "#include:${CMAKE_MATCH_1}")
+        endif()
+        if(_is_core
+           AND _directive MATCHES "[<\"][^>\"]*(apps/|gui_|cli_|mcp_|devapi_|dev_api_|jsonrpc|transport)")
+            _arch_hit(CORE_FRONTEND "${_relative}" "0"
+                      "#include:${CMAKE_MATCH_1}")
+        endif()
+    endforeach()
 
     # String literals are irrelevant to symbol/call checks below.
     string(REGEX REPLACE "\"([^\"\\\\]|\\\\.)*\"" "\"\"" _scan "${_scan}")
@@ -347,13 +357,19 @@ if(DEFINED ARCH_EXPECT_RULE AND NOT ARCH_EXPECT_RULE STREQUAL "")
     if(NOT ARCH_EXPECT_RULE IN_LIST _arch_rules)
         message(FATAL_ERROR "unknown ARCH_EXPECT_RULE=${ARCH_EXPECT_RULE}")
     endif()
+    # One seeded violation per fixture is the norm, so the expected count
+    # defaults to 1. A fixture that exists to prove EVERY violation is reported
+    # (not just the first) declares its own count with ARCH_EXPECT_HITS.
+    if(NOT DEFINED ARCH_EXPECT_HITS OR ARCH_EXPECT_HITS STREQUAL "")
+        set(ARCH_EXPECT_HITS 1)
+    endif()
     foreach(_rule IN LISTS _arch_rules)
         get_property(_hits GLOBAL PROPERTY "ARCH_HITS_${_rule}")
         list(LENGTH _hits _count)
         if(_rule STREQUAL ARCH_EXPECT_RULE)
-            if(NOT _count EQUAL 1)
+            if(NOT _count EQUAL ARCH_EXPECT_HITS)
                 message(FATAL_ERROR
-                    "${_rule} negative fixture expected exactly one hit; got ${_count}: ${_hits}")
+                    "${_rule} negative fixture expected exactly ${ARCH_EXPECT_HITS} hit(s); got ${_count}: ${_hits}")
             endif()
         elseif(NOT _count EQUAL 0)
             message(FATAL_ERROR
@@ -398,10 +414,12 @@ endfunction()
 #
 # Entry format: "<file-regex>|<symbol>,<symbol>,...". Include-directive hits use
 # the symbol form "#include:<header>"; whole-file call scans use the call name.
-# The whole-file scans report the FIRST match in a file, so an entry lists every
-# forbidden header/call that file legitimately has — otherwise merely reordering
-# includes would move the reported hit and fail a green tree. Per-LINE symbol
-# hits are reported individually and carry no such caveat.
+# Include directives are now scanned one at a time, so EVERY forbidden header a
+# file names is reported and must be listed here — an allowed first include no
+# longer masks a forbidden later one. The whole-file CALL scans still report the
+# FIRST match in a file, so an entry lists every forbidden call that file
+# legitimately makes; otherwise merely reordering code would move the reported
+# hit and fail a green tree. Per-LINE symbol hits carry no such caveat.
 function(_arch_report_debt rule note)
     get_property(_hits GLOBAL PROPERTY "ARCH_HITS_${rule}")
     set(_entries "${ARGN}")

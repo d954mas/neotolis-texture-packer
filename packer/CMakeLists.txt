@@ -129,9 +129,21 @@ find_program(TP_BASH NAMES bash)
 if(TP_BASH)
     add_test(NAME tp_boundaries_grep
         COMMAND "${TP_BASH}" "${CMAKE_SOURCE_DIR}/scripts/check_boundaries.sh")
+    # The script is a POSIX shell program: it needs grep/sed/awk/find/xargs/
+    # mktemp, not just an interpreter. A non-login bash inherits the caller's
+    # PATH verbatim, so on a plain Windows shell the gate either dies on
+    # "grep: command not found" or, worse, resolves Windows' System32 find.exe
+    # instead of GNU find. The toolbox always ships in the same directory as
+    # the bash we just located (Git for Windows usr/bin, /usr/bin or /bin on
+    # POSIX), so prepend exactly that directory -- no login shell (whose
+    # profile may cd elsewhere and defeat WORKING_DIRECTORY), no PATH probing,
+    # and no cost at run time. A genuinely missing bash still lands in the
+    # fail-closed stand-in below.
+    get_filename_component(TP_BASH_TOOL_DIR "${TP_BASH}" DIRECTORY)
     set_tests_properties(tp_boundaries_grep PROPERTIES
         WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
-        LABELS "architecture")
+        LABELS "architecture"
+        ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${TP_BASH_TOOL_DIR}")
 else()
     # The stand-in prints the reason and FAIL_REGULAR_EXPRESSION turns that
     # output into a test failure (cmake -E echo itself exits 0), keeping the
@@ -190,6 +202,22 @@ foreach(TP_ARCH_CALL_FIXTURE IN ITEMS
     set_tests_properties("tp_architecture_negative_${TP_ARCH_CALL_FIXTURE}_call"
         PROPERTIES LABELS "architecture")
 endforeach()
+
+# Include-scan completeness: a view TU naming TWO forbidden platform headers
+# must produce TWO hits. The scan used to be one whole-file MATCH per rule,
+# which reported only the FIRST forbidden include -- so a header covered by a
+# per-symbol debt allowance silently absorbed every later violation in the same
+# file. Asserting the exact count (not just "a hit") is what makes this fixture
+# red before the MATCHALL rewrite and green after.
+add_test(NAME tp_architecture_negative_view_platform_second_include
+    COMMAND "${CMAKE_COMMAND}"
+        "-DARCH_ROOT=${CMAKE_SOURCE_DIR}"
+        "-DARCH_SCAN_ROOT=${CMAKE_SOURCE_DIR}/cmake/fixtures/architecture_boundaries/view_platform_second_include"
+        "-DARCH_EXPECT_RULE=VIEW_PLATFORM"
+        "-DARCH_EXPECT_HITS=2"
+        -P "${TP_ARCHITECTURE_CHECK}")
+set_tests_properties(tp_architecture_negative_view_platform_second_include
+    PROPERTIES LABELS "architecture")
 
 # Role classification is not a hit-counted rule: an undeclared gui_view_* file
 # must abort the checker instead of being scanned as a non-view (the bypass

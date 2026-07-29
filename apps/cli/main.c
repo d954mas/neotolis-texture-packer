@@ -235,6 +235,11 @@ static void emit_string_array(tp_sb *sb, const char *const *items,
 }
 
 static void build_help(tp_sb *sb) {
+    /* These ids are the EXIT-CODE vocabulary (cli_exit.h 0..8), NOT the
+     * `error.id` vocabulary -- error ids are tp_status ids (docs/formats/
+     * cli-report.md). An OOM payload therefore reports id "oom" and exits with
+     * the "internal" family (1); it does not get a row here, because there is
+     * no distinct OOM exit code to freeze. */
     static const struct {
         const char *id;
         int code;

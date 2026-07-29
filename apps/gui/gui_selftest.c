@@ -599,19 +599,30 @@ static bool selftest_set_target_path_at(
     int atlas_index, int target_index,
     const char *out_path);
 
+/* Both string arguments are COPIED before the first mutation below. Callers
+ * routinely pass `tp_snapshot_target` fields, and every submit/apply here
+ * republishes the observation and frees the snapshot generation those strings
+ * live in -- reading the caller's pointer after that point is a use-after-free
+ * (ASan caught exactly that on the final comparison). The copies are the only
+ * values compared against the committed result. */
 static bool selftest_set_target_at(int atlas_index, int target_index,
                                    const char *exporter_id, const char *out_path,
                                    bool enabled) {
     char exporter_copy[TP_EXPORTER_ID_MAX];
-    if (!exporter_id ||
-        strlen(exporter_id) >= sizeof exporter_copy) {
+    char out_path_copy[TP_IDENTITY_PATH_MAX];
+    if (!exporter_id || !out_path ||
+        strlen(exporter_id) >= sizeof exporter_copy ||
+        strlen(out_path) >= sizeof out_path_copy) {
         return false;
     }
     memcpy(
         exporter_copy, exporter_id,
         strlen(exporter_id) + 1U);
+    memcpy(
+        out_path_copy, out_path,
+        strlen(out_path) + 1U);
     if (!selftest_set_target_path_at(
-            atlas_index, target_index, out_path) ||
+            atlas_index, target_index, out_path_copy) ||
         !gui_actions__submit_draft()) {
         return false;
     }
@@ -633,7 +644,7 @@ static bool selftest_set_target_at(int atlas_index, int target_index,
         selftest_target_at(atlas_index, target_index);
     return result &&
            strcmp(result->exporter_id, exporter_copy) == 0 &&
-           strcmp(result->out_path, out_path) == 0 &&
+           strcmp(result->out_path, out_path_copy) == 0 &&
            result->enabled == enabled;
 }
 
@@ -1182,8 +1193,20 @@ void run_selftest(void) {
                 if (strcmp(target->exporter_id, "json-neotolis") == 0) {
                     jtarget = k;
                 } else {
-                    selftest_set_target_at(i_rotate, k, target->exporter_id,
-                                           target->out_path, false);
+                    /* `target` is borrowed from `target_snapshot`; the disable
+                     * below republishes the observation and frees it. Copy the
+                     * values out BEFORE the mutation, then re-fetch to prove
+                     * the row still resolves at its stable index. */
+                    char keep_exporter[TP_EXPORTER_ID_MAX];
+                    char keep_out_path[TP_IDENTITY_PATH_MAX];
+                    (void)snprintf(keep_exporter, sizeof keep_exporter, "%s",
+                                   target->exporter_id);
+                    (void)snprintf(keep_out_path, sizeof keep_out_path, "%s",
+                                   target->out_path);
+                    selftest_set_target_at(i_rotate, k, keep_exporter,
+                                           keep_out_path, false);
+                    NT_ASSERT(selftest_target_at(i_rotate, k) != NULL &&
+                              "the disabled target survives its own mutation");
                 }
             }
             char tbase[700] = {0};
@@ -2827,8 +2850,17 @@ void run_selftest(void) {
         if (e_atlas >= 0) {
             const tp_snapshot_target *t0 = selftest_target_at(e_atlas, 0);
             const bool was = t0->enabled;
+            /* Same observation-lifetime rule as the export loop above: the
+             * toggle frees the snapshot `t0` points into, so the exporter id
+             * and out_path travel as copies, not as borrowed rows. */
+            char t0_exporter[TP_EXPORTER_ID_MAX];
+            char t0_out_path[TP_IDENTITY_PATH_MAX];
+            (void)snprintf(t0_exporter, sizeof t0_exporter, "%s",
+                           t0->exporter_id);
+            (void)snprintf(t0_out_path, sizeof t0_out_path, "%s",
+                           t0->out_path);
             selftest_set_target_at(
-                e_atlas, 0, t0->exporter_id, t0->out_path, !was);
+                e_atlas, 0, t0_exporter, t0_out_path, !was);
             const tp_snapshot_target *changed = selftest_target_at(e_atlas, 0);
             const bool now = changed->enabled;
             char exporter[TP_EXPORTER_ID_MAX];

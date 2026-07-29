@@ -64,9 +64,13 @@ static void emit_error_message(bool json, bool quiet, const char *id,
         }
         tp_sb_str(&sb, "}}");
         if (sb.oom) {
+            /* The ONLY way to reach this branch is a tp_sb growth failure, so
+             * the id is the OOM status token (tp_status_id(TP_STATUS_OOM)) --
+             * "internal" was not a tp_status id at all and told an agent
+             * nothing about the cause. The process still exits
+             * CLI_EXIT_INTERNAL: OOM has no exit family of its own. */
             tp_sb_free(&sb);
-            (void)fputs("{\"schema\":1,\"error\":{\"id\":\"internal\"}}\n",
-                        stdout);
+            (void)fputs("{\"schema\":1,\"error\":{\"id\":\"oom\"}}\n", stdout);
             return;
         }
         cli_out_stdout(&sb);
