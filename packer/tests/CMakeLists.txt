@@ -481,10 +481,14 @@ tp_add_test(NAME bench_foundation TARGET tp_bench_foundation
 # bytes they inflate into, plus the inflate cost, at 1024/2048/4096 synthetic
 # page scales and one 4096 atlas built from the real Kenney bench assets. NOT a
 # ctest: it drives the real nt_builder and allocates hundreds of MiB.
+# Also carries the S27 phase-2 cold-tier codec sweep (stb PNG levels 1/3/5/8 +
+# forced filter-none, vs raw miniz deflate levels 1/3/6) over the two 4096 page
+# fixtures. miniz comes in transitively via nt_builder; named here because this
+# TU includes miniz.h directly.
 #   tp_bench_pack_blob <scratch_dir> [iterations] [bench_assets_root]
 tp_add_test(NAME bench_pack_blob TARGET tp_bench_pack_blob
     SOURCES tp_bench_pack_blob.c
-    LIBS tp_build nt_time PRIVATE_SRC
+    LIBS tp_build nt_time miniz PRIVATE_SRC
     DEFINES _CRT_SECURE_NO_WARNINGS
     NO_CTEST)
 

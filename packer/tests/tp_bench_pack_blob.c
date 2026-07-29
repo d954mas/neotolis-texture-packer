@@ -20,6 +20,71 @@
  * NOT a ctest: it drives the real nt_builder and allocates hundreds of MiB.
  *
  *   tp_bench_pack_blob <scratch_dir> [iterations] [bench_assets_root]
+ *
+ * ---------------------------------------------------------------------------
+ * Packet S27 phase-2 codec sweep (appended below the phase-1 lines)
+ *
+ * The owner wants a compressed COLD tier for the pack-result cache: inactive
+ * atlases held as compressed pixel blobs in RAM, compressed in the background on
+ * demotion, decompressed on atlas switch. Phase 1 only measured stb PNG at the
+ * stb default effort (level 8). That is the slowest useful point on the curve
+ * and says nothing about whether a cheaper codec buys the same ratio.
+ *
+ * The sweep runs on the two 4096-page fixtures only (synthetic incompressible
+ * noise = the pessimistic floor, real Kenney CC0 art = the realistic case) and
+ * measures, per codec configuration, over the FULL inflated page set:
+ *   enc_p50_ms / dec_p50_ms -- median of `iterations` whole-set passes
+ *   bytes / ratio           -- compressed size, raw_page_bytes / bytes
+ *   enc_MBps / dec_MBps     -- throughput expressed in RAW MiB per second
+ *   alloc_floor (one line per fixture) -- malloc + first-touch + free over the
+ *                              same page set, i.e. the destination-allocation
+ *                              cost that stb PNG unavoidably pays inside its
+ *                              decode number and that the flate rows exclude by
+ *                              inflating into a reused buffer
+ * and then extrapolates the number that actually decides the design: the decode
+ * cost of ONE atlas switch at two realistic atlas sizes (64 MiB = 4x2048^2,
+ * 256 MiB = 4x4096^2), from the measured raw-bytes decode throughput.
+ *
+ * Configurations:
+ *   png  L1/L3/L5/L8   stbi_write_png_compression_level, stb default filter
+ *   png  L1 filter=0   stbi_write_force_png_filter=0 (no per-row filtering)
+ *   flate L1/L3/L6     miniz mz_compress2 / mz_uncompress over raw RGBA8, no
+ *                      PNG container and no filtering at all
+ *
+ * ANSWER (2026-07-29, native-release, Windows, iterations=7, median per number):
+ *
+ * 1. The stb PNG "level" knob is a trap. stb_image_write.h line 911 clamps the
+ *    zlib quality with `if (quality < 5) quality = 5;`, so levels 1, 3 and 5 emit
+ *    BYTE-IDENTICAL output at identical cost. There is no cheap PNG in stb --
+ *    the sweep confirms it (9,637,670 coded bytes for L1 == L3 == L5 on Kenney,
+ *    and encode within 1% across the three). The only real PNG lever is
+ *    stbi_write_force_png_filter=0: on Kenney it gives up 2.4% ratio (62.7x ->
+ *    61.2x) and buys 1.6x encode and 1.9x decode.
+ *
+ * 2. Raw miniz deflate beats PNG on every axis on both fixtures. On Kenney,
+ *    flate L6 = 114.1x ratio / 478 MiB/s encode / 1839 MiB/s decode, versus PNG
+ *    L8 at 62.7x / 130 MiB/s / 1070 MiB/s. PNG's filters do not pay for
+ *    themselves on packed sprite pages: the alpha gutters and flat fills are long
+ *    runs plain LZ77 already eats, and the filter step adds a full extra pass
+ *    over the pixels on BOTH encode and decode. Even on the incompressible
+ *    synthetic fixture flate wins (1.24x vs 1.03x, and 1.7x faster to decode).
+ *
+ * 3. Decode is the number that decides the tier, and it barely responds to the
+ *    level. Across flate L1/L3/L6 decode moves ~7% (336 -> 313 ms) while the
+ *    ratio moves 87.9x -> 114.1x. The level knob is close to free on the read
+ *    path, so take the higher level.
+ *
+ * 4. Recommendation: miniz raw deflate, level 6. See the S27 packet notes.
+ *
+ * 5. Caveats the numbers carry:
+ *    - The sweep is single-threaded and serial over the pages of one result. A
+ *      4-page atlas promoted on 4 threads divides switch_*_ms by ~the page count.
+ *    - flate inflates into a reused destination (what a real promote into the
+ *      result arena does); stb PNG allocates internally and cannot. The
+ *      `alloc_floor` line measures that difference directly: 79.7 ms per 576 MiB
+ *      (7.2 GiB/s) is inside every PNG decode number and outside every flate one.
+ *    - Run-to-run spread on a loaded desktop is ~10-30% on the big fixture; treat
+ *      the switch_*_ms column as an order-of-magnitude gate, not a budget.
  */
 
 #include "tp_bench_support.h"
@@ -45,11 +110,16 @@
 #include "stb_image.h"
 #include "stb_image_write.h"
 
+/* Raw deflate, no PNG container: the phase-2 alternative to stb PNG. Vendored at
+ * external/neotolis-engine/deps/miniz and already PUBLIC-linked by nt_builder. */
+#include "miniz.h"
+
 typedef struct scale_spec {
     const char *name;
     int page_dim;   /* max_size; sprites are laid out to fill exactly one page */
     int tile;       /* synthetic sprite edge in px; 0 = real Kenney assets */
     int asset_count;/* real-asset mode: how many manifest rows to pack */
+    bool codec_sweep;/* run the phase-2 codec/level sweep on this fixture */
 } scale_spec;
 
 /* Opaque, non-uniform pixels: nothing here may be trimmed away, and a codec (if
@@ -173,6 +243,281 @@ static uint64_t png_page_bytes(const tp_result *result, double *out_encode_ms,
     *out_encode_ms = encode_ms;
     *out_decode_ms = decode_ms;
     return total;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Phase-2 codec sweep                                                        */
+/* ------------------------------------------------------------------------- */
+
+#define TP_BENCH_MIB 1048576.0
+
+typedef struct codec_cfg {
+    const char *codec;  /* "png" | "flate" */
+    int level;          /* png: stbi_write_png_compression_level; flate: mz level */
+    int png_filter;     /* png only: -1 = stb default (adaptive), 0 = filter none */
+} codec_cfg;
+
+/* Ordered cheap -> expensive within each codec so the printed table reads as a
+ * curve. flate has no filtering stage at all, which is the whole point. */
+static const codec_cfg k_codec_cfgs[] = {
+    {"png", 1, -1},
+    {"png", 3, -1},
+    {"png", 5, -1},
+    {"png", 8, -1}, /* stb default: the phase-1 number, re-measured here */
+    {"png", 1, 0},  /* filters cost encode time and buy little at low effort */
+    {"flate", 1, -1},
+    {"flate", 3, -1},
+    {"flate", 6, -1},
+};
+
+static void codec_cfg_label(const codec_cfg *cfg, char *out, size_t out_size) {
+    if (cfg->png_filter >= 0) {
+        (void)snprintf(out, out_size, "%s_L%d_filter%d", cfg->codec, cfg->level,
+                       cfg->png_filter);
+    } else {
+        (void)snprintf(out, out_size, "%s_L%d", cfg->codec, cfg->level);
+    }
+}
+
+/* One page in, one owned compressed buffer out. */
+static bool codec_encode_page(const codec_cfg *cfg, const tp_page *page,
+                              uint8_t **out_bytes, size_t *out_size) {
+    *out_bytes = NULL;
+    *out_size = 0U;
+    const size_t raw = (size_t)page->w * (size_t)page->h * 4U;
+    if (strcmp(cfg->codec, "png") == 0) {
+        stbi_write_png_compression_level = cfg->level;
+        stbi_write_force_png_filter = cfg->png_filter;
+        png_sink sink = {NULL, 0U, false};
+        const int written =
+            stbi_write_png_to_func(png_collect, &sink, page->w, page->h, 4,
+                                   page->rgba, page->w * 4);
+        if (!written || sink.failed || sink.size == 0U) {
+            free(sink.bytes);
+            return false;
+        }
+        *out_bytes = sink.bytes;
+        *out_size = sink.size;
+        return true;
+    }
+    const mz_ulong bound = mz_compressBound((mz_ulong)raw);
+    uint8_t *dst = (uint8_t *)malloc((size_t)bound);
+    if (!dst) {
+        return false;
+    }
+    mz_ulong dst_len = bound;
+    if (mz_compress2(dst, &dst_len, page->rgba, (mz_ulong)raw, cfg->level) !=
+        MZ_OK) {
+        free(dst);
+        return false;
+    }
+    *out_bytes = dst;
+    *out_size = (size_t)dst_len;
+    return true;
+}
+
+/* Decode one compressed page back to RGBA8 and verify the dimensions/length, so
+ * a codec that silently truncates cannot post a fast time.
+ *
+ * `scratch` is a caller-owned destination big enough for the largest page, held
+ * across runs. This matters more than it looks: a fresh 64 MiB malloc per page
+ * costs a kernel zero-fill on first touch, which on this machine is the same
+ * order as the whole inflate. A real cold tier promotes into the result arena or
+ * a pooled buffer, so reusing the destination is the honest model. stb PNG
+ * allocates internally and cannot be given a destination -- the `alloc_floor`
+ * line printed per fixture quantifies exactly that difference. */
+static bool codec_decode_page(const codec_cfg *cfg, const tp_page *page,
+                              const uint8_t *bytes, size_t size,
+                              uint8_t *scratch) {
+    const size_t raw = (size_t)page->w * (size_t)page->h * 4U;
+    if (strcmp(cfg->codec, "png") == 0) {
+        int w = 0;
+        int h = 0;
+        int comp = 0;
+        stbi_uc *decoded =
+            stbi_load_from_memory(bytes, (int)size, &w, &h, &comp, 4);
+        const bool ok = decoded && w == page->w && h == page->h;
+        stbi_image_free(decoded);
+        return ok;
+    }
+    mz_ulong dst_len = (mz_ulong)raw;
+    const int status = mz_uncompress(scratch, &dst_len, bytes, (mz_ulong)size);
+    return status == MZ_OK && (size_t)dst_len == raw;
+}
+
+/* Volatile so the touch loop below survives -O2: an unread malloc/memset/free
+ * triple is dead code clang deletes outright, which is exactly what made the
+ * first version of this measurement print 0.0 ms. */
+static volatile uint8_t g_alloc_floor_sink;
+
+/* Median cost of malloc + first-touch + free over the whole page set: the
+ * allocation floor that is unavoidably inside every stb PNG decode number above,
+ * and that the flate rows deliberately exclude. One volatile store per 4 KiB is
+ * what actually costs -- it forces the kernel to commit and zero each page. */
+static void run_alloc_floor(const scale_spec *spec, const tp_result *result,
+                            int runs) {
+    tp_bench_samples samples;
+    tp_bench_samples_init(&samples);
+    bool ok = true;
+    for (int run = 0; ok && run < runs; ++run) {
+        const double start = tp_bench_now_ms();
+        for (int p = 0; p < result->page_count; ++p) {
+            const size_t raw =
+                (size_t)result->pages[p].w * (size_t)result->pages[p].h * 4U;
+            uint8_t *dst = (uint8_t *)malloc(raw);
+            if (!dst) {
+                ok = false;
+                break;
+            }
+            for (size_t off = 0U; off < raw; off += 4096U) {
+                ((volatile uint8_t *)dst)[off] = (uint8_t)run;
+            }
+            g_alloc_floor_sink = ((volatile uint8_t *)dst)[raw - 1U];
+            free(dst);
+        }
+        const double elapsed = tp_bench_now_ms() - start;
+        ok = ok && tp_bench_samples_record(&samples, true, elapsed);
+    }
+    if (!ok || !tp_bench_samples_valid(&samples)) {
+        (void)fprintf(stderr, "alloc_floor scale=%s FAILED\n", spec->name);
+        return;
+    }
+    const double ms = tp_bench_samples_percentile(&samples, 50U);
+    const double raw_mib = (double)raw_page_bytes(result) / TP_BENCH_MIB;
+    (void)printf("alloc_floor scale=%s raw_MiB=%.1f p50_ms=%.1f MiBps=%.1f "
+                 "runs=%d\n",
+                 spec->name, raw_mib, ms,
+                 ms > 0.0 ? raw_mib / (ms / 1000.0) : 0.0, runs);
+}
+
+static void codec_free_blobs(uint8_t **blobs, int count) {
+    for (int i = 0; i < count; ++i) {
+        free(blobs[i]);
+        blobs[i] = NULL;
+    }
+}
+
+/* Whole-page-set encode + decode, `runs` passes each, median reported. Times are
+ * per FULL result (all pages), which is what a cold-tier demote/promote of one
+ * atlas would actually pay. */
+static bool run_codec_cfg(const codec_cfg *cfg, const scale_spec *spec,
+                          const tp_result *result, int runs) {
+    const int page_count = result->page_count;
+    const uint64_t raw_total = raw_page_bytes(result);
+    uint8_t **blobs = (uint8_t **)calloc((size_t)page_count, sizeof *blobs);
+    size_t *sizes = (size_t *)calloc((size_t)page_count, sizeof *sizes);
+    size_t widest = 0U;
+    for (int p = 0; p < page_count; ++p) {
+        const size_t raw =
+            (size_t)result->pages[p].w * (size_t)result->pages[p].h * 4U;
+        if (raw > widest) {
+            widest = raw;
+        }
+    }
+    /* Pre-faulted, reused decode destination -- see codec_decode_page(). */
+    uint8_t *scratch = (uint8_t *)malloc(widest);
+    if (!blobs || !sizes || !scratch) {
+        free(scratch);
+        free(sizes);
+        free(blobs);
+        return false;
+    }
+    memset(scratch, 0, widest);
+    bool ok = true;
+    tp_bench_samples encode;
+    tp_bench_samples decode;
+    tp_bench_samples_init(&encode);
+    tp_bench_samples_init(&decode);
+
+    for (int run = 0; ok && run < runs; ++run) {
+        codec_free_blobs(blobs, page_count);
+        const double start = tp_bench_now_ms();
+        for (int p = 0; p < page_count; ++p) {
+            if (!codec_encode_page(cfg, &result->pages[p], &blobs[p],
+                                   &sizes[p])) {
+                ok = false;
+                break;
+            }
+        }
+        const double elapsed = tp_bench_now_ms() - start;
+        ok = ok && tp_bench_samples_record(&encode, true, elapsed);
+    }
+
+    uint64_t coded_total = 0U;
+    for (int p = 0; ok && p < page_count; ++p) {
+        coded_total += (uint64_t)sizes[p];
+    }
+
+    for (int run = 0; ok && run < runs; ++run) {
+        const double start = tp_bench_now_ms();
+        for (int p = 0; p < page_count; ++p) {
+            if (!codec_decode_page(cfg, &result->pages[p], blobs[p], sizes[p],
+                                   scratch)) {
+                ok = false;
+                break;
+            }
+        }
+        const double elapsed = tp_bench_now_ms() - start;
+        ok = ok && tp_bench_samples_record(&decode, true, elapsed);
+    }
+
+    if (ok && tp_bench_samples_valid(&encode) &&
+        tp_bench_samples_valid(&decode)) {
+        char label[64];
+        codec_cfg_label(cfg, label, sizeof label);
+        const double enc_ms = tp_bench_samples_percentile(&encode, 50U);
+        const double dec_ms = tp_bench_samples_percentile(&decode, 50U);
+        const double raw_mib = (double)raw_total / TP_BENCH_MIB;
+        const double ratio =
+            coded_total > 0U ? (double)raw_total / (double)coded_total : 0.0;
+        const double enc_mibps = enc_ms > 0.0 ? raw_mib / (enc_ms / 1000.0) : 0.0;
+        const double dec_mibps = dec_ms > 0.0 ? raw_mib / (dec_ms / 1000.0) : 0.0;
+        /* Atlas-switch cost: how long ONE atlas of the given raw footprint takes
+         * to decode at the measured throughput. 64 MiB = 4x2048^2 RGBA8,
+         * 256 MiB = 4x4096^2 RGBA8. */
+        const double switch_64_ms =
+            dec_mibps > 0.0 ? 64.0 / dec_mibps * 1000.0 : 0.0;
+        const double switch_256_ms =
+            dec_mibps > 0.0 ? 256.0 / dec_mibps * 1000.0 : 0.0;
+        /* Cold-tier capacity: raw page MiB retained per 512 MiB RAM budget. */
+        const double budget512_raw_mib = ratio * 512.0;
+        (void)printf(
+            "codec scale=%s cfg=%-16s pages=%d raw_bytes=%" PRIu64
+            " coded_bytes=%" PRIu64 " ratio=%.2f enc_p50_ms=%.1f "
+            "dec_p50_ms=%.1f enc_MiBps=%.1f dec_MiBps=%.1f "
+            "switch_64MiB_ms=%.1f switch_256MiB_ms=%.1f "
+            "budget512_raw_MiB=%.0f runs=%d\n",
+            spec->name, label, page_count, raw_total, coded_total, ratio, enc_ms,
+            dec_ms, enc_mibps, dec_mibps, switch_64_ms, switch_256_ms,
+            budget512_raw_mib, runs);
+    } else {
+        char label[64];
+        codec_cfg_label(cfg, label, sizeof label);
+        (void)fprintf(stderr, "codec scale=%s cfg=%s FAILED\n", spec->name,
+                      label);
+        ok = false;
+    }
+
+    codec_free_blobs(blobs, page_count);
+    free(scratch);
+    free(sizes);
+    free(blobs);
+    return ok;
+}
+
+static bool run_codec_sweep(const scale_spec *spec, const tp_result *result,
+                            int runs) {
+    bool ok = true;
+    run_alloc_floor(spec, result, runs);
+    for (size_t i = 0; i < sizeof k_codec_cfgs / sizeof k_codec_cfgs[0]; ++i) {
+        if (!run_codec_cfg(&k_codec_cfgs[i], spec, result, runs)) {
+            ok = false;
+        }
+    }
+    /* Leave the globals where the rest of the process expects them. */
+    stbi_write_png_compression_level = 8;
+    stbi_write_force_png_filter = -1;
+    return ok;
 }
 
 /* Fill `descs` from real Kenney bench assets. Returns the number of sprites
@@ -373,6 +718,26 @@ static bool run_scale(const scale_spec *spec, const char *scratch,
         ok = false;
     }
 
+    /* Phase-2 sweep runs on a fresh inflate so the phase-1 lines above stay
+     * exactly the measurement they were, untouched by codec work. */
+    if (ok && spec->codec_sweep) {
+        tp_arena *arena = tp_arena_create(0);
+        tp_result **results = NULL;
+        int count = 0;
+        if (!arena) {
+            ok = false;
+        } else if (tp_pack_read_memory(blob, blob_size, map, arena, &results,
+                                       &count, &err) != TP_STATUS_OK ||
+                   count != 1) {
+            (void)fprintf(stderr, "scale=%s codec-sweep inflate failed: %s\n",
+                          spec->name, err.msg);
+            ok = false;
+        } else {
+            ok = run_codec_sweep(spec, results[0], iterations);
+        }
+        tp_arena_destroy(arena);
+    }
+
     tp_name_map_destroy(map);
     free(blob);
     (void)remove(path);
@@ -398,12 +763,14 @@ int main(int argc, char **argv) {
     }
     const char *assets_root = argc > 3 ? argv[3] : "examples/bench-assets";
     const scale_spec scales[] = {
-        {"blob_1024", 1024, 128, 0},
-        {"blob_2048", 2048, 128, 0},
-        {"blob_4096", 4096, 128, 0},
+        {"blob_1024", 1024, 128, 0, false},
+        {"blob_2048", 2048, 128, 0, false},
+        /* The two codec-sweep fixtures: 4096^2 synthetic noise (pessimistic
+         * floor -- nothing compresses) and 4096^2 real art (the real case). */
+        {"blob_4096", 4096, 128, 0, true},
         /* Real CC0 sprite art: the synthetic tiles are incompressible noise, so
          * only this case makes the png_ratio counterfactual meaningful. */
-        {"blob_kenney_4096", 4096, 0, 2000},
+        {"blob_kenney_4096", 4096, 0, 2000, true},
     };
     int failures = 0;
     for (size_t i = 0; i < sizeof scales / sizeof scales[0]; ++i) {
