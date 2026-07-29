@@ -477,6 +477,17 @@ tp_add_test(NAME bench_foundation TARGET tp_bench_foundation
     DEFINES _CRT_SECURE_NO_WARNINGS
     NO_CTEST)
 
+# Packet S27 premise gate: serialized `.ntpack` blob bytes vs the raw RGBA8 page
+# bytes they inflate into, plus the inflate cost, at 1024/2048/4096 synthetic
+# page scales and one 4096 atlas built from the real Kenney bench assets. NOT a
+# ctest: it drives the real nt_builder and allocates hundreds of MiB.
+#   tp_bench_pack_blob <scratch_dir> [iterations] [bench_assets_root]
+tp_add_test(NAME bench_pack_blob TARGET tp_bench_pack_blob
+    SOURCES tp_bench_pack_blob.c
+    LIBS tp_build nt_time PRIVATE_SRC
+    DEFINES _CRT_SECURE_NO_WARNINGS
+    NO_CTEST)
+
 # Deterministic checked-in large project: 100 atlases x 10 file sources. The
 # generator uses the core's white-box model helpers; the ctest comes back
 # through the public snapshot/load boundary and proves committed bytes,
