@@ -49,6 +49,7 @@ static tp_exporter g_nopivot;
 static tp_exporter g_norot;
 static tp_exporter g_list_error;
 static tp_exporter g_write_error;
+static tp_exporter g_stray;
 static int g_list_error_write_calls;
 
 void setUp(void) { tp_export_run__test_reset_all(); }
@@ -63,12 +64,8 @@ static void fill(uint8_t *p, int n, uint8_t r, uint8_t g, uint8_t b) {
     }
 }
 
-static tp_status list_error_write(const tp_export_prepared *prep, const tp_export_caps *caps,
-                                  const char *out_path_base, tp_export_notices *notices, tp_error *err) {
-    (void)prep;
-    (void)caps;
-    (void)out_path_base;
-    (void)notices;
+static tp_status list_error_write(const tp_export_write_ctx *ctx, tp_error *err) {
+    (void)ctx;
     (void)err;
     g_list_error_write_calls++;
     return TP_STATUS_OK;
@@ -83,17 +80,39 @@ static tp_status list_error_outputs(const tp_export_prepared *prep, const char *
     return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS, "test exporter output path overflow");
 }
 
-static tp_status write_error_write(const tp_export_prepared *prep,
-                                   const tp_export_caps *caps,
-                                   const char *out_path_base,
-                                   tp_export_notices *notices,
+static tp_status write_error_write(const tp_export_write_ctx *ctx,
                                    tp_error *err) {
-    (void)prep;
-    (void)caps;
-    (void)out_path_base;
-    (void)notices;
+    (void)ctx;
     return tp_error_set(err, TP_STATUS_PATH_RESOLVE_FAILED,
                         "test writer failed after its publication attempt");
+}
+
+/* Declares one ordinary output plus one inside a SUBDIRECTORY of the export
+ * directory -- a set the whole-set publication cannot cover. */
+static int g_stray_write_calls;
+
+static tp_status stray_outputs(const tp_export_prepared *prep, const char *out_path_base,
+                               tp_export_path_sink sink, void *ud, tp_error *err) {
+    (void)prep;
+    char primary[TP_IDENTITY_PATH_MAX];
+    char stray[TP_IDENTITY_PATH_MAX];
+    const int pn = snprintf(primary, sizeof primary, "%s.json", out_path_base);
+    const int sn = snprintf(stray, sizeof stray, "%s/sub/stray.json", out_path_base);
+    if (pn <= 0 || (size_t)pn >= sizeof primary || sn <= 0 ||
+        (size_t)sn >= sizeof stray) {
+        return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
+                            "test exporter output path overflow");
+    }
+    sink(ud, primary);
+    sink(ud, stray);
+    return TP_STATUS_OK;
+}
+
+static tp_status stray_write(const tp_export_write_ctx *ctx, tp_error *err) {
+    (void)ctx;
+    (void)err;
+    g_stray_write_calls++;
+    return TP_STATUS_OK;
 }
 
 static cJSON *load_json(const char *base) {
@@ -488,10 +507,23 @@ static bool setup_all(const char *dir) {
                                            .multipage = true,
                                            .aliases = true},
                                   .write = write_error_write};
+    g_stray = (tp_exporter){.id = "test-stray-output",
+                            .display_name = "test stray output",
+                            .extension = "json",
+                            .caps = {.rotate90 = true,
+                                     .flips = true,
+                                     .polygons = true,
+                                     .pivot = true,
+                                     .slice9 = true,
+                                     .multipage = true,
+                                     .aliases = true},
+                            .write = stray_write,
+                            .list_outputs = stray_outputs};
     if (tp_exporter_register(&g_nopivot) != TP_STATUS_OK ||
         tp_exporter_register(&g_norot) != TP_STATUS_OK ||
         tp_exporter_register(&g_list_error) != TP_STATUS_OK ||
-        tp_exporter_register(&g_write_error) != TP_STATUS_OK) {
+        tp_exporter_register(&g_write_error) != TP_STATUS_OK ||
+        tp_exporter_register(&g_stray) != TP_STATUS_OK) {
         return false;
     }
 
@@ -898,6 +930,64 @@ static void test_failed_writer_error_falls_back_when_error_copy_fails(void) {
     tp_project_destroy(project);
 }
 
+static bool any_private_leftover_in(const char *directory);
+
+/* An output the whole-set publication cannot cover is refused BEFORE the writer
+ * runs, and the report must say the writer was not attempted: classifying it
+ * WRITER_FAILED would send an operator hunting a writer that never executed. */
+static void test_uncoverable_output_list_is_refused_before_the_writer_runs(void) {
+    char base[1100];
+    char primary[1200];
+    TEST_ASSERT_TRUE(snprintf(base, sizeof base, "%s/stray_out", g_dir) > 0);
+    TEST_ASSERT_TRUE(snprintf(primary, sizeof primary, "%s.json", base) > 0);
+    (void)remove(primary);
+
+    tp_pack_sprite_desc sprite = {
+        .name = "wide", .rgba = g_wide, .w = 120, .h = 24,
+        .origin_x = 0.5F, .origin_y = 0.5F};
+    tp_project *project = tp_project_create();
+    TEST_ASSERT_NOT_NULL(project);
+    tp_project_atlas *atlas = tp_project_get_atlas(project, 0);
+    atlas->shape = 0;
+    atlas->allow_transform = false;
+    atlas->power_of_two = false;
+    atlas->alpha_threshold = 1;
+    atlas->max_size = 256;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_atlas_add_target(atlas, "test-stray-output", base, NULL));
+
+    tp_arena *arena = tp_arena_create(0);
+    TEST_ASSERT_NOT_NULL(arena);
+    tp_export_report report;
+    memset(&report, 0, sizeof report);
+    const tp_export_run_opts opts = {.report = &report};
+    tp_export_notices notices;
+    tp_export_notices_init(&notices);
+    tp_error error = {{0}};
+
+    g_stray_write_calls = 0;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_INVALID_ARGUMENT,
+        tp_export_run_ex(project, 0, &sprite, 1, g_dir, arena, &notices, NULL,
+                         &opts, &error));
+    TEST_ASSERT_EQUAL_INT(1, report.target_count);
+    TEST_ASSERT_FALSE(report.targets[0].ok);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(TP_EXPORT_WRITER_NOT_ATTEMPTED,
+                                  report.targets[0].writer_outcome,
+                                  "a rejected output list is not a writer failure");
+    TEST_ASSERT_EQUAL_INT(0, g_stray_write_calls);
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(report.targets[0].error, "stray.json"),
+                                 report.targets[0].error);
+    TEST_ASSERT_FALSE_MESSAGE(tp_fs_exists(primary),
+                              "a refused output list must write nothing");
+    TEST_ASSERT_FALSE(any_private_leftover_in(g_dir));
+
+    tp_export_notices_free(&notices);
+    tp_arena_destroy(arena);
+    tp_project_destroy(project);
+}
+
 /* Snapshot input admission is complete before target output paths are resolved.
  * A later orchestration failure must therefore retain READY instead of leaving
  * the admission outcome at its NOT_EVALUATED zero value. */
@@ -1042,9 +1132,11 @@ static uint8_t *read_whole_file(const char *path, size_t *out_size) {
     return bytes;
 }
 
-/* The exporters publish through tp_fs_write_file_atomic, so a failed write must
- * leave neither a half-written destination nor its sibling temp behind. */
-static bool any_atomic_temp_left_in(const char *directory) {
+/* The publication owns two private names -- the staging directory it writes into
+ * and the ".tp-old-" copies its two-phase swap displaces. Neither may survive a
+ * run, successful or not: a leftover means the export left machinery of its own
+ * sitting in the user's output directory. */
+static bool any_private_leftover_in(const char *directory) {
     tp_fs_dir *dir = tp_fs_dir_open(directory);
     if (!dir) {
         return false;
@@ -1052,7 +1144,8 @@ static bool any_atomic_temp_left_in(const char *directory) {
     bool found = false;
     tp_fs_dir_entry entry;
     while (!found && tp_fs_dir_next(dir, &entry) == TP_FS_DIR_ENTRY) {
-        found = strstr(entry.name, ".tp-tmp-") != NULL;
+        found = strstr(entry.name, ".tp-stage-") != NULL ||
+                strstr(entry.name, ".tp-old-") != NULL;
     }
     tp_fs_dir_close(dir);
     return found;
@@ -1081,8 +1174,8 @@ static tp_project *make_single_target_project(const char *base) {
     return project;
 }
 
-/* Overwriting an existing page really publishes the new bytes (the atomic path
- * must not degenerate into "write the temp and forget to promote it"). */
+/* Overwriting an existing page really publishes the new bytes (the staged set
+ * must not degenerate into "write the staging dir and forget to promote it"). */
 static void test_atomic_export_overwrite_publishes_the_new_content(void) {
     char base[1100];
     char page[1200];
@@ -1124,8 +1217,9 @@ static void test_atomic_export_overwrite_publishes_the_new_content(void) {
     TEST_ASSERT_EQUAL_INT_MESSAGE(0, memcmp(bytes, png_magic, sizeof png_magic),
                                   "the published page is not a PNG");
     free(bytes);
-    TEST_ASSERT_FALSE_MESSAGE(any_atomic_temp_left_in(g_dir),
-                              "a successful export left its sibling temp behind");
+    TEST_ASSERT_FALSE_MESSAGE(any_private_leftover_in(g_dir),
+                              "a successful export left its private staging "
+                              "machinery behind");
 
     tp_export_notices_free(&notices);
     tp_arena_destroy(arena);
@@ -1133,9 +1227,10 @@ static void test_atomic_export_overwrite_publishes_the_new_content(void) {
     (void)remove(page);
 }
 
-/* Publication failure: the destination page path is an existing DIRECTORY, so the
- * temp writes fine and the replace is what fails. The target is classified
- * WRITER_FAILED, the pre-existing destination is untouched, and no temp is left. */
+/* Publication failure: the destination page path is an existing DIRECTORY, so
+ * the staged set is produced fine and the set verification is what refuses. The
+ * writer DID run, so the target is classified WRITER_FAILED; the pre-existing
+ * destination is untouched and no private leftover remains. */
 static void test_atomic_export_replace_failure_keeps_the_old_file(void) {
     char base[1100];
     char page[1200];
@@ -1179,29 +1274,15 @@ static void test_atomic_export_replace_failure_keeps_the_old_file(void) {
     TEST_ASSERT_EQUAL_size_t(sizeof keep - 1U, kept);
     TEST_ASSERT_EQUAL_INT(0, memcmp(bytes, keep, kept));
     free(bytes);
-    TEST_ASSERT_FALSE_MESSAGE(any_atomic_temp_left_in(g_dir),
-                              "a failed export left its sibling temp behind");
+    TEST_ASSERT_FALSE_MESSAGE(any_private_leftover_in(g_dir),
+                              "a failed export left its private staging "
+                              "machinery behind");
 
     tp_export_notices_free(&notices);
     tp_arena_destroy(arena);
     tp_project_destroy(project);
     (void)remove(sentinel);
     (void)tp_fs_remove_dir(page);
-}
-
-/* Export set-atomicity leaves no private staging dir behind on any path. */
-static bool any_stage_dir_left_in(const char *directory) {
-    tp_fs_dir *dir = tp_fs_dir_open(directory);
-    if (!dir) {
-        return false;
-    }
-    bool found = false;
-    tp_fs_dir_entry entry;
-    while (!found && tp_fs_dir_next(dir, &entry) == TP_FS_DIR_ENTRY) {
-        found = strstr(entry.name, ".tp-stage-") != NULL;
-    }
-    tp_fs_dir_close(dir);
-    return found;
 }
 
 /* The output SET is atomic per target: a re-export that fails mid-set (page 1's
@@ -1309,10 +1390,9 @@ static void test_export_set_failure_leaves_previous_outputs_byte_identical(void)
     TEST_ASSERT_EQUAL_INT(0, memcmp(bytes, stale_json, got));
     free(bytes);
     TEST_ASSERT_TRUE(tp_fs_is_dir(page1));
-    TEST_ASSERT_FALSE_MESSAGE(any_atomic_temp_left_in(g_dir),
-                              "a failed set publish left a sibling temp behind");
-    TEST_ASSERT_FALSE_MESSAGE(any_stage_dir_left_in(g_dir),
-                              "a failed set publish left its staging dir behind");
+    TEST_ASSERT_FALSE_MESSAGE(any_private_leftover_in(g_dir),
+                              "a failed set publish left its staging dir or a "
+                              "rollback copy behind");
 
     /* --- obstacle removed: a clean re-export publishes the COMPLETE new set --- */
     TEST_ASSERT_TRUE(tp_fs_remove_file(sentinel));
@@ -1353,8 +1433,7 @@ static void test_export_set_failure_leaves_previous_outputs_byte_identical(void)
     TEST_ASSERT_NOT_NULL_MESSAGE(root,
                                  "a successful re-export must publish the new metadata");
     cJSON_Delete(root);
-    TEST_ASSERT_FALSE(any_atomic_temp_left_in(g_dir));
-    TEST_ASSERT_FALSE(any_stage_dir_left_in(g_dir));
+    TEST_ASSERT_FALSE(any_private_leftover_in(g_dir));
 
     tp_project_destroy(project);
     (void)remove(page0);
@@ -1585,6 +1664,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_snapshot_report_marks_nonempty_input_ready_before_output_resolution);
     RUN_TEST(test_report_marks_pre_target_setup_failure_as_pack_failed);
     RUN_TEST(test_report_page_oom_leaves_no_partial_runs);
+    RUN_TEST(test_uncoverable_output_list_is_refused_before_the_writer_runs);
     RUN_TEST(test_atomic_export_overwrite_publishes_the_new_content);
     RUN_TEST(test_atomic_export_replace_failure_keeps_the_old_file);
     RUN_TEST(test_export_set_failure_leaves_previous_outputs_byte_identical);

@@ -564,3 +564,23 @@ bool tp_fs_sync_parent(const char *path_utf8) {
      * equivalent for ordinary application handles. */
     return true;
 }
+
+/* Contract in tp_fs_internal.h: only a definitively absent pid is reported dead.
+ * OpenProcess failing with ERROR_INVALID_PARAMETER is the one answer that means
+ * "no such pid"; access-denied means the process exists under another account,
+ * which is LIVE. A handle that opens but reports a real exit code is a reaped
+ * zombie whose id is no longer doing work, so it counts as dead. */
+bool tp_fs_process_is_live(unsigned long pid) {
+    if (pid == 0UL || pid > 0xFFFFFFFFUL) {
+        return true;
+    }
+    HANDLE process =
+        OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, (DWORD)pid);
+    if (!process) {
+        return GetLastError() != ERROR_INVALID_PARAMETER;
+    }
+    DWORD code = 0;
+    const bool dead = GetExitCodeProcess(process, &code) && code != STILL_ACTIVE;
+    (void)CloseHandle(process);
+    return !dead;
+}

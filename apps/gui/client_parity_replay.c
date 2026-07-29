@@ -314,7 +314,6 @@ static const char *notice_field_token(int field_id) {
         case TP_NOTICE_FIELD_PIVOT: return "pivot";
         case TP_NOTICE_FIELD_ALIAS: return "alias";
         case TP_NOTICE_FIELD_MULTIPAGE: return "multipage";
-        case TP_NOTICE_FIELD_SET_ATOMICITY: return "set_atomicity";
         default: return "none";
     }
 }
@@ -322,7 +321,6 @@ static const char *notice_field_token(int field_id) {
 static const char *notice_reason_token(int reason_id) {
     switch (reason_id) {
         case TP_NOTICE_REASON_CAPS_UNSUPPORTED: return "caps_unsupported";
-        case TP_NOTICE_REASON_PATH_NOT_STAGEABLE: return "path_not_stageable";
         default: return "none";
     }
 }

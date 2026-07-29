@@ -45,6 +45,12 @@
 #include "tp_project_mutation_internal.h"
 #include "unity.h"
 
+/* Direct-drive context for the writer contract (tp_core/tp_export.h): a golden
+ * test wants the files exactly where they will be published, so the write base
+ * and the published base are the same path. Production splits them -- the
+ * publisher hands the writer a staging base with the same basename. */
+#define DIRECT_CTX(prep_ptr, caps_ptr, base_path, notices_ptr)                     &(const tp_export_write_ctx) {                                                     .prep = (prep_ptr), .caps = (caps_ptr),                                        .write_path_base = (base_path), .out_path_base = (base_path),                  .notices = (notices_ptr)                                                   }
+
 #include "tp_fixtures.h"
 
 static const char *g_dir;      /* scratch output dir (argv[1]) */
@@ -451,7 +457,7 @@ void test_golden_bytes(void) {
     write_game_project(proj);
     char base[1088];
     (void)snprintf(base, sizeof base, "%s/defold_golden", proj);
-    TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_OK, tp_export_defold_write(&prep, defold_caps(), base, &notices, &e), e.msg);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_OK, tp_export_defold_write(DIRECT_CTX(&prep, defold_caps(), base, &notices), &e), e.msg);
     TEST_ASSERT_EQUAL_INT_MESSAGE(0, notices.count, "full-fidelity golden must raise zero notices");
     tp_export_notices_free(&notices);
 
@@ -532,7 +538,7 @@ void test_rotated_geometry(void) {
     write_game_project(proj);
     char base[1088];
     (void)snprintf(base, sizeof base, "%s/defold_rot", proj);
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_export_defold_write(&prep, defold_caps(), base, &notices, &e));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_export_defold_write(DIRECT_CTX(&prep, defold_caps(), base, &notices), &e));
     TEST_ASSERT_EQUAL_INT_MESSAGE(0, notices.count, "representable rotation raises no notice");
     tp_export_notices_free(&notices);
 
@@ -615,7 +621,7 @@ void test_hull_untrimmed_space(void) {
     tp_export_notices_init(&notices);
     char base[1024];
     (void)snprintf(base, sizeof base, "%s/defold_hull", g_dir);
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_export_defold_write(&prep, defold_caps(), base, &notices, &e));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_export_defold_write(DIRECT_CTX(&prep, defold_caps(), base, &notices), &e));
     tp_export_notices_free(&notices);
 
     char path[1088];
@@ -689,7 +695,7 @@ static bool export_trivial(const char *base, tp_arena *ar, tp_export_notices *no
     if (tp_normalize(&r, NULL, ar, &prep, &e) != TP_STATUS_OK) {
         return false;
     }
-    return tp_export_defold_write(&prep, defold_caps(), base, notices, &e) == TP_STATUS_OK;
+    return tp_export_defold_write(DIRECT_CTX(&prep, defold_caps(), base, notices), &e) == TP_STATUS_OK;
 }
 
 void test_tpatlas_file_ref(void) {
@@ -789,7 +795,7 @@ void test_tpatlas_referential_integrity(void) {
     tp_export_notices_init(&notices);
     char base[1024];
     (void)snprintf(base, sizeof base, "%s/defold_refint", g_dir);
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_export_defold_write(&prep, defold_caps(), base, &notices, &e));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_export_defold_write(DIRECT_CTX(&prep, defold_caps(), base, &notices), &e));
     tp_export_notices_free(&notices);
 
     char ip[1088], ap[1088];
@@ -832,7 +838,7 @@ static bool export_fixture(const char *case_name, const char *base, tp_arena *ar
     }
     tp_export_notices notices;
     tp_export_notices_init(&notices);
-    tp_status st = tp_export_defold_write(&prep, defold_caps(), base, &notices, e);
+    tp_status st = tp_export_defold_write(DIRECT_CTX(&prep, defold_caps(), base, &notices), e);
     tp_export_notices_free(&notices);
     return st == TP_STATUS_OK;
 }
@@ -1060,7 +1066,7 @@ void test_playback_enum_and_flags(void) {
     tp_export_notices_init(&notices);
     char base[1024];
     (void)snprintf(base, sizeof base, "%s/defold_anims", g_dir);
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_export_defold_write(&prep, defold_caps(), base, &notices, &e));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_export_defold_write(DIRECT_CTX(&prep, defold_caps(), base, &notices), &e));
 
     char path[1088];
     (void)snprintf(path, sizeof path, "%s.tpatlas", base);
@@ -1214,7 +1220,7 @@ static bool pack_demo_atlas(const demo_atlas *da, tp_arena *ar) {
             (void)snprintf(b, sizeof b, "%s/demo_%s", g_dir, da->atlas);
             tp_export_notices notices;
             tp_export_notices_init(&notices);
-            ok = tp_export_defold_write(&prep, defold_caps(), b, &notices, &e) == TP_STATUS_OK;
+            ok = tp_export_defold_write(DIRECT_CTX(&prep, defold_caps(), b, &notices), &e) == TP_STATUS_OK;
             tp_export_notices_free(&notices);
             if (!ok) {
                 (void)fprintf(stderr, "demo: export '%s' failed: %s\n", da->atlas, e.msg);
@@ -1380,7 +1386,7 @@ void test_defold_metadata_path_above_legacy_limit_reaches_the_filesystem_boundar
 
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_BAD_PROJECT,
-        tp_export_defold_write(&prep, &caps, base, NULL, &err));
+        tp_export_defold_write(DIRECT_CTX(&prep, &caps, base, NULL), &err));
     TEST_ASSERT_TRUE(strlen(err.msg) > 0U);
 }
 // #endregion

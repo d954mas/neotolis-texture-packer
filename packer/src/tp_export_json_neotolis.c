@@ -350,32 +350,34 @@ static tp_status emit_root(tp_sb *sb, const tp_export_prepared *prep, const tp_e
 /* entry                                                              */
 /* ------------------------------------------------------------------ */
 
-tp_status tp_export_json_neotolis_write(const tp_export_prepared *prep, const tp_export_caps *caps,
-                                        const char *out_path_base, tp_export_notices *notices, tp_error *err) {
-    if (!prep || !caps || !out_path_base) {
-        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "json-neotolis: NULL prep/caps/out_path_base");
+tp_status tp_export_json_neotolis_write(const tp_export_write_ctx *ctx, tp_error *err) {
+    if (!ctx || !ctx->prep || !ctx->caps || !ctx->write_path_base || !ctx->out_path_base) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "json-neotolis: incomplete write context");
     }
+    const tp_export_prepared *prep = ctx->prep;
+    const char *write_base = ctx->write_path_base;
 
     char path[TP_IDENTITY_PATH_MAX];
-    tp_status st = tp_export_output_path(out_path_base, ".json", path, err);
+    tp_status st = tp_export_output_path(write_base, ".json", path, err);
     if (st != TP_STATUS_OK) {
         return st;
     }
-    st = tp_export_list_page_files(prep->result, out_path_base, ignore_output_path, NULL, err);
+    st = tp_export_list_page_files(prep->result, write_base, ignore_output_path, NULL, err);
     if (st != TP_STATUS_OK) {
         return st;
     }
 
     /* Pages sit next to the json; straight-alpha default (ROADMAP). */
-    st = tp_export_write_pages(prep->result, out_path_base, false, err);
+    st = tp_export_write_pages(prep->result, write_base, false, err);
     if (st != TP_STATUS_OK) {
         return st;
     }
 
-    /* Page files sit next to the json. */
-    const char *page_base = tp_path_basename(out_path_base);
+    /* Page files sit next to the json, so the emitted reference is a bare
+     * basename -- identical whether the set is staged or written in place. */
+    const char *page_base = tp_path_basename(ctx->out_path_base);
     tp_sb sb = {0};
-    st = emit_root(&sb, prep, caps, page_base, notices, err);
+    st = emit_root(&sb, prep, ctx->caps, page_base, ctx->notices, err);
     if (st != TP_STATUS_OK) {
         free(sb.buf);
         return st;
@@ -385,7 +387,7 @@ tp_status tp_export_json_neotolis_write(const tp_export_prepared *prep, const tp
         return tp_error_set(err, TP_STATUS_OOM, "json-neotolis: OOM building JSON");
     }
 
-    if (!tp_fs_write_file_atomic(path, sb.buf, sb.len)) { /* binary: keep LF */
+    if (!tp_fs_write_file(path, sb.buf, sb.len)) { /* binary: keep LF */
         free(sb.buf);
         return tp_error_set(err, TP_STATUS_BAD_PROJECT, "json-neotolis: cannot write '%s'", path);
     }

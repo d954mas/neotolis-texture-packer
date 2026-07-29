@@ -705,11 +705,16 @@ tp_status tp_export_run_ex(const tp_project *project, int atlas_index, const tp_
         if (st != TP_STATUS_OK) {
             return st;
         }
+        bool writer_ran = false;
         st = tp_export_write_and_publish_set(exp, prep, out_bases[t],
                                              output_files, output_file_count,
-                                             notices, err);
+                                             notices, &writer_ran, err);
         if (rt) {
-            rt->writer_outcome = st == TP_STATUS_OK
+            /* A rejected output list is decided BEFORE the writer runs, so it is
+             * not a writer failure -- the report must not blame a writer that
+             * never executed. */
+            rt->writer_outcome = !writer_ran ? TP_EXPORT_WRITER_NOT_ATTEMPTED
+                                 : st == TP_STATUS_OK
                                      ? TP_EXPORT_WRITER_SUCCEEDED
                                      : TP_EXPORT_WRITER_FAILED;
         }

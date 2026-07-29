@@ -630,7 +630,14 @@ void test_real_export_reports_committed_files_before_later_writer_failure(void) 
         2, response->export_result.files);
     TEST_ASSERT_EQUAL_INT(1, response->export_result.atlases_failed);
     TEST_ASSERT_TRUE(response->export_result.partial_publication);
-    TEST_ASSERT_TRUE(response->export_result.publication_uncertain);
+    /* The RUN is partial -- one atlas target published and one failed -- but the
+     * failed target's publication is not UNCERTAIN. Its output directory is a
+     * regular file, so the staged-set publication cannot even create its private
+     * staging dir and the writer is never attempted; nothing of that target was
+     * written, and the report must not suggest artifacts might be lying around.
+     * publication_uncertain is now reserved for a target whose writer really did
+     * run (TP_EXPORT_WRITER_FAILED). */
+    TEST_ASSERT_FALSE(response->export_result.publication_uncertain);
     TEST_ASSERT_NOT_EQUAL(
         '\0', response->export_result.first_error[0]);
     TEST_ASSERT_TRUE(tp_fs_exists(published_json));

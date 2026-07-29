@@ -393,10 +393,20 @@ tp_add_test(NAME export_png LIBS tp_build unity stb_image
     MAKE_DIRS "${CMAKE_BINARY_DIR}/tp_export_png_test"
     ARGS "${CMAKE_BINARY_DIR}/tp_export_png_test")
 
-# Export output-SET publication: exclusive staging-dir create, unlisted-output
-# preflight before the first rename, and the bypassed-staging notice. Drives
+# Export output-SET publication: declared-list preflight (outside-directory and
+# case-insensitive duplicate rejections before the writer runs), unlisted/missing
+# output verdicts before the first rename, two-phase-swap rollback, and the
+# dead-owner reaper including crash-mid-swap recovery. Drives
 # tp_export_write_and_publish_set directly over a fixture exporter (no pack).
-tp_add_test(NAME export_set_publish LIBS tp_core unity PRIVATE_SRC
+# The rename fault seam is compiled out of the shipped library, so tp_export_png.c
+# is rebuilt here with TP_ENABLE_TEST_SEAMS (same pattern as tp_test_export_run
+# recompiling tp_export_run.c); that TU carries the PNG page writer, hence the
+# stb_image_write include path and link.
+tp_add_test(NAME export_set_publish
+    SOURCES test_export_set_publish.c ../src/tp_export_png.c
+    LIBS tp_core unity stb_image_write PRIVATE_SRC SEAMS
+    INCLUDE_DIRS
+        $<TARGET_PROPERTY:stb_image_write,INTERFACE_INCLUDE_DIRECTORIES>
     MAKE_DIRS "${CMAKE_BINARY_DIR}/tp_export_set_publish_test"
     ARGS "${CMAKE_BINARY_DIR}/tp_export_set_publish_test")
 

@@ -37,37 +37,58 @@ bool tp_fs_flush(FILE *file); /* checked stdio flush */
 bool tp_fs_sync(FILE *file);  /* checked flush + durable file sync */
 bool tp_fs_close(FILE *file);
 bool tp_fs_write_file(const char *path_utf8, const void *data, size_t size);
-/* Same bytes, but the destination is never observed half-written: the content goes
- * to a sibling temp and is published with one tp_fs_replace. A failure at any step
- * removes the temp and leaves an existing destination byte-for-byte intact. Not
- * durability (no fsync) -- exports are reproducible, so the property that matters
- * is that a failed write cannot destroy the previous export. */
-#define TP_FS_ATOMIC_TEMP_PATH_MAX 4160 /* TP_IDENTITY_PATH_MAX + ".tp-tmp-<pid>" */
-bool tp_fs_write_file_atomic(const char *path_utf8, const void *data,
-                             size_t size);
 
-/* Staged output-SET publish (export set-atomicity). A staging dir is a private
- * ".tp-stage-<pid>-<serial>" child of `parent_utf8` -- the same directory (and
- * therefore volume) as the files it will replace, so promotion stays a pure
- * rename. `parent_utf8` must be "" or end with a path separator; "" means the
- * current directory. While a redirect is armed on the calling thread,
- * tp_fs_write_file_atomic calls whose destination is a DIRECT child of
- * `final_dir_utf8` write a plain file of the same name into `staging_dir_utf8`
- * instead (per-file temp+replace inside a private dir buys nothing); every
- * other path keeps the sibling-temp behavior. The publish pass is the caller's:
- * one tp_fs_replace per staged file, and the staging tree must be removed on
- * every exit path. Redirects do not nest. */
+/* Longest path this module composes out of a canonical path: the canonical limit
+ * plus the longest private suffix below (".tp-old-<hexpid>-<hexserial>"). */
+#define TP_FS_STAGE_PATH_MAX 4160 /* TP_IDENTITY_PATH_MAX + a private suffix */
+
+/* ------------------------------------------------------------------ */
+/* Staged output-SET publish (export set-atomicity).                    */
+/* ------------------------------------------------------------------ */
+/*
+ * The publisher (tp_export_write_and_publish_set) owns the policy; this module
+ * owns the three names it needs and the cross-run reaper. Every private name is
+ * "<something>.tp-<role>-<hexpid>-<hexserial>", so a leftover always says which
+ * process owned it and the reaper can decide by liveness alone.
+ *
+ * Staging is a SIBLING of the output directory on purpose: promotion must be a
+ * pure rename, which requires the same volume, and the caller's request/work dir
+ * is frequently on a different one.
+ */
+
+/* Creates a private ".tp-stage-<hexpid>-<hexserial>" directory under
+ * `parent_utf8`, which must be "" or end with a path separator ("" means the
+ * current directory). The exclusive create is the single atomic step that
+ * decides ownership, so a leftover or foreign name is skipped, never adopted. */
 bool tp_fs_stage_dir_create(const char *parent_utf8, char *out, size_t out_cap);
-void tp_fs_stage_redirect_begin(const char *final_dir_utf8,
-                                const char *staging_dir_utf8);
-void tp_fs_stage_redirect_end(void);
+
 /* Maps a DIRECT child of `final_dir_utf8` ("" or trailing-separator form, as
  * above) to its staged sibling under `staging_dir_utf8`. False when `path_utf8`
- * is not a direct child or the result would overflow `out_cap`. The redirect
- * and the caller's publish pass share this one mapping rule. */
+ * is not a direct child or the result would overflow `out_cap`. */
 bool tp_fs_stage_child_path(const char *final_dir_utf8,
                             const char *staging_dir_utf8,
                             const char *path_utf8, char *out, size_t out_cap);
+
+/* Builds the DISPLACED name for `destination_utf8`:
+ * "<destination>.tp-old-<hexpid>-<hexserial>", a sibling of the destination (so
+ * the swap back is also a pure rename). Each call yields a fresh serial. False
+ * only when the result would overflow `out_cap`. */
+bool tp_fs_stage_old_path(const char *destination_utf8, char *out,
+                          size_t out_cap);
+
+/* Best-effort cross-run cleanup of the two private names above under
+ * `parent_utf8` ("" or trailing-separator form). Only entries whose embedded pid
+ * is definitively gone are touched, so a concurrent exporter's work is never
+ * disturbed. A ".tp-stage-*" directory is removed. A ".tp-old-*" file is the
+ * crash-mid-swap record: its destination present means the swap completed and
+ * the old copy is deleted; its destination missing means the swap was
+ * interrupted and the old copy is renamed back. Silent; never fails a run. */
+void tp_fs_stage_reap_orphans(const char *parent_utf8);
+
+/* True unless a process with `pid` is definitively gone. Conservative on
+ * purpose: an access-denied or otherwise unanswerable probe reports LIVE, so the
+ * reaper above never removes a directory that might still be in use. */
+bool tp_fs_process_is_live(unsigned long pid);
 /* Best-effort recursive removal; never follows directory reparse points. */
 void tp_fs_remove_tree(const char *path_utf8);
 

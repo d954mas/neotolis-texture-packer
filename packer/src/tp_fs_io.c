@@ -4,6 +4,7 @@
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h> /* strtoul: the reaper parses the pid out of a private name */
 #include <string.h>
 
 #include "core/nt_assert.h"
@@ -95,22 +96,20 @@ static bool fs_is_sep(char c) {
     return c == '/' || c == '\\';
 }
 
-/* Thread-local so a redirect brackets exactly one writer invocation on its own
- * thread; the strings are borrowed and must outlive the armed window. */
-static _Thread_local const char *s_stage_final_dir;
-static _Thread_local const char *s_stage_dir;
+/* The two private names the staged-set publish creates. Both carry the owning
+ * pid so the reaper can decide by liveness, and both are parsed back by
+ * stage_parse_owner below, so each spelling lives in exactly one place. */
+#define TP_FS_STAGE_DIR_PREFIX ".tp-stage-"
+#define TP_FS_STAGE_OLD_INFIX ".tp-old-"
 
-void tp_fs_stage_redirect_begin(const char *final_dir_utf8,
-                                const char *staging_dir_utf8) {
-    NT_ASSERT(final_dir_utf8 != NULL && staging_dir_utf8 != NULL);
-    NT_ASSERT(s_stage_final_dir == NULL && s_stage_dir == NULL);
-    s_stage_final_dir = final_dir_utf8;
-    s_stage_dir = staging_dir_utf8;
-}
+/* One counter behind every private name this module hands out, so a stage dir
+ * and a displaced destination created back to back can never collide. */
+static _Atomic uint32_t s_stage_serial;
 
-void tp_fs_stage_redirect_end(void) {
-    s_stage_final_dir = NULL;
-    s_stage_dir = NULL;
+static uint32_t stage_next_serial(void) {
+    return atomic_fetch_add_explicit(&s_stage_serial, 1U,
+                                     memory_order_relaxed) +
+           1U;
 }
 
 bool tp_fs_stage_child_path(const char *final_dir_utf8,
@@ -154,12 +153,11 @@ bool tp_fs_stage_dir_create(const char *parent_utf8, char *out, size_t out_cap) 
     }
     const size_t parent_len = strlen(parent_utf8);
     NT_ASSERT(parent_len == 0U || fs_is_sep(parent_utf8[parent_len - 1U]));
-    static _Atomic uint32_t counter;
     const unsigned long pid = (unsigned long)tp_fs_getpid();
     for (unsigned int attempt = 0U; attempt < 256U; attempt++) {
-        const uint32_t serial =
-            atomic_fetch_add_explicit(&counter, 1U, memory_order_relaxed) + 1U;
-        const int n = snprintf(out, out_cap, "%s.tp-stage-%08lx-%08lx",
+        const uint32_t serial = stage_next_serial();
+        const int n = snprintf(out, out_cap, "%s" TP_FS_STAGE_DIR_PREFIX
+                                             "%08lx-%08lx",
                                parent_utf8, pid & 0xffffffffUL,
                                (unsigned long)serial);
         if (n <= 0 || (size_t)n >= out_cap) {
@@ -178,6 +176,134 @@ bool tp_fs_stage_dir_create(const char *parent_utf8, char *out, size_t out_cap) 
     return false;
 }
 
+bool tp_fs_stage_old_path(const char *destination_utf8, char *out,
+                          size_t out_cap) {
+    if (!destination_utf8 || !out) {
+        errno = EINVAL;
+        return false;
+    }
+    const unsigned long pid = (unsigned long)tp_fs_getpid();
+    const int n = snprintf(out, out_cap, "%s" TP_FS_STAGE_OLD_INFIX "%08lx-%08lx",
+                           destination_utf8, pid & 0xffffffffUL,
+                           (unsigned long)stage_next_serial());
+    if (n <= 0 || (size_t)n >= out_cap) {
+        errno = ENAMETOOLONG;
+        return false;
+    }
+    return true;
+}
+
+/* Parses the "<hexpid>-<hexserial>" tail our private names end with. Returns
+ * false for anything that is not exactly that shape, so an unrelated name that
+ * merely starts the same way is left alone. */
+static bool stage_parse_owner(const char *tail, unsigned long *out_pid) {
+    if (tail[0] == '\0') {
+        return false;
+    }
+    char *end = NULL;
+    const unsigned long pid = strtoul(tail, &end, 16);
+    if (end == tail || *end != '-') {
+        return false;
+    }
+    const char *serial = end + 1;
+    if (serial[0] == '\0') {
+        return false;
+    }
+    (void)strtoul(serial, &end, 16);
+    if (*end != '\0') {
+        return false;
+    }
+    *out_pid = pid;
+    return true;
+}
+
+/* The owner pid of a ".tp-stage-<hexpid>-<hexserial>" directory name. */
+static bool stage_dir_owner(const char *name, unsigned long *out_pid) {
+    const size_t prefix_len = sizeof TP_FS_STAGE_DIR_PREFIX - 1U;
+    if (strncmp(name, TP_FS_STAGE_DIR_PREFIX, prefix_len) != 0) {
+        return false;
+    }
+    return stage_parse_owner(name + prefix_len, out_pid);
+}
+
+/* The owner pid of a "<destination>.tp-old-<hexpid>-<hexserial>" file name, plus
+ * the length of the destination name it displaced. The LAST infix wins, so a
+ * destination that legitimately contains ".tp-old-" still round-trips. */
+static bool stage_old_owner(const char *name, unsigned long *out_pid,
+                            size_t *out_destination_len) {
+    const size_t infix_len = sizeof TP_FS_STAGE_OLD_INFIX - 1U;
+    const char *at = NULL;
+    for (const char *scan = name; (scan = strstr(scan, TP_FS_STAGE_OLD_INFIX)) != NULL;
+         scan += infix_len) {
+        at = scan;
+    }
+    if (!at || at == name) {
+        return false; /* no infix, or nothing left to restore it to */
+    }
+    if (!stage_parse_owner(at + infix_len, out_pid)) {
+        return false;
+    }
+    *out_destination_len = (size_t)(at - name);
+    return true;
+}
+
+void tp_fs_stage_reap_orphans(const char *parent_utf8) {
+    if (!parent_utf8) {
+        return;
+    }
+    const size_t parent_len = strlen(parent_utf8);
+    NT_ASSERT(parent_len == 0U || fs_is_sep(parent_utf8[parent_len - 1U]));
+    tp_fs_dir *dir = tp_fs_dir_open(parent_len > 0U ? parent_utf8 : ".");
+    if (!dir) {
+        return;
+    }
+    tp_fs_dir_entry entry;
+    while (tp_fs_dir_next(dir, &entry) == TP_FS_DIR_ENTRY) {
+        unsigned long pid = 0UL;
+        size_t destination_len = 0U;
+        const bool is_stage = stage_dir_owner(entry.name, &pid);
+        const bool is_old =
+            !is_stage && stage_old_owner(entry.name, &pid, &destination_len);
+        if (!is_stage && !is_old) {
+            continue;
+        }
+        if (tp_fs_process_is_live(pid)) {
+            continue; /* someone is still exporting through it */
+        }
+        char path[TP_FS_STAGE_PATH_MAX];
+        const int n =
+            snprintf(path, sizeof path, "%s%s", parent_utf8, entry.name);
+        if (n <= 0 || (size_t)n >= sizeof path) {
+            continue;
+        }
+        if (is_stage) {
+            if (entry.info.kind == TP_FS_KIND_DIRECTORY && !entry.info.reparse) {
+                tp_fs_remove_tree(path);
+            }
+            continue;
+        }
+        if (entry.info.kind != TP_FS_KIND_REGULAR || entry.info.reparse) {
+            continue;
+        }
+        /* Crash mid-swap. The destination decides which half of the swap ran:
+         * present => the staged file already landed and this copy is spent;
+         * missing => the displace ran and the promote did not, so the old set
+         * member is restored. */
+        char destination[TP_FS_STAGE_PATH_MAX];
+        const int dn = snprintf(destination, sizeof destination, "%s%.*s",
+                                parent_utf8, (int)destination_len, entry.name);
+        if (dn <= 0 || (size_t)dn >= sizeof destination) {
+            continue;
+        }
+        if (tp_fs_exists(destination)) {
+            (void)tp_fs_remove_file(path);
+        } else {
+            (void)tp_fs_replace(path, destination);
+        }
+    }
+    tp_fs_dir_close(dir);
+}
+
 void tp_fs_remove_tree(const char *path_utf8) {
     tp_fs_dir *dir = tp_fs_dir_open(path_utf8);
     if (dir) {
@@ -186,7 +312,7 @@ void tp_fs_remove_tree(const char *path_utf8) {
             if (tp_fs_dir_next(dir, &entry) != TP_FS_DIR_ENTRY) {
                 break;
             }
-            char child[TP_FS_ATOMIC_TEMP_PATH_MAX];
+            char child[TP_FS_STAGE_PATH_MAX];
             if ((size_t)snprintf(child, sizeof child, "%s/%s", path_utf8,
                                  entry.name) >= sizeof child) {
                 continue;
@@ -204,44 +330,6 @@ void tp_fs_remove_tree(const char *path_utf8) {
         tp_fs_dir_close(dir);
     }
     (void)tp_fs_remove_dir(path_utf8);
-}
-
-/* Sibling temp + one replace. The pid keeps two processes exporting to a shared
- * output directory off each other's temp; within one process the writers are
- * sequential, so the name is simply reused. An armed stage redirect (above)
- * takes precedence for direct children of its final dir: those bytes go to the
- * staging sibling as one plain write, and publication becomes the caller's
- * whole-set replace pass. */
-bool tp_fs_write_file_atomic(const char *path_utf8, const void *data,
-                             size_t size) {
-    if (!path_utf8) {
-        errno = EINVAL;
-        return false;
-    }
-    if (s_stage_final_dir) {
-        char staged[TP_FS_ATOMIC_TEMP_PATH_MAX];
-        if (tp_fs_stage_child_path(s_stage_final_dir, s_stage_dir, path_utf8,
-                                   staged, sizeof staged)) {
-            return tp_fs_write_file(staged, data, size);
-        }
-    }
-    char tmp[TP_FS_ATOMIC_TEMP_PATH_MAX];
-    const int length = snprintf(tmp, sizeof tmp, "%s.tp-tmp-%08lx", path_utf8,
-                                (unsigned long)tp_fs_getpid());
-    if (length <= 0 || (size_t)length >= sizeof tmp) {
-        errno = ENAMETOOLONG;
-        return false;
-    }
-    if (!tp_fs_write_file(tmp, data, size)) {
-        (void)tp_fs_remove_file(tmp);
-        return false;
-    }
-    if (!tp_fs_replace(tmp, path_utf8)) {
-        /* The destination is untouched -- everything so far happened in the temp. */
-        (void)tp_fs_remove_file(tmp);
-        return false;
-    }
-    return true;
 }
 
 bool tp_fs_exists(const char *path_utf8) {

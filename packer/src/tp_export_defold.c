@@ -472,56 +472,61 @@ static tp_status write_text(const char *base, const char *ext, const tp_sb *sb, 
     if (st != TP_STATUS_OK) {
         return st;
     }
-    if (!tp_fs_write_file_atomic(path, sb->buf, sb->len)) { /* binary: keep LF */
+    if (!tp_fs_write_file(path, sb->buf, sb->len)) { /* binary: keep LF */
         return tp_error_set(err, TP_STATUS_BAD_PROJECT, "defold: cannot write '%s'", path);
     }
     return TP_STATUS_OK;
 }
 
-tp_status tp_export_defold_write(const tp_export_prepared *prep, const tp_export_caps *caps, const char *out_path_base,
-                                 tp_export_notices *notices, tp_error *err) {
-    if (!prep || !caps || !out_path_base) {
-        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "defold: NULL prep/caps/out_path_base");
+tp_status tp_export_defold_write(const tp_export_write_ctx *ctx, tp_error *err) {
+    if (!ctx || !ctx->prep || !ctx->caps || !ctx->write_path_base || !ctx->out_path_base) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "defold: incomplete write context");
     }
+    const tp_export_prepared *prep = ctx->prep;
+    const char *write_base = ctx->write_path_base;
+    tp_export_notices *notices = ctx->notices;
 
-    tp_status st = tp_export_defold_list_outputs(prep, out_path_base, ignore_output_path, NULL, err);
+    tp_status st = tp_export_defold_list_outputs(prep, write_base, ignore_output_path, NULL, err);
     if (st != TP_STATUS_OK) {
         return st;
     }
 
     /* Page PNGs: straight-alpha (Defold texture profiles premultiply at build). */
-    st = tp_export_write_pages(prep->result, out_path_base, false, err);
+    st = tp_export_write_pages(prep->result, write_base, false, err);
     if (st != TP_STATUS_OK) {
         return st;
     }
 
     /* Page/tpinfo files sit next to the .tpatlas; bob resolves page `name` and the
-     * .tpatlas `file` relative to their own directory (AtlasBuilder.java 2.7.0). */
-    const char *base = tp_path_basename(out_path_base);
+     * .tpatlas `file` relative to their own directory (AtlasBuilder.java 2.7.0).
+     * Both references describe where the atlas will BE, so they are derived from
+     * the published base -- staging shares its basename, and the game.project
+     * walk must climb the real output tree, not the staging dir. */
+    const char *base = tp_path_basename(ctx->out_path_base);
 
     tp_sb info = {0};
-    st = emit_tpinfo(&info, prep, caps, base, notices, err);
+    st = emit_tpinfo(&info, prep, ctx->caps, base, notices, err);
     if (st != TP_STATUS_OK) {
         free(info.buf);
         return st;
     }
-    st = write_text(out_path_base, ".tpinfo", &info, err);
+    st = write_text(write_base, ".tpinfo", &info, err);
     free(info.buf);
     if (st != TP_STATUS_OK) {
         return st;
     }
 
     char tpinfo_ref[TP_DEFOLD_PATH_MAX];
-    if (!resolve_tpatlas_file_ref(out_path_base, base, tpinfo_ref, sizeof tpinfo_ref) && notices) {
+    if (!resolve_tpatlas_file_ref(ctx->out_path_base, base, tpinfo_ref, sizeof tpinfo_ref) && notices) {
         (void)tp_export_notice_addf(
             notices,
             "could not locate game.project above '%s' -- .tpatlas 'file' reference '%s' may not resolve in Defold "
             "(expected a project-absolute \"/path/%s\")",
-            out_path_base, tpinfo_ref, tpinfo_ref);
+            ctx->out_path_base, tpinfo_ref, tpinfo_ref);
     }
     tp_sb atlas = {0};
     emit_tpatlas(&atlas, prep, tpinfo_ref, notices);
-    st = write_text(out_path_base, ".tpatlas", &atlas, err);
+    st = write_text(write_base, ".tpatlas", &atlas, err);
     free(atlas.buf);
     return st;
 }
