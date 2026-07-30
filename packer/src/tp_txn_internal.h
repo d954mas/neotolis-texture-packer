@@ -153,10 +153,13 @@ tp_status tp_txn__decode_prechecked_json_n(const char *json, size_t json_len,
                                            tp_txn_request **out,
                                            tp_error *err);
 
+#ifdef TP_ENABLE_TEST_SEAMS
 /* Test-only allocation fault seam for tp_project_clone (implemented in
  * tp_project_clone.c; default off / -1). Set N to make the (N+1)th clone
  * allocation return NULL so a test can prove that a clone failure at any staging
- * depth returns NULL, leaks nothing, and leaves the source untouched. Fires once. */
+ * depth returns NULL, leaks nothing, and leaves the source untouched. Fires once.
+ * Compiled out of every build that does not define TP_ENABLE_TEST_SEAMS, so a
+ * consumer must recompile tp_project_clone.c with the define. */
 void tp_project__test_set_clone_alloc_fail(int nth);
 
 /* Number of allocations the LAST tp_project_clone attempt requested (whether it
@@ -168,6 +171,7 @@ int tp_project__test_clone_alloc_count(void);
  * clone. For a completed clone this is its exact payload live-byte count
  * (allocator metadata excluded), not an estimate from allocation count. */
 size_t tp_project__test_clone_allocation_bytes(void);
+#endif /* TP_ENABLE_TEST_SEAMS */
 
 /* Exact semantic identity for one atlas, using the same field/order rules as
  * tp_semantic_identity. The single-operation commit path uses it to detect a

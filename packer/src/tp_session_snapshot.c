@@ -21,6 +21,10 @@
 #include "tp_session_snapshot_internal.h"
 
 // #region allocation accounting
+/* Accounting and fault injection exist only for the benchmark/fault suites, so
+ * both the counters and the branch that reads them are compiled out of a
+ * shipping build: snapshot_calloc is then a plain calloc. */
+#ifdef TP_ENABLE_TEST_SEAMS
 static _Thread_local size_t s_snapshot_allocations;
 static _Thread_local size_t s_snapshot_allocation_bytes;
 static _Thread_local size_t s_snapshot_fail_after = SIZE_MAX;
@@ -46,8 +50,10 @@ void tp_session__test_fail_snapshot_allocation_after(size_t successful) {
 void tp_session__test_fail_next_generation_owner_allocation(void) {
     tp_project_generation__test_fail_next_allocation();
 }
+#endif
 
 static void *snapshot_calloc(size_t count, size_t size) {
+#ifdef TP_ENABLE_TEST_SEAMS
     if (s_snapshot_fail_after != SIZE_MAX) {
         if (s_snapshot_fail_after == 0U) {
             s_snapshot_fail_after = SIZE_MAX;
@@ -55,11 +61,14 @@ static void *snapshot_calloc(size_t count, size_t size) {
         }
         s_snapshot_fail_after--;
     }
+#endif
     void *allocation = calloc(count, size);
+#ifdef TP_ENABLE_TEST_SEAMS
     if (allocation) {
         s_snapshot_allocations++;
         s_snapshot_allocation_bytes += count * size;
     }
+#endif
     return allocation;
 }
 

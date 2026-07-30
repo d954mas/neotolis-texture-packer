@@ -615,10 +615,7 @@ tp_status tp_pack_produce_observed(const tp_pack_settings *settings,
      * private child process, stages an ASCII artifact, and atomically publishes to
      * `out_path` (Unicode / long paths included). Cancellation kills the worker,
      * cleans staging, publishes nothing, and returns TP_STATUS_CANCELLED. */
-    tp_build_worker_opts wopts;
-    memset(&wopts, 0, sizeof wopts);
-    wopts.cancel = cancel;
-    st = tp_build_worker_run_opts(settings, path_images, out_path, &wopts, err);
+    st = tp_build_worker_run_cancellable(settings, path_images, out_path, cancel, err);
     if (st != TP_STATUS_OK) {
         out_path[0] = '\0';
     }

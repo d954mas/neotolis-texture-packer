@@ -42,6 +42,8 @@
 #include "unity.h"
 #include "../src/tp_project_internal.h"
 #include "tp_project_mutation_internal.h"
+#include "tp_project_parse_internal.h" /* tp_project_json_admit: the production admission entry */
+#include "tp_project_path_internal.h"  /* tp_relativize: the production save-path relativizer */
 
 void setUp(void) {
     tp_project__test_serialization_stats_reset();
@@ -186,7 +188,7 @@ void test_json_admission_exact_limits_and_escaped_punctuation(void) {
     };
     tp_error error = {{0}};
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
-                          tp_project__test_json_admit(
+                          tp_project_json_admit(
                               json, sizeof json - 1U, &limits, &error));
 }
 
@@ -201,7 +203,7 @@ void test_json_admission_rejects_nodes_entries_and_depth(void) {
         sizeof node_bomb - 1U, 7U, 3U, 2U,
     };
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OUT_OF_BOUNDS,
-                          tp_project__test_json_admit(
+                          tp_project_json_admit(
                               node_bomb, sizeof node_bomb - 1U,
                               &node_limits, &error));
 
@@ -210,7 +212,7 @@ void test_json_admission_rejects_nodes_entries_and_depth(void) {
     };
     memset(&error, 0, sizeof error);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OUT_OF_BOUNDS,
-                          tp_project__test_json_admit(
+                          tp_project_json_admit(
                               node_bomb, sizeof node_bomb - 1U,
                               &entry_limits, &error));
 
@@ -219,7 +221,7 @@ void test_json_admission_rejects_nodes_entries_and_depth(void) {
     };
     memset(&error, 0, sizeof error);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OUT_OF_BOUNDS,
-                          tp_project__test_json_admit(
+                          tp_project_json_admit(
                               depth_bomb, sizeof depth_bomb - 1U,
                               &depth_limits, &error));
 }
@@ -2214,27 +2216,27 @@ void test_relativize_is_unc_aware_reentrant_and_component_unbounded(void) {
     }
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
-        tp_project__test_relativize(absolute, "/foundation/base", relative,
+        tp_relativize(absolute, "/foundation/base", relative,
                                     sizeof relative));
     TEST_ASSERT_EQUAL_STRING(expected, relative);
 
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
-        tp_project__test_relativize(
+        tp_relativize(
             "//Server/Share/project/assets/hero.png",
             "//server/share/project", relative, sizeof relative));
     TEST_ASSERT_EQUAL_STRING("assets/hero.png", relative);
 
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
-        tp_project__test_relativize(
+        tp_relativize(
             "//server/other/assets/hero.png", "//server/share/project",
             relative, sizeof relative));
     TEST_ASSERT_EQUAL_STRING("//server/other/assets/hero.png", relative);
 
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
-        tp_project__test_relativize("//other/share/assets/hero.png",
+        tp_relativize("//other/share/assets/hero.png",
                                     "//server/share/project", relative,
                                     sizeof relative));
     TEST_ASSERT_EQUAL_STRING("//other/share/assets/hero.png", relative);
@@ -2291,7 +2293,7 @@ void test_path_folding_is_locale_independent(void) {
         }
 
         char relative[TP_IDENTITY_PATH_MAX] = {0};
-        if (tp_project__test_relativize("C:/proj/assets/hero.png", "c:/proj",
+        if (tp_relativize("C:/proj/assets/hero.png", "c:/proj",
                                         relative, sizeof relative) !=
                 TP_STATUS_OK ||
             strcmp(relative, "assets/hero.png") != 0) {
@@ -2307,7 +2309,7 @@ void test_path_folding_is_locale_independent(void) {
          * all in ASCII. Neither path may acquire a drive root, so the two
          * differ from their first component onward. */
         relative[0] = '\0';
-        if (tp_project__test_relativize("\xC9:/proj/hero.png", "\xE9:/proj",
+        if (tp_relativize("\xC9:/proj/hero.png", "\xE9:/proj",
                                         relative, sizeof relative) !=
                 TP_STATUS_OK ||
             strcmp(relative, "../../\xC9:/proj/hero.png") != 0) {

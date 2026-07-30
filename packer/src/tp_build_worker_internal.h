@@ -19,18 +19,6 @@
 extern "C" {
 #endif
 
-/* Optional knobs for a worker run. All-zero = production defaults (own module
- * path, 5-minute safety timeout, full 64 KiB reply cap, no cancellation).
- * `worker_exe`, `timeout_ms` and `reply_cap` are test seams; `cancel` carries
- * cooperative cancellation from tp_pack_cancellable. */
-typedef struct tp_build_worker_opts {
-    const char *worker_exe;         /* NULL = this process's own module path */
-    int timeout_ms;                 /* <= 0 = default 5-min safety timeout */
-    size_t reply_cap;               /* 0 = default 64 KiB; a lowered cap (< pipe buffer)
-                                     * lets a test drive the over-cap fail-closed branch */
-    const tp_cancel_token *cancel;  /* NULL = no cancellation */
-} tp_build_worker_opts;
-
 /* Runs one atlas through the private build worker. Mirrors tp_build_driver_run and
  * CONSUMES `loaded_images` (frees it on every path). The child is spawned with its
  * CWD set to a private ASCII staging dir on the destination's volume; it writes a
@@ -48,21 +36,45 @@ tp_status tp_build_worker_run(const tp_pack_settings *settings,
                               tp_image_rgba8 *loaded_images,
                               const char *out_path, tp_error *err);
 
-/* Test seam: run against an explicit worker executable (`worker_exe` NULL = own
- * module path). Lets the fault-injecting worker binaries exercise the crash /
- * malformed-reply / non-zero-exit outcome mapping. */
-tp_status tp_build_worker_run_exe(const tp_pack_settings *settings,
-                                  tp_image_rgba8 *loaded_images,
-                                  const char *out_path, const char *worker_exe,
-                                  tp_error *err);
+/* Same run, carrying cooperative cancellation from tp_pack_cancellable. `cancel`
+ * may be NULL. This is the whole production configuration surface of the worker:
+ * the executable, the safety timeout, and the reply cap are not caller-settable
+ * in a shipping build. */
+tp_status tp_build_worker_run_cancellable(const tp_pack_settings *settings,
+                                          tp_image_rgba8 *loaded_images,
+                                          const char *out_path,
+                                          const tp_cancel_token *cancel,
+                                          tp_error *err);
 
-/* Full entry: cancellation, an overridable timeout, and an explicit worker exe.
- * `opts` may be NULL (production defaults). tp_pack routes here with a cancel
- * poll; the cancel/timeout tests route here with a hang worker + tiny timeout. */
-tp_status tp_build_worker_run_opts(const tp_pack_settings *settings,
-                                   tp_image_rgba8 *loaded_images,
-                                   const char *out_path,
-                                   const tp_build_worker_opts *opts, tp_error *err);
+#ifdef TP_ENABLE_TEST_SEAMS
+/* Fault-injection controls, held apart from the production configuration above so
+ * a shipping consumer cannot see -- let alone set -- a knob whose only purpose is
+ * to break the run. All-zero means production defaults. Compiled out of every
+ * build that does not define TP_ENABLE_TEST_SEAMS, so a consumer must recompile
+ * tp_build_worker.c with the define (see the tp_test_build_worker target). */
+typedef struct tp_build_worker_test_controls {
+    const char *worker_exe;  /* NULL = this process's own module path */
+    int timeout_ms;          /* <= 0 = default 5-min safety timeout */
+    size_t reply_cap;        /* 0 = default 64 KiB; a lowered cap (< pipe buffer)
+                              * drives the over-cap fail-closed branch */
+} tp_build_worker_test_controls;
+
+/* Runs with fault-injection controls (`controls` may be NULL) plus the same
+ * cancellation the production entry takes. Lets the fault-injecting worker
+ * binaries exercise the crash / malformed-reply / non-zero-exit / hang outcome
+ * mapping. */
+tp_status tp_build_worker__test_run(
+    const tp_pack_settings *settings, tp_image_rgba8 *loaded_images,
+    const char *out_path, const tp_build_worker_test_controls *controls,
+    const tp_cancel_token *cancel, tp_error *err);
+
+/* Convenience over tp_build_worker__test_run for the common case: an explicit
+ * worker executable and nothing else. */
+tp_status tp_build_worker__test_run_exe(const tp_pack_settings *settings,
+                                        tp_image_rgba8 *loaded_images,
+                                        const char *out_path,
+                                        const char *worker_exe, tp_error *err);
+#endif
 
 /* Private-directory hygiene, shared with the outer job worker (which stages one
  * `.ntpack` per Pack request in its own `req-<hexpid>-<id>` directory under

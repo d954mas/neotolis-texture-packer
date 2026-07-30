@@ -64,6 +64,7 @@ tp_status tp_project_validate_sprite_pack_overrides(
     return TP_STATUS_OK;
 }
 
+#ifdef TP_ENABLE_TEST_SEAMS
 static _Thread_local bool s_measure_id_validation;
 static _Thread_local size_t s_id_validation_probes;
 
@@ -76,6 +77,7 @@ size_t tp_project__test_id_validation_work_take(void) {
     s_measure_id_validation = false;
     return s_id_validation_probes;
 }
+#endif
 
 typedef struct tp_identity_slot {
     tp_id128 *model;
@@ -160,8 +162,10 @@ static tp_status ids_are_unique(const tp_identity_slot *ids, size_t count,
         return tp_error_set(error, TP_STATUS_OOM,
                             "assigning project ids: out of memory");
     }
+#ifdef TP_ENABLE_TEST_SEAMS
     tp_project__test_note_id_resources(count * sizeof *ids,
                                        capacity * sizeof *table);
+#endif
     tp_status status = TP_STATUS_OK;
     for (size_t i = 0U; i < count && status == TP_STATUS_OK; i++) {
         if (tp_id128_is_nil(ids[i].value)) {
@@ -172,9 +176,11 @@ static tp_status ids_are_unique(const tp_identity_slot *ids, size_t count,
         size_t bucket = (size_t)tp_id128_bucket(ids[i].value) & (capacity - 1U);
         bool inserted = false;
         for (size_t probe = 0U; probe < capacity; probe++) {
+#ifdef TP_ENABLE_TEST_SEAMS
             if (s_measure_id_validation) {
                 s_id_validation_probes++;
             }
+#endif
             if (table[bucket] == 0U) {
                 table[bucket] = i + 1U;
                 inserted = true;

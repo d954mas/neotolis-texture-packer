@@ -6,6 +6,7 @@
 #include "tp_core/tp_identity.h"
 #include "tp_core/tp_project.h"
 #include "tp_project_internal.h"
+#include "tp_project_parse_internal.h" /* tp_project_json_admit: the production admission entry */
 #include "cJSON.h"
 
 #include <stdbool.h>
@@ -99,7 +100,7 @@ static bool project_load_case_admission_is_exact(const project_load_case *c) {
     const tp_project_json_limits exact = {
         c->json_bytes, c->nodes, c->max_entries, c->max_depth,
     };
-    if (tp_project__test_json_admit(c->json, c->json_bytes, &exact, &err) !=
+    if (tp_project_json_admit(c->json, c->json_bytes, &exact, &err) !=
         TP_STATUS_OK) {
         (void)fprintf(stderr,
                       "project load fixture admission failed shape=%s point=%s error=%s\n",
@@ -108,25 +109,25 @@ static bool project_load_case_admission_is_exact(const project_load_case *c) {
     }
     tp_project_json_limits below = exact;
     below.bytes--;
-    if (tp_project__test_json_admit(c->json, c->json_bytes, &below, &err) !=
+    if (tp_project_json_admit(c->json, c->json_bytes, &below, &err) !=
         TP_STATUS_OUT_OF_BOUNDS) {
         return false;
     }
     below = exact;
     below.nodes--;
-    if (tp_project__test_json_admit(c->json, c->json_bytes, &below, &err) !=
+    if (tp_project_json_admit(c->json, c->json_bytes, &below, &err) !=
         TP_STATUS_OUT_OF_BOUNDS) {
         return false;
     }
     below = exact;
     below.container_entries--;
-    if (tp_project__test_json_admit(c->json, c->json_bytes, &below, &err) !=
+    if (tp_project_json_admit(c->json, c->json_bytes, &below, &err) !=
         TP_STATUS_OUT_OF_BOUNDS) {
         return false;
     }
     below = exact;
     below.depth--;
-    return tp_project__test_json_admit(c->json, c->json_bytes, &below, &err) ==
+    return tp_project_json_admit(c->json, c->json_bytes, &below, &err) ==
            TP_STATUS_OUT_OF_BOUNDS;
 }
 

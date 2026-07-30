@@ -46,13 +46,25 @@ tp_add_test(NAME op_apply LIBS tp_core unity PRIVATE_SRC)
 # ordering, the CLI batch JSON golden + batch==one-by-one property, and UB-free
 # numbers. Includes the private src/ internal headers for the clone + op alloc-fault
 # seams (same pattern as test_op_apply.c).
-tp_add_test(NAME transaction LIBS tp_core unity PRIVATE_SRC)
+# The clone allocation-fault seam and the serialization work probes are compiled
+# out of the shipped library, so their TUs are recompiled here with
+# TP_ENABLE_TEST_SEAMS.
+tp_add_test(NAME transaction
+    SOURCES test_transaction.c ../src/tp_project_clone.c ../src/tp_project_write.c
+    LIBS tp_core unity PRIVATE_SRC SEAMS)
 
 # Architecture foundation M1: the synchronous session is the only live model
 # owner; snapshots are independently owned and rejected commits publish nothing.
 # tinycthread: the owner-thread contract test drives a whole session lifecycle
 # on a spawned owner, proving the owner is the creating thread.
-tp_add_test(NAME session LIBS tp_core tinycthread unity PRIVATE_SRC
+# The snapshot accounting/fault seams, the generation-owner allocation fault, the
+# save-I/O faults, and the clone allocation fault are all compiled out of the
+# shipped library, so their TUs are recompiled here with TP_ENABLE_TEST_SEAMS.
+tp_add_test(NAME session
+    SOURCES test_session.c ../src/tp_session_snapshot.c
+        ../src/tp_project_generation.c ../src/tp_project_save.c
+        ../src/tp_project_clone.c
+    LIBS tp_core tinycthread unity PRIVATE_SRC SEAMS
     MAKE_DIRS "${CMAKE_BINARY_DIR}/tp_session_test"
     ARGS "${CMAKE_BINARY_DIR}/tp_session_test")
 
@@ -63,6 +75,7 @@ tp_add_test(NAME session LIBS tp_core tinycthread unity PRIVATE_SRC
 # tinycthread PRIVATE, so a target recompiling a session TU needs its headers.
 tp_add_test(NAME session_observation
     SOURCES test_session_observation.c ../src/tp_session_observation.c
+        ../src/tp_session_snapshot.c ../src/tp_project_generation.c
     LIBS tp_core tinycthread unity PRIVATE_SRC SEAMS)
 
 # USA-07 reverse/superseded admission needs a second live observed owner, which
@@ -72,6 +85,7 @@ tp_add_test(NAME session_observation
 # pattern as tp_test_session_observation recompiling tp_session_observation.c).
 tp_add_test(NAME session_job_observation
     SOURCES test_session_job_observation.c ../src/tp_session_job_observation.c
+        ../src/tp_session_snapshot.c ../src/tp_project_generation.c
     LIBS tp_core tinycthread unity PRIVATE_SRC SEAMS)
 
 # Owner refcount invariants must remain executable in Release, where libc
@@ -83,7 +97,9 @@ tp_add_test(NAME project_generation_assert LIBS tp_core PRIVATE_SRC
 # Save I/O propagation at the live owner boundary. This stays separate from the
 # broad session battery so the identity/fingerprint/history outcome table is
 # easy to review when persistence changes.
-tp_add_test(NAME session_save_io_contract LIBS tp_core unity PRIVATE_SRC
+tp_add_test(NAME session_save_io_contract
+    SOURCES test_session_save_io_contract.c ../src/tp_project_save.c
+    LIBS tp_core unity PRIVATE_SRC SEAMS
     MAKE_DIRS "${CMAKE_BINARY_DIR}/tp_session_save_io_contract_test"
     ARGS "${CMAKE_BINARY_DIR}/tp_session_save_io_contract_test")
 
@@ -169,7 +185,9 @@ tp_add_test(NAME history_codec_contract LIBS tp_core unity PRIVATE_SRC
 # applied; the coordinator prepare/publish/abort fire at the right commit points; and a
 # real on-disk file journal round-trips. Includes the private src/ internal header for the
 # format constants + memory-io fault seams. argv[1] is a scratch dir for the file test.
-tp_add_test(NAME journal LIBS tp_core unity PRIVATE_SRC
+tp_add_test(NAME journal
+    SOURCES test_journal.c ../src/tp_project_clone.c ../src/tp_project_write.c
+    LIBS tp_core unity PRIVATE_SRC SEAMS
     MAKE_DIRS "${CMAKE_BINARY_DIR}/tp_journal_test"
     ARGS "${CMAKE_BINARY_DIR}/tp_journal_test")
 
@@ -336,7 +354,12 @@ endforeach()
 # A regression that failed to kill the hang worker must not wedge CI for the job's
 # full 6h budget: TIMEOUT bounds the whole worker suite well above its sub-second
 # normal run.
-tp_add_test(NAME build_worker LIBS tp_build unity PRIVATE_SRC
+# The fault-injection controls (explicit worker exe, tiny timeout, lowered reply
+# cap) are compiled out of the shipped library, so tp_build_worker.c is recompiled
+# here with TP_ENABLE_TEST_SEAMS.
+tp_add_test(NAME build_worker
+    SOURCES test_build_worker.c ../src/tp_build_worker.c
+    LIBS tp_build unity PRIVATE_SRC SEAMS
     DEFINES TP_TEST_WORKER_TIMEOUT_MS=400
     MAKE_DIRS "${CMAKE_BINARY_DIR}/tp_build_worker_test"
     ARGS
@@ -360,7 +383,14 @@ tp_add_test(NAME image LIBS tp_core unity PRIVATE_SRC
 
 # Phase 3 tp_project load/save: round-trip, sparse, determinism, version refusal,
 # path relativization, to_settings bridge. Needs a scratch dir for project files.
-tp_add_test(NAME project LIBS tp_core unity PRIVATE_SRC
+# Save-I/O faults, the writer size cap, the serialization/load work probes, and
+# the JSON-limit writer override are all compiled out of the shipped library, so
+# their four TUs are recompiled here with TP_ENABLE_TEST_SEAMS.
+# cjson: tp_project_parse.c parses through cJSON (header path only here).
+tp_add_test(NAME project
+    SOURCES test_project.c ../src/tp_project_save.c ../src/tp_project_write.c
+        ../src/tp_project_parse.c ../src/tp_project_identity.c
+    LIBS tp_core unity cjson PRIVATE_SRC SEAMS
     MAKE_DIRS "${CMAKE_BINARY_DIR}/tp_project_test"
     ARGS "${CMAKE_BINARY_DIR}/tp_project_test")
 
@@ -380,7 +410,9 @@ tp_add_test(NAME project_contract LIBS tp_core unity PRIVATE_SRC
 
 # Exact pre-publication Save outcome matrix: typed phase/path/native cause,
 # unchanged destination, and caller-controlled retry for every I/O phase.
-tp_add_test(NAME save_io_contract LIBS tp_core unity PRIVATE_SRC
+tp_add_test(NAME save_io_contract
+    SOURCES test_save_io_contract.c ../src/tp_project_save.c
+    LIBS tp_core unity PRIVATE_SRC SEAMS
     MAKE_DIRS "${CMAKE_BINARY_DIR}/tp_save_io_contract_test"
     ARGS "${CMAKE_BINARY_DIR}/tp_save_io_contract_test")
 
@@ -481,9 +513,15 @@ tp_add_test(NAME demo_export TARGET tp_demo_export
 # tp_build (not just tp_core): the --pack-hash-probe mode calls the session probe
 # tp_session_pack_input_hash, which lives in tp_job.c (tp_build). tp_build PUBLIC-
 # links tp_core, so the other modes keep their symbols.
+# The snapshot/clone accounting and the project-load work probes are compiled out
+# of the shipped library, so their TUs are recompiled here with
+# TP_ENABLE_TEST_SEAMS.
 tp_add_test(NAME bench_foundation TARGET tp_bench_foundation
     SOURCES tp_bench_foundation.c tp_bench_project_load.c
-    LIBS tp_build nt_time cjson PRIVATE_SRC
+        ../src/tp_session_snapshot.c ../src/tp_project_generation.c
+        ../src/tp_project_clone.c ../src/tp_project_parse.c
+        ../src/tp_project_identity.c
+    LIBS tp_build nt_time cjson tinycthread PRIVATE_SRC SEAMS
     DEFINES _CRT_SECURE_NO_WARNINGS
     NO_CTEST)
 

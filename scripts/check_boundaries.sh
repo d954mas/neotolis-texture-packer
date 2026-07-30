@@ -1132,6 +1132,170 @@ else
     trap - EXIT
 fi
 
+# 24. Test seams are not a shipping surface. `<owner>__test_<name>` marks a symbol
+#     that exists only so a test can observe or break its owner. Compiled into the
+#     shipped library it is an unaudited entry point any consumer can call, it
+#     widens the internal contract, and it hides which functions are real API --
+#     a fault-injection one also leaves the production path carrying a branch whose
+#     only purpose is to fail. Every such symbol must therefore sit inside a live
+#     `#ifdef TP_ENABLE_TEST_SEAMS` region, or in a translation unit that refuses to
+#     compile without the define (the `#ifndef TP_ENABLE_TEST_SEAMS` + `#error` file
+#     guard, e.g. packer/src/tp_test_seams.h). Consumers recompile the owning TU
+#     with the define via tp_add_test's SEAMS keyword.
+#     Complement to cmake A6, which pins two NAMED job-owner seams to their fences:
+#     A6 proves those specific seams stay fenced, this proves no unfenced seam
+#     appears anywhere in shipping code.
+#     A compound guard (`#if defined(TP_ENABLE_TEST_SEAMS) || X`) is NOT a fence --
+#     it can compile the seam into every build -- and neither is the `#else`/`#elif`
+#     branch of one, matching A6's walker.
+_seam_fence_awk='
+FNR == 1 { in_block = 0; depth = 0; delete seam; seam_only = 0; pending = 0 }
+{
+    line = $0
+    out = ""
+    i = 1
+    n = length(line)
+    while (i <= n) {
+        c = substr(line, i, 2)
+        if (in_block) {
+            if (c == "*/") { in_block = 0; i += 2 } else { i++ }
+            continue
+        }
+        if (c == "/*") { in_block = 1; i += 2; continue }
+        if (c == "//") { break }
+        out = out substr(line, i, 1)
+        i++
+    }
+    line = out
+    trimmed = line
+    sub(/^[ \t]+/, "", trimmed)
+    sub(/[ \t\r]+$/, "", trimmed)
+    if (pending && trimmed != "") {
+        if (trimmed ~ /^#[ \t]*error/) { seam_only = 1 }
+        pending = 0
+    }
+    if (trimmed ~ /^#[ \t]*(if|ifdef|ifndef)([^A-Za-z0-9_]|$)/) {
+        depth++
+        seam[depth] = (trimmed ~ /^#[ \t]*ifdef[ \t]+TP_ENABLE_TEST_SEAMS$/ ||
+                       trimmed ~ /^#[ \t]*if[ \t]+defined[ \t]*\([ \t]*TP_ENABLE_TEST_SEAMS[ \t]*\)$/) ? 1 : 0
+        if (trimmed ~ /^#[ \t]*ifndef[ \t]+TP_ENABLE_TEST_SEAMS$/) { pending = 1 }
+        next
+    }
+    if (trimmed ~ /^#[ \t]*endif/) { seam[depth] = 0; if (depth > 0) depth--; next }
+    if (trimmed ~ /^#[ \t]*(else|elif)/) { seam[depth] = 0; next }
+    if (seam_only) next
+    for (d = 1; d <= depth; d++) { if (seam[d]) next }
+    rest = line
+    while (match(rest, /[A-Za-z_][A-Za-z0-9_]*__test_[A-Za-z0-9_]*/)) {
+        printf "%s:%d:%s\n", FILENAME, FNR, substr(rest, RSTART, RLENGTH)
+        rest = substr(rest, RSTART + RLENGTH)
+    }
+}
+'
+# DEBT, not design. Each name below is a seam that predates this rule and whose
+# owning component is not fenced yet. The list is exact -- full symbol names, no
+# prefixes, no patterns -- so a NEW unfenced seam, including one in an
+# already-listed component, is still a hit. Packet W1-P6 fenced the session,
+# project, and build-worker families and could not reach past its file zone; the
+# owners still owed a fence are tp_diff/tp_history, tp_idset, tp_image, tp_journal,
+# tp_model, tp_op, tp_recovery, tp_txn, tp_validate, the CLI pack-fault binary's
+# tp_export_run arming call, and the GUI's gui_project__test_session.
+# Shrink this list; never grow it.
+_seam_fence_allowed='gui_project__test_session
+tp_diff__test_alloc_count
+tp_diff__test_reset_alloc_count
+tp_diff__test_set_alloc_fail
+tp_export_run__test_set_report_alloc_fail
+tp_history__test_fail_next_reserve
+tp_history__test_set_limits
+tp_idset__test_force_bucket
+tp_idset__test_probe_reset
+tp_idset__test_probe_take
+tp_image__test_decode_count
+tp_image__test_reset_decode_count
+tp_journal__test_fail_next_metadata_materialize
+tp_journal__test_has_valid_record_after
+tp_journal__test_recovery_copy_stats
+tp_journal__test_recovery_ops_borrow_raw
+tp_journal__test_set_file_limit
+tp_journal__test_set_record_limit
+tp_model__test_set_revision
+tp_op__test_apply_count_publish
+tp_op__test_apply_count_reset
+tp_op__test_apply_count_take
+tp_op__test_set_alloc_fail
+tp_recovery__test_candidate_insert
+tp_recovery__test_craft_metadata_journal
+tp_recovery__test_fail_next_live_retire_cleanup
+tp_recovery__test_fail_next_quarantine_unlink
+tp_recovery__test_fail_next_resolve_verify
+tp_recovery__test_hold_foreign_lock
+tp_recovery__test_peek_candidate
+tp_recovery__test_release_foreign_lock
+tp_recovery__test_session_attach_at
+tp_txn__test_complexity_reset
+tp_txn__test_count_op_walk
+tp_txn__test_encode_stats_reset
+tp_txn__test_error_allocations
+tp_txn__test_fail_next_request_encode
+tp_txn__test_json_precheck
+tp_txn__test_last_measure_allocations
+tp_txn__test_op_walk_steps
+tp_txn__test_request_encode_calls
+tp_txn__test_set_add_error_fail
+tp_txn__test_set_result_echo_fail
+tp_validate__test_fail_sprite_index
+tp_validate__test_set_alloc_fail
+tp_validate__test_work_get
+tp_validate__test_work_reset'
+_seam_fence_scan() {
+    awk "$_seam_fence_awk" "$@" 2>/dev/null |
+        awk -F: -v allowed="$_seam_fence_allowed" '
+            BEGIN { n = split(allowed, a, "\n"); for (i = 1; i <= n; i++) ok[a[i]] = 1 }
+            !($3 in ok)'
+}
+r24=$(_seam_fence_scan $(shipping_srcs))
+[ -n "$r24" ] && hit "R24 test seam outside a TP_ENABLE_TEST_SEAMS fence" "$r24"
+
+_r24_dir=$(mktemp -d 2>/dev/null)
+if [ -z "$_r24_dir" ] || [ ! -d "$_r24_dir" ]; then
+    hit "R24-selftest" "R24 self-test could not create a scratch dir (mktemp failed)"
+else
+    trap 'rm -rf "$_r24_dir"' EXIT
+    printf 'void tp_thing__test_fail_next(void);\n' >"$_r24_dir/seeded_plain.h"
+    printf '#ifdef TP_ENABLE_TEST_SEAMS\nvoid tp_thing__test_fail_next(void);\n#endif\n' \
+        >"$_r24_dir/fenced.h"
+    printf '#ifdef TP_ENABLE_TEST_SEAMS\n#ifdef _WIN32\nvoid tp_thing__test_fail_next(void);\n#endif\n#endif\n' \
+        >"$_r24_dir/fenced_nested.h"
+    printf '#if defined(TP_ENABLE_TEST_SEAMS) || defined(TP_OTHER)\nvoid tp_thing__test_fail_next(void);\n#endif\n' \
+        >"$_r24_dir/compound.h"
+    printf '#ifdef TP_ENABLE_TEST_SEAMS\nvoid a(void);\n#else\nvoid tp_thing__test_fail_next(void);\n#endif\n' \
+        >"$_r24_dir/else_branch.h"
+    printf '#ifndef TP_ENABLE_TEST_SEAMS\n#error "seam-only header"\n#endif\nvoid tp_thing__test_fail_next(void);\n' \
+        >"$_r24_dir/seam_only.h"
+    printf '/* tp_thing__test_fail_next is named here in prose only. */\nvoid tp_thing_real(void);\n' \
+        >"$_r24_dir/comment.h"
+    printf 'void tp_txn__test_complexity_reset(void);\n' >"$_r24_dir/allowed.h"
+    [ -z "$(_seam_fence_scan "$_r24_dir/seeded_plain.h")" ] &&
+        hit "R24-selftest" "R24 failed to catch an unfenced seam declaration"
+    [ -n "$(_seam_fence_scan "$_r24_dir/fenced.h")" ] &&
+        hit "R24-selftest" "R24 false-positives on a properly fenced seam"
+    [ -n "$(_seam_fence_scan "$_r24_dir/fenced_nested.h")" ] &&
+        hit "R24-selftest" "R24 false-positives on a seam nested inside its fence"
+    [ -z "$(_seam_fence_scan "$_r24_dir/compound.h")" ] &&
+        hit "R24-selftest" "R24 accepted a compound #if condition as a seam fence"
+    [ -z "$(_seam_fence_scan "$_r24_dir/else_branch.h")" ] &&
+        hit "R24-selftest" "R24 accepted the #else branch of a seam fence as fenced"
+    [ -n "$(_seam_fence_scan "$_r24_dir/seam_only.h")" ] &&
+        hit "R24-selftest" "R24 false-positives on a header that #errors without the define"
+    [ -n "$(_seam_fence_scan "$_r24_dir/comment.h")" ] &&
+        hit "R24-selftest" "R24 read a seam name in a comment as a declaration"
+    [ -n "$(_seam_fence_scan "$_r24_dir/allowed.h")" ] &&
+        hit "R24-selftest" "R24 ignored its exact debt allowance"
+    rm -rf "$_r24_dir"
+    trap - EXIT
+fi
+
 if [ "$fail" -eq 0 ]; then
     say "boundaries OK"
 fi

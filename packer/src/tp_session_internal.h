@@ -53,16 +53,20 @@ tp_status tp_session_attach_recovery_live(
     tp_session *session, tp_recovery_live *live,
     const tp_recovery_metadata *metadata, tp_error *err);
 
+#ifdef TP_ENABLE_TEST_SEAMS
 /* Component-local benchmark seam. Counts successful snapshot DTO/storage
- * allocations and their live-byte high-water on the calling thread. The
- * project-clone component has its own existing counter. */
+ * allocations and their live-byte high-water on the calling thread, and injects
+ * the snapshot / generation-owner allocation faults. Compiled out of every build
+ * that does not define TP_ENABLE_TEST_SEAMS, so a consumer must recompile
+ * tp_session_snapshot.c (and, for the generation-owner fault,
+ * tp_project_generation.c) with the define. The project-clone component has its
+ * own existing counter. */
 void tp_session__test_reset_snapshot_allocations(void);
 size_t tp_session__test_snapshot_allocation_count(void);
 size_t tp_session__test_snapshot_allocation_bytes(void);
 void tp_session__test_fail_snapshot_allocation_after(size_t successful);
 void tp_session__test_fail_next_generation_owner_allocation(void);
 
-#ifdef TP_ENABLE_TEST_SEAMS
 typedef void (*tp_session_test_observe_after_cut_fn)(void *context);
 /* One-shot thread-local seam invoked after the observation has fixed its cut
  * but before retained state is materialized. Tests use it to inject the commit

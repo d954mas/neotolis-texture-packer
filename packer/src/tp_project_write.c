@@ -28,6 +28,10 @@ typedef struct tp_write_ctx {
     const tp_project *project;
 } tp_write_ctx;
 
+/* Serialization work probes. The counters and every increment are compiled out of
+ * a shipping build, so the writer carries no accounting a shipped consumer could
+ * read. */
+#ifdef TP_ENABLE_TEST_SEAMS
 static _Thread_local size_t s_test_save_buffer_calls;
 static _Thread_local size_t s_test_serializer_allocations;
 static _Thread_local size_t s_test_serializer_peak_capacity;
@@ -61,20 +65,29 @@ size_t tp_project__test_load_buffer_calls(void) {
 size_t tp_project__test_size_query_calls(void) {
     return s_test_size_query_calls;
 }
+#endif
 
 /* The shared builder reads limit==0 as "unlimited"; the persisted-project cap is
  * a HARD byte budget, so a zero budget must reject before the first byte. */
 static void tp_write_begin(tp_sb *sb, size_t limit) {
     sb->limit = limit;
     sb->limit_exceeded = (limit == 0U);
+#ifdef TP_ENABLE_TEST_SEAMS
     sb->allocation_count = &s_test_serializer_allocations;
+#else
+    sb->allocation_count = NULL;
+#endif
 }
 
 /* Capacity only grows within one emit, so the final capacity IS the peak. */
 static void tp_write_end(const tp_sb *sb) {
+#ifdef TP_ENABLE_TEST_SEAMS
     if (sb->cap > s_test_serializer_peak_capacity) {
         s_test_serializer_peak_capacity = sb->cap;
     }
+#else
+    (void)sb;
+#endif
 }
 
 /* Every string this writer emits is UTF-8-validated by
@@ -425,7 +438,9 @@ static tp_status project_save_buffer_mode(const tp_project *p, bool checkpoint,
     if (canonical != TP_STATUS_OK) {
         return canonical;
     }
+#ifdef TP_ENABLE_TEST_SEAMS
     s_test_save_buffer_calls++;
+#endif
     tp_pack_settings defaults;
     tp_pack_settings_defaults(&defaults);
     const tp_write_ctx ctx = {checkpoint, p};
@@ -462,6 +477,7 @@ tp_status tp_project_checkpoint_save_buffer(const tp_project *p, char **out,
                                     out_len, err);
 }
 
+#ifdef TP_ENABLE_TEST_SEAMS
 tp_status tp_project__test_save_buffer_with_json_limits(
     const tp_project *project, bool checkpoint,
     const tp_project_json_limits *limits, char **out, size_t *out_len,
@@ -469,11 +485,14 @@ tp_status tp_project__test_save_buffer_with_json_limits(
     return project_save_buffer_mode(project, checkpoint, limits, out, out_len,
                                     err);
 }
+#endif
 
 static tp_status project_serialized_size_bounded_mode(
     const tp_project *p, bool checkpoint, size_t limit, size_t *out_len,
     tp_error *err) {
+#ifdef TP_ENABLE_TEST_SEAMS
     s_test_size_query_calls++;
+#endif
     if (!p || !out_len) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
                             "tp_project_serialized_size_bounded: NULL argument");
@@ -510,5 +529,7 @@ tp_status tp_project_checkpoint_serialized_size_bounded(
 }
 
 void tp_project_write_note_load_buffer_call(void) {
+#ifdef TP_ENABLE_TEST_SEAMS
     s_test_load_buffer_calls++;
+#endif
 }

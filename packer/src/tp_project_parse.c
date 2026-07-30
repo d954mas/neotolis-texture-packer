@@ -37,6 +37,9 @@ const tp_project_json_limits TP_PROJECT_JSON_LIMITS = {
     (size_t)TP_PROJECT_JSON_MAX_DEPTH,
 };
 
+/* Load-path work probes. Both the arming state and the production sites that feed
+ * it are compiled out of a shipping build. */
+#ifdef TP_ENABLE_TEST_SEAMS
 static _Thread_local bool s_test_measure_load_lookups;
 static _Thread_local tp_project_load_lookup_work s_test_load_lookup_work;
 static _Thread_local bool s_test_measure_load_resources;
@@ -62,10 +65,6 @@ tp_project_load_resources tp_project__test_load_resources_take(void) {
     return s_test_load_resources;
 }
 
-bool tp_project__test_load_resources_enabled(void) {
-    return s_test_measure_load_resources;
-}
-
 void tp_project__test_note_id_resources(size_t refs_bytes,
                                         size_t index_bytes) {
     if (!s_test_measure_load_resources) {
@@ -78,6 +77,7 @@ void tp_project__test_note_id_resources(size_t refs_bytes,
         s_test_load_resources.id_index_bytes = index_bytes;
     }
 }
+#endif
 
 /* ======================================================================== */
 /* load                                                                     */
@@ -216,12 +216,14 @@ static bool tp_load_lookup_init(tp_load_lookup *lookup, int expected) {
         return false;
     }
     lookup->capacity = capacity;
+#ifdef TP_ENABLE_TEST_SEAMS
     if (s_test_measure_load_resources) {
         const size_t bytes = capacity * sizeof *lookup->slots;
         if (bytes > s_test_load_resources.source_index_peak_bytes) {
             s_test_load_resources.source_index_peak_bytes = bytes;
         }
     }
+#endif
     return true;
 }
 
@@ -245,9 +247,11 @@ static tp_load_lookup_slot *tp_load_lookup_find(tp_load_lookup *lookup,
             slot->hash = hash;
             return slot;
         }
+#ifdef TP_ENABLE_TEST_SEAMS
         if (s_test_measure_load_lookups) {
             s_test_load_lookup_work.source_path_comparisons++;
         }
+#endif
         if (slot->hash == hash) {
             if (tp_source_path_text_equal(slot->key, key)) {
                 return slot;
@@ -956,12 +960,6 @@ tp_status tp_project_json_admit(
         }
     }
     return TP_STATUS_OK;
-}
-
-tp_status tp_project__test_json_admit(
-    const char *text, size_t len, const tp_project_json_limits *limits,
-    tp_error *err) {
-    return tp_project_json_admit(text, len, limits, err);
 }
 
 /* Parse core shared by load (from file) + load_buffer (from memory). Borrows

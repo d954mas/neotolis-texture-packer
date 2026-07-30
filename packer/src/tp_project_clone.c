@@ -37,6 +37,7 @@
 /* The seam is per-thread so independent sessions may clone concurrently without
  * racing on process-global test instrumentation. Tests and benchmarks arm/read
  * it on the same thread that performs the clone. */
+#ifdef TP_ENABLE_TEST_SEAMS
 static _Thread_local int s_clone_fail = -1; /* countdown; -1 disabled. Fires once. */
 static _Thread_local int s_clone_allocs = 0;
 static _Thread_local size_t s_clone_allocation_bytes = 0U;
@@ -50,6 +51,7 @@ int tp_project__test_clone_alloc_count(void) { return s_clone_allocs; }
 size_t tp_project__test_clone_allocation_bytes(void) {
     return s_clone_allocation_bytes;
 }
+#endif
 
 typedef struct clone_ctx {
     int fail;
@@ -224,12 +226,18 @@ tp_project *tp_project_clone(const tp_project *src) {
     if (!src) {
         return NULL;
     }
+#ifdef TP_ENABLE_TEST_SEAMS
     clone_ctx ctx = {s_clone_fail, 0, 0U};
+#else
+    clone_ctx ctx = {-1, 0, 0U}; /* no armed fault outside a seam build */
+#endif
     tp_project *dst = (tp_project *)cl_alloc(&ctx, sizeof(tp_project));
     if (!dst) {
+#ifdef TP_ENABLE_TEST_SEAMS
         s_clone_fail = ctx.fail;
         s_clone_allocs = ctx.allocs;
         s_clone_allocation_bytes = ctx.allocation_bytes;
+#endif
         return NULL;
     }
     dst->project_dir = NULL;
@@ -266,8 +274,10 @@ tp_project *tp_project_clone(const tp_project *src) {
         }
     }
 done:
+#ifdef TP_ENABLE_TEST_SEAMS
     s_clone_fail = ctx.fail;
     s_clone_allocs = ctx.allocs;
     s_clone_allocation_bytes = ctx.allocation_bytes;
+#endif
     return dst;
 }

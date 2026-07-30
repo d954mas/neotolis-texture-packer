@@ -230,7 +230,7 @@ static char g_long_dir[LONG_PATH_CAP];
  * are built in-process here. The engine's threaded builder can deadlock under
  * Windows clang-ASan when invoked after a child spawn/reap cycle (pre-existing
  * engine/env issue, not the containment path), so no direct_nt_build call may
- * follow a tp_build_worker_run/tp_build_worker_run_exe call in this suite. */
+ * follow a tp_build_worker_run/tp_build_worker__test_run_exe call in this suite. */
 void test_direct_reference_builds(void) {
     char direct_path[1024];
     TEST_ASSERT_TRUE(snprintf(direct_path, sizeof direct_path, "%s/wrk_direct.ntpack", g_dir) > 0);
@@ -347,7 +347,7 @@ void test_crashing_worker_reports_crashed_and_preserves_prior_artifact(void) {
     /* Now a crashing worker aimed at the SAME path. */
     make_settings(&s, g_dir);
     err = (tp_error){{0}};
-    tp_status st = tp_build_worker_run_exe(&s, NULL, path, g_worker_crash, &err);
+    tp_status st = tp_build_worker__test_run_exe(&s, NULL, path, g_worker_crash, &err);
     TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_BUILDER_CRASHED, st, err.msg);
 
     /* No publish: the prior artifact is byte-for-byte unchanged. */
@@ -382,12 +382,11 @@ void test_cancel_kills_worker_and_cleans_staging(void) {
     const int staging_before = count_staging_dirs(g_dir);
     int polls = 0;
     const tp_cancel_token cancel = {cancel_after_a_few_polls, &polls};
-    tp_build_worker_opts opts;
-    memset(&opts, 0, sizeof opts);
-    opts.worker_exe = g_worker_hang;
-    opts.cancel = &cancel;
+    tp_build_worker_test_controls controls;
+    memset(&controls, 0, sizeof controls);
+    controls.worker_exe = g_worker_hang;
 
-    tp_status st = tp_build_worker_run_opts(&s, NULL, path, &opts, &err);
+    tp_status st = tp_build_worker__test_run(&s, NULL, path, &controls, &cancel, &err);
     TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_CANCELLED, st,
                                   "cancel must report CANCELLED, not a builder error");
     TEST_ASSERT_TRUE_MESSAGE(polls > 3, "the cancel token was not polled");
@@ -406,12 +405,12 @@ void test_timeout_kills_worker_and_cleans_staging(void) {
     make_settings(&s, g_dir);
     tp_error err = {{0}};
     const int staging_before = count_staging_dirs(g_dir);
-    tp_build_worker_opts opts;
-    memset(&opts, 0, sizeof opts);
-    opts.worker_exe = g_worker_hang;
-    opts.timeout_ms = TP_TEST_WORKER_TIMEOUT_MS;
+    tp_build_worker_test_controls controls;
+    memset(&controls, 0, sizeof controls);
+    controls.worker_exe = g_worker_hang;
+    controls.timeout_ms = TP_TEST_WORKER_TIMEOUT_MS;
 
-    tp_status st = tp_build_worker_run_opts(&s, NULL, path, &opts, &err);
+    tp_status st = tp_build_worker__test_run(&s, NULL, path, &controls, NULL, &err);
     TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_BUILDER_CRASHED, st, err.msg);
     TEST_ASSERT_NOT_NULL_MESSAGE(strstr(err.msg, "timed out"), err.msg);
     TEST_ASSERT_FALSE_MESSAGE(tp_fs_exists(path), "timeout published an artifact");
@@ -426,7 +425,7 @@ void test_malformed_reply_is_builder_failed(void) {
     make_settings(&s, g_dir);
     tp_error err = {{0}};
     const int staging_before = count_staging_dirs(g_dir);
-    tp_status st = tp_build_worker_run_exe(&s, NULL, path, g_worker_malformed, &err);
+    tp_status st = tp_build_worker__test_run_exe(&s, NULL, path, g_worker_malformed, &err);
     TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_BUILDER_FAILED, st, err.msg);
     TEST_ASSERT_EQUAL_INT_MESSAGE(staging_before, count_staging_dirs(g_dir), "malformed left staging behind");
 }
@@ -439,7 +438,7 @@ void test_nonzero_exit_with_error_reply_is_builder_failed(void) {
     tp_pack_settings s;
     make_settings(&s, g_dir);
     tp_error err = {{0}};
-    tp_status st = tp_build_worker_run_exe(&s, NULL, path, g_worker_nonzero, &err);
+    tp_status st = tp_build_worker__test_run_exe(&s, NULL, path, g_worker_nonzero, &err);
     TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_BUILDER_FAILED, st, err.msg);
     TEST_ASSERT_NOT_NULL(strstr(err.msg, "worker fault seam"));
 }
@@ -456,7 +455,7 @@ void test_sink_write_failure_publishes_nothing_and_cleans_staging(void) {
     make_settings(&s, g_dir);
     tp_error err = {{0}};
     const int staging_before = count_staging_dirs(g_dir);
-    tp_status st = tp_build_worker_run_exe(&s, NULL, path, g_worker_nowrite, &err);
+    tp_status st = tp_build_worker__test_run_exe(&s, NULL, path, g_worker_nowrite, &err);
     TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_BUILDER_FAILED, st, err.msg);
     TEST_ASSERT_NOT_NULL_MESSAGE(strstr(err.msg, "sink write failed"), err.msg);
     TEST_ASSERT_FALSE_MESSAGE(tp_fs_exists(path), "sink failure published an artifact");
@@ -474,7 +473,7 @@ void test_ok_reply_missing_artifact_is_builder_crashed(void) {
     make_settings(&s, g_dir);
     tp_error err = {{0}};
     const int staging_before = count_staging_dirs(g_dir);
-    tp_status st = tp_build_worker_run_exe(&s, NULL, path, g_worker_oknoart, &err);
+    tp_status st = tp_build_worker__test_run_exe(&s, NULL, path, g_worker_oknoart, &err);
     TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_BUILDER_CRASHED, st, err.msg);
     TEST_ASSERT_NOT_NULL_MESSAGE(strstr(err.msg, "no readable artifact"), err.msg);
     TEST_ASSERT_FALSE_MESSAGE(tp_fs_exists(path), "missing-artifact OK published an artifact");
@@ -493,7 +492,7 @@ void test_oversized_declared_length_reply_is_builder_failed(void) {
     make_settings(&s, g_dir);
     tp_error err = {{0}};
     const int staging_before = count_staging_dirs(g_dir);
-    tp_status st = tp_build_worker_run_exe(&s, NULL, path, g_worker_biglen, &err);
+    tp_status st = tp_build_worker__test_run_exe(&s, NULL, path, g_worker_biglen, &err);
     TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_BUILDER_FAILED, st, err.msg);
     TEST_ASSERT_FALSE_MESSAGE(tp_fs_exists(path), "oversized-length reply published an artifact");
     TEST_ASSERT_EQUAL_INT_MESSAGE(staging_before, count_staging_dirs(g_dir),
@@ -510,7 +509,7 @@ void test_truncated_reply_frame_is_builder_failed(void) {
     make_settings(&s, g_dir);
     tp_error err = {{0}};
     const int staging_before = count_staging_dirs(g_dir);
-    tp_status st = tp_build_worker_run_exe(&s, NULL, path, g_worker_trunc, &err);
+    tp_status st = tp_build_worker__test_run_exe(&s, NULL, path, g_worker_trunc, &err);
     TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_BUILDER_FAILED, st, err.msg);
     TEST_ASSERT_FALSE_MESSAGE(tp_fs_exists(path), "truncated reply published an artifact");
     TEST_ASSERT_EQUAL_INT_MESSAGE(staging_before, count_staging_dirs(g_dir),
@@ -528,7 +527,7 @@ void test_missing_worker_exe_is_builder_crashed(void) {
     make_settings(&s, g_dir);
     tp_error err = {{0}};
     const int staging_before = count_staging_dirs(g_dir);
-    tp_status st = tp_build_worker_run_exe(&s, NULL, path, "ntpacker-no-such-worker", &err);
+    tp_status st = tp_build_worker__test_run_exe(&s, NULL, path, "ntpacker-no-such-worker", &err);
     TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_BUILDER_CRASHED, st, err.msg);
     TEST_ASSERT_FALSE_MESSAGE(tp_fs_exists(path), "spawn/exec failure published an artifact");
     TEST_ASSERT_EQUAL_INT_MESSAGE(staging_before, count_staging_dirs(g_dir),
@@ -568,11 +567,11 @@ void test_oversized_reply_is_builder_failed(void) {
     make_settings(&s, g_dir);
     tp_error err = {{0}};
     const int staging_before = count_staging_dirs(g_dir);
-    tp_build_worker_opts opts;
-    memset(&opts, 0, sizeof opts);
-    opts.worker_exe = g_worker_flood;
-    opts.reply_cap = 1024; /* below the flood (8 KiB) and the 64 KiB pipe buffer */
-    tp_status st = tp_build_worker_run_opts(&s, NULL, path, &opts, &err);
+    tp_build_worker_test_controls controls;
+    memset(&controls, 0, sizeof controls);
+    controls.worker_exe = g_worker_flood;
+    controls.reply_cap = 1024; /* below the flood (8 KiB) and the 64 KiB pipe buffer */
+    tp_status st = tp_build_worker__test_run(&s, NULL, path, &controls, NULL, &err);
     TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_BUILDER_FAILED, st, err.msg);
     TEST_ASSERT_NOT_NULL_MESSAGE(strstr(err.msg, "oversized"), err.msg);
     TEST_ASSERT_FALSE_MESSAGE(tp_fs_exists(path), "oversized reply published an artifact");

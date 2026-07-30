@@ -290,11 +290,6 @@ tp_status tp_relativize(const char *abs, const char *base_dir, char *out,
     return TP_STATUS_OK;
 }
 
-tp_status tp_project__test_relativize(const char *abs, const char *base_dir,
-                                      char *out, size_t cap) {
-    return tp_relativize(abs, base_dir, out, cap);
-}
-
 /* ======================================================================== */
 /* path resolve + packing bridge                                            */
 /* ======================================================================== */

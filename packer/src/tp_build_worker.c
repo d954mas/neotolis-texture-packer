@@ -43,7 +43,7 @@
 
 /* Internal safety timeout (decision 0018 kickoff): cancellation is the primary
  * control; this only bounds a wedged builder. Overridable by the cancel/timeout
- * test via tp_build_worker_opts.timeout_ms; never user-facing. */
+ * test via tp_build_worker_test_controls.timeout_ms; never user-facing. */
 #define TP_BUILD_WORKER_TIMEOUT_MS (5 * 60 * 1000)
 
 /* Cancel/timeout poll cadence while the child runs. */
@@ -373,27 +373,71 @@ static tp_status map_outcome(const uint8_t *reply, size_t reply_len, bool read_o
                         (read_ok && !reply_eof) ? "oversized" : "malformed/truncated");
 }
 
+/* One run description, file-private and identical in every build so no struct
+ * ever crosses the seam fence. The production entries fill `cancel` alone; the
+ * fenced test entries add the fault-injection fields. */
+typedef struct build_worker_run_params {
+    const char *worker_exe;
+    int timeout_ms;
+    size_t reply_cap;
+    const tp_cancel_token *cancel;
+} build_worker_run_params;
+
+static tp_status build_worker_run(const tp_pack_settings *settings,
+                                  tp_image_rgba8 *loaded_images,
+                                  const char *out_path,
+                                  const build_worker_run_params *params,
+                                  tp_error *err);
+
 tp_status tp_build_worker_run(const tp_pack_settings *settings, tp_image_rgba8 *loaded_images,
                               const char *out_path, tp_error *err) {
-    return tp_build_worker_run_opts(settings, loaded_images, out_path, NULL, err);
+    return build_worker_run(settings, loaded_images, out_path, NULL, err);
 }
 
-tp_status tp_build_worker_run_exe(const tp_pack_settings *settings, tp_image_rgba8 *loaded_images,
-                                  const char *out_path, const char *worker_exe, tp_error *err) {
-    tp_build_worker_opts opts;
-    memset(&opts, 0, sizeof opts);
-    opts.worker_exe = worker_exe;
-    return tp_build_worker_run_opts(settings, loaded_images, out_path, &opts, err);
+tp_status tp_build_worker_run_cancellable(const tp_pack_settings *settings,
+                                          tp_image_rgba8 *loaded_images,
+                                          const char *out_path,
+                                          const tp_cancel_token *cancel, tp_error *err) {
+    build_worker_run_params params;
+    memset(&params, 0, sizeof params);
+    params.cancel = cancel;
+    return build_worker_run(settings, loaded_images, out_path, &params, err);
 }
 
-tp_status tp_build_worker_run_opts(const tp_pack_settings *settings, tp_image_rgba8 *loaded_images,
-                                   const char *out_path, const tp_build_worker_opts *opts,
-                                   tp_error *err) {
+#ifdef TP_ENABLE_TEST_SEAMS
+tp_status tp_build_worker__test_run(const tp_pack_settings *settings,
+                                    tp_image_rgba8 *loaded_images, const char *out_path,
+                                    const tp_build_worker_test_controls *controls,
+                                    const tp_cancel_token *cancel, tp_error *err) {
+    build_worker_run_params params;
+    memset(&params, 0, sizeof params);
+    if (controls) {
+        params.worker_exe = controls->worker_exe;
+        params.timeout_ms = controls->timeout_ms;
+        params.reply_cap = controls->reply_cap;
+    }
+    params.cancel = cancel;
+    return build_worker_run(settings, loaded_images, out_path, &params, err);
+}
+
+tp_status tp_build_worker__test_run_exe(const tp_pack_settings *settings,
+                                        tp_image_rgba8 *loaded_images, const char *out_path,
+                                        const char *worker_exe, tp_error *err) {
+    tp_build_worker_test_controls controls;
+    memset(&controls, 0, sizeof controls);
+    controls.worker_exe = worker_exe;
+    return tp_build_worker__test_run(settings, loaded_images, out_path, &controls, NULL, err);
+}
+#endif
+
+static tp_status build_worker_run(const tp_pack_settings *settings, tp_image_rgba8 *loaded_images,
+                                  const char *out_path, const build_worker_run_params *params,
+                                  tp_error *err) {
     /* Resolve the worker executable BEFORE consuming loaded_images. A self-path
      * failure is NOT silently downgraded to an in-process build: that would run
      * nt_builder in the host and lose containment, so it fails closed. */
     char self[4096];
-    const char *exe = opts ? opts->worker_exe : NULL;
+    const char *exe = params ? params->worker_exe : NULL;
     if (!exe) {
         if (!tp_proc_self_path(self, sizeof self)) {
             free_loaded_images(loaded_images, settings->sprite_count);
@@ -450,8 +494,9 @@ tp_status tp_build_worker_run_opts(const tp_pack_settings *settings, tp_image_rg
      * runs BEFORE reading stdout: a hung child that never closes its stdout can no
      * longer wedge the parent in a blocking read -- cancel/timeout kills it, which
      * breaks the pipes and lets the subsequent read reach EOF at once. */
-    const int timeout_ms = (opts && opts->timeout_ms > 0) ? opts->timeout_ms : TP_BUILD_WORKER_TIMEOUT_MS;
-    const tp_cancel_token *cancel = opts ? opts->cancel : NULL;
+    const int timeout_ms =
+        (params && params->timeout_ms > 0) ? params->timeout_ms : TP_BUILD_WORKER_TIMEOUT_MS;
+    const tp_cancel_token *cancel = params ? params->cancel : NULL;
     const double start = now_ms();
     tp_proc_result w = {TP_PROC_END_ABNORMAL, -1};
     bool finished = false;
@@ -483,7 +528,7 @@ tp_status tp_build_worker_run_opts(const tp_pack_settings *settings, tp_image_rg
      * pipe buffer) so a worker that overshoots the cap still write-and-exits and the
      * post-wait read observes the over-cap (not-EOF) fail-closed branch. */
     const size_t reply_cap =
-        (opts && opts->reply_cap > 0U) ? opts->reply_cap : TP_BUILD_WORKER_REPLY_CAP;
+        (params && params->reply_cap > 0U) ? params->reply_cap : TP_BUILD_WORKER_REPLY_CAP;
     uint8_t *reply = NULL;
     size_t reply_len = 0U;
     bool reply_eof = false;

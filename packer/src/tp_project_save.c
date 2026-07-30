@@ -34,6 +34,10 @@ typedef enum tp_temp_open_result {
     TP_TEMP_OPEN_FAILED,
 } tp_temp_open_result;
 
+/* Save-path fault injection. Both the arming state and every branch that reads
+ * it are compiled out of a shipping build, so the published save path carries no
+ * route to a synthetic I/O failure. */
+#ifdef TP_ENABLE_TEST_SEAMS
 static _Thread_local bool s_test_fail_next_temp_create;
 static _Thread_local bool s_test_fail_next_file_sync;
 static _Thread_local bool s_test_fail_next_parent_sync;
@@ -53,6 +57,7 @@ void tp_project__test_set_save_max_bytes(size_t max_bytes) {
     s_test_save_max_bytes = max_bytes;
     s_test_save_max_bytes_armed = true;
 }
+#endif
 
 /* Create a unique sibling temp atomically and keep that exact file open. There
  * is deliberately no remove-before-open: an existing name belongs to another
@@ -63,6 +68,7 @@ static tp_temp_open_result tp_open_save_temp(const char *path, char *tmp,
                                              int *out_native_code) {
     *out = NULL;
     *out_native_code = 0;
+#ifdef TP_ENABLE_TEST_SEAMS
     if (s_test_fail_next_temp_create ||
         s_test_fail_next_save_io == TP_FILE_IO_PHASE_TEMP_OPEN) {
         s_test_fail_next_temp_create = false;
@@ -70,6 +76,7 @@ static tp_temp_open_result tp_open_save_temp(const char *path, char *tmp,
         *out_native_code = EACCES;
         return TP_TEMP_OPEN_FAILED;
     }
+#endif
     static _Atomic uint64_t counter;
     const unsigned long pid = (unsigned long)tp_getpid();
     for (unsigned int attempt = 0; attempt < 128U; attempt++) {
@@ -228,10 +235,12 @@ static tp_status tp_project_save_stage(tp_project *p, const char *path,
         return bst;
     }
     size_t save_max_bytes = (size_t)TP_IDENTITY_FILE_MAX_BYTES;
+#ifdef TP_ENABLE_TEST_SEAMS
     if (s_test_save_max_bytes_armed) {
         save_max_bytes = s_test_save_max_bytes;
         s_test_save_max_bytes_armed = false;
     }
+#endif
     if (len > save_max_bytes) {
         free(buf);
         return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
@@ -278,11 +287,14 @@ static tp_status tp_project_save_stage(tp_project *p, const char *path,
     }
     tp_file_io_phase failed_phase = TP_FILE_IO_PHASE_NONE;
     bool wrote = false;
+#ifdef TP_ENABLE_TEST_SEAMS
     if (s_test_fail_next_save_io == TP_FILE_IO_PHASE_TEMP_WRITE) {
         s_test_fail_next_save_io = TP_FILE_IO_PHASE_NONE;
         native_code = ENOSPC;
         failed_phase = TP_FILE_IO_PHASE_TEMP_WRITE;
-    } else {
+    } else
+#endif
+    {
         wrote = tp_fs_write_all(f, buf, len);
         if (!wrote) {
             native_code = errno != 0 ? errno : EIO;
@@ -291,13 +303,16 @@ static tp_status tp_project_save_stage(tp_project *p, const char *path,
     }
     bool synced = false;
     if (wrote) {
+#ifdef TP_ENABLE_TEST_SEAMS
         if (s_test_fail_next_file_sync ||
             s_test_fail_next_save_io == TP_FILE_IO_PHASE_FILE_SYNC) {
             s_test_fail_next_file_sync = false;
             s_test_fail_next_save_io = TP_FILE_IO_PHASE_NONE;
             native_code = EIO;
             failed_phase = TP_FILE_IO_PHASE_FILE_SYNC;
-        } else {
+        } else
+#endif
+        {
             synced = tp_fs_sync(f);
             if (!synced) {
                 native_code = errno != 0 ? errno : EIO;
@@ -307,12 +322,15 @@ static tp_status tp_project_save_stage(tp_project *p, const char *path,
     }
     const bool close_result = tp_fs_close(f);
     bool closed = close_result;
+#ifdef TP_ENABLE_TEST_SEAMS
     if (s_test_fail_next_save_io == TP_FILE_IO_PHASE_TEMP_CLOSE) {
         s_test_fail_next_save_io = TP_FILE_IO_PHASE_NONE;
         native_code = EIO;
         failed_phase = TP_FILE_IO_PHASE_TEMP_CLOSE;
         closed = false;
-    } else if (!close_result && failed_phase == TP_FILE_IO_PHASE_NONE) {
+    } else
+#endif
+    if (!close_result && failed_phase == TP_FILE_IO_PHASE_NONE) {
         native_code = errno != 0 ? errno : EIO;
         failed_phase = TP_FILE_IO_PHASE_TEMP_CLOSE;
     }
@@ -344,12 +362,16 @@ static tp_status tp_project_save_stage(tp_project *p, const char *path,
     const tp_file_io_phase publish_phase =
         create_only ? TP_FILE_IO_PHASE_ATOMIC_CREATE
                     : TP_FILE_IO_PHASE_ATOMIC_REPLACE;
+#ifdef TP_ENABLE_TEST_SEAMS
     const bool inject_publish_failure =
         s_test_fail_next_save_io == publish_phase;
     if (inject_publish_failure) {
         s_test_fail_next_save_io = TP_FILE_IO_PHASE_NONE;
         native_code = EACCES;
     }
+#else
+    const bool inject_publish_failure = false;
+#endif
     if (!inject_publish_failure && create_only) {
         const tp_fs_move_result move_result =
             tp_fs_move_no_replace(tmp, path);
@@ -380,9 +402,12 @@ static tp_status tp_project_save_stage(tp_project *p, const char *path,
         *out_fingerprint = written_fingerprint;
     }
     bool parent_synced = false;
+#ifdef TP_ENABLE_TEST_SEAMS
     if (s_test_fail_next_parent_sync) {
         s_test_fail_next_parent_sync = false;
-    } else {
+    } else
+#endif
+    {
         parent_synced = tp_fs_sync_parent(path);
     }
     if (!parent_synced) {
