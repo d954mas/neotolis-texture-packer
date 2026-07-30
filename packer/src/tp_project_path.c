@@ -1,9 +1,9 @@
 #include "tp_project_path_internal.h"
 
-#include <ctype.h>
 #include <stdio.h>
 #include <string.h>
 
+#include "tp_ascii.h" /* locale-free classification/fold: path identity is not process-dependent */
 #include "tp_core/tp_identity.h"
 
 #ifdef _WIN32
@@ -33,7 +33,8 @@ bool tp_path_is_absolute(const char *p) {
     if (p[0] == '/' || p[0] == '\\') {
         return true; /* POSIX root or Windows UNC / drive-relative root */
     }
-    if (isalpha((unsigned char)p[0]) && p[1] == ':' && (p[2] == '/' || p[2] == '\\' || p[2] == '\0')) {
+    if (tp_ascii_is_alpha((unsigned char)p[0]) && p[1] == ':' &&
+        (p[2] == '/' || p[2] == '\\' || p[2] == '\0')) {
         return true; /* Windows drive path */
     }
     return false;
@@ -106,7 +107,7 @@ static size_t tp_skip_path_separators(const char *path, size_t pos) {
 
 static tp_path_root tp_classify_path_root(const char *path) {
     tp_path_root root = {0};
-    if (isalpha((unsigned char)path[0]) && path[1] == ':' &&
+    if (tp_ascii_is_alpha((unsigned char)path[0]) && path[1] == ':' &&
         (path[2] == '/' || path[2] == '\0')) {
         root.kind = TP_PATH_ROOT_DRIVE;
         root.first = 0U;
@@ -153,7 +154,8 @@ static bool tp_path_span_eq(const char *a, size_t a_start, size_t a_len,
     for (size_t i = 0U; i < a_len; i++) {
         const unsigned char ac = (unsigned char)a[a_start + i];
         const unsigned char bc = (unsigned char)b[b_start + i];
-        if (insensitive ? tolower(ac) != tolower(bc) : ac != bc) {
+        if (insensitive ? tp_ascii_tolower(ac) != tp_ascii_tolower(bc)
+                        : ac != bc) {
             return false;
         }
     }

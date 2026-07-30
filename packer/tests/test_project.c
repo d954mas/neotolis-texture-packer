@@ -11,6 +11,7 @@
 
 #define _CRT_SECURE_NO_WARNINGS
 
+#include <locale.h>
 #include <math.h>
 #include <stdbool.h>
 #include <stdarg.h>
@@ -36,6 +37,7 @@
 #include "tp_core/tp_pack.h"
 #include "tp_core/tp_project.h"
 #include "tp_core/tp_transaction.h"
+#include "tp_ascii.h" /* shared locale-free fold -- same code production uses (drift guard) */
 #include "tp_project_identity_internal.h"
 #include "unity.h"
 #include "../src/tp_project_internal.h"
@@ -2238,6 +2240,93 @@ void test_relativize_is_unc_aware_reentrant_and_component_unbounded(void) {
     TEST_ASSERT_EQUAL_STRING("//other/share/assets/hero.png", relative);
 }
 
+/* Spec §4.3 determinism: path identity carries no locale input. The shared
+ * ASCII fold classifies and folds by explicit range, so no LC_CTYPE can move a
+ * byte into a different equivalence class -- a drive root still compares
+ * case-insensitively over ASCII only, and a high byte that a single-byte locale
+ * calls a cased letter is still not a drive letter.
+ *
+ * Failures are recorded and reported after the locale is restored: an assert
+ * fired inside the loop would longjmp out and leave the whole test binary in a
+ * foreign LC_CTYPE. */
+void test_path_folding_is_locale_independent(void) {
+    static const char *const locales[] = {
+        "C",
+        "tr_TR.ISO-8859-9", "tr_TR.UTF-8", "Turkish",
+        "de_DE.ISO-8859-1", "de_DE.UTF-8", "German",
+        "en_US.ISO-8859-1", "en_US.ISO8859-1", ".1252",
+    };
+    const char *const current = setlocale(LC_CTYPE, NULL);
+    char saved[128];
+    (void)snprintf(saved, sizeof saved, "%s", current ? current : "C");
+
+    unsigned applied = 0U;
+    char failure[256];
+    failure[0] = '\0';
+
+    for (size_t i = 0U; i < sizeof locales / sizeof locales[0]; i++) {
+        if (!setlocale(LC_CTYPE, locales[i])) {
+            continue; /* not installed on this platform */
+        }
+        applied++;
+
+        for (unsigned c = 0U; c <= 0xFFU; c++) {
+            const unsigned char byte = (unsigned char)c;
+            const bool alpha =
+                (byte >= 'A' && byte <= 'Z') || (byte >= 'a' && byte <= 'z');
+            const unsigned char lower =
+                (byte >= 'A' && byte <= 'Z')
+                    ? (unsigned char)(byte + ('a' - 'A'))
+                    : byte;
+            if (tp_ascii_is_alpha(byte) == alpha &&
+                tp_ascii_tolower(byte) == lower) {
+                continue;
+            }
+            if (failure[0] == '\0') {
+                (void)snprintf(failure, sizeof failure,
+                               "byte 0x%02X classifies or folds differently "
+                               "under LC_CTYPE=%s",
+                               c, locales[i]);
+            }
+        }
+
+        char relative[TP_IDENTITY_PATH_MAX] = {0};
+        if (tp_project__test_relativize("C:/proj/assets/hero.png", "c:/proj",
+                                        relative, sizeof relative) !=
+                TP_STATUS_OK ||
+            strcmp(relative, "assets/hero.png") != 0) {
+            if (failure[0] == '\0') {
+                (void)snprintf(failure, sizeof failure,
+                               "drive root lost ASCII case-insensitivity under "
+                               "LC_CTYPE=%s (got '%s')",
+                               locales[i], relative);
+            }
+        }
+
+        /* 0xC9/0xE9 are a cased letter pair in Latin-1 locales and nothing at
+         * all in ASCII. Neither path may acquire a drive root, so the two
+         * differ from their first component onward. */
+        relative[0] = '\0';
+        if (tp_project__test_relativize("\xC9:/proj/hero.png", "\xE9:/proj",
+                                        relative, sizeof relative) !=
+                TP_STATUS_OK ||
+            strcmp(relative, "../../\xC9:/proj/hero.png") != 0) {
+            if (failure[0] == '\0') {
+                (void)snprintf(failure, sizeof failure,
+                               "a high byte was read as a drive letter under "
+                               "LC_CTYPE=%s (got '%s')",
+                               locales[i], relative);
+            }
+        }
+    }
+
+    TEST_ASSERT_NOT_NULL(setlocale(LC_CTYPE, saved));
+    TEST_ASSERT_GREATER_THAN_UINT(0U, applied);
+    if (failure[0] != '\0') {
+        TEST_FAIL_MESSAGE(failure);
+    }
+}
+
 int main(int argc, char **argv) {
     g_dir = (argc > 1) ? argv[1] : ".";
     UNITY_BEGIN();
@@ -2307,5 +2396,6 @@ int main(int argc, char **argv) {
     RUN_TEST(test_core_owns_animation_and_target_defaults_without_truncation);
     RUN_TEST(test_target_exporter_id_bound_is_enforced_at_model_and_load_boundaries);
     RUN_TEST(test_relativize_is_unc_aware_reentrant_and_component_unbounded);
+    RUN_TEST(test_path_folding_is_locale_independent);
     return UNITY_END();
 }

@@ -591,12 +591,19 @@ static gui_row_identity s_selected_cache_identity;
 static int s_selected_cache_row;
 static const tp_snapshot_sprite *s_selected_cache_override;
 
+/* FNV-1a/64 over (source id, source key). The 0xFF separator makes the field
+ * boundary unforgeable -- it is not a legal UTF-8 byte, so no source key can
+ * contain one and no two distinct (id, key) pairs can fold to the same byte
+ * stream. Process-local bucket index only: every hit is confirmed by a full
+ * id + key comparison, so the value is never an identity. */
 static uint64_t override_hash(tp_id128 source_id, const char *source_key) {
-    uint64_t hash = UINT64_C(1469598103934665603);
+    uint64_t hash = UINT64_C(14695981039346656037);
     for (size_t i = 0; i < sizeof source_id.bytes; ++i) {
         hash ^= (uint64_t)source_id.bytes[i];
         hash *= UINT64_C(1099511628211);
     }
+    hash ^= UINT64_C(0xFF);
+    hash *= UINT64_C(1099511628211);
     for (const unsigned char *p = (const unsigned char *)source_key; *p; ++p) {
         hash ^= (uint64_t)*p;
         hash *= UINT64_C(1099511628211);

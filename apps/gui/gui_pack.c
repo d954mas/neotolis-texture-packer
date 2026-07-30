@@ -108,8 +108,10 @@ void gui_pack__test_set_result_budget(uint64_t byte_budget) {
 }
 #endif
 
+/* FNV-1a/64 over one NUL-terminated field. Process-local bucket index only:
+ * every hit is confirmed by a full strcmp, so the value is never an identity. */
 static uint64_t pack_ref_hash(const char *text) {
-    uint64_t hash = UINT64_C(1469598103934665603);
+    uint64_t hash = UINT64_C(14695981039346656037);
     for (const unsigned char *p = (const unsigned char *)text; *p; ++p) {
         hash ^= (uint64_t)*p;
         hash *= UINT64_C(1099511628211);

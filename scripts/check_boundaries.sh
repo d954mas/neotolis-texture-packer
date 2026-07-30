@@ -1088,6 +1088,50 @@ if [ -n "$(_usa_missing "$(_usa_ids)")" ]; then
     hit "R22-selftest" "R22 detector false-positives on a fully covered id set"
 fi
 
+# 23. Spec §4.3 determinism: no locale-dependent byte classification or folding
+#     in shipping code. The <ctype.h>/<wctype.h> case and character-class
+#     functions consult the active LC_CTYPE, so the same path text, id text, or
+#     token would land in different equivalence classes depending on the locale
+#     the process happens to run under. packer/src/tp_ascii.h is the shared
+#     replacement and needs no exception here -- it classifies by explicit ASCII
+#     range and calls nothing. isdigit/isxdigit are deliberately NOT banned:
+#     C17 §7.4.1.5 and §7.4.1.12 pin them to the decimal / hexadecimal digits in
+#     every locale, so they carry no locale input. A legit exception carries a
+#     "boundary-ok:" note on the same line.
+_locale_ctype='(^|[^A-Za-z0-9_])(is|to)w?(alpha|alnum|upper|lower|space|punct|print|graph|cntrl|blank)[[:space:]]*\('
+_locale_ctype_scan() {
+    grep -nE "$_locale_ctype" "$@" 2>/dev/null | grep -v 'boundary-ok:'
+}
+r23=$(_locale_ctype_scan $(shipping_srcs))
+[ -n "$r23" ] && hit "R23 locale-dependent ctype in shipping code" "$r23"
+
+_r23_dir=$(mktemp -d 2>/dev/null)
+if [ -z "$_r23_dir" ] || [ ! -d "$_r23_dir" ]; then
+    hit "R23-selftest" "R23 self-test could not create a scratch dir (mktemp failed)"
+else
+    trap 'rm -rf "$_r23_dir"' EXIT
+    printf '    if (isalpha((unsigned char)p[0]) && p[1] == 0x3A) {\n' \
+        >"$_r23_dir/seeded_classify.c"
+    printf '    return tolower(a) == tolower(b);\n' >"$_r23_dir/seeded_fold.c"
+    printf '    return towupper(wc);\n' >"$_r23_dir/seeded_wide.c"
+    printf '    return tp_ascii_tolower(a) == tp_ascii_tolower(b) &&\n           tp_ascii_is_alpha(a);\n' \
+        >"$_r23_dir/shared_fold.c"
+    printf '    if (!isdigit(byte) && !(byte >= 0x61 && byte <= 0x66)) {\n' \
+        >"$_r23_dir/digit_grammar.c"
+    [ -z "$(_locale_ctype_scan "$_r23_dir/seeded_classify.c")" ] &&
+        hit "R23-selftest" "R23 failed to catch a seeded locale classification"
+    [ -z "$(_locale_ctype_scan "$_r23_dir/seeded_fold.c")" ] &&
+        hit "R23-selftest" "R23 failed to catch a seeded locale case fold"
+    [ -z "$(_locale_ctype_scan "$_r23_dir/seeded_wide.c")" ] &&
+        hit "R23-selftest" "R23 failed to catch a seeded wide-character locale fold"
+    [ -n "$(_locale_ctype_scan "$_r23_dir/shared_fold.c")" ] &&
+        hit "R23-selftest" "R23 false-positives on the shared ASCII fold"
+    [ -n "$(_locale_ctype_scan "$_r23_dir/digit_grammar.c")" ] &&
+        hit "R23-selftest" "R23 false-positives on the locale-independent digit predicates"
+    rm -rf "$_r23_dir"
+    trap - EXIT
+fi
+
 if [ "$fail" -eq 0 ]; then
     say "boundaries OK"
 fi
