@@ -1149,7 +1149,7 @@ fi
 #     it can compile the seam into every build -- and neither is the `#else`/`#elif`
 #     branch of one, matching A6's walker.
 _seam_fence_awk='
-FNR == 1 { in_block = 0; depth = 0; delete seam; seam_only = 0; pending = 0 }
+FNR == 1 { in_block = 0; depth = 0; split("", seam); seam_only = 0; pending = 0 }
 {
     line = $0
     out = ""
@@ -1248,10 +1248,19 @@ tp_validate__test_fail_sprite_index
 tp_validate__test_set_alloc_fail
 tp_validate__test_work_get
 tp_validate__test_work_reset'
+# The allowance list reaches awk through the ENVIRONMENT, not `-v`: a `-v`
+# assignment is a single lexical string, and awks other than gawk reject an
+# embedded newline in one ("newline in string"), which kills the program before
+# it reads a line -- a scan that cannot run must not look like a clean scan.
+# stderr is deliberately NOT discarded here for the same reason: an awk that
+# refuses the program has to be visible.
 _seam_fence_scan() {
-    awk "$_seam_fence_awk" "$@" 2>/dev/null |
-        awk -F: -v allowed="$_seam_fence_allowed" '
-            BEGIN { n = split(allowed, a, "\n"); for (i = 1; i <= n; i++) ok[a[i]] = 1 }
+    awk "$_seam_fence_awk" "$@" |
+        SEAM_FENCE_ALLOWED="$_seam_fence_allowed" awk -F: '
+            BEGIN {
+                n = split(ENVIRON["SEAM_FENCE_ALLOWED"], a, "\n")
+                for (i = 1; i <= n; i++) ok[a[i]] = 1
+            }
             !($3 in ok)'
 }
 r24=$(_seam_fence_scan $(shipping_srcs))
