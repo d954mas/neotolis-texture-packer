@@ -133,8 +133,11 @@ static char *dup_cstr(const char *s) {
     return copy;
 }
 
+/* FNV-1a/64 over one NUL-terminated field. Process-local bucket index for the
+ * in-memory image-hash cache only -- never persisted and never an identity;
+ * img_cache_slot confirms every hit with a full strcmp. */
 static uint64_t path_bucket(const char *path) {
-    uint64_t hash = UINT64_C(1469598103934665603);
+    uint64_t hash = UINT64_C(14695981039346656037);
     for (const unsigned char *p = (const unsigned char *)path; *p; ++p) {
         hash ^= (uint64_t)*p;
         hash *= UINT64_C(1099511628211);

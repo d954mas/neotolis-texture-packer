@@ -6,54 +6,366 @@
 
 #include "gui_scan.h"
 
+#include "core/nt_assert.h"
 #include "tp_core/tp_identity.h"
+#include "tp_core/tp_session.h"
 #ifdef NTPACKER_GUI_SELFTEST
 #include "tp_session_internal.h"
 #endif
 
-/* GUI mutation and Undo/Redo run through tp_session; reads use one cached owned
- * snapshot. Field edits coalesce by exact target until the gesture boundary, so
- * one gesture produces one transaction and one Undo step. */
+/* GUI mutation and Undo/Redo run through tp_session; reads use one atomically observed
+ * immutable snapshot. Feature-local draft owners submit one typed transaction per gesture. */
 
 gui_project_state s_project;
 
 // #region helpers
-void gui_project__snapshot_drop(void) {
-    if (s_project.snapshot) {
-        s_project.snapshot_lifetime_generation++;
+static void reduce_project_display_name(
+    gui_project_state *project,
+    const tp_session_snapshot *snapshot) {
+    NT_ASSERT(project != NULL);
+    NT_ASSERT(snapshot != NULL);
+    const tp_session_identity identity =
+        tp_session_snapshot_identity(snapshot);
+    const char *path =
+        identity.kind == TP_IDENTITY_SAVED
+            ? identity.canonical_path
+            : "";
+    if (path[0] == '\0') {
+        (void)snprintf(
+            project->name, sizeof project->name,
+            "untitled");
+        return;
     }
-    tp_session_snapshot_destroy(s_project.snapshot);
-    s_project.snapshot = NULL;
+    const char *base = path;
+    for (const char *cursor = path; *cursor;
+         ++cursor) {
+        if (*cursor == '/' || *cursor == '\\') {
+            base = cursor + 1;
+        }
+    }
+    (void)snprintf(
+        project->name, sizeof project->name,
+        "%s", base);
+}
+
+static void reduce_recovery_health(
+    gui_project_state *project,
+    tp_session_recovery_health health) {
+    NT_ASSERT(project != NULL);
+    if (!health.degraded) {
+        /* A failed cross-identity retire can temporarily leave no owner while
+         * Save As asks the frontend to rebind. Preserve the exact result notice
+         * until a healthy owner is actually available. */
+        if (!health.available &&
+            project->recovery_notice_active) {
+            return;
+        }
+        project->recovery_notice_active = false;
+        project->recovery_notice.notice_id =
+            health.notice_id;
+        project->recovery_notice.generation =
+            health.generation;
+        project->recovery_notice.status =
+            TP_STATUS_OK;
+        project->recovery_notice.message[0] =
+            '\0';
+        return;
+    }
+    if (project->recovery_notice_active &&
+        strcmp(
+            health.notice_id,
+            project->recovery_notice.notice_id) == 0 &&
+        health.generation ==
+            project->recovery_notice.generation &&
+        health.first_cause ==
+            project->recovery_notice.status) {
+        return;
+    }
+    project->recovery_notice_active = true;
+    project->recovery_notice.notice_id =
+        health.notice_id;
+    project->recovery_notice.generation =
+        health.generation;
+    project->recovery_notice.status =
+        health.first_cause == TP_STATUS_OK
+            ? TP_STATUS_JOURNAL_FAILED
+            : health.first_cause;
+    project->recovery_notice
+        .has_last_durable_revision =
+        health.has_last_durable_revision;
+    project->recovery_notice
+        .last_durable_revision =
+        health.last_durable_revision;
+    (void)snprintf(
+        project->recovery_notice.message,
+        sizeof project->recovery_notice.message,
+        "Crash recovery is degraded (%s). Editing and Undo remain available, but recent unsaved changes may not survive an app or system crash.",
+        tp_status_str(
+            project->recovery_notice.status));
+}
+
+static void reduce_project_observation(
+    void *context, const tp_session_observation *observation,
+    uint64_t instance_generation) {
+    gui_project_state *project = context;
+    const tp_session_recovery_health recovery =
+        tp_session_observation_recovery_health(
+            observation);
+    const bool new_instance =
+        project->observed_instance_generation !=
+        instance_generation;
+    if (new_instance &&
+        project->recovery_required &&
+        !recovery.available) {
+        gui_project_note_recovery_setup_failure(
+            "required recovery is unavailable for the active project");
+    }
+    reduce_recovery_health(project, recovery);
+    const tp_session_snapshot *snapshot =
+        tp_session_observation_snapshot(observation);
+    if (new_instance) {
+        reduce_project_display_name(
+            project, snapshot);
+        project->observed_instance_generation =
+            instance_generation;
+        project->observed_revision =
+            snapshot
+                ? tp_session_snapshot_revision(snapshot)
+                : 0;
+        return;
+    }
+    if (tp_session_observation_resync_required(observation)) {
+        if (snapshot &&
+            project->observed_revision !=
+                tp_session_snapshot_revision(snapshot)) {
+            project->preview_stale = true;
+        }
+    }
+    const size_t event_count =
+        tp_session_observation_event_count(observation);
+    for (size_t index = 0U; index < event_count; ++index) {
+        const tp_session_event *event =
+            tp_session_observation_event_at(
+                observation, index);
+        if (event &&
+            event->kind != TP_SESSION_EVENT_SAVED) {
+            project->preview_stale = true;
+        }
+    }
+    if (snapshot) {
+        reduce_project_display_name(
+            project, snapshot);
+        project->observed_revision =
+            tp_session_snapshot_revision(snapshot);
+    }
+}
+
+tp_status gui_project__client_init(tp_error *err) {
+    if (s_project.binding_initialized) {
+        return TP_STATUS_OK;
+    }
+    gui_host_binding_init(&s_project.binding);
+    tp_status status =
+        gui_session_client_register_reducer(
+            &s_project.binding.client,
+            reduce_project_observation, &s_project, err);
+    if (status == TP_STATUS_OK) {
+        s_project.binding_initialized = true;
+    }
+    return status;
+}
+
+tp_session *gui_project__borrow_active_session(void) {
+    return gui_session_client_attached_session(
+        &s_project.binding.client);
+}
+
+bool gui_project__ingress_is_open(void) {
+    return s_project.binding_initialized &&
+           gui_host_binding_lifecycle(
+               &s_project.binding) ==
+               GUI_HOST_OPEN;
+}
+
+static void request_observation(void) {
+    if (!s_project.binding_initialized ||
+        !gui_session_client_is_attached(
+            &s_project.binding.client)) {
+        return;
+    }
+    tp_error err = {{0}};
+    const tp_status status =
+        gui_session_client_request_observe(
+            &s_project.binding.client, &err);
+    if (status != TP_STATUS_OK) {
+        gui_project__note_session_reject(status, &err);
+    }
 }
 
 const tp_session_snapshot *gui_project_snapshot(void) {
-    if (!s_project.snapshot && s_project.session) {
-        tp_error err = {0};
-        if (tp_session_snapshot_create(s_project.session, &s_project.snapshot, &err) != TP_STATUS_OK) {
-            s_project.snapshot = NULL;
-        }
-    }
-    return s_project.snapshot;
+    return gui_session_client_snapshot(
+        &s_project.binding.client);
 }
 
 uint64_t gui_project_snapshot_lifetime_generation(void) {
-    return s_project.snapshot_lifetime_generation;
+    return gui_session_client_snapshot_lifetime_generation(
+        &s_project.binding.client);
 }
 
-tp_session *gui_project_session_for_jobs(void) { return s_project.session; }
+uint64_t gui_project_source_runtime_generation(void) {
+    return gui_session_client_source_runtime_generation(
+        &s_project.binding.client);
+}
+
+bool gui_project_observed_input_token(
+    tp_session_input_token *out) {
+    if (!out) {
+        return false;
+    }
+    const tp_session_snapshot *snapshot =
+        gui_project_snapshot();
+    if (!snapshot) {
+        *out = (tp_session_input_token){0};
+        return false;
+    }
+    *out =
+        tp_session_snapshot_input_token(snapshot);
+    out->source_generation =
+        gui_project_source_runtime_generation();
+    return true;
+}
+
+tp_status gui_project_frame_begin(tp_error *err) {
+    return gui_session_client_frame_begin(
+        &s_project.binding.client, err);
+}
+
+void gui_project_frame_end(void) {
+    gui_session_client_frame_end(
+        &s_project.binding.client);
+}
+
+bool gui_project_frame_is_pinned(void) {
+    return gui_session_client_frame_is_pinned(
+        &s_project.binding.client);
+}
+
+tp_status gui_project_register_observation_reducer(
+    gui_session_client_reducer_fn reduce, void *context, tp_error *err) {
+    return gui_session_client_register_reducer(
+        &s_project.binding.client, reduce, context, err);
+}
+
+bool gui_project_submit_receipt_query(
+    const char transaction_id[33],
+    gui_session_submit_identity identity,
+    gui_session_submit_terminal *out) {
+    return gui_session_client_pending_submit_query(
+        &s_project.binding.client, transaction_id, identity, out);
+}
+
+tp_status gui_project_job_enqueue_pack(
+    tp_id128 atlas_id, const char *work_dir,
+    const char *preview_exporter_id, tp_error *err) {
+    return gui_host_binding_enqueue_pack(
+        &s_project.binding, atlas_id, work_dir,
+        preview_exporter_id, err);
+}
+
+tp_status gui_project_job_enqueue_export(
+    tp_id128 atlas_id, const char *work_dir,
+    tp_error *err) {
+    return gui_host_binding_enqueue_export(
+        &s_project.binding, atlas_id, work_dir,
+        err);
+}
+
+tp_status gui_project_job_enqueue_cancel(
+    tp_error *err) {
+    return gui_host_binding_enqueue_cancel(
+        &s_project.binding, err);
+}
+
+bool gui_project_host_take_completion(
+    gui_host_completion *out) {
+    return gui_host_binding_take_completion(
+        &s_project.binding, out);
+}
+
+bool gui_project_job_busy(void) {
+    const tp_session_job_observed_state state =
+        gui_session_client_job_state(
+            &s_project.binding.client);
+    if (state.present &&
+        state.session_instance_generation ==
+            gui_session_client_instance_generation(
+                &s_project.binding.client) &&
+        !state.terminal) {
+        return true;
+    }
+    /* Before the next atomic observation, ingress and staged receipts are
+     * host lifecycle facts rather than a second runtime-state projection.
+     * `active` also keeps admission fail-safe if observation refresh failed. */
+    return gui_host_binding_job_busy(
+        &s_project.binding);
+}
+
+tp_session_job_kind
+gui_project_job_active_kind(void) {
+    return gui_host_binding_job_active_kind(
+        &s_project.binding);
+}
+
+tp_session_job_observed_state
+gui_project_job_observed_state(void) {
+    return gui_session_client_job_state(
+        &s_project.binding.client);
+}
+
+gui_project_lifecycle_state
+gui_project_lifecycle_state_query(void) {
+    switch (gui_host_binding_lifecycle(
+        &s_project.binding)) {
+    case GUI_HOST_CLOSED:
+        return GUI_PROJECT_LIFECYCLE_CLOSED;
+    case GUI_HOST_OPEN:
+        return GUI_PROJECT_LIFECYCLE_OPEN_IDLE;
+    case GUI_HOST_DRAINING:
+    case GUI_HOST_READY_TO_CUTOVER:
+        return GUI_PROJECT_LIFECYCLE_DRAINING;
+    default:
+        NT_ASSERT(false);
+        return GUI_PROJECT_LIFECYCLE_CLOSED;
+    }
+}
+
+void gui_project_set_controller_status_port(
+    gui_project_controller_status_port port) {
+    s_project.controller_status = port;
+}
+
+uint64_t
+gui_project_session_instance_generation(void) {
+    return gui_session_client_instance_generation(
+        &s_project.binding.client);
+}
 
 void gui_project_invalidate_sources(void) {
     gui_scan_invalidate_all();
-    if (!s_project.session) {
+    if (!gui_project__ingress_is_open() ||
+        !gui_session_client_is_attached(
+            &s_project.binding.client)) {
         return;
     }
     tp_error err = {0};
-    const tp_status status = tp_session_invalidate_sources(s_project.session, &err);
+    const tp_status status =
+        gui_host_binding_invalidate_sources(
+            &s_project.binding, &err);
     if (status != TP_STATUS_OK) {
         gui_project__note_session_reject(status, &err);
         return;
     }
-    gui_project__snapshot_drop();
+    request_observation();
 }
 
 uint64_t gui_project_snapshot_model_generation(void) {
@@ -82,25 +394,6 @@ bool gui_project_take_op_error(char *out, size_t cap) {
     return true;
 }
 
-/* fix3 [2]: fill `out` with the reason a flush's commit failed -- the drained op-error, else a NEUTRAL
- * fallback that fits save AND pack AND the dirty gate (the flush-failure abort paths share one wording,
- * no "saved"-specific verb). Consumes the op-error like gui_project_take_op_error. NULL-safe. */
-void gui_project_flush_error(char *out, size_t cap) {
-    if (!out || !cap) {
-        return;
-    }
-    char m[256] = {0};
-    if (!gui_project_take_op_error(m, sizeof m)) {
-        (void)snprintf(m, sizeof m,
-                       "Your last edit could not be committed -- correct it and try again.");
-    }
-    (void)snprintf(out, cap, "%s", m);
-}
-
-void gui_project__next_transaction_id(char out[33]) {
-    (void)snprintf(out, 33U, "%032llx", (unsigned long long)(s_project.txn_seq++));
-}
-
 void gui_project__note_session_reject(tp_status status, const tp_error *err) {
     const char *message = (err && err->msg[0]) ? err->msg : tp_status_str(status);
     s_project.op_error = true;
@@ -109,53 +402,33 @@ void gui_project__note_session_reject(tp_status status, const tp_error *err) {
 }
 
 void gui_project__sync_recovery_notice(void) {
-    if (!s_project.session) {
-        return;
-    }
-    const tp_session_recovery_health health =
-        tp_session_recovery_health_query(s_project.session);
-    if (!health.degraded) {
-        /* A failed cross-identity retire can temporarily leave no owner while
-         * Save As asks the frontend to rebind. Preserve the exact result notice
-         * until a healthy owner is actually available. */
-        if (!health.available && s_project.recovery_notice_active) {
-            return;
-        }
-        s_project.recovery_notice_active = false;
-        s_project.recovery_notice.notice_id = health.notice_id;
-        s_project.recovery_notice.generation = health.generation;
-        s_project.recovery_notice.status = TP_STATUS_OK;
-        s_project.recovery_notice.message[0] = '\0';
-        return;
-    }
-    if (s_project.recovery_notice_active &&
-        strcmp(health.notice_id, s_project.recovery_notice.notice_id) == 0 &&
-        health.generation == s_project.recovery_notice.generation &&
-        health.first_cause == s_project.recovery_notice.status) {
-        return;
-    }
-    gui_project__note_recovery_degraded(health.first_cause);
-}
-
-bool gui_project__refresh_after_session_commit(void) {
-    gui_project__sync_recovery_notice();
-    /* Core is the sole semantic no-op owner. A no-change admission leaves the
-     * revision unchanged, so keep the current projection and preview state. */
-    if (s_project.snapshot &&
-        tp_session_snapshot_revision(s_project.snapshot) == tp_session_revision(s_project.session)) {
-        return false;
-    }
-    s_project.preview_stale = true;
-    gui_project__snapshot_drop();
-    return true;
+    request_observation();
 }
 
 // #endregion
 
 // #region lifecycle dev seams (selftest only)
-#ifdef NTPACKER_GUI_SELFTEST
-tp_session *gui_project__test_session(void) { return s_project.session; }
+#if defined(NTPACKER_GUI_SELFTEST) || defined(TP_ENABLE_TEST_SEAMS)
+tp_session *gui_project__test_session(void) {
+    return gui_project__borrow_active_session();
+}
 
+#endif
+#ifdef TP_ENABLE_TEST_SEAMS
+void gui_project__test_fail_next_observe(void) {
+    gui_session_client__test_fail_next_observe();
+}
+
+void gui_project__test_fail_observes(
+    unsigned int count) {
+    gui_session_client__test_fail_observes(count);
+}
+
+bool
+gui_project__test_host_has_staged_completion(void) {
+    return gui_host_binding__test_has_staged(
+        &s_project.binding);
+}
 #endif
 // #endregion
 
@@ -179,10 +452,7 @@ bool gui_project_is_stale(void) { return s_project.preview_stale; }
 // #endregion
 
 // #region dirty/stale choke point
-/* Post-commit choke point: a REAL committed mutation makes the preview stale and bumps the
- * session generation. Undo history + dirty are core-owned. `act` is vestigial (coalescing moved to the
- * transaction buffer) but kept for call-site clarity + the dev-seam signature. */
+/* Preview freshness is presentation state; model/history/dirty remain session-owned. */
 void gui_project_mark_packed(void) { s_project.preview_stale = false; }
 void gui_project_mark_stale(void) { s_project.preview_stale = true; }
-void gui_project_tick(double now_seconds) { s_project.now = now_seconds; }
 // #endregion

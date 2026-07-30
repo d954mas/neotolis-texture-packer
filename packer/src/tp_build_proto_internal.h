@@ -29,7 +29,12 @@ extern "C" {
 #define TP_BUILD_PROTO_VERSION 1u
 
 /* Fail-closed bounds applied before any allocation. A frame that declares more
- * than the buffer holds, or a field past these caps, is rejected. */
+ * than the buffer holds, or a field past these caps, is rejected.
+ * TP_BUILD_PROTO_MAX_NAME_BYTES is also the text-field cap: every text field
+ * (atlas / out / sprite name, artifact name, message) is admitted as at most
+ * that many bytes, free of embedded NUL, and strict Unicode-scalar UTF-8 --
+ * the same admission the outer job-worker codec applies, so an inner field can
+ * never carry text the outer terminal frame would refuse. */
 #define TP_BUILD_PROTO_MAX_FRAME_BYTES ((size_t)1u << 31) /* 2 GiB hard cap */
 #define TP_BUILD_PROTO_MAX_SPRITES 65535u                 /* mirrors tp_pack sprite_count cap */
 #define TP_BUILD_PROTO_MAX_NAME_BYTES 4096u               /* atlas / sprite / artifact / message */
@@ -95,7 +100,9 @@ tp_status tp_build_proto_encode_response(const tp_build_proto_response *resp, ui
  * matching *_free); on failure returns a structured status, fills `err`, frees
  * any partial allocation, and zeroes `out`. Wrong magic -> BAD_MAGIC,
  * unsupported version -> BAD_VERSION, truncated / oversized-declared-length /
- * corrupt payload -> OUT_OF_BOUNDS or INVALID_ARGUMENT. */
+ * corrupt payload -> OUT_OF_BOUNDS or INVALID_ARGUMENT, a text field that is
+ * over cap or carries an embedded NUL -> INVALID_ARGUMENT, one that is not
+ * well-formed UTF-8 -> INVALID_UTF8. */
 tp_status tp_build_proto_decode_request(const uint8_t *bytes, size_t len, tp_build_proto_request *out, tp_error *err);
 tp_status tp_build_proto_decode_response(const uint8_t *bytes, size_t len, tp_build_proto_response *out, tp_error *err);
 

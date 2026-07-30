@@ -33,7 +33,22 @@ if(EMSCRIPTEN)
 endif()
 add_subdirectory(external/neotolis-engine/tools/builder nt_builder)
 
+# nt_resource calls the http/fs implementations behind the engine's *_interface
+# pattern, which deliberately leaves the impl choice to the final link -- so the
+# engine declares no edge and CMake emits the archives in whatever order the
+# consumer listed. An ELF linker never rescans an archive, and tp_build's
+# nt_builder closure appends a SECOND nt_resource occurrence after any stub the
+# consumer listed, so nt_resource objects pulled there dangle (undefined
+# nt_http_*/nt_fs_* on Linux/macOS; lld-link on Windows is order-insensitive).
+# This build uses exactly one impl everywhere, so declare the edge here
+# (CMP0079): the topological sort then places the impls after EVERY
+# nt_resource occurrence in every target.
+target_link_libraries(nt_resource INTERFACE nt_http_stub nt_fs)
+
 enable_testing()
+# Shared tp_add_test()/tp_add_gui_test() so every first-party test target gets the
+# same executable/link/warning/CRT/ctest shape (see the file header).
+include("${CMAKE_CURRENT_LIST_DIR}/cmake/tp_add_test.cmake")
 add_custom_target(report_loc_inventory
     COMMAND ${CMAKE_COMMAND}
         -DROOT=${CMAKE_SOURCE_DIR}
@@ -42,6 +57,9 @@ add_custom_target(report_loc_inventory
     VERBATIM)
 add_subdirectory(apps/smoke)
 add_subdirectory(packer)
+# apps/common holds the small modules both shipped clients compile directly; its
+# CMakeLists owns only their tests, which link tp_core (packer/).
+add_subdirectory(apps/common)
 # apps/gui and apps/cli link tp_core/tp_build (packer/), so add them after.
 add_subdirectory(apps/gui)
 add_subdirectory(apps/cli)

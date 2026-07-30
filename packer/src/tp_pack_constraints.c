@@ -5,7 +5,7 @@ bool tp_pack_sprite_shape_wire_representable(int value) {
 }
 
 bool tp_pack_sprite_rotate_wire_representable(int value) {
-    return value == 0;
+    return tp_pack_sprite_allow_rotate_valid(value);
 }
 
 bool tp_pack_sprite_max_vertices_wire_representable(int value) {
@@ -13,7 +13,7 @@ bool tp_pack_sprite_max_vertices_wire_representable(int value) {
 }
 
 bool tp_pack_sprite_spacing_wire_representable(int value) {
-    return value >= 1 && value <= UINT8_MAX;
+    return tp_pack_sprite_spacing_valid(value);
 }
 
 tp_pack_atlas_constraint_facts tp_pack_atlas_constraint_facts_of(
@@ -24,9 +24,9 @@ tp_pack_atlas_constraint_facts tp_pack_atlas_constraint_facts_of(
     }
     facts.max_size_out_of_range =
         !tp_pack_max_size_valid(input->max_size);
-    facts.padding_negative = input->padding < 0;
-    facts.margin_negative = input->margin < 0;
-    facts.extrude_negative = input->extrude < 0;
+    facts.padding_negative = !tp_pack_nonnegative_valid(input->padding);
+    facts.margin_negative = !tp_pack_nonnegative_valid(input->margin);
+    facts.extrude_negative = !tp_pack_nonnegative_valid(input->extrude);
     facts.padding_exceeds_max_size = input->padding > input->max_size;
     facts.margin_exceeds_max_size = input->margin > input->max_size;
     facts.extrude_exceeds_max_size = input->extrude > input->max_size;

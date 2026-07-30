@@ -31,83 +31,83 @@ static int anim_list(const tp_session_snapshot *snapshot,
         }
         return CLI_EXIT_OK;
     }
-    cli_sb sb = {0};
+    tp_sb sb = {0};
     bool first = true;
-    cli_sb_putc(&sb, '{');
-    cli_sb_str(&sb, "\n  \"schema\": ");
-    cli_sb_int(&sb, CLI_INSPECT_SCHEMA);
-    cli_sb_str(&sb, ",\n  \"animations\": ");
+    tp_sb_char(&sb, '{');
+    tp_sb_str(&sb, "\n  \"schema\": ");
+    tp_sb_int(&sb, CLI_INSPECT_SCHEMA);
+    tp_sb_str(&sb, ",\n  \"animations\": ");
     if (a->animation_count == 0) {
-        cli_sb_str(&sb, "[]");
+        tp_sb_str(&sb, "[]");
     } else {
-        cli_sb_putc(&sb, '[');
+        tp_sb_char(&sb, '[');
         for (int i = 0; i < a->animation_count; i++) {
             const tp_snapshot_animation *an =
                 tp_session_snapshot_animation_at(snapshot, a->id, i);
-            cli_sb_str(&sb, i == 0 ? "\n" : ",\n");
-            cli_sb_indent(&sb, 2);
-            cli_sb_putc(&sb, '{');
+            tp_sb_str(&sb, i == 0 ? "\n" : ",\n");
+            tp_sb_indent(&sb, 2);
+            tp_sb_char(&sb, '{');
             first = true;
-            cli_sb_str(&sb, "\n");
-            cli_sb_indent(&sb, 3);
+            tp_sb_str(&sb, "\n");
+            tp_sb_indent(&sb, 3);
             char idtext[TP_ID_TEXT_CAP];
             ntpacker_fmt_shape_id(idtext, sizeof idtext, TP_ID_KIND_ANIM, an->id);
-            cli_sb_str(&sb, "\"id\": "); /* structural shape-ID */
-            cli_sb_json_str(&sb, idtext);
-            cli_sb_str(&sb, ",\n");
-            cli_sb_indent(&sb, 3);
-            cli_sb_str(&sb, "\"name\": "); /* logical/display name (name-keyed) */
-            cli_sb_json_str(&sb, an->name);
-            cli_sb_str(&sb, ",\n");
-            cli_sb_indent(&sb, 3);
-            cli_sb_str(&sb, "\"fps\": ");
-            cli_sb_num(&sb, (double)an->fps);
-            cli_sb_str(&sb, ",\n");
-            cli_sb_indent(&sb, 3);
-            cli_sb_str(&sb, "\"playback\": ");
-            cli_sb_int(&sb, an->playback);
-            cli_sb_str(&sb, ",\n");
-            cli_sb_indent(&sb, 3);
-            cli_sb_str(&sb, "\"flip_h\": ");
-            cli_sb_str(&sb, an->flip_h ? "true" : "false");
-            cli_sb_str(&sb, ",\n");
-            cli_sb_indent(&sb, 3);
-            cli_sb_str(&sb, "\"flip_v\": ");
-            cli_sb_str(&sb, an->flip_v ? "true" : "false");
-            cli_sb_str(&sb, ",\n");
-            cli_sb_indent(&sb, 3);
-            cli_sb_str(&sb, "\"frames\": ");
+            tp_sb_str(&sb, "\"id\": "); /* structural shape-ID */
+            tp_sb_json_string(&sb, idtext);
+            tp_sb_str(&sb, ",\n");
+            tp_sb_indent(&sb, 3);
+            tp_sb_str(&sb, "\"name\": "); /* logical/display name (name-keyed) */
+            tp_sb_json_string(&sb, an->name);
+            tp_sb_str(&sb, ",\n");
+            tp_sb_indent(&sb, 3);
+            tp_sb_str(&sb, "\"fps\": ");
+            tp_sb_num(&sb, (double)an->fps);
+            tp_sb_str(&sb, ",\n");
+            tp_sb_indent(&sb, 3);
+            tp_sb_str(&sb, "\"playback\": ");
+            tp_sb_int(&sb, an->playback);
+            tp_sb_str(&sb, ",\n");
+            tp_sb_indent(&sb, 3);
+            tp_sb_str(&sb, "\"flip_h\": ");
+            tp_sb_str(&sb, an->flip_h ? "true" : "false");
+            tp_sb_str(&sb, ",\n");
+            tp_sb_indent(&sb, 3);
+            tp_sb_str(&sb, "\"flip_v\": ");
+            tp_sb_str(&sb, an->flip_v ? "true" : "false");
+            tp_sb_str(&sb, ",\n");
+            tp_sb_indent(&sb, 3);
+            tp_sb_str(&sb, "\"frames\": ");
             if (an->frame_count == 0) {
-                cli_sb_str(&sb, "[]");
+                tp_sb_str(&sb, "[]");
             } else {
-                cli_sb_putc(&sb, '[');
+                tp_sb_char(&sb, '[');
                 for (int f = 0; f < an->frame_count; f++) {
-                    cli_sb_str(&sb, f == 0 ? "\n" : ",\n");
-                    cli_sb_indent(&sb, 4);
+                    tp_sb_str(&sb, f == 0 ? "\n" : ",\n");
+                    tp_sb_indent(&sb, 4);
                     const tp_snapshot_frame *frame =
                         tp_session_snapshot_animation_frame_at(
                             snapshot, a->id, an->id, f);
-                    cli_sb_json_str(&sb, frame ? frame->name : "");
+                    tp_sb_json_string(&sb, frame ? frame->name : "");
                 }
-                cli_sb_str(&sb, "\n");
-                cli_sb_indent(&sb, 3);
-                cli_sb_putc(&sb, ']');
+                tp_sb_str(&sb, "\n");
+                tp_sb_indent(&sb, 3);
+                tp_sb_char(&sb, ']');
             }
             (void)first;
-            cli_sb_str(&sb, "\n");
-            cli_sb_indent(&sb, 2);
-            cli_sb_putc(&sb, '}');
+            tp_sb_str(&sb, "\n");
+            tp_sb_indent(&sb, 2);
+            tp_sb_char(&sb, '}');
         }
-        cli_sb_str(&sb, "\n  ]");
+        tp_sb_str(&sb, "\n  ]");
     }
-    cli_sb_str(&sb, "\n}");
+    tp_sb_str(&sb, "\n}");
     if (sb.oom) {
-        cli_sb_free(&sb);
+        tp_sb_free(&sb);
         cli_emit_error(true, false, "oom", "out of memory building anim list");
         return CLI_EXIT_INTERNAL;
     }
     cli_out_stdout(&sb);
-    cli_sb_free(&sb);
+    tp_sb_free(&sb);
     return CLI_EXIT_OK;
 }
 
@@ -127,16 +127,7 @@ static int fill_anim_settings(tp_op_anim_settings *s, const char *const *pos, in
             cli_emit_error(json, quiet, "usage", "%s", m);
             return CLI_EXIT_USAGE;
         }
-        if (strcmp(key, "fps") == 0) {
-            float fv = 0.0F;
-            if (!to_float(val, &fv)) {
-                (void)snprintf(m, sizeof m, "fps = '%s' must be a number", val);
-                cli_emit_error(json, quiet, "usage", "%s", m);
-                return CLI_EXIT_USAGE;
-            }
-            s->fps = fv;
-            s->mask |= TP_ANF_FPS;
-        } else if (strcmp(key, "playback") == 0) {
+        if (strcmp(key, "playback") == 0) { /* an enum parse (index OR mode name), not a plain int */
             int pb = 0;
             if (!parse_playback(val, &pb)) {
                 (void)snprintf(m, sizeof m, "playback = '%s' must be 0..6 or a mode name", val);
@@ -145,26 +136,17 @@ static int fill_anim_settings(tp_op_anim_settings *s, const char *const *pos, in
             }
             s->playback = pb;
             s->mask |= TP_ANF_PLAYBACK;
-        } else if (strcmp(key, "flip_h") == 0) {
-            bool bv = false;
-            if (!to_bool(val, &bv)) {
-                (void)snprintf(m, sizeof m, "flip_h = '%s' must be 0/1/true/false", val);
-                cli_emit_error(json, quiet, "usage", "%s", m);
-                return CLI_EXIT_USAGE;
-            }
-            s->flip_h = bv;
-            s->mask |= TP_ANF_FLIP_H;
-        } else if (strcmp(key, "flip_v") == 0) {
-            bool bv = false;
-            if (!to_bool(val, &bv)) {
-                (void)snprintf(m, sizeof m, "flip_v = '%s' must be 0/1/true/false", val);
-                cli_emit_error(json, quiet, "usage", "%s", m);
-                return CLI_EXIT_USAGE;
-            }
-            s->flip_v = bv;
-            s->mask |= TP_ANF_FLIP_V;
-        } else {
-            (void)snprintf(m, sizeof m, "unknown anim key '%s' (known: fps, playback, flip_h, flip_v)", key);
+            continue;
+        }
+        const int matched = cli_fill_registry_field(TP_FIELD_FAMILY_ANIM, s, &s->mask,
+                                                    key, val, json, quiet);
+        if (matched < 0) {
+            return CLI_EXIT_USAGE;
+        }
+        if (matched == 0) {
+            char known[128];
+            (void)snprintf(m, sizeof m, "unknown anim key '%s' (known: %s)", key,
+                           cli_field_key_list(TP_FIELD_FAMILY_ANIM, known, sizeof known));
             cli_emit_error(json, quiet, "usage", "%s", m);
             return CLI_EXIT_USAGE;
         }

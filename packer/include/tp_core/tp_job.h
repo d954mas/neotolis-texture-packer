@@ -13,22 +13,16 @@
 extern "C" {
 #endif
 
-typedef enum tp_session_job_kind {
-    TP_SESSION_JOB_NONE = 0,
-    TP_SESSION_JOB_PACK,
-    TP_SESSION_JOB_EXPORT
-} tp_session_job_kind;
-
-typedef enum tp_session_job_state {
-    TP_SESSION_JOB_RUNNING = 1,
-    TP_SESSION_JOB_SUCCEEDED,
-    TP_SESSION_JOB_FAILED,
-    TP_SESSION_JOB_CANCELLED
-} tp_session_job_state;
+typedef struct tp_session_job_result_handle
+    tp_session_job_result_handle;
 
 typedef struct tp_pack_job_request {
     tp_id128 atlas_id;
     const char *work_dir;
+    /* Host-owned admission identity. Zero asks the session to assign a
+     * monotonic request id; generation zero remains data. */
+    uint64_t session_instance_generation;
+    uint64_t request_id;
     /* NULL runs the atlas' native settings. A non-NULL exporter id produces
      * the capability-clamped preview pack for that target format. */
     const char *preview_exporter_id;
@@ -39,6 +33,8 @@ typedef struct tp_pack_job_request {
  * progress, and cancellation; already-published files are not rolled back. */
 typedef struct tp_export_command_request {
     const char *work_dir;
+    uint64_t session_instance_generation;
+    uint64_t request_id;
     /* Nil exports every eligible atlas. A stable non-nil ID restricts the
      * command to that atlas; frontends never pass a mutable collection index. */
     tp_id128 atlas_id;
@@ -102,14 +98,15 @@ typedef struct tp_session_export_job_result {
     char first_error[256];
     /* Selected atlases with enabled targets but no usable input images. */
     int atlases_skipped;
-    /* True only when cancellation won after at least one target committed. */
+    /* True when terminal failure/cancellation happened after at least one
+     * target committed. */
     bool partial_publication;
     /* True when a direct writer failed and its API cannot prove that it left no
      * partially published artifacts, regardless of terminal cancellation. */
     bool publication_uncertain;
 } tp_session_export_job_result;
 
-typedef struct tp_session_job_result {
+struct tp_session_job_result {
     tp_session_job_kind kind;
     tp_session_job_state state;
     tp_status status;
@@ -119,7 +116,10 @@ typedef struct tp_session_job_result {
         tp_session_pack_job_result pack;
         tp_session_export_job_result export_result;
     };
-} tp_session_job_result;
+    /* Private refcounted owner for this result receipt. Callers must treat it
+     * as opaque and release through result_destroy. */
+    tp_session_job_result_handle *_owner;
+};
 
 /* One concrete derived job may be active per session. The session owns its
  * handle/lifetime; algorithms and worker implementation stay in tp_build. */
@@ -130,19 +130,36 @@ tp_status tp_session_export_start(tp_session *session,
                                   const tp_export_command_request *request,
                                   tp_error *err);
 bool tp_session_job_active(const tp_session *session);
-tp_status tp_session_job_poll(const tp_session *session,
+/* Host-thread admission step: pumps the owned process and publishes its latest
+ * typed progress/terminal projection into session-observed state. */
+tp_status tp_session_job_poll(tp_session *session,
                               tp_session_job_progress *out, tp_error *err);
 /* Accepts cancellation only before the terminal-boundary claim. Export
  * linearizes that claim immediately after its final eligible writer returns;
  * a request accepted before the claim may own the outcome even if that writer
  * just returned. Repeated requests and requests after the claim are rejected. */
 tp_status tp_session_job_cancel(tp_session *session, tp_error *err);
-/* Succeeds only after poll reports a terminal state. Transfers a successful
- * Pack arena/result to `out` and releases the session-owned job handle. */
+/* Succeeds only after poll reports a terminal state. Returns an owned receipt
+ * that pins any successful Pack arena/result, then releases the session's
+ * active-job handle. */
 tp_status tp_session_job_take_result(tp_session *session,
                                      tp_session_job_result *out,
                                      tp_error *err);
 void tp_session_job_result_destroy(tp_session_job_result *result);
+/* Shrinks a TAKEN result's receipt to what it actually has to retain: the
+ * arena behind `pack.result`. Frees the request-side buffers the live job was
+ * still holding (the serialized project JSON, request/work-dir paths, preview
+ * exporter id) and destroys the exited worker process handle, which retains a
+ * second encoded copy of that JSON plus OS handles. Every value field of
+ * `result` -- including pack.result and its pages, and the tp_error/file_io
+ * context, which is value-owned precisely so destroying the response frame
+ * cannot dangle it -- stays valid, and
+ * tp_session_job_result_destroy remains the single, exactly-once release.
+ * Only a result returned by tp_session_job_take_result may be compacted (an
+ * owner-less result is a no-op); a caller that keeps the receipt alive long
+ * term (e.g. pinning it in a result cache) MUST compact first, or the pin
+ * silently retains the whole request. Idempotent. */
+void tp_session_job_result_compact(tp_session_job_result *result);
 
 /* Returns the typed core freshness verdict for a completed Pack result. A live
  * token newer than the worker's verified snapshot always yields STALE with

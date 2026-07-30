@@ -21,9 +21,15 @@
 #include "tp_core/tp_arena.h"
 #include "tp_core/tp_export.h"
 #include "tp_core/tp_model.h"
-#include "tp_core/tp_name_map.h"
-#include "tp_core/tp_pack_read.h"
+#include "tp_name_map.h"
+#include "tp_pack_read.h"
 #include "unity.h"
+
+/* Direct-drive context for the writer contract (tp_core/tp_export.h): a golden
+ * test wants the files exactly where they will be published, so the write base
+ * and the published base are the same path. Production splits them -- the
+ * publisher hands the writer a staging base with the same basename. */
+#define DIRECT_CTX(prep_ptr, caps_ptr, base_path, notices_ptr)                     &(const tp_export_write_ctx) {                                                     .prep = (prep_ptr), .caps = (caps_ptr),                                        .write_path_base = (base_path), .out_path_base = (base_path),                  .notices = (notices_ptr)                                                   }
 
 #include "tp_fixtures.h"
 
@@ -110,7 +116,7 @@ static bool export_case(jc *j) {
     tp_export_caps caps = tp_export_caps_full();
     tp_export_notices notices;
     tp_export_notices_init(&notices);
-    tp_status st = tp_export_json_neotolis_write(&prep, &caps, j->base, &notices, &e);
+    tp_status st = tp_export_json_neotolis_write(DIRECT_CTX(&prep, &caps, j->base, &notices), &e);
     /* full caps => zero metadata-loss notices. */
     bool no_notices = (notices.count == 0);
     tp_export_notices_free(&notices);
@@ -333,7 +339,7 @@ void test_determinism_reexport(void) {
         tp_export_caps caps = tp_export_caps_full();
         tp_export_notices notices;
         tp_export_notices_init(&notices);
-        TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_export_json_neotolis_write(&prep, &caps, g[i].base, &notices, &e));
+        TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_export_json_neotolis_write(DIRECT_CTX(&prep, &caps, g[i].base, &notices), &e));
         tp_export_notices_free(&notices);
 
         size_t n2 = 0;
@@ -371,7 +377,7 @@ void test_metadata_path_above_legacy_limit_reaches_the_filesystem_boundary(void)
 
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_BAD_PROJECT,
-        tp_export_json_neotolis_write(&prep, &caps, base, NULL, &err));
+        tp_export_json_neotolis_write(DIRECT_CTX(&prep, &caps, base, NULL), &err));
     TEST_ASSERT_TRUE(strlen(err.msg) > 0U);
 }
 // #endregion

@@ -79,9 +79,6 @@ void test_windows_path_sources_are_strict_utf8(void) {
                              error);
     TEST_ASSERT_NOT_EQUAL(0, value[0]);
     TEST_ASSERT_TRUE_MESSAGE(
-        nt_win_temp_path_utf8(value, sizeof value, error, sizeof error), error);
-    TEST_ASSERT_NOT_EQUAL(0, value[0]);
-    TEST_ASSERT_TRUE_MESSAGE(
         nt_win_module_path_utf8(value, sizeof value, error, sizeof error),
         error);
     TEST_ASSERT_NOT_EQUAL(0, value[0]);

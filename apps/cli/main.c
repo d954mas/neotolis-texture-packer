@@ -36,15 +36,15 @@ static const char *const HELP_GLOBAL_OPTIONS[] = {
     "--json", "--quiet", "--strict", "--dry-run", "--help", "--version",
 };
 
-static void indent(cli_sb *sb, int depth) {
+static void indent(tp_sb *sb, int depth) {
     for (int i = 0; i < depth; i++) {
-        cli_sb_str(sb, "  ");
+        tp_sb_str(sb, "  ");
     }
 }
 
 /* One "caps" object (the exporter's format expressiveness). Fields are the
  * append-only tp_export_caps set; snake_case/lowercase already. */
-static void emit_caps(cli_sb *sb, int depth, const tp_export_caps *c) {
+static void emit_caps(tp_sb *sb, int depth, const tp_export_caps *c) {
     struct {
         const char *key;
         bool val;
@@ -53,16 +53,16 @@ static void emit_caps(cli_sb *sb, int depth, const tp_export_caps *c) {
         {"slice9", c->slice9},     {"multipage", c->multipage}, {"aliases", c->aliases},
     };
     int n = (int)(sizeof fields / sizeof fields[0]);
-    cli_sb_str(sb, "{\n");
+    tp_sb_str(sb, "{\n");
     for (int i = 0; i < n; i++) {
         indent(sb, depth + 1);
-        cli_sb_json_str(sb, fields[i].key);
-        cli_sb_str(sb, ": ");
-        cli_sb_str(sb, fields[i].val ? "true" : "false");
-        cli_sb_str(sb, (i + 1 < n) ? ",\n" : "\n");
+        tp_sb_json_string(sb, fields[i].key);
+        tp_sb_str(sb, ": ");
+        tp_sb_str(sb, fields[i].val ? "true" : "false");
+        tp_sb_str(sb, (i + 1 < n) ? ",\n" : "\n");
     }
     indent(sb, depth);
-    cli_sb_putc(sb, '}');
+    tp_sb_char(sb, '}');
 }
 
 /* The `version --json` schema manifest (plan "CLI v1 contract"): app version,
@@ -70,137 +70,137 @@ static void emit_caps(cli_sb *sb, int depth, const tp_export_caps *c) {
  * formats + versions, and the live exporter registry with capabilities. Every
  * number/id is sourced from a core constant or the registry -- no hand-copied
  * values, no exporter-id literals (boundary gate R2). */
-static void build_manifest(cli_sb *sb) {
-    cli_sb_str(sb, "{\n");
+static void build_manifest(tp_sb *sb) {
+    tp_sb_str(sb, "{\n");
     indent(sb, 1);
-    cli_sb_json_str(sb, "schema");
-    cli_sb_str(sb, ": ");
-    cli_sb_int(sb, CLI_MANIFEST_SCHEMA);
-    cli_sb_str(sb, ",\n");
+    tp_sb_json_string(sb, "schema");
+    tp_sb_str(sb, ": ");
+    tp_sb_int(sb, CLI_MANIFEST_SCHEMA);
+    tp_sb_str(sb, ",\n");
     indent(sb, 1);
-    cli_sb_json_str(sb, "app_version");
-    cli_sb_str(sb, ": ");
-    cli_sb_json_str(sb, NTPACKER_VERSION);
-    cli_sb_str(sb, ",\n");
+    tp_sb_json_string(sb, "app_version");
+    tp_sb_str(sb, ": ");
+    tp_sb_json_string(sb, NTPACKER_VERSION);
+    tp_sb_str(sb, ",\n");
     indent(sb, 1);
-    cli_sb_json_str(sb, "project_schema");
-    cli_sb_str(sb, ": ");
-    cli_sb_int(sb, TP_PROJECT_SCHEMA_VERSION);
-    cli_sb_str(sb, ",\n");
+    tp_sb_json_string(sb, "project_schema");
+    tp_sb_str(sb, ": ");
+    tp_sb_int(sb, TP_PROJECT_SCHEMA_VERSION);
+    tp_sb_str(sb, ",\n");
 
     /* verbs: each verb that emits a --json payload -> its payload schema version.
      * inspect/validate landed in B2; grows as pack lands. */
     indent(sb, 1);
-    cli_sb_json_str(sb, "verbs");
-    cli_sb_str(sb, ": {\n");
+    tp_sb_json_string(sb, "verbs");
+    tp_sb_str(sb, ": {\n");
     indent(sb, 2);
-    cli_sb_json_str(sb, "inspect");
-    cli_sb_str(sb, ": ");
-    cli_sb_int(sb, CLI_INSPECT_SCHEMA); /* query-payload schema (single source of truth) */
-    cli_sb_str(sb, ",\n");
+    tp_sb_json_string(sb, "inspect");
+    tp_sb_str(sb, ": ");
+    tp_sb_int(sb, CLI_INSPECT_SCHEMA); /* query-payload schema (single source of truth) */
+    tp_sb_str(sb, ",\n");
     indent(sb, 2);
-    cli_sb_json_str(sb, "validate");
-    cli_sb_str(sb, ": ");
-    cli_sb_int(sb, CLI_VALIDATE_SCHEMA);
-    cli_sb_str(sb, ",\n");
+    tp_sb_json_string(sb, "validate");
+    tp_sb_str(sb, ": ");
+    tp_sb_int(sb, CLI_VALIDATE_SCHEMA);
+    tp_sb_str(sb, ",\n");
     indent(sb, 2);
-    cli_sb_json_str(sb, "pack");
-    cli_sb_str(sb, ": 1,\n");
+    tp_sb_json_string(sb, "pack");
+    tp_sb_str(sb, ": 1,\n");
     /* B4 mutation verbs have distinct apply and dry-run payloads. `anim list` is
      * a query whose payload shares inspect's schema and is advertised separately. */
     static const char *const mut_verbs[] = {"new", "add", "remove", "set", "sprite", "anim", "target", "atlas"};
     for (int i = 0; i < (int)(sizeof mut_verbs / sizeof mut_verbs[0]); i++) {
         indent(sb, 2);
-        cli_sb_json_str(sb, mut_verbs[i]);
-        cli_sb_str(sb, ": {\n");
+        tp_sb_json_string(sb, mut_verbs[i]);
+        tp_sb_str(sb, ": {\n");
         indent(sb, 3);
-        cli_sb_json_str(sb, "apply");
-        cli_sb_str(sb, ": ");
-        cli_sb_int(sb, CLI_MUTATION_APPLY_SCHEMA);
-        cli_sb_str(sb, ",\n");
+        tp_sb_json_string(sb, "apply");
+        tp_sb_str(sb, ": ");
+        tp_sb_int(sb, CLI_MUTATION_APPLY_SCHEMA);
+        tp_sb_str(sb, ",\n");
         indent(sb, 3);
-        cli_sb_json_str(sb, "dry_run");
-        cli_sb_str(sb, ": ");
-        cli_sb_int(sb, CLI_MUTATION_DRY_RUN_SCHEMA);
+        tp_sb_json_string(sb, "dry_run");
+        tp_sb_str(sb, ": ");
+        tp_sb_int(sb, CLI_MUTATION_DRY_RUN_SCHEMA);
         if (strcmp(mut_verbs[i], "anim") == 0) {
-            cli_sb_str(sb, ",\n");
+            tp_sb_str(sb, ",\n");
             indent(sb, 3);
-            cli_sb_json_str(sb, "list");
-            cli_sb_str(sb, ": ");
-            cli_sb_int(sb, CLI_INSPECT_SCHEMA);
+            tp_sb_json_string(sb, "list");
+            tp_sb_str(sb, ": ");
+            tp_sb_int(sb, CLI_INSPECT_SCHEMA);
         }
-        cli_sb_str(sb, "\n");
+        tp_sb_str(sb, "\n");
         indent(sb, 2);
-        cli_sb_str(sb, "},\n");
+        tp_sb_str(sb, "},\n");
     }
     indent(sb, 2);
-    cli_sb_json_str(sb, "help");
-    cli_sb_str(sb, ": ");
-    cli_sb_int(sb, CLI_HELP_SCHEMA);
-    cli_sb_str(sb, ",\n");
+    tp_sb_json_string(sb, "help");
+    tp_sb_str(sb, ": ");
+    tp_sb_int(sb, CLI_HELP_SCHEMA);
+    tp_sb_str(sb, ",\n");
     indent(sb, 2);
-    cli_sb_json_str(sb, "version");
-    cli_sb_str(sb, ": ");
-    cli_sb_int(sb, CLI_MANIFEST_SCHEMA);
-    cli_sb_str(sb, "\n");
+    tp_sb_json_string(sb, "version");
+    tp_sb_str(sb, ": ");
+    tp_sb_int(sb, CLI_MANIFEST_SCHEMA);
+    tp_sb_str(sb, "\n");
     indent(sb, 1);
-    cli_sb_str(sb, "},\n");
+    tp_sb_str(sb, "},\n");
 
     /* formats: export FORMAT -> format-schema version. json-neotolis key comes
      * from the shared exporter-id constant (never a literal); its value is the
      * public json schema constant; defold-tpinfo carries the tpinfo version. */
     indent(sb, 1);
-    cli_sb_json_str(sb, "formats");
-    cli_sb_str(sb, ": {\n");
+    tp_sb_json_string(sb, "formats");
+    tp_sb_str(sb, ": {\n");
     indent(sb, 2);
-    cli_sb_json_str(sb, TP_EXPORTER_ID_JSON_NEOTOLIS);
-    cli_sb_str(sb, ": ");
-    cli_sb_int(sb, TP_JSON_NEOTOLIS_SCHEMA_VERSION);
-    cli_sb_str(sb, ",\n");
+    tp_sb_json_string(sb, TP_EXPORTER_ID_JSON_NEOTOLIS);
+    tp_sb_str(sb, ": ");
+    tp_sb_int(sb, TP_JSON_NEOTOLIS_SCHEMA_VERSION);
+    tp_sb_str(sb, ",\n");
     indent(sb, 2);
-    cli_sb_json_str(sb, "defold-tpinfo");
-    cli_sb_str(sb, ": ");
-    cli_sb_json_str(sb, TP_DEFOLD_TPINFO_VERSION);
-    cli_sb_str(sb, "\n");
+    tp_sb_json_string(sb, "defold-tpinfo");
+    tp_sb_str(sb, ": ");
+    tp_sb_json_string(sb, TP_DEFOLD_TPINFO_VERSION);
+    tp_sb_str(sb, "\n");
     indent(sb, 1);
-    cli_sb_str(sb, "},\n");
+    tp_sb_str(sb, "},\n");
 
     /* exporters: the live registry (built-ins + any runtime-registered). */
     indent(sb, 1);
-    cli_sb_json_str(sb, "exporters");
-    cli_sb_str(sb, ": [\n");
+    tp_sb_json_string(sb, "exporters");
+    tp_sb_str(sb, ": [\n");
     int count = tp_exporter_count();
     for (int i = 0; i < count; i++) {
         const tp_exporter *e = tp_exporter_at(i);
         indent(sb, 2);
-        cli_sb_str(sb, "{\n");
+        tp_sb_str(sb, "{\n");
         indent(sb, 3);
-        cli_sb_json_str(sb, "id");
-        cli_sb_str(sb, ": ");
-        cli_sb_json_str(sb, e->id);
-        cli_sb_str(sb, ",\n");
+        tp_sb_json_string(sb, "id");
+        tp_sb_str(sb, ": ");
+        tp_sb_json_string(sb, e->id);
+        tp_sb_str(sb, ",\n");
         indent(sb, 3);
-        cli_sb_json_str(sb, "name");
-        cli_sb_str(sb, ": ");
-        cli_sb_json_str(sb, e->display_name);
-        cli_sb_str(sb, ",\n");
+        tp_sb_json_string(sb, "name");
+        tp_sb_str(sb, ": ");
+        tp_sb_json_string(sb, e->display_name);
+        tp_sb_str(sb, ",\n");
         indent(sb, 3);
-        cli_sb_json_str(sb, "ext");
-        cli_sb_str(sb, ": ");
-        cli_sb_json_str(sb, e->extension);
-        cli_sb_str(sb, ",\n");
+        tp_sb_json_string(sb, "ext");
+        tp_sb_str(sb, ": ");
+        tp_sb_json_string(sb, e->extension);
+        tp_sb_str(sb, ",\n");
         indent(sb, 3);
-        cli_sb_json_str(sb, "caps");
-        cli_sb_str(sb, ": ");
+        tp_sb_json_string(sb, "caps");
+        tp_sb_str(sb, ": ");
         emit_caps(sb, 3, &e->caps);
-        cli_sb_str(sb, "\n");
+        tp_sb_str(sb, "\n");
         indent(sb, 2);
-        cli_sb_putc(sb, '}');
-        cli_sb_str(sb, (i + 1 < count) ? ",\n" : "\n");
+        tp_sb_char(sb, '}');
+        tp_sb_str(sb, (i + 1 < count) ? ",\n" : "\n");
     }
     indent(sb, 1);
-    cli_sb_str(sb, "]\n");
-    cli_sb_str(sb, "}");
+    tp_sb_str(sb, "]\n");
+    tp_sb_str(sb, "}");
 }
 
 static void print_usage(FILE *out);
@@ -210,31 +210,36 @@ static int cmd_version(bool json) {
         (void)printf("ntpacker %s\n", NTPACKER_VERSION);
         return CLI_EXIT_OK;
     }
-    cli_sb sb = {0};
+    tp_sb sb = {0};
     build_manifest(&sb);
     if (sb.oom) {
-        cli_sb_free(&sb);
+        tp_sb_free(&sb);
         cli_emit_error(true, false, "oom", "out of memory building version manifest");
         return CLI_EXIT_INTERNAL;
     }
     cli_out_stdout(&sb);
-    cli_sb_free(&sb);
+    tp_sb_free(&sb);
     return CLI_EXIT_OK;
 }
 
-static void emit_string_array(cli_sb *sb, const char *const *items,
+static void emit_string_array(tp_sb *sb, const char *const *items,
                               size_t count) {
-    cli_sb_str(sb, "[\n");
+    tp_sb_str(sb, "[\n");
     for (size_t i = 0U; i < count; ++i) {
         indent(sb, 2);
-        cli_sb_json_str(sb, items[i]);
-        cli_sb_str(sb, i + 1U < count ? ",\n" : "\n");
+        tp_sb_json_string(sb, items[i]);
+        tp_sb_str(sb, i + 1U < count ? ",\n" : "\n");
     }
     indent(sb, 1);
-    cli_sb_putc(sb, ']');
+    tp_sb_char(sb, ']');
 }
 
-static void build_help(cli_sb *sb) {
+static void build_help(tp_sb *sb) {
+    /* These ids are the EXIT-CODE vocabulary (cli_exit.h 0..8), NOT the
+     * `error.id` vocabulary -- error ids are tp_status ids (docs/formats/
+     * cli-report.md). An OOM payload therefore reports id "oom" and exits with
+     * the "internal" family (1); it does not get a row here, because there is
+     * no distinct OOM exit code to freeze. */
     static const struct {
         const char *id;
         int code;
@@ -249,44 +254,44 @@ static void build_help(cli_sb *sb) {
         {"validate", CLI_EXIT_VALIDATE},
         {"file_io", CLI_EXIT_FILE_IO},
     };
-    cli_sb_str(sb, "{\n");
+    tp_sb_str(sb, "{\n");
     indent(sb, 1);
-    cli_sb_json_str(sb, "schema");
-    cli_sb_str(sb, ": ");
-    cli_sb_int(sb, CLI_HELP_SCHEMA);
-    cli_sb_str(sb, ",\n");
+    tp_sb_json_string(sb, "schema");
+    tp_sb_str(sb, ": ");
+    tp_sb_int(sb, CLI_HELP_SCHEMA);
+    tp_sb_str(sb, ",\n");
     indent(sb, 1);
-    cli_sb_json_str(sb, "usage");
-    cli_sb_str(sb, ": ");
-    cli_sb_json_str(sb, "ntpacker <command> [options]");
-    cli_sb_str(sb, ",\n");
+    tp_sb_json_string(sb, "usage");
+    tp_sb_str(sb, ": ");
+    tp_sb_json_string(sb, "ntpacker <command> [options]");
+    tp_sb_str(sb, ",\n");
     indent(sb, 1);
-    cli_sb_json_str(sb, "commands");
-    cli_sb_str(sb, ": ");
+    tp_sb_json_string(sb, "commands");
+    tp_sb_str(sb, ": ");
     emit_string_array(sb, HELP_COMMANDS,
                       sizeof HELP_COMMANDS / sizeof HELP_COMMANDS[0]);
-    cli_sb_str(sb, ",\n");
+    tp_sb_str(sb, ",\n");
     indent(sb, 1);
-    cli_sb_json_str(sb, "global_options");
-    cli_sb_str(sb, ": ");
+    tp_sb_json_string(sb, "global_options");
+    tp_sb_str(sb, ": ");
     emit_string_array(sb, HELP_GLOBAL_OPTIONS,
                       sizeof HELP_GLOBAL_OPTIONS /
                           sizeof HELP_GLOBAL_OPTIONS[0]);
-    cli_sb_str(sb, ",\n");
+    tp_sb_str(sb, ",\n");
     indent(sb, 1);
-    cli_sb_json_str(sb, "exit_codes");
-    cli_sb_str(sb, ": {\n");
+    tp_sb_json_string(sb, "exit_codes");
+    tp_sb_str(sb, ": {\n");
     for (size_t i = 0U; i < sizeof exit_codes / sizeof exit_codes[0]; ++i) {
         indent(sb, 2);
-        cli_sb_json_str(sb, exit_codes[i].id);
-        cli_sb_str(sb, ": ");
-        cli_sb_int(sb, exit_codes[i].code);
-        cli_sb_str(sb, i + 1U < sizeof exit_codes / sizeof exit_codes[0]
+        tp_sb_json_string(sb, exit_codes[i].id);
+        tp_sb_str(sb, ": ");
+        tp_sb_int(sb, exit_codes[i].code);
+        tp_sb_str(sb, i + 1U < sizeof exit_codes / sizeof exit_codes[0]
                            ? ",\n"
                            : "\n");
     }
     indent(sb, 1);
-    cli_sb_str(sb, "}\n}");
+    tp_sb_str(sb, "}\n}");
 }
 
 static int cmd_help(bool json) {
@@ -294,15 +299,15 @@ static int cmd_help(bool json) {
         print_usage(stdout);
         return CLI_EXIT_OK;
     }
-    cli_sb sb = {0};
+    tp_sb sb = {0};
     build_help(&sb);
     if (sb.oom) {
-        cli_sb_free(&sb);
+        tp_sb_free(&sb);
         cli_emit_error(true, false, "oom", "out of memory building help payload");
         return CLI_EXIT_INTERNAL;
     }
     cli_out_stdout(&sb);
-    cli_sb_free(&sb);
+    tp_sb_free(&sb);
     return CLI_EXIT_OK;
 }
 
@@ -357,7 +362,7 @@ static void print_usage(FILE *out) {
 
 static int ntpacker_main_utf8(int argc, char **argv) {
     /* BLOCKER-3: pin dot-decimal float formatting for every payload, before any
-     * output. tp_core's %.9g writers and the CLI's cli_sb_num both depend on it. */
+     * output. tp_core's %.9g writers and the CLI's tp_sb_num both depend on it. */
     (void)setlocale(LC_NUMERIC, "C");
 
     bool json = false;

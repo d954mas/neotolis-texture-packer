@@ -16,5 +16,7 @@ bool nt_utf8_path_to_utf16(const char *path_utf8, wchar_t *out,
 FILE *nt_utf8_fopen(const char *path_utf8, const char *mode);
 int nt_utf8_remove(const char *path_utf8);
 int nt_utf8_rename(const char *source_utf8, const char *destination_utf8);
+/* Removes an EMPTY directory; fails when anything is still inside it. */
+int nt_utf8_rmdir(const char *path_utf8);
 
 #endif

@@ -41,7 +41,7 @@ void declare_row_tooltips(nt_ui_context_t *ctx);
  * strip's page/zoom icon-only ghosts). */
 void declare_tooltips(nt_ui_context_t *ctx);
 
-/* Unsaved-changes confirm modal (Save / Discard / Cancel). */
+/* Lifecycle confirm: resolves an active draft first, then ordinary unsaved changes. */
 void declare_confirm_modal(nt_ui_context_t *ctx);
 
 /* R6b startup crash-recovery modal: lists every recovered crash-orphan and resolves each one via the

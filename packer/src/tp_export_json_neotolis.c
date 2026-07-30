@@ -4,9 +4,11 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "tp_export_geom.h"
 #include "tp_fs_internal.h"
+#include "tp_strutil.h" /* shared tp_path_basename (one core definition) */
 
-#include "tp_sb.h"
+#include "tp_core/tp_sb.h"
 
 /* Full-fidelity json-neotolis writer. Deterministic (tp_project.c conventions:
  * "version" first then ascending keys, 2-space indent, LF, %.9g, trailing
@@ -17,17 +19,6 @@
 /* ------------------------------------------------------------------ */
 /* helpers                                                            */
 /* ------------------------------------------------------------------ */
-
-/* Basename of a '/'- or '\\'-separated path (page files sit next to the json). */
-static const char *path_basename(const char *p) {
-    const char *base = p;
-    for (const char *c = p; *c; c++) {
-        if (*c == '/' || *c == '\\') {
-            base = c + 1;
-        }
-    }
-    return base;
-}
 
 static void ignore_output_path(void *ud, const char *path) {
     (void)ud;
@@ -61,38 +52,6 @@ static void transform_str(uint8_t t, char *buf, size_t cap) {
         }
         used += (size_t)n;
     }
-}
-
-/* True when the sprite's hull is exactly the axis-aligned trim quad (a plain
- * RECT) -- then the frame rect already describes it and no polygon is emitted. */
-static bool is_rect_quad(const tp_sprite *s) {
-    if (s->vert_count != 4 || !s->verts) {
-        return false;
-    }
-    int w = s->frame.w;
-    int h = s->frame.h;
-    bool seen[4] = {false, false, false, false};
-    for (int i = 0; i < 4; i++) {
-        int x = s->verts[i].x;
-        int y = s->verts[i].y;
-        int ci;
-        if (x == 0 && y == 0) {
-            ci = 0;
-        } else if (x == w && y == 0) {
-            ci = 1;
-        } else if (x == 0 && y == h) {
-            ci = 2;
-        } else if (x == w && y == h) {
-            ci = 3;
-        } else {
-            return false;
-        }
-        if (seen[ci]) {
-            return false;
-        }
-        seen[ci] = true;
-    }
-    return true;
 }
 
 static void emit_scaled(tp_sb *sb, long v, float scale) {
@@ -200,7 +159,7 @@ static tp_status emit_sprite(tp_sb *sb, int depth, const tp_export_prepared *pre
         }
     }
 
-    bool has_poly = (s->vert_count > 0 && !is_rect_quad(s));
+    bool has_poly = (s->vert_count > 0 && !tp_export_is_rect_quad(s));
     if (has_poly) {
         if (caps->polygons) {
             tp_obj_key(sb, depth + 1, &first, "polygon");
@@ -391,31 +350,34 @@ static tp_status emit_root(tp_sb *sb, const tp_export_prepared *prep, const tp_e
 /* entry                                                              */
 /* ------------------------------------------------------------------ */
 
-tp_status tp_export_json_neotolis_write(const tp_export_prepared *prep, const tp_export_caps *caps,
-                                        const char *out_path_base, tp_export_notices *notices, tp_error *err) {
-    if (!prep || !caps || !out_path_base) {
-        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "json-neotolis: NULL prep/caps/out_path_base");
+tp_status tp_export_json_neotolis_write(const tp_export_write_ctx *ctx, tp_error *err) {
+    if (!ctx || !ctx->prep || !ctx->caps || !ctx->write_path_base || !ctx->out_path_base) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "json-neotolis: incomplete write context");
     }
+    const tp_export_prepared *prep = ctx->prep;
+    const char *write_base = ctx->write_path_base;
 
     char path[TP_IDENTITY_PATH_MAX];
-    tp_status st = tp_export_output_path(out_path_base, ".json", path, err);
+    tp_status st = tp_export_output_path(write_base, ".json", path, err);
     if (st != TP_STATUS_OK) {
         return st;
     }
-    st = tp_export_list_page_files(prep->result, out_path_base, ignore_output_path, NULL, err);
+    st = tp_export_list_page_files(prep->result, write_base, ignore_output_path, NULL, err);
     if (st != TP_STATUS_OK) {
         return st;
     }
 
     /* Pages sit next to the json; straight-alpha default (ROADMAP). */
-    st = tp_export_write_pages(prep->result, out_path_base, false, err);
+    st = tp_export_write_pages(prep->result, write_base, false, err);
     if (st != TP_STATUS_OK) {
         return st;
     }
 
-    const char *page_base = path_basename(out_path_base);
+    /* Page files sit next to the json, so the emitted reference is a bare
+     * basename -- identical whether the set is staged or written in place. */
+    const char *page_base = tp_path_basename(ctx->out_path_base);
     tp_sb sb = {0};
-    st = emit_root(&sb, prep, caps, page_base, notices, err);
+    st = emit_root(&sb, prep, ctx->caps, page_base, ctx->notices, err);
     if (st != TP_STATUS_OK) {
         free(sb.buf);
         return st;

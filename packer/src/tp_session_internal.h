@@ -6,23 +6,20 @@
 #include "tp_core/tp_transaction.h"
 
 /* Declaration-only seam for the session family: construction/recovery entry
- * points, the gate/recovery-health predicates, and the test-only seams. The
- * struct layout and the platform lock it embeds live in tp_session_layout.h,
- * which only tp_session.c and tp_session_snapshot.c include; every other
- * includer here keeps using tp_session as an opaque handle. */
+ * points, the owner-thread assertion, and the test-only seams. The struct
+ * layout and the owner-thread identity it embeds live in tp_session_layout.h,
+ * which only the session-family TUs include; every other includer here keeps
+ * using tp_session as an opaque handle. */
 
 typedef struct tp_recovery_live tp_recovery_live;
 
-/* The single-writer gate, defined in tp_session.c. Both the writer TU and the
- * snapshot TU acquire it to sample a consistent admission point. */
-void gate_lock(const tp_session *session);
-void gate_unlock(const tp_session *session);
-
-/* Recovery-health predicate defined in tp_session.c beside the live seam. The
- * writer gates mutation on it and snapshot_create records it, so both TUs need it. */
-bool recovery_is_healthy(const tp_session *session);
-tp_session_recovery_health tp_session__recovery_health_locked(
-    const tp_session *session);
+/* One host thread owns a session for its whole lifetime: it creates it, admits
+ * every command, and destroys it. Transport and worker threads enqueue owned
+ * immutable requests/completions instead of calling in, so a call from any
+ * other thread is a programming error, not a runtime condition. Defined in
+ * tp_session.c; every session entry point in the family calls it exactly once,
+ * and family-private helpers never repeat it. */
+void tp_session__assert_owner_thread(const tp_session *session);
 
 /* Internal Open/recovery construction seam. Always consumes `project`, including
  * every failure path, so ownership cannot become ambiguous under allocation/RNG
@@ -56,14 +53,30 @@ tp_status tp_session_attach_recovery_live(
     tp_session *session, tp_recovery_live *live,
     const tp_recovery_metadata *metadata, tp_error *err);
 
+#ifdef TP_ENABLE_TEST_SEAMS
 /* Component-local benchmark seam. Counts successful snapshot DTO/storage
- * allocations and their live-byte high-water on the calling thread. The
- * project-clone component has its own existing counter. */
+ * allocations and their live-byte high-water on the calling thread, and injects
+ * the snapshot / generation-owner allocation faults. Compiled out of every build
+ * that does not define TP_ENABLE_TEST_SEAMS, so a consumer must recompile
+ * tp_session_snapshot.c (and, for the generation-owner fault,
+ * tp_project_generation.c) with the define. The project-clone component has its
+ * own existing counter. */
 void tp_session__test_reset_snapshot_allocations(void);
 size_t tp_session__test_snapshot_allocation_count(void);
 size_t tp_session__test_snapshot_allocation_bytes(void);
 void tp_session__test_fail_snapshot_allocation_after(size_t successful);
 void tp_session__test_fail_next_generation_owner_allocation(void);
+
+typedef void (*tp_session_test_observe_after_cut_fn)(void *context);
+/* One-shot thread-local seam invoked after the observation has fixed its cut
+ * but before retained state is materialized. Tests use it to inject the commit
+ * that could previously split events_after() from snapshot_create(). Compiled
+ * out of every build that does not define TP_ENABLE_TEST_SEAMS, so a consumer
+ * must recompile tp_session_observation.c with the define (see the
+ * tp_test_session_observation target). */
+void tp_session__test_set_observe_after_cut(
+    tp_session_test_observe_after_cut_fn hook, void *context);
+#endif
 
 /* Recovery orchestration uses this only to complete the ownership transfer on
  * an attach error: accepted live handles remain session-owned even degraded. */

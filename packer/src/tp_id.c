@@ -193,7 +193,9 @@ tp_id128 tp_sprite_id(tp_id128 source_id, const char *normalized_key) {
 /* shape ID (prefix + hex)                                                   */
 /* ======================================================================== */
 
-const char *tp_id_kind_prefix(tp_id_kind kind) {
+/* "atlas_"/"source_"/"anim_"/"target_", or "" for INVALID. The single source of
+ * the prefix strings for tp_id_format and tp_id_parse below. */
+static const char *tp_id_kind_prefix(tp_id_kind kind) {
     switch (kind) {
         case TP_ID_KIND_ATLAS: return "atlas_";
         case TP_ID_KIND_SOURCE: return "source_";

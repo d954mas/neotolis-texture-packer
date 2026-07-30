@@ -1,13 +1,14 @@
 /* Immutable snapshot materialization and the DTO/selector query surface, split
  * from tp_session.c as the session family's read-only second responsibility zone.
- * It reads committed state through tp_session_layout.h under the shared writer
- * gate and never mutates the live model or its project. */
+ * It reads committed state through tp_session_layout.h on the session's owner
+ * thread and never mutates the live model or its project. */
 #include "tp_core/tp_session.h"
 
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 
+#include "core/nt_assert.h"
 #include "tp_core/tp_id.h"
 #include "tp_core/tp_project.h"
 #include "tp_core/tp_sprite_index.h"
@@ -20,6 +21,10 @@
 #include "tp_session_snapshot_internal.h"
 
 // #region allocation accounting
+/* Accounting and fault injection exist only for the benchmark/fault suites, so
+ * both the counters and the branch that reads them are compiled out of a
+ * shipping build: snapshot_calloc is then a plain calloc. */
+#ifdef TP_ENABLE_TEST_SEAMS
 static _Thread_local size_t s_snapshot_allocations;
 static _Thread_local size_t s_snapshot_allocation_bytes;
 static _Thread_local size_t s_snapshot_fail_after = SIZE_MAX;
@@ -45,8 +50,10 @@ void tp_session__test_fail_snapshot_allocation_after(size_t successful) {
 void tp_session__test_fail_next_generation_owner_allocation(void) {
     tp_project_generation__test_fail_next_allocation();
 }
+#endif
 
 static void *snapshot_calloc(size_t count, size_t size) {
+#ifdef TP_ENABLE_TEST_SEAMS
     if (s_snapshot_fail_after != SIZE_MAX) {
         if (s_snapshot_fail_after == 0U) {
             s_snapshot_fail_after = SIZE_MAX;
@@ -54,11 +61,14 @@ static void *snapshot_calloc(size_t count, size_t size) {
         }
         s_snapshot_fail_after--;
     }
+#endif
     void *allocation = calloc(count, size);
+#ifdef TP_ENABLE_TEST_SEAMS
     if (allocation) {
         s_snapshot_allocations++;
         s_snapshot_allocation_bytes += count * size;
     }
+#endif
     return allocation;
 }
 
@@ -79,22 +89,35 @@ tp_status tp_session_snapshot_create(const tp_session *session,
                             "snapshot requires session and output");
     }
     *out = NULL;
-    tp_session_snapshot *snapshot = (tp_session_snapshot *)snapshot_calloc(1U, sizeof *snapshot);
+    tp_session__assert_owner_thread(session);
+    tp_session_snapshot *snapshot = NULL;
+    tp_status status = tp_session_snapshot__capture(session, &snapshot, err);
+    if (status != TP_STATUS_OK) {
+        return status;
+    }
+    status = tp_session_snapshot__materialize_captured(snapshot, err);
+    if (status == TP_STATUS_OK) {
+        *out = snapshot;
+    }
+    return status;
+}
+
+tp_status tp_session_snapshot__capture(
+    const tp_session *session, tp_session_snapshot **out, tp_error *err) {
+    NT_ASSERT(session != NULL);
+    NT_ASSERT(out != NULL);
+    *out = NULL;
+    tp_session_snapshot *snapshot =
+        (tp_session_snapshot *)snapshot_calloc(1U, sizeof *snapshot);
     if (!snapshot) {
         return tp_error_set(err, TP_STATUS_OOM, "snapshot allocation failed");
     }
-
-    /* Only generation retention and scalar metadata capture require a
-     * consistent admission point. The retained generation is immutable, so DTO
-     * materialization must not keep the single-writer gate held. */
-    gate_lock(session);
     tp_project_generation *generation = NULL;
-    tp_status retain_status = tp_model__retain_project_generation(
+    tp_status status = tp_model__retain_project_generation(
         session->model, &generation, err);
-    if (retain_status != TP_STATUS_OK) {
-        gate_unlock(session);
+    if (status != TP_STATUS_OK) {
         free(snapshot);
-        return retain_status;
+        return status;
     }
     snapshot->generation = generation;
     snapshot->project = tp_project_generation_project(generation);
@@ -105,18 +128,19 @@ tp_status tp_session_snapshot_create(const tp_session *session,
     snapshot->source_generation = session->source_generation;
     snapshot->event_sequence = session->event_sequence;
     snapshot->dirty = tp_model_dirty(session->model);
-    snapshot->recovery_health =
-        tp_session__recovery_health_locked(session);
     snapshot->identity = session->identity;
     snapshot->saved_file_fingerprint = session->saved_file_fingerprint;
-    snapshot->has_saved_file_fingerprint = session->has_saved_file_fingerprint;
-    gate_unlock(session);
+    snapshot->has_saved_file_fingerprint =
+        session->has_saved_file_fingerprint;
+    *out = snapshot;
+    return TP_STATUS_OK;
+}
 
-    tp_status status = snapshot_materialize(snapshot, err);
-    if (status == TP_STATUS_OK) {
-        *out = snapshot;
-    }
-    return status;
+tp_status tp_session_snapshot__materialize_captured(
+    tp_session_snapshot *snapshot, tp_error *err) {
+    NT_ASSERT(snapshot != NULL);
+    NT_ASSERT(snapshot->generation != NULL);
+    return snapshot_materialize(snapshot, err);
 }
 
 static tp_status snapshot_materialize(tp_session_snapshot *snapshot,
@@ -288,10 +312,6 @@ tp_status tp_session_snapshot_load(const char *path,
     }
     snapshot->project = tp_project_generation_project(snapshot->generation);
     snapshot->atlas_count = snapshot->project->atlas_count;
-    snapshot->recovery_health.notice_id =
-        TP_SESSION_NOTICE_RECOVERY_DEGRADED;
-    snapshot->recovery_health.available = true;
-    snapshot->recovery_health.first_cause = TP_STATUS_OK;
     snapshot->identity.kind = TP_IDENTITY_SAVED;
     (void)snprintf(snapshot->identity.canonical_path,
                    sizeof snapshot->identity.canonical_path, "%s", canonical);

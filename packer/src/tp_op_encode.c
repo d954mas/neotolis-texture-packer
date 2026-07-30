@@ -1,6 +1,6 @@
 /*
  * Determinism: canonical BYTE-STABLE encoders for an operation and an apply
- * result. Same conventions as the tp_project writer (src/tp_sb.h): 2-space indent,
+ * result. Same conventions as the tp_project writer (tp_core/tp_sb.h): 2-space indent,
  * LF, %.9g floats, keys ASCENDING with the "op" discriminator first, a trailing
  * newline. Endian-independent (no reinterpret), so goldens are byte-identical on
  * every OS. Sparse: a SET op emits only the fields its presence mask selects.
@@ -14,7 +14,7 @@
 #include "tp_core/tp_id.h"
 #include "tp_encode_internal.h"
 #include "tp_op_internal.h"
-#include "tp_sb.h"
+#include "tp_core/tp_sb.h"
 
 typedef enum { FT_ID, FT_STR, FT_INT, FT_NUM, FT_BOOL, FT_ARR, FT_REF, FT_REFS } ftype;
 
@@ -158,6 +158,31 @@ static bool emit_object(tp_sb *sb, const char *force_first, efield *f, int n,
 #define PUSH_REF(K, RV) (f[c].key = (K), f[c].t = FT_REF, f[c].refs = (RV), c++)
 #define PUSH_REFS(K, RV, RN) (f[c].key = (K), f[c].t = FT_REFS, f[c].refs = (RV), f[c].arrn = (RN), c++)
 
+/* Push every masked field of a SET family straight from the registry. Order is
+ * irrelevant to the bytes -- emit_object sorts keys ascending -- so this is a
+ * plain row walk. Returns the new field count. */
+static int push_fields(efield *f, int c, tp_field_family family,
+                       const void *payload, uint32_t mask) {
+    size_t count = 0U;
+    const tp_field_row *rows = tp_op_field_rows(family, &count);
+    for (size_t i = 0U; i < count; i++) {
+        const tp_field_row *row = &rows[i];
+        if ((mask & row->bit) == 0U) {
+            continue;
+        }
+        const void *v = (const char *)payload + row->op_off;
+        switch (row->type) {
+            case TP_FIELD_INT:
+            case TP_FIELD_INT_I16:
+            case TP_FIELD_INT_U16: PUSH_INT(row->key, *(const int *)v); break;
+            case TP_FIELD_BOOL: PUSH_BOOL(row->key, *(const bool *)v); break;
+            case TP_FIELD_FLOAT: PUSH_NUM(row->key, *(const float *)v); break;
+            case TP_FIELD_STR: PUSH_STR(row->key, *(const char *const *)v); break;
+        }
+    }
+    return c;
+}
+
 bool tp_operation_emit_canonical(tp_sb *sb, const tp_operation *op, int depth,
                                  bool trailing_newline) {
     if (!sb || !op || depth < 0) {
@@ -179,20 +204,10 @@ bool tp_operation_emit_canonical(tp_sb *sb, const tp_operation *op, int depth,
         case TP_OP_ATLAS_CREATE: PUSH_STR("name", op->u.atlas_create.name); break;
         case TP_OP_ATLAS_REMOVE: break;
         case TP_OP_ATLAS_RENAME: PUSH_STR("name", op->u.atlas_rename.name); break;
-        case TP_OP_ATLAS_SETTINGS_SET: {
-            const tp_op_atlas_settings *s = &op->u.atlas_settings;
-            if (s->mask & TP_AF_MAX_SIZE) PUSH_INT("max_size", s->max_size);
-            if (s->mask & TP_AF_PADDING) PUSH_INT("padding", s->padding);
-            if (s->mask & TP_AF_MARGIN) PUSH_INT("margin", s->margin);
-            if (s->mask & TP_AF_EXTRUDE) PUSH_INT("extrude", s->extrude);
-            if (s->mask & TP_AF_ALPHA_THRESHOLD) PUSH_INT("alpha_threshold", s->alpha_threshold);
-            if (s->mask & TP_AF_MAX_VERTICES) PUSH_INT("max_vertices", s->max_vertices);
-            if (s->mask & TP_AF_SHAPE) PUSH_INT("shape", s->shape);
-            if (s->mask & TP_AF_ALLOW_TRANSFORM) PUSH_BOOL("allow_transform", s->allow_transform);
-            if (s->mask & TP_AF_POWER_OF_TWO) PUSH_BOOL("power_of_two", s->power_of_two);
-            if (s->mask & TP_AF_PIXELS_PER_UNIT) PUSH_NUM("pixels_per_unit", s->pixels_per_unit);
+        case TP_OP_ATLAS_SETTINGS_SET:
+            c = push_fields(f, c, TP_FIELD_FAMILY_ATLAS, &op->u.atlas_settings,
+                            op->u.atlas_settings.mask);
             break;
-        }
         case TP_OP_SOURCE_ADD:
             PUSH_ID("source_id", TP_ID_KIND_SOURCE, op->u.source_add.source_id);
             PUSH_STR("key", op->u.source_add.key);
@@ -207,33 +222,19 @@ bool tp_operation_emit_canonical(tp_sb *sb, const tp_operation *op, int depth,
             const tp_op_sprite_set *s = &op->u.sprite_set;
             PUSH_ID("source_id", TP_ID_KIND_SOURCE, s->source_id);
             PUSH_STR("src_key", s->src_key);
-            if (s->mask & TP_SPF_ORIGIN) {
-                PUSH_NUM("origin_x", s->origin_x);
-                PUSH_NUM("origin_y", s->origin_y);
-            }
-            if (s->mask & TP_SPF_SLICE9) {
-                PUSH_INT("slice9_l", s->slice9[0]);
-                PUSH_INT("slice9_r", s->slice9[1]);
-                PUSH_INT("slice9_t", s->slice9[2]);
-                PUSH_INT("slice9_b", s->slice9[3]);
-            }
-            if (s->mask & TP_SPF_SHAPE) PUSH_INT("ov_shape", s->ov_shape);
-            if (s->mask & TP_SPF_ALLOW_ROTATE) PUSH_INT("ov_allow_rotate", s->ov_allow_rotate);
-            if (s->mask & TP_SPF_MAX_VERTICES) PUSH_INT("ov_max_vertices", s->ov_max_vertices);
-            if (s->mask & TP_SPF_MARGIN) PUSH_INT("ov_margin", s->ov_margin);
-            if (s->mask & TP_SPF_EXTRUDE) PUSH_INT("ov_extrude", s->ov_extrude);
+            c = push_fields(f, c, TP_FIELD_FAMILY_SPRITE, s, s->mask);
             break;
         }
         case TP_OP_SPRITE_OVERRIDE_CLEAR: {
             uint32_t m = op->u.sprite_clear.mask;
             PUSH_ID("source_id", TP_ID_KIND_SOURCE, op->u.sprite_clear.source_id);
             PUSH_STR("src_key", op->u.sprite_clear.src_key);
-            size_t clear_count = 0U;
-            const tp_sprite_clear_field *clear_fields =
-                tp_op__sprite_clear_fields(&clear_count);
-            for (size_t i = 0U; i < clear_count; i++) {
-                if ((m & clear_fields[i].bit) != 0U) {
-                    clr_toks[clr_n++] = clear_fields[i].token;
+            size_t row_count = 0U;
+            const tp_field_row *rows =
+                tp_op_field_rows(TP_FIELD_FAMILY_SPRITE, &row_count);
+            for (size_t i = 0U; i < row_count; i++) { /* one token per masked BIT */
+                if (rows[i].clear_token && (m & rows[i].bit) != 0U) {
+                    clr_toks[clr_n++] = rows[i].clear_token;
                 }
             }
             PUSH_ARR("fields", (char *const *)clr_toks, clr_n);
@@ -263,10 +264,7 @@ bool tp_operation_emit_canonical(tp_sb *sb, const tp_operation *op, int depth,
         case TP_OP_ANIMATION_SETTINGS_SET: {
             const tp_op_anim_settings *s = &op->u.anim_settings;
             PUSH_ID("anim_id", TP_ID_KIND_ANIM, s->anim_id);
-            if (s->mask & TP_ANF_FPS) PUSH_NUM("fps", s->fps);
-            if (s->mask & TP_ANF_PLAYBACK) PUSH_INT("playback", s->playback);
-            if (s->mask & TP_ANF_FLIP_H) PUSH_BOOL("flip_h", s->flip_h);
-            if (s->mask & TP_ANF_FLIP_V) PUSH_BOOL("flip_v", s->flip_v);
+            c = push_fields(f, c, TP_FIELD_FAMILY_ANIM, s, s->mask);
             break;
         }
         case TP_OP_ANIMATION_FRAMES_SET:
@@ -297,9 +295,7 @@ bool tp_operation_emit_canonical(tp_sb *sb, const tp_operation *op, int depth,
         case TP_OP_TARGET_SET: {
             const tp_op_target_set *s = &op->u.target_set;
             PUSH_ID("target_id", TP_ID_KIND_TARGET, s->target_id);
-            if (s->mask & TP_TF_EXPORTER) PUSH_STR("exporter_id", s->exporter_id);
-            if (s->mask & TP_TF_OUT_PATH) PUSH_STR("out_path", s->out_path);
-            if (s->mask & TP_TF_ENABLED) PUSH_BOOL("enabled", s->enabled);
+            c = push_fields(f, c, TP_FIELD_FAMILY_TARGET, s, s->mask);
             break;
         }
         case TP_OP_INVALID:

@@ -68,7 +68,6 @@ static inline uint16_t Su(float px) { return (uint16_t)((px * g_ui_scale) + 0.5F
 #define STRIP_CHIP_MIN_W 760.0F
 
 /* Cap on export targets shown per atlas (settings panel target rows + the Export dialog loop). */
-#define GUI_MAX_TARGETS 16
 
 /* Playback mode labels, order == the Defold-pinned enum (0 once_forward .. 6 none). Printed by the
  * animation editor (settings panel) and the canvas preview caption. */

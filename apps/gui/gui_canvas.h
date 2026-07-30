@@ -37,7 +37,7 @@ typedef enum { GUI_CANVAS_SOURCE = 0, GUI_CANVAS_ATLAS, GUI_CANVAS_ANIM } gui_ca
 #define GUI_CANVAS_MAX_PAGES 16
 
 typedef struct gui_canvas_double_click_ref {
-    const tp_result *result;
+    uint64_t result_generation;
     int sprite_index;
     bool valid;
 } gui_canvas_double_click_ref;
@@ -71,6 +71,7 @@ typedef struct gui_canvas {
     int page_count;
     int cur_page;
     const tp_result *result; /* borrowed (arena-owned by gui_pack); NULL = no atlas */
+    uint64_t result_generation; /* changes on every result rebind; pointer identity is not state */
     bool pages_dirty;        /* result set but textures not yet uploaded (GL deferred to the pass) */
     bool upload_failed;      /* a page exceeded the GPU max texture size / OOM'd -> skipped (16K pages) */
     int sel_sprite;          /* accent-outlined region index, -1 none */
@@ -125,17 +126,15 @@ void gui_canvas_set_ui_scale(gui_canvas *c, float scale);
 bool gui_canvas_set_image(gui_canvas *c, const char *abs_path, char *err_out, size_t err_cap);
 void gui_canvas_clear(gui_canvas *c); /* drops source image; leaves atlas state */
 void gui_canvas_invalidate(gui_canvas *c);
-const char *gui_canvas_loaded_path(const gui_canvas *c);
 bool gui_canvas_has_image(const gui_canvas *c);
 int gui_canvas_img_w(const gui_canvas *c);
 int gui_canvas_img_h(const gui_canvas *c);
 
 /* --- ATLAS mode --- */
-/* Borrows `result` (NULL clears the atlas view). Marks pages dirty; the actual GPU upload happens in
- * gui_canvas_upload_pages (call inside the render pass). Switches mode to ATLAS and refits. */
-void gui_canvas_set_result(gui_canvas *c, const tp_result *result);
 /* Rebinds the displayed result and invalidates the shell-owned double-click
- * identity before the previous result arena can be observed again. */
+ * identity before the previous result arena can be observed again. Borrows
+ * `result` (NULL clears the atlas view); marks pages dirty for the next
+ * gui_canvas_upload_pages, switches mode to ATLAS and refits. */
 void gui_canvas_rebind_result(gui_canvas *c,
                               gui_canvas_double_click_ref *double_click,
                               const tp_result *result);
@@ -145,7 +144,6 @@ bool gui_canvas_has_atlas(const gui_canvas *c);
 int gui_canvas_page_count(const gui_canvas *c);
 int gui_canvas_cur_page(const gui_canvas *c);
 void gui_canvas_set_page(gui_canvas *c, int page);
-void gui_canvas_set_mode(gui_canvas *c, gui_canvas_mode mode);
 gui_canvas_mode gui_canvas_get_mode(const gui_canvas *c);
 
 /* zoom/pan (bb = canvas box in layout px, from nt_ui_get_bbox). zoom_pct: 100 == 1:1. */
@@ -160,7 +158,8 @@ bool gui_canvas_zoom_to_sprite(gui_canvas *c, const float bb[4],
                                int sprite_index);
 void gui_canvas_double_click_reset(gui_canvas_double_click_ref *ref);
 bool gui_canvas_double_click_press(gui_canvas_double_click_ref *ref,
-                                   const tp_result *result, int sprite_index,
+                                   uint64_t result_generation,
+                                   int sprite_index,
                                    bool engine_double_clicked);
 /* Shared raw-input ownership gate. Menus/modal editors own the pointer while
  * open, so all armed click/pan and retained double-click state is cancelled. */

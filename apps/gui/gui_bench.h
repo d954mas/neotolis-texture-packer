@@ -1,13 +1,13 @@
 #ifndef NTPACKER_GUI_BENCH_H
 #define NTPACKER_GUI_BENCH_H
 
-/* Dev seam: the `--bench-perf[=<out.txt>]` headless perf-probe mode (compiled into EVERY build, same
- * spirit as --shot -- available in every build, NOT documented in --help). When active it opens the
+/* Dev seam: the `--bench-perf[=<out.txt>]` headless perf-probe mode (compiled only when
+ * NTPACKER_GUI_DEV_SEAMS is on, same spirit as --shot, NOT documented in --help). When active it opens the
  * owner-scale bench fixture, lets the project/rows settle for a few frames, then times the EXISTING
  * GUI interactions (row rebuild, filter, every sort key, selection, edit + undo/redo, refresh) and prints
  * machine-readable `bench_perf ...` lines, asserts the non-blocking hard-gates (async pack request +
  * refresh-does-not-mutate-revision), measures per-frame render time when a real GL context is present
- * (skipped under NTPACKER_GUI_HEADLESS), optionally mirrors the lines to a file, and quits.
+ * (skipped in a NTPACKER_GUI_HEADLESS_CI build), optionally mirrors the lines to a file, and quits.
  *
  * Timing is advisory (a slow number never fails the run -- D decides budgets); only an invariant
  * violation or a hard fixture-load failure makes the process exit non-zero (gui_bench_exit_code).
@@ -15,10 +15,13 @@
  * The prototypes below are the only entry points main()/frame() call. */
 
 #include <stdbool.h>
+#include <stddef.h> /* NULL (no-op fallback below) */
 
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+#ifdef NTPACKER_GUI_DEV_SEAMS
 
 /* main() arg loop: consume `--bench-perf` or `--bench-perf=<out.txt>`. Returns true if `arg` was the
  * bench flag (so main() skips its project-arg fallback for it). */
@@ -45,6 +48,17 @@ void gui_bench_post_draw(void);
 /* main()'s return value: 0 for a clean run (or no bench), non-zero if a --bench-perf invariant assert
  * or a hard fixture-load failure fired. Persists after the run ends. */
 int gui_bench_exit_code(void);
+
+#else /* !NTPACKER_GUI_DEV_SEAMS -- shipped build: every entry point is a compile-time no-op. */
+
+static inline bool gui_bench_parse_arg(const char *arg) { (void)arg; return false; }
+static inline bool gui_bench_active(void) { return false; }
+static inline const char *gui_bench_default_project(void) { return NULL; }
+static inline void gui_bench_tick(void) {}
+static inline void gui_bench_post_draw(void) {}
+static inline int gui_bench_exit_code(void) { return 0; }
+
+#endif /* NTPACKER_GUI_DEV_SEAMS */
 
 #ifdef __cplusplus
 }

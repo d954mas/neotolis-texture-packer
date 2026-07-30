@@ -16,7 +16,7 @@
 #include "tp_core/tp_project.h"
 #include "tp_project_mutation_internal.h"
 #include "tp_project_identity_internal.h"
-#include "tp_core/tp_project_lease.h"
+#include "tp_project_lease.h"
 #include "tp_core/tp_scan.h"
 #include "unity.h"
 

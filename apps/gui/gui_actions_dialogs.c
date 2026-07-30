@@ -1,4 +1,5 @@
 #include "gui_actions_internal.h"
+#include "gui_project.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -14,43 +15,75 @@
 
 #include "app/nt_app.h"
 // #region file dialogs (tinyfiledialogs)
-static void do_open(void) {
+bool gui_actions__open_dialog(void) {
     static const char *filt[] = {"*.ntpacker_project"};
     const char *path = tinyfd_openFileDialog("Open Project", "", 1, filt, "ntpacker project", 0);
     if (!path) {
-        return;
+        return false;
     }
     if (!gui_scan_exists(path)) {
         set_statusf_ex(STATUS_WARNING, "project not found: %s", path); /* never fatal (F6b) */
-        return;
+        return false;
     }
-    char err[256];
-    if (gui_project_open(path, err, sizeof err) == TP_STATUS_OK) {
-        gui_pack_clear(-1);
-        gui_shell_reset_shown_result();
-        cancel_edit();
-        clamp_selection();
-        reset_selection();
-        set_statusf("Opened %s", gui_project_display_name());
-    } else {
-        set_statusf_ex(STATUS_ERROR, "Open failed: %s", err);
+    tp_error error = {{0}};
+    const tp_status status =
+        gui_project_lifecycle_begin_open(
+            path, &error);
+    if (status != TP_STATUS_OK) {
+        set_statusf_ex(
+            STATUS_ERROR, "Open failed: %s",
+            error.msg[0]
+                ? error.msg
+                : tp_status_str(status));
+        return false;
     }
+    return true;
 }
 
-static void do_save_as(void) {
+bool gui_actions__save_as(void) {
     static const char *filt[] = {"*.ntpacker_project"};
     const char *def = gui_project_has_path() ? gui_project_path() : "untitled.ntpacker_project";
     const char *path = tinyfd_saveFileDialog("Save Project As", def, 1, filt, "ntpacker project");
     if (!path) {
-        return;
+        return false;
     }
     char full[TP_IDENTITY_PATH_MAX];
     if (!gui_paths_project_file(path, full, sizeof full)) {
         set_status_ex(STATUS_ERROR,
                       "Save path is invalid or exceeds the supported path limit.");
-        return;
+        return false;
     }
     char err[256];
+    const tp_status preflight =
+        gui_project_save_as_preflight(
+            full, err, sizeof err);
+    if (preflight != TP_STATUS_OK) {
+        set_statusf_ex(
+            STATUS_ERROR, "Save failed: %s",
+            err[0] ? err : tp_status_str(preflight));
+        return false;
+    }
+
+    const tp_session_snapshot *before =
+        gui_project_snapshot();
+    const int64_t revision_before =
+        before ? tp_session_snapshot_revision(before)
+               : -1;
+    if (gui_draft_phase() != GUI_EDIT_IDLE &&
+        !gui_actions__submit_draft()) {
+        return false;
+    }
+    const tp_session_snapshot *after =
+        gui_project_snapshot();
+    const int64_t revision_after =
+        after ? tp_session_snapshot_revision(after)
+              : -1;
+    if (revision_before >= 0 &&
+        revision_after >= 0) {
+        gui_actions__rebase_deferred_edits(
+            revision_before, revision_after);
+    }
+    (void)gui_actions__intent_drain(GUI_INTENT_PHASE_EDIT);
     if (gui_project_save_as(full, err, sizeof err) == TP_STATUS_OK) {
         char notice[256];
         if (gui_project_take_save_notice(notice, sizeof notice)) {
@@ -58,15 +91,19 @@ static void do_save_as(void) {
         } else {
             set_statusf("Saved %s", gui_project_display_name());
         }
+        return true;
     } else {
         set_statusf_ex(STATUS_ERROR, "Save failed: %s", err);
+        return false;
     }
 }
 
-static void do_save(void) {
+bool gui_actions__save(void) {
     if (!gui_project_has_path()) {
-        do_save_as();
-        return;
+        return gui_actions__save_as();
+    }
+    if (!gui_actions__submit_draft()) {
+        return false;
     }
     char err[256];
     if (gui_project_save(err, sizeof err) == TP_STATUS_OK) {
@@ -76,46 +113,36 @@ static void do_save(void) {
         } else {
             set_statusf("Saved %s", gui_project_display_name());
         }
+        return true;
     } else {
         set_statusf_ex(STATUS_ERROR, "Save failed: %s", err);
-    }
-}
-
-void gui_request_remove_animation(int animation_index) {
-    gui_animation_ref animation;
-    if (gui_project_animation_ref_at(s_sel_atlas, animation_index, &animation)) {
-        gui_request_remove_animation_ref(&animation);
+        return false;
     }
 }
 
 void gui_request_remove_animation_ref(const gui_animation_ref *animation) {
     if (animation && !tp_id128_is_nil(animation->atlas_id) &&
         !tp_id128_is_nil(animation->animation_id)) {
-        s_actions.pending_remove_anim = true;
-        s_actions.pending_remove_anim_ref = *animation;
+        const gui_intent intent = {.kind = GUI_INTENT_REMOVE_ANIMATION,
+                                   .payload.animation = *animation};
+        (void)gui_actions__intent_push(&intent);
     }
 }
-
-void gui_request_remove_target(int target_index) {
-    gui_target_ref target;
-    if (gui_project_target_ref_at(s_sel_atlas, target_index, &target)) {
-        gui_request_remove_target_ref(&target);
-    }
-}
-
 
 void gui_request_remove_target_ref(const gui_target_ref *target) {
     if (target && !tp_id128_is_nil(target->atlas_id) &&
         !tp_id128_is_nil(target->target_id)) {
-        s_actions.pending_remove_target = true;
-        s_actions.pending_remove_target_ref = *target;
+        const gui_intent intent = {.kind = GUI_INTENT_REMOVE_TARGET,
+                                   .payload.target = *target};
+        (void)gui_actions__intent_push(&intent);
     }
 }
 
 static bool selected_atlas_intent(tp_id128 *atlas_id, int64_t *revision) {
     const tp_session_snapshot *snapshot = gui_project_snapshot();
+    const int atlas_index = gui_view_atlas_index(snapshot);
     const tp_snapshot_atlas *atlas = snapshot
-                                         ? tp_session_snapshot_atlas_at(snapshot, s_sel_atlas)
+                                         ? tp_session_snapshot_atlas_at(snapshot, atlas_index)
                                          : NULL;
     if (!atlas) {
         return false;
@@ -125,7 +152,7 @@ static bool selected_atlas_intent(tp_id128 *atlas_id, int64_t *revision) {
     return true;
 }
 
-static void do_add_files(void) {
+void gui_actions__add_files(void) {
     static const char *filt[] = {"*.png", "*.jpg", "*.jpeg", "*.bmp", "*.tga"};
     const char *res = tinyfd_openFileDialog("Add Image Files", "", 5, filt, "image files", 1);
     if (!res) {
@@ -189,17 +216,10 @@ static void do_add_files(void) {
     }
 }
 
-bool gui_actions__flush_failed(void); /* defined below; a discrete browse is a flush-first entry point */
-
 /* Save dialog for a target's output path, relativized to the project like sources. Atlas-explicit so
  * the Export dialog (which spans all atlases) can browse any target, not just the selected atlas's. */
 void gui_actions__browse_target(const gui_target_ref *queued) {
-    /* H/G3: commit any BUFFERED out-path gesture FIRST so the Save dialog seeds from the just-typed path,
-     * not a stale committed one (clicking the "..." button is in-panel, so no blur gesture-commit fired).
-     * Route through gui_actions__flush_failed() like every other flush-first entry: an operation
-     * rejection surfaces the error and aborts. Re-fetch a/t AFTER the flush
-     * (a committed flush clone-swaps the project). */
-    if (gui_actions__flush_failed()) {
+    if (!gui_actions__submit_draft()) {
         return;
     }
     const tp_session_snapshot *snapshot = gui_project_snapshot();
@@ -230,50 +250,45 @@ void gui_actions__browse_target(const gui_target_ref *queued) {
                       "Output path is invalid or exceeds the supported path limit.");
         return;
     }
-    /* Browse changes one field only. Commit the masked out-path operation as
-     * this dialog's discrete gesture; never round-trip exporter/enabled through
-     * frontend buffers where a long registered format id could be truncated. */
-    if (gui_project_set_target_out_path(&target, rel) &&
-        gui_project_flush_pending()) {
+    /* The dialog is one complete text gesture. It enters the same draft
+     * lifecycle as typing, then submits the exact masked operation. */
+    if (gui_text_edit_begin_target_out_path(
+            &target, t->out_path) &&
+        gui_text_edit_update(rel) &&
+        gui_actions__submit_draft()) {
         set_statusf("Output path: %s", rel);
     }
 }
 
-void gui_request_browse_target(int atlas_index, int target_index) {
-    gui_target_ref target;
-    if (gui_project_target_ref_at(atlas_index, target_index, &target)) {
-        s_actions.pending_browse_target = true;
-        s_actions.pending_browse_target_ref = target;
+void gui_request_browse_target_ref(const gui_target_ref *target) {
+    if (target && !tp_id128_is_nil(target->atlas_id) &&
+        !tp_id128_is_nil(target->target_id)) {
+        const gui_intent intent = {.kind = GUI_INTENT_BROWSE_TARGET,
+                                   .payload.target = *target};
+        (void)gui_actions__intent_push(&intent);
     }
 }
 
-void gui_request_add_target(int atlas_index) {
-    const tp_session_snapshot *snapshot = gui_project_snapshot();
-    const tp_snapshot_atlas *atlas = snapshot
-                                         ? tp_session_snapshot_atlas_at(snapshot,
-                                                                        atlas_index)
-                                         : NULL;
-    if (atlas) {
-        s_actions.pending_add_target = true;
-        s_actions.pending_add_target_atlas_id = atlas->id;
-        s_actions.pending_add_target_revision = tp_session_snapshot_revision(snapshot);
+void gui_request_add_target(tp_id128 atlas_id, int64_t expected_revision) {
+    if (!tp_id128_is_nil(atlas_id)) {
+        const gui_intent intent = {
+            .kind = GUI_INTENT_ADD_TARGET,
+            .payload.scope = {atlas_id, expected_revision}};
+        (void)gui_actions__intent_push(&intent);
     }
 }
 
-void gui_request_add_animation(int atlas_index) {
-    const tp_session_snapshot *snapshot = gui_project_snapshot();
-    const tp_snapshot_atlas *atlas = snapshot
-                                         ? tp_session_snapshot_atlas_at(snapshot,
-                                                                        atlas_index)
-                                         : NULL;
-    if (atlas) {
-        s_actions.pending_add_anim = true;
-        s_actions.pending_add_anim_atlas_id = atlas->id;
-        s_actions.pending_add_anim_revision = tp_session_snapshot_revision(snapshot);
+void gui_request_add_animation(tp_id128 atlas_id,
+                               int64_t expected_revision) {
+    if (!tp_id128_is_nil(atlas_id)) {
+        const gui_intent intent = {
+            .kind = GUI_INTENT_ADD_ANIMATION,
+            .payload.scope = {atlas_id, expected_revision}};
+        (void)gui_actions__intent_push(&intent);
     }
 }
 
-static void do_add_folder(void) {
+void gui_actions__add_folder(void) {
     const char *dir = tinyfd_selectFolderDialog("Add Folder", "");
     if (!dir) {
         return;
@@ -287,7 +302,9 @@ static void do_add_folder(void) {
     tp_id128 atlas_id;
     int64_t revision = 0;
     const gui_add_status r = selected_atlas_intent(&atlas_id, &revision)
-                                 ? gui_project_add_source(atlas_id, revision, norm)
+                                 ? gui_project_add_source_kind(
+                                       atlas_id, revision, norm,
+                                       TP_SOURCE_KIND_FOLDER)
                                  : GUI_ADD_FAILED;
     if (r == GUI_ADD_ADDED) {
         set_statusf("Added folder %s", path_last(norm));
@@ -300,127 +317,214 @@ static void do_add_folder(void) {
 // #endregion
 
 // #region new/exit confirm flow
-/* A rejected buffered gesture leaves the model older than the caller expects.
- * Surface the operation error and tell the caller to abort, so a destructive
- * gate never discards the project and Pack never runs on stale state.
- * Returns true when the flush FAILED (the caller must abort); false when it is safe to proceed. */
-bool gui_actions__flush_failed(void) {
-    if (gui_project_flush_pending()) {
-        return false; /* nothing pending / net-zero no-op / committed OK -> proceed */
-    }
-    char m[256];
-    gui_project_flush_error(m, sizeof m); /* fix3 [2]: shared neutral wording (save/pack/gate) */
-    set_status_ex(STATUS_ERROR, m);
-    return true;
-}
-
 void request_new(void) {
-    if (gui_actions__busy_block()) {
-        return;
-    }
-    if (gui_actions__flush_failed()) {
-        return; /* A rejected buffered edit must not be silently discarded. */
-    }
-    if (gui_project_is_dirty()) {
-        s_after_confirm = AFTER_NEW;
-        s_confirm_open = true;
-    } else if (gui_project_new()) {
-        gui_pack_clear(-1);
-        gui_shell_reset_shown_result();
-        cancel_edit();
-        clamp_selection();
-        reset_selection();
-        set_status("New project.");
-    } else {
-        set_status_ex(STATUS_ERROR, "Out of memory: could not create a new project (current project kept)."); /* F3 */
-    }
+    s_actions.pending_lifecycle_request =
+        GUI_LIFECYCLE_REQUEST_NEW;
 }
 void request_exit(void) {
-    if (gui_actions__busy_block()) {
-        return;
-    }
-    if (gui_actions__flush_failed()) {
-        return; /* A rejected buffered edit must not be silently discarded. */
-    }
-    if (gui_project_is_dirty()) {
-        s_after_confirm = AFTER_EXIT;
-        s_confirm_open = true;
-    } else {
-        nt_app_quit();
-    }
+    s_actions.pending_lifecycle_request =
+        GUI_LIFECYCLE_REQUEST_EXIT;
 }
 /* Open routes through the same unsaved-changes confirm as New/Exit (no silent discard). The actual
- * OS open dialog runs via s_pending_open, either now (clean) or after the modal resolves. */
+ * OS open dialog runs as a GUI_INTENT_OPEN, either now (clean) or after the modal resolves. */
 void request_open(void) {
-    if (gui_actions__busy_block()) {
-        return;
+    s_actions.pending_lifecycle_request =
+        GUI_LIFECYCLE_REQUEST_OPEN;
+}
+
+static bool begin_new(void) {
+    tp_error error = {{0}};
+    const tp_status status =
+        gui_project_lifecycle_begin_new(
+            &error);
+    if (status == TP_STATUS_OK) {
+        return true;
     }
-    if (gui_actions__flush_failed()) {
-        return; /* A rejected buffered edit must not be silently discarded. */
+    set_statusf_ex(
+        STATUS_ERROR,
+        "New project failed: %s",
+        error.msg[0]
+            ? error.msg
+            : tp_status_str(status));
+    return false;
+}
+
+static bool begin_exit(void) {
+    tp_error error = {{0}};
+    const tp_status status =
+        gui_project_lifecycle_begin_shutdown(
+            true, &error);
+    if (status == TP_STATUS_OK) {
+        return true;
+    }
+    set_statusf_ex(
+        STATUS_ERROR,
+        "Exit failed: %s",
+        error.msg[0]
+            ? error.msg
+            : tp_status_str(status));
+    return false;
+}
+
+bool gui_actions__apply_lifecycle_request(void) {
+    const gui_lifecycle_request request =
+        s_actions.pending_lifecycle_request;
+    s_actions.pending_lifecycle_request =
+        GUI_LIFECYCLE_REQUEST_NONE;
+    if (request ==
+        GUI_LIFECYCLE_REQUEST_NONE) {
+        return false;
+    }
+    if (gui_project_lifecycle_state_query() !=
+        GUI_PROJECT_LIFECYCLE_OPEN_IDLE) {
+        set_status_ex(
+            STATUS_WARNING,
+            "A project lifecycle transition is already in progress.");
+        return false;
+    }
+    if (gui_draft_phase() != GUI_EDIT_IDLE) {
+        s_after_confirm = request;
+        s_confirm_draft = true;
+        s_confirm_open = true;
+        return false;
     }
     if (gui_project_is_dirty()) {
-        s_after_confirm = AFTER_OPEN;
+        s_after_confirm = request;
+        s_confirm_draft = false;
         s_confirm_open = true;
-    } else {
-        s_pending_open = true;
+        return false;
     }
+    if (request ==
+        GUI_LIFECYCLE_REQUEST_NEW) {
+        return begin_new();
+    }
+    if (request ==
+        GUI_LIFECYCLE_REQUEST_EXIT) {
+        return begin_exit();
+    }
+    gui_actions__request_open_dialog();
+    return false;
 }
 static void confirm_perform(void) {
-    if (s_after_confirm == AFTER_NEW) {
-        if (gui_project_new()) {
-            gui_pack_clear(-1);
-            gui_shell_reset_shown_result();
-            cancel_edit();
-            clamp_selection();
-            reset_selection();
-            set_status("New project.");
-        } else {
-            set_status_ex(STATUS_ERROR, "Out of memory: could not create a new project (current project kept)."); /* F3 */
-        }
-    } else if (s_after_confirm == AFTER_EXIT) {
-        gui_project_discard_recovery_on_shutdown();
-        nt_app_quit();
-    } else if (s_after_confirm == AFTER_OPEN) {
-        s_pending_open = true; /* runs the open dialog next frame */
+    if (s_after_confirm == GUI_LIFECYCLE_REQUEST_NEW) {
+        (void)begin_new();
+    } else if (s_after_confirm == GUI_LIFECYCLE_REQUEST_EXIT) {
+        (void)begin_exit();
+    } else if (s_after_confirm == GUI_LIFECYCLE_REQUEST_OPEN) {
+        gui_actions__request_open_dialog(); /* runs the open dialog next frame */
     }
-    s_after_confirm = AFTER_NONE;
+    s_after_confirm = GUI_LIFECYCLE_REQUEST_NONE;
+}
+
+static void confirm_continue(void) {
+    s_actions.pending_lifecycle_request =
+        s_after_confirm;
+    s_after_confirm =
+        GUI_LIFECYCLE_REQUEST_NONE;
+    (void)gui_actions__apply_lifecycle_request();
 }
 // #endregion
 
 
 void gui_actions__apply_confirm(void) {
+    if (s_confirm_draft) {
+        if (s_modal_action == MODAL_SAVE) {
+            const bool applied =
+                gui_draft_phase() ==
+                        GUI_EDIT_CONFLICTED
+                    ? gui_actions__apply_draft_mine()
+                    : gui_actions__submit_draft();
+            if (applied &&
+                gui_draft_phase() ==
+                    GUI_EDIT_IDLE) {
+                s_confirm_open = false;
+                s_confirm_draft = false;
+                confirm_continue();
+            } else {
+                /* Keep the explicit choice open after validation, OOM, a
+                 * deleted target, or another conflict. The draft and outer
+                 * lifecycle request remain intact for retry, Discard, or
+                 * Cancel. */
+                s_confirm_open = true;
+                s_confirm_draft = true;
+            }
+        } else if (s_modal_action == MODAL_DISCARD) {
+            gui_draft_discard();
+            if (gui_draft_phase() ==
+                GUI_EDIT_IDLE) {
+                s_confirm_open = false;
+                s_confirm_draft = false;
+                confirm_continue();
+            }
+        } else if (s_modal_action == MODAL_CANCEL) {
+            s_confirm_open = false;
+            s_confirm_draft = false;
+            s_after_confirm =
+                GUI_LIFECYCLE_REQUEST_NONE;
+        }
+        s_modal_action = MODAL_NONE;
+        return;
+    }
     if (s_modal_action == MODAL_SAVE) {
-        do_save();
+        const bool saved = gui_actions__save();
         s_confirm_open = false;
-        if (!gui_project_is_dirty()) {
+        if (saved) {
             confirm_perform();
         } else {
-            s_after_confirm = AFTER_NONE;
+            s_after_confirm = GUI_LIFECYCLE_REQUEST_NONE;
         }
     } else if (s_modal_action == MODAL_DISCARD) {
         s_confirm_open = false;
         confirm_perform();
     } else if (s_modal_action == MODAL_CANCEL) {
         s_confirm_open = false;
-        s_after_confirm = AFTER_NONE;
+        s_after_confirm = GUI_LIFECYCLE_REQUEST_NONE;
     }
     s_modal_action = MODAL_NONE;
 }
 
-void gui_actions__apply_file_dialogs(void) {
-    if (s_pending_open) {
-        do_open();
+void gui_actions_pump_lifecycle(void) {
+    tp_error error = {{0}};
+    gui_project_lifecycle_kind completed =
+        GUI_PROJECT_LIFECYCLE_NONE;
+    const tp_status status =
+        gui_project_lifecycle_pump(
+            &completed, &error);
+    if (status != TP_STATUS_OK) {
+        set_statusf_ex(
+            STATUS_ERROR,
+            "Session lifecycle failed: %s",
+            error.msg[0]
+                ? error.msg
+                : tp_status_str(status));
+        return;
     }
-    if (s_pending_save) {
-        do_save();
+    if (completed ==
+        GUI_PROJECT_LIFECYCLE_NONE) {
+        return;
     }
-    if (s_pending_save_as) {
-        do_save_as();
+    gui_actions__discard_edits();
+    gui_actions__clear_pending();
+    gui_actions_refresh_fingerprint_reset();
+    if (completed ==
+        GUI_PROJECT_LIFECYCLE_SHUTDOWN) {
+        nt_app_quit();
+        return;
     }
-    if (s_pending_add_files) {
-        do_add_files();
-    }
-    if (s_pending_add_folder) {
-        do_add_folder();
+    gui_pack_clear(-1);
+    gui_shell_reset_shown_result();
+    cancel_edit();
+    gui_view_reconcile_observation(gui_project_snapshot());
+    reset_selection();
+    /* A replacement project is "newly current": adopt its first atlas so the
+     * panels open populated (reconciliation itself only clears). */
+    gui_view_adopt_default_atlas(gui_project_snapshot());
+    if (completed ==
+        GUI_PROJECT_LIFECYCLE_NEW) {
+        set_status("New project.");
+    } else {
+        set_statusf(
+            "Opened %s",
+            gui_project_display_name());
     }
 }

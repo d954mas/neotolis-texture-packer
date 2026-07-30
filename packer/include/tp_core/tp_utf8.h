@@ -12,7 +12,6 @@ extern "C" {
  * or zero when the prefix is malformed or truncated. */
 size_t tp_utf8_codepoint_width(const char *text, size_t available);
 
-bool tp_utf8_is_valid_bytes(const char *text, size_t length);
 bool tp_utf8_is_valid_c_string(const char *text);
 
 #ifdef __cplusplus

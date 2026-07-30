@@ -1,4 +1,4 @@
-#include "tp_core/tp_name_map.h"
+#include "tp_name_map.h"
 
 #include <stdbool.h>
 #include <stdlib.h>

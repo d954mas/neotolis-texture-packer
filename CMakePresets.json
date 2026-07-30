@@ -14,6 +14,8 @@
         "CMAKE_C_COMPILER": "clang",
         "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
         "NT_UI_DEBUG_TOOLS": "ON",
+        "NTPACKER_GUI_DEV_SEAMS": "ON",
+        "NTPACKER_GUI_HEADLESS_CI": "OFF",
         "NTPACKER_GUI_SELFTEST": "OFF",
         "NTPACKER_GUI_CTEST": "OFF",
         "NT_DEVAPI_ENABLED": "OFF",
@@ -34,7 +36,8 @@
       "binaryDir": "${sourceDir}/build/_cmake/native-release",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
-        "NT_UI_DEBUG_TOOLS": "OFF"
+        "NT_UI_DEBUG_TOOLS": "OFF",
+        "NTPACKER_GUI_DEV_SEAMS": "OFF"
       }
     },
     {

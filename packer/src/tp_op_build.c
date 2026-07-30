@@ -21,6 +21,27 @@
 #include "tp_core/tp_sprite_index.h"
 #include "tp_strutil.h" /* shared tp_strdup (one core definition) */
 
+/* Resolve a human `selector` to exactly one entity id of the wanted kind, for op
+ * building. Wraps tp_selector_resolve + a kind check. */
+static tp_status tp_op_resolve_target(const tp_project *p, const struct tp_sprite_index *sprites,
+                                      int sprite_atlas_index, tp_selector_kind want, const char *selector,
+                                      tp_selector_result *out, tp_selector_candidates *cand, tp_error *err) {
+    if (!p || !selector || !out) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "null project/selector/out");
+    }
+    tp_selector_result res;
+    tp_status st = tp_selector_resolve(p, selector, sprites, sprite_atlas_index, &res, cand, err);
+    if (st != TP_STATUS_OK) {
+        return st; /* NOT_FOUND / AMBIGUOUS_SELECTOR / INVALID_ARGUMENT already set */
+    }
+    if (res.kind != want) {
+        return tp_error_set(err, TP_STATUS_NOT_FOUND, "selector '%s' resolved to a %s, expected a %s", selector,
+                            tp_selector_kind_token(res.kind), tp_selector_kind_token(want));
+    }
+    *out = res;
+    return TP_STATUS_OK;
+}
+
 /* Resolve `selector` to one entity of `want` kind that OWNED BY atlas `atlas_index`. A
  * project-wide match in a DIFFERENT atlas is treated as not-found -- the atlas scopes the
  * search, so a builder never pairs atlas A with a sub-entity that actually lives in B
@@ -35,25 +56,6 @@ static tp_status resolve_in_atlas(const tp_project *p, int atlas_index, tp_selec
         return tp_error_set(err, TP_STATUS_NOT_FOUND, "selector '%s' resolves to a %s in a different atlas", selector,
                             tp_selector_kind_token(want));
     }
-    return TP_STATUS_OK;
-}
-
-tp_status tp_op_resolve_target(const tp_project *p, const struct tp_sprite_index *sprites, int sprite_atlas_index,
-                               tp_selector_kind want, const char *selector, tp_selector_result *out,
-                               tp_selector_candidates *cand, tp_error *err) {
-    if (!p || !selector || !out) {
-        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "null project/selector/out");
-    }
-    tp_selector_result res;
-    tp_status st = tp_selector_resolve(p, selector, sprites, sprite_atlas_index, &res, cand, err);
-    if (st != TP_STATUS_OK) {
-        return st; /* NOT_FOUND / AMBIGUOUS_SELECTOR / INVALID_ARGUMENT already set */
-    }
-    if (res.kind != want) {
-        return tp_error_set(err, TP_STATUS_NOT_FOUND, "selector '%s' resolved to a %s, expected a %s", selector,
-                            tp_selector_kind_token(res.kind), tp_selector_kind_token(want));
-    }
-    *out = res;
     return TP_STATUS_OK;
 }
 
@@ -83,22 +85,6 @@ tp_status tp_op_build_atlas_rename(const tp_project *p, const char *atlas_sel, c
     out->atlas_id = res.id;
     out->u.atlas_rename.name = tp_strdup(new_name);
     return out->u.atlas_rename.name ? TP_STATUS_OK : TP_STATUS_OOM;
-}
-
-tp_status tp_op_build_atlas_remove(const tp_project *p, const char *atlas_sel, tp_operation *out,
-                                   tp_selector_candidates *cand, tp_error *err) {
-    if (!out) {
-        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "null out");
-    }
-    tp_selector_result res;
-    tp_status st = tp_op_resolve_target(p, NULL, -1, TP_SEL_ATLAS, atlas_sel, &res, cand, err);
-    if (st != TP_STATUS_OK) {
-        return st;
-    }
-    memset(out, 0, sizeof *out);
-    out->kind = TP_OP_ATLAS_REMOVE;
-    out->atlas_id = res.id;
-    return TP_STATUS_OK;
 }
 
 tp_status tp_op_build_target_set(const tp_project *p, const char *atlas_sel, const char *target_sel,

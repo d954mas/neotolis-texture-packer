@@ -23,7 +23,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "tp_core/tp_diff.h"   /* R4: tp_model_enable_history / tp_model_undo / tp_model_redo */
+#include "tp_diff.h"   /* R4: tp_model_enable_history / tp_model_undo / tp_model_redo */
 #include "tp_core/tp_export.h" /* TP_EXPORTER_ID_JSON_NEOTOLIS */
 #include "tp_core/tp_journal.h"
 #include "tp_core/tp_operation.h"

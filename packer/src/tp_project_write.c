@@ -5,9 +5,13 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "core/nt_assert.h"
+
 #include "tp_core/tp_id.h"
 #include "tp_core/tp_identity.h"
 #include "tp_core/tp_pack.h"
+#include "tp_core/tp_sb.h"
+#include "tp_core/tp_utf8.h"
 #include "tp_project_identity_internal.h"
 #include "tp_project_parse_internal.h"
 #include "tp_project_path_internal.h"
@@ -16,18 +20,18 @@
 /* deterministic writer (ux.md principle 7)                                 */
 /* ======================================================================== */
 
-typedef struct tp_sb {
-    char *buf;
-    size_t len;
-    size_t cap;
-    size_t limit;
-    bool oom;
-    bool count_only;
-    bool too_large;
+/* Checkpoint mode rewrites each source path to its absolute lexical form; the
+ * project supplies the base directory. Carried beside the shared builder rather
+ * than inside it so tp_sb stays one general writer. */
+typedef struct tp_write_ctx {
     bool absolute_sources;
-    const tp_project *path_context;
-} tp_sb;
+    const tp_project *project;
+} tp_write_ctx;
 
+/* Serialization work probes. The counters and every increment are compiled out of
+ * a shipping build, so the writer carries no accounting a shipped consumer could
+ * read. */
+#ifdef TP_ENABLE_TEST_SEAMS
 static _Thread_local size_t s_test_save_buffer_calls;
 static _Thread_local size_t s_test_serializer_allocations;
 static _Thread_local size_t s_test_serializer_peak_capacity;
@@ -61,124 +65,38 @@ size_t tp_project__test_load_buffer_calls(void) {
 size_t tp_project__test_size_query_calls(void) {
     return s_test_size_query_calls;
 }
+#endif
 
-static void tp_sb_write(tp_sb *sb, const char *s, size_t n) {
-    if (sb->oom || sb->too_large) {
-        return;
-    }
-    if (n > SIZE_MAX - sb->len) {
-        sb->too_large = true;
-        return;
-    }
-    const size_t next = sb->len + n;
-    if (next > sb->limit) {
-        sb->too_large = true;
-        return;
-    }
-    if (sb->count_only) {
-        if (next == SIZE_MAX) {
-            sb->too_large = true;
-            return;
-        }
-        sb->len = next;
-        return;
-    }
-    if (next == SIZE_MAX) {
-        sb->too_large = true;
-        return;
-    }
-    if (next + 1U > sb->cap) {
-        const size_t max_cap =
-            sb->limit < SIZE_MAX ? sb->limit + 1U : SIZE_MAX;
-        size_t new_cap = (sb->cap == 0) ? 1024U : sb->cap;
-        if (new_cap > max_cap) {
-            new_cap = max_cap;
-        }
-        while (next + 1U > new_cap) {
-            if (new_cap > max_cap / 2U) {
-                new_cap = max_cap;
-                break;
-            }
-            new_cap *= 2U;
-        }
-        s_test_serializer_allocations++;
-        char *nb = (char *)realloc(sb->buf, new_cap);
-        if (!nb) {
-            sb->oom = true;
-            return;
-        }
-        sb->buf = nb;
-        sb->cap = new_cap;
-        if (new_cap > s_test_serializer_peak_capacity) {
-            s_test_serializer_peak_capacity = new_cap;
-        }
-    }
-    memcpy(sb->buf + sb->len, s, n);
-    sb->len = next;
-    sb->buf[sb->len] = '\0';
+/* The shared builder reads limit==0 as "unlimited"; the persisted-project cap is
+ * a HARD byte budget, so a zero budget must reject before the first byte. */
+static void tp_write_begin(tp_sb *sb, size_t limit) {
+    sb->limit = limit;
+    sb->limit_exceeded = (limit == 0U);
+#ifdef TP_ENABLE_TEST_SEAMS
+    sb->allocation_count = &s_test_serializer_allocations;
+#else
+    sb->allocation_count = NULL;
+#endif
 }
 
-static void tp_sb_str(tp_sb *sb, const char *s) { tp_sb_write(sb, s, strlen(s)); }
-
-static void tp_sb_char(tp_sb *sb, char c) { tp_sb_write(sb, &c, 1U); }
-
-static void tp_sb_indent(tp_sb *sb, int depth) {
-    for (int i = 0; i < depth; i++) {
-        tp_sb_str(sb, "  ");
+/* Capacity only grows within one emit, so the final capacity IS the peak. */
+static void tp_write_end(const tp_sb *sb) {
+#ifdef TP_ENABLE_TEST_SEAMS
+    if (sb->cap > s_test_serializer_peak_capacity) {
+        s_test_serializer_peak_capacity = sb->cap;
     }
+#else
+    (void)sb;
+#endif
 }
 
-static void tp_sb_int(tp_sb *sb, long v) {
-    char tmp[32];
-    (void)snprintf(tmp, sizeof tmp, "%ld", v);
-    tp_sb_str(sb, tmp);
-}
-
-static void tp_sb_uint(tp_sb *sb, unsigned long v) {
-    char tmp[32];
-    (void)snprintf(tmp, sizeof tmp, "%lu", v);
-    tp_sb_str(sb, tmp);
-}
-
-/* "%.9g" round-trips a float exactly (unlike "%g"); locale is "C" in tp_core. */
-static void tp_sb_num(tp_sb *sb, double v) {
-    char tmp[64];
-    (void)snprintf(tmp, sizeof tmp, "%.9g", v);
-    tp_sb_str(sb, tmp);
-}
-
-static void tp_sb_json_string(tp_sb *sb, const char *s) {
-    tp_sb_char(sb, '"');
-    for (const unsigned char *c = (const unsigned char *)s; *c; c++) {
-        switch (*c) {
-            case '"': tp_sb_str(sb, "\\\""); break;
-            case '\\': tp_sb_str(sb, "\\\\"); break;
-            case '\b': tp_sb_str(sb, "\\b"); break;
-            case '\f': tp_sb_str(sb, "\\f"); break;
-            case '\n': tp_sb_str(sb, "\\n"); break;
-            case '\r': tp_sb_str(sb, "\\r"); break;
-            case '\t': tp_sb_str(sb, "\\t"); break;
-            default:
-                if (*c < 0x20U) {
-                    char esc[8];
-                    (void)snprintf(esc, sizeof esc, "\\u%04x", (unsigned)*c);
-                    tp_sb_str(sb, esc);
-                } else {
-                    tp_sb_char(sb, (char)*c);
-                }
-                break;
-        }
-    }
-    tp_sb_char(sb, '"');
-}
-
-/* Opens the next "key": slot at `keydepth`, handling the leading comma. */
-static void tp_obj_key(tp_sb *sb, int keydepth, bool *first, const char *key) {
-    tp_sb_str(sb, *first ? "\n" : ",\n");
-    *first = false;
-    tp_sb_indent(sb, keydepth);
-    tp_sb_json_string(sb, key);
-    tp_sb_str(sb, ": ");
+/* Every string this writer emits is UTF-8-validated by
+ * tp_project_validate_canonical before the first byte is written, so an invalid
+ * byte here is an internal invariant violation, not user data to launder: assert
+ * instead of substituting U+FFFD into the round-tripped project file. */
+static void tp_emit_json_string(tp_sb *sb, const char *s) {
+    NT_ASSERT(tp_utf8_is_valid_c_string(s));
+    tp_sb_json_string(sb, s);
 }
 
 static void tp_emit_id(tp_sb *sb, tp_id_kind kind, tp_id128 id); /* defined below */
@@ -197,7 +115,7 @@ static void tp_emit_frames(tp_sb *sb, int depth, const tp_project_frame *frames,
         tp_sb_char(sb, '{');
         bool first = true;
         tp_obj_key(sb, depth + 2, &first, "key");
-        tp_sb_json_string(sb, fr->src_key);
+        tp_emit_json_string(sb, fr->src_key);
         tp_obj_key(sb, depth + 2, &first, "source");
         tp_emit_id(sb, TP_ID_KIND_SOURCE, fr->source_ref);
         tp_sb_str(sb, "\n");
@@ -233,7 +151,7 @@ static void tp_emit_sprite(tp_sb *sb, int depth, const tp_project_sprite *s) {
         tp_sb_int(sb, (long)s->ov_extrude);
     }
     tp_obj_key(sb, depth + 1, &first, "key"); /* source-local key (ext kept) */
-    tp_sb_json_string(sb, s->src_key);
+    tp_emit_json_string(sb, s->src_key);
     if (s->ov_margin != TP_PROJECT_OV_INHERIT) {
         tp_obj_key(sb, depth + 1, &first, "margin");
         tp_sb_int(sb, (long)s->ov_margin);
@@ -252,7 +170,7 @@ static void tp_emit_sprite(tp_sb *sb, int depth, const tp_project_sprite *s) {
     }
     if (s->rename) {
         tp_obj_key(sb, depth + 1, &first, "rename");
-        tp_sb_json_string(sb, s->rename);
+        tp_emit_json_string(sb, s->rename);
     }
     if (s->ov_shape != TP_PROJECT_OV_INHERIT) {
         tp_obj_key(sb, depth + 1, &first, "shape");
@@ -296,7 +214,7 @@ static void tp_emit_anim(tp_sb *sb, int depth, const tp_project_anim *an) {
     tp_obj_key(sb, depth + 1, &first, "id"); /* structural shape-ID (persistent) */
     tp_emit_id(sb, TP_ID_KIND_ANIM, an->id);
     tp_obj_key(sb, depth + 1, &first, "name"); /* logical/display name */
-    tp_sb_json_string(sb, an->name);
+    tp_emit_json_string(sb, an->name);
     if (an->playback != TP_PROJECT_ANIM_PLAYBACK_DEFAULT) {
         tp_obj_key(sb, depth + 1, &first, "playback");
         tp_sb_int(sb, (long)an->playback);
@@ -314,11 +232,11 @@ static void tp_emit_target(tp_sb *sb, int depth, const tp_project_target *t) {
         tp_sb_str(sb, "false");
     }
     tp_obj_key(sb, depth + 1, &first, "exporter_id");
-    tp_sb_json_string(sb, t->exporter_id);
+    tp_emit_json_string(sb, t->exporter_id);
     tp_obj_key(sb, depth + 1, &first, "id"); /* structural shape-ID (persistent) */
     tp_emit_id(sb, TP_ID_KIND_TARGET, t->id);
     tp_obj_key(sb, depth + 1, &first, "out_path");
-    tp_sb_json_string(sb, t->out_path);
+    tp_emit_json_string(sb, t->out_path);
     tp_sb_str(sb, "\n");
     tp_sb_indent(sb, depth);
     tp_sb_char(sb, '}');
@@ -337,40 +255,45 @@ static const char *tp_source_kind_token(tp_source_kind kind) {
 
 /* One tagged source object: keys ascending ASCII (id, [kind], path). `id` is always
  * written (same discipline as atlas/anim/target); `kind` is sparse (folder omitted). */
-static void tp_emit_source(tp_sb *sb, int depth, const tp_project_source *s) {
+static void tp_emit_source(tp_sb *sb, const tp_write_ctx *ctx, int depth,
+                           const tp_project_source *s) {
     tp_sb_char(sb, '{');
     bool first = true;
     tp_obj_key(sb, depth + 1, &first, "id"); /* structural shape-ID (persistent, always written) */
     tp_emit_id(sb, TP_ID_KIND_SOURCE, s->id);
     if (s->kind != TP_SOURCE_KIND_FOLDER) { /* sparse: folder is the default */
         tp_obj_key(sb, depth + 1, &first, "kind");
-        tp_sb_json_string(sb, tp_source_kind_token(s->kind));
+        tp_emit_json_string(sb, tp_source_kind_token(s->kind));
     }
     tp_obj_key(sb, depth + 1, &first, "path");
     const char *path = s->path;
     char absolute_path[TP_PATH_MAX];
-    if (sb->absolute_sources) {
+    if (ctx->absolute_sources) {
         tp_error path_error = {0};
         tp_status path_status = tp_project_source_path_absolute_lexical(
-            sb->path_context, path, absolute_path, sizeof absolute_path,
+            ctx->project, path, absolute_path, sizeof absolute_path,
             &path_error);
         if (path_status == TP_STATUS_PATH_NOT_ABSOLUTE) {
             path_status = tp_identity_path_absolute_lexical(
                 path, absolute_path, sizeof absolute_path, &path_error);
         }
-        if (path_status != TP_STATUS_OK) {
-            sb->too_large = true;
-        } else {
-            path = absolute_path;
+        /* The base directory is an OS-supplied path with no UTF-8 admission, so
+         * a malformed join is refused here rather than reaching the assert. */
+        if (path_status != TP_STATUS_OK ||
+            !tp_utf8_is_valid_c_string(absolute_path)) {
+            sb->limit_exceeded = true;
+            return;
         }
+        path = absolute_path;
     }
-    tp_sb_json_string(sb, path);
+    tp_emit_json_string(sb, path);
     tp_sb_str(sb, "\n");
     tp_sb_indent(sb, depth);
     tp_sb_char(sb, '}');
 }
 
-static void tp_emit_atlas(tp_sb *sb, int depth, const tp_project_atlas *a, const tp_pack_settings *d) {
+static void tp_emit_atlas(tp_sb *sb, const tp_write_ctx *ctx, int depth,
+                          const tp_project_atlas *a, const tp_pack_settings *d) {
     tp_sb_char(sb, '{');
     bool first = true;
     if (a->allow_transform != d->allow_transform) {
@@ -412,7 +335,7 @@ static void tp_emit_atlas(tp_sb *sb, int depth, const tp_project_atlas *a, const
         tp_sb_int(sb, (long)a->max_vertices);
     }
     tp_obj_key(sb, depth + 1, &first, "name");
-    tp_sb_json_string(sb, a->name);
+    tp_emit_json_string(sb, a->name);
     if (a->padding != d->padding) {
         tp_obj_key(sb, depth + 1, &first, "padding");
         tp_sb_int(sb, (long)a->padding);
@@ -435,7 +358,7 @@ static void tp_emit_atlas(tp_sb *sb, int depth, const tp_project_atlas *a, const
         for (int i = 0; i < a->source_count; i++) {
             tp_sb_str(sb, i == 0 ? "\n" : ",\n");
             tp_sb_indent(sb, depth + 2);
-            tp_emit_source(sb, depth + 2, &a->sources[i]);
+            tp_emit_source(sb, ctx, depth + 2, &a->sources[i]);
         }
         tp_sb_str(sb, "\n");
         tp_sb_indent(sb, depth + 1);
@@ -470,7 +393,8 @@ static void tp_emit_atlas(tp_sb *sb, int depth, const tp_project_atlas *a, const
     tp_sb_char(sb, '}');
 }
 
-static void tp_emit_root(tp_sb *sb, const tp_project *p, const tp_pack_settings *d) {
+static void tp_emit_root(tp_sb *sb, const tp_write_ctx *ctx,
+                         const tp_project *p, const tp_pack_settings *d) {
     tp_sb_char(sb, '{');
     tp_sb_str(sb, "\n");
     tp_sb_indent(sb, 1);
@@ -486,7 +410,7 @@ static void tp_emit_root(tp_sb *sb, const tp_project *p, const tp_pack_settings 
         for (int i = 0; i < p->atlas_count; i++) {
             tp_sb_str(sb, i == 0 ? "\n" : ",\n");
             tp_sb_indent(sb, 2);
-            tp_emit_atlas(sb, 2, &p->atlases[i], d);
+            tp_emit_atlas(sb, ctx, 2, &p->atlases[i], d);
         }
         tp_sb_str(sb, "\n");
         tp_sb_indent(sb, 1);
@@ -514,15 +438,17 @@ static tp_status project_save_buffer_mode(const tp_project *p, bool checkpoint,
     if (canonical != TP_STATUS_OK) {
         return canonical;
     }
+#ifdef TP_ENABLE_TEST_SEAMS
     s_test_save_buffer_calls++;
+#endif
     tp_pack_settings defaults;
     tp_pack_settings_defaults(&defaults);
+    const tp_write_ctx ctx = {checkpoint, p};
     tp_sb sb = {0};
-    sb.limit = limits->bytes;
-    sb.absolute_sources = checkpoint;
-    sb.path_context = p;
-    tp_emit_root(&sb, p, &defaults);
-    if (sb.oom || sb.too_large) {
+    tp_write_begin(&sb, limits->bytes);
+    tp_emit_root(&sb, &ctx, p, &defaults);
+    tp_write_end(&sb);
+    if (sb.oom || sb.limit_exceeded) {
         free(sb.buf);
         return tp_error_set(err, sb.oom ? TP_STATUS_OOM : TP_STATUS_OUT_OF_BOUNDS,
                             sb.oom ? "tp_project_save_buffer: out of memory building JSON"
@@ -551,6 +477,7 @@ tp_status tp_project_checkpoint_save_buffer(const tp_project *p, char **out,
                                     out_len, err);
 }
 
+#ifdef TP_ENABLE_TEST_SEAMS
 tp_status tp_project__test_save_buffer_with_json_limits(
     const tp_project *project, bool checkpoint,
     const tp_project_json_limits *limits, char **out, size_t *out_len,
@@ -558,11 +485,14 @@ tp_status tp_project__test_save_buffer_with_json_limits(
     return project_save_buffer_mode(project, checkpoint, limits, out, out_len,
                                     err);
 }
+#endif
 
 static tp_status project_serialized_size_bounded_mode(
     const tp_project *p, bool checkpoint, size_t limit, size_t *out_len,
     tp_error *err) {
+#ifdef TP_ENABLE_TEST_SEAMS
     s_test_size_query_calls++;
+#endif
     if (!p || !out_len) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
                             "tp_project_serialized_size_bounded: NULL argument");
@@ -574,13 +504,12 @@ static tp_status project_serialized_size_bounded_mode(
     }
     tp_pack_settings defaults;
     tp_pack_settings_defaults(&defaults);
+    const tp_write_ctx ctx = {checkpoint, p};
     tp_sb sb = {0};
-    sb.limit = limit;
+    tp_write_begin(&sb, limit);
     sb.count_only = true;
-    sb.absolute_sources = checkpoint;
-    sb.path_context = p;
-    tp_emit_root(&sb, p, &defaults);
-    if (sb.too_large) {
+    tp_emit_root(&sb, &ctx, p, &defaults);
+    if (sb.limit_exceeded) {
         return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
                             "serialized project exceeds the %zu-byte checkpoint limit",
                             limit);
@@ -600,5 +529,7 @@ tp_status tp_project_checkpoint_serialized_size_bounded(
 }
 
 void tp_project_write_note_load_buffer_call(void) {
+#ifdef TP_ENABLE_TEST_SEAMS
     s_test_load_buffer_calls++;
+#endif
 }

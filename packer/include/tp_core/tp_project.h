@@ -77,6 +77,15 @@ typedef struct tp_project_sprite {
 
 #define TP_PROJECT_ORIGIN_DEFAULT 0.5F
 #define TP_PROJECT_OV_INHERIT (-1)
+/* slice9 border widths are stored as uint16_t pixels; [0..65535] is the whole
+ * storage domain. One owner: operation admission, the project parser, and the
+ * machine-readable field schema all reference these names. */
+#define TP_PROJECT_SLICE9_MIN 0
+#define TP_PROJECT_SLICE9_MAX UINT16_MAX
+
+static inline bool tp_project_slice9_valid(int value) {
+    return value >= TP_PROJECT_SLICE9_MIN && value <= TP_PROJECT_SLICE9_MAX;
+}
 
 /* One animation frame reference: a sprite in the same atlas, in playback order.
  * It uses the same canonical source ID + source-local key identity as a sprite
@@ -105,9 +114,19 @@ typedef struct tp_project_anim {
 } tp_project_anim;
 
 #define TP_PROJECT_ANIM_FPS_DEFAULT 30.0F
-#define TP_PROJECT_ANIM_PLAYBACK_DEFAULT 0
-#define TP_PROJECT_ANIM_PLAYBACK_MIN 0
-#define TP_PROJECT_ANIM_PLAYBACK_MAX 6
+/* The stable playback vocabulary (pinned to Defold's set, ux.md 3.7b). The wire
+ * carries the ID; the machine-readable field schema (tp_operation.h) carries the
+ * matching tokens, and the Defold exporter maps the same ids to its own spelling. */
+#define TP_PROJECT_ANIM_PLAYBACK_ONCE_FORWARD 0
+#define TP_PROJECT_ANIM_PLAYBACK_LOOP_FORWARD 1
+#define TP_PROJECT_ANIM_PLAYBACK_ONCE_BACKWARD 2
+#define TP_PROJECT_ANIM_PLAYBACK_LOOP_BACKWARD 3
+#define TP_PROJECT_ANIM_PLAYBACK_ONCE_PINGPONG 4
+#define TP_PROJECT_ANIM_PLAYBACK_LOOP_PINGPONG 5
+#define TP_PROJECT_ANIM_PLAYBACK_NONE 6
+#define TP_PROJECT_ANIM_PLAYBACK_DEFAULT TP_PROJECT_ANIM_PLAYBACK_ONCE_FORWARD
+#define TP_PROJECT_ANIM_PLAYBACK_MIN TP_PROJECT_ANIM_PLAYBACK_ONCE_FORWARD
+#define TP_PROJECT_ANIM_PLAYBACK_MAX TP_PROJECT_ANIM_PLAYBACK_NONE
 
 static inline bool tp_project_anim_fps_valid(float value) {
     return value > 0.0F && value <= FLT_MAX;
@@ -234,11 +253,6 @@ const tp_project_source *tp_project_atlas_source_by_id(
     const tp_project_atlas *atlas, tp_id128 id);
 const tp_project_target *tp_project_atlas_target_by_id(
     const tp_project_atlas *atlas, tp_id128 id);
-
-/* True when the atlas already holds a source whose '/'-normalized path equals `path`'s
- * -- the exact predicate add_source_kind uses to dedupe. Lets a caller (the op-engine
- * validator) reject a would-be-deduped add BEFORE it strands a new source's id. */
-bool tp_project_atlas_has_source_path(const tp_project_atlas *a, const char *path);
 
 /* True iff SOME target in the project OTHER than `exclude` has this exact (non-empty)
  * out_path. Scans EVERY atlas's targets (an out_path collision is project-wide: two

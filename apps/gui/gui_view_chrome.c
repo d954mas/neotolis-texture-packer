@@ -22,7 +22,7 @@
 #include "gui_actions.h"
 #include "gui_canvas.h"
 #include "gui_pack.h"
-#include "gui_project.h"
+#include "gui_project_view.h"
 #include "gui_recovery_indicator.h"
 #include "gui_version.h" /* NTPACKER_VERSION/NTPACKER_ENGINE_NAME/NTPACKER_REPO_URL (About modal) */
 
@@ -202,10 +202,10 @@ static void file_items(nt_ui_menu_ctx_t *m) {
         request_open();
     }
     if (nt_ui_menu_item_ex(m, MK_SAVE, "Save", (nt_ui_menu_item_opts_t){.shortcut = "Ctrl+S"})) {
-        s_pending_save = true;
+        gui_request_save();
     }
     if (nt_ui_menu_item_ex(m, MK_SAVEAS, "Save As...", (nt_ui_menu_item_opts_t){.shortcut = "Ctrl+Shift+S"})) {
-        s_pending_save_as = true;
+        gui_request_save_as();
     }
     nt_ui_menu_separator(m);
     if (nt_ui_menu_item_ex(m, MK_EXPORT, "Export\xE2\x80\xA6", (nt_ui_menu_item_opts_t){.shortcut = "Ctrl+E"})) {
@@ -213,7 +213,7 @@ static void file_items(nt_ui_menu_ctx_t *m) {
     }
     nt_ui_menu_separator(m);
     if (nt_ui_menu_item_ex(m, MK_REFRESH, "Refresh", (nt_ui_menu_item_opts_t){.shortcut = "F5"})) {
-        s_pending_refresh = true;
+        gui_request_refresh();
     }
     nt_ui_menu_separator(m);
     if (nt_ui_menu_item(m, MK_EXIT, "Exit")) {
@@ -223,22 +223,22 @@ static void file_items(nt_ui_menu_ctx_t *m) {
 static void edit_items(nt_ui_menu_ctx_t *m) {
     nt_ui_menu_item_opts_t u = {.shortcut = "Ctrl+Z", .disabled = !gui_project_can_undo()};
     if (nt_ui_menu_item_ex(m, MK_UNDO, "Undo", u)) {
-        do_undo();
+        gui_request_undo();
     }
     nt_ui_menu_item_opts_t r = {.shortcut = "Ctrl+Y", .disabled = !gui_project_can_redo()};
     if (nt_ui_menu_item_ex(m, MK_REDO, "Redo", r)) {
-        do_redo();
+        gui_request_redo();
     }
 }
 /* Atlas menu mirrors the canvas Pack action and its busy state. */
 static void atlas_items(nt_ui_menu_ctx_t *m) {
     nt_ui_menu_item_opts_t p = {.shortcut = "Ctrl+P", .disabled = !s_pack_has_sources || gui_pack_async_busy()};
     if (nt_ui_menu_item_ex(m, MK_PACK, "Pack", p)) {
-        s_pending_pack = true;
+        gui_request_pack();
     }
     nt_ui_menu_separator(m);
     if (nt_ui_menu_item(m, MK_ADD_ATLAS, "Add atlas")) {
-        s_pending_add_atlas = true;
+        gui_request_add_atlas();
     }
 }
 /* Radio-style UI-scale item; the active one is marked with a check glyph (baked in the DejaVu font). */
@@ -378,9 +378,8 @@ void declare_context_menu(nt_ui_context_t *ctx) {
         nt_ui_menu_item_opts_t rm = {.disabled = (atlas_count <= 1)};
         if (nt_ui_menu_item_ex(&s_ctx_menu, MK_CTX_REMOVE, "Remove", rm)) {
             if (!tp_id128_is_nil(s_ctx_atlas_id)) {
-                s_pending_remove_atlas = true;
-                s_pending_remove_atlas_id = s_ctx_atlas_id;
-                s_pending_remove_atlas_revision = s_ctx_atlas_revision;
+                gui_request_remove_atlas(s_ctx_atlas_id,
+                                         s_ctx_atlas_revision);
             }
         }
     } else if (s_ctx_kind == CTX_SPRITE) {
@@ -422,11 +421,9 @@ void declare_context_menu(nt_ui_context_t *ctx) {
             if (nt_ui_menu_item(&s_ctx_menu, MK_CTX_REMOVE, "Remove")) {
                 if (!tp_id128_is_nil(s_ctx_sprite_atlas_id) &&
                     !tp_id128_is_nil(s_ctx_sprite_source_id)) {
-                    s_pending_remove_source = true;
-                    s_pending_remove_source_atlas_id =
-                        s_ctx_sprite_atlas_id;
-                    s_pending_remove_source_id = s_ctx_sprite_source_id;
-                    s_pending_remove_source_revision = s_ctx_sprite_revision;
+                    gui_request_remove_source(s_ctx_sprite_atlas_id,
+                                              s_ctx_sprite_source_id,
+                                              s_ctx_sprite_revision);
                 }
             }
         }
@@ -515,9 +512,9 @@ void declare_tooltips(nt_ui_context_t *ctx) {
     (void)nt_ui_tooltip(ctx, NT_UI_DATA_LAYER(LAYER_IMG), LAYER_TEXT, nt_ui_id("ntpacker/zoom_fit"), "Fit atlas to view", &s_tip_style);
 }
 
-/* Export dialog (mouse-complete): every atlas's targets, toggle/browse per target, then Export runs the
- * same do_export path. All edits enqueue via gui_edit_target (committed at frame top; dirty + undo,
- * no parallel state) -- never commit while holding p/a/t (UAF fix). */
+/* Export dialog: every atlas's targets, toggle/browse per target, then Export
+ * runs the same action path. Mutations are captured by typed actions and run
+ * between frames, never while snapshot records are borrowed. */
 void declare_export_modal(nt_ui_context_t *ctx) {
     if (!nt_ui_modal_visible(ctx, s_id_export_modal, &s_modal_style, &s_export_open)) {
         return;
@@ -577,14 +574,17 @@ void declare_export_modal(nt_ui_context_t *ctx) {
                     continue;
                 }
                 nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), a->name, &g_row);
-                for (int ti = 0; ti < a->target_count && ti < GUI_MAX_TARGETS; ti++) {
+                for (int ti = 0; ti < a->target_count; ti++) {
                     const tp_snapshot_target *t = tp_session_snapshot_target_at(snapshot, a->id, ti);
                     if (!t) {
                         continue;
                     }
-                    char idb[48];
-                    (void)snprintf(idb, sizeof idb, "export/a%d_t%d", ai, ti);
-                    const uint32_t rid = nt_ui_id(idb);
+                    const gui_target_ref target = {
+                        a->id, t->id,
+                        tp_session_snapshot_revision(snapshot)};
+                    const uint32_t rid =
+                        gui_stable_entity_ui_id(
+                            "export/target", t->id);
                     const char *exp_name = t->exporter_id;
                     for (int i = 0; i < ne; i++) {
                         const tp_exporter *e = tp_exporter_at(i);
@@ -596,17 +596,14 @@ void declare_export_modal(nt_ui_context_t *ctx) {
                     const bool has_path = (t->out_path && t->out_path[0] != '\0');
                     const nt_ui_events_t pev = nt_ui_events(ctx, nt_ui_child_id(rid, "path"), NULL);
                     if (pev.clicked) {
-                        gui_request_browse_target(ai, ti);
+                        gui_request_browse_target_ref(&target);
                     }
                     CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(BASE_ROW_H))},
                                      .padding = {Su(8), Su(6), 0, 0},
                                      .childGap = Su(8),
                                      .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
                         if (tp_checkbox(ctx, nt_ui_child_id(rid, "en"), t->enabled, true)) {
-                            gui_target_ref target;
-                            if (gui_project_target_ref_at(ai, ti, &target)) {
-                                gui_edit_target_enabled(&target, !t->enabled);
-                            }
+                            gui_edit_target_enabled(&target, !t->enabled);
                         }
                         CLAY({.layout = {.sizing = {CLAY_SIZING_FIXED(S(96)), CLAY_SIZING_GROW(0)}, .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
                             ui_label_fit(ctx, exp_name, &g_caption, S(96), 0U);
@@ -618,17 +615,9 @@ void declare_export_modal(nt_ui_context_t *ctx) {
                             ui_label_fit(ctx, has_path ? t->out_path : "(click to set output path)", has_path ? &g_row : &g_dim, S(300), 0U);
                         }
                         if (ui_btn(ctx, nt_ui_child_id(rid, "br"), "\xE2\x80\xA6", &g_btn_ghost, true, 28.0F, 22.0F, &g_caption)) {
-                            gui_request_browse_target(ai, ti);
+                            gui_request_browse_target_ref(&target);
                         }
                     }
-                }
-                /* Targets past GUI_MAX_TARGETS aren't listed (the per-target UI arrays are fixed), but they
-                 * DO export -- surface the hidden tail rather than dropping it silently (P2). */
-                if (a->target_count > GUI_MAX_TARGETS) {
-                    char more[80];
-                    (void)snprintf(more, sizeof more, "+%d more target(s) not shown (still exported).",
-                                   a->target_count - GUI_MAX_TARGETS);
-                    nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), more, &g_dim);
                 }
             }
         }
@@ -640,7 +629,7 @@ void declare_export_modal(nt_ui_context_t *ctx) {
         CLAY({.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT, .childGap = Su(12), .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
             if (ui_btn(ctx, nt_ui_id("export/run"), gui_pack_async_busy() ? "Exporting\xE2\x80\xA6" : "Export", &g_btn_primary,
                        enabled_targets > 0 && !gui_pack_async_busy(), 120.0F, 34.0F, &g_onaccent)) {
-                s_pending_export = true;
+                gui_request_export();
                 s_export_open = false;
             }
             if (ui_btn(ctx, nt_ui_id("export/cancel"), "Cancel", &g_btn, true, 100.0F, 34.0F, &g_body)) {
@@ -653,20 +642,46 @@ void declare_export_modal(nt_ui_context_t *ctx) {
 
 void declare_confirm_modal(nt_ui_context_t *ctx) {
     if (nt_ui_modal_visible(ctx, s_id_modal, &s_modal_style, &s_confirm_open)) {
-        CLAY({.layout = {.sizing = {CLAY_SIZING_FIXED(S(460)), CLAY_SIZING_FIT(0)},
+        const gui_edit_phase draft_phase =
+            gui_draft_phase();
+        const bool apply_enabled =
+            !s_confirm_draft ||
+            draft_phase == GUI_EDIT_EDITING ||
+            (draft_phase == GUI_EDIT_CONFLICTED &&
+             gui_draft_can_apply());
+        CLAY({.layout = {.sizing = {
+                             CLAY_SIZING_FIXED(
+                                 S(s_confirm_draft ? 520 : 460)),
+                             CLAY_SIZING_FIT(0)},
                          .padding = {Su(22), Su(22), Su(22), Su(22)},
                          .layoutDirection = CLAY_TOP_TO_BOTTOM,
                          .childGap = Su(16)},
               .backgroundColor = C_PANEL,
               .cornerRadius = CLAY_CORNER_RADIUS(S(8)),
               .border = {.color = C_BORDER, .width = {Su(1), Su(1), Su(1), Su(1), 0}}}) {
-            nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), "Unsaved changes", &g_body);
-            nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), "Save changes before continuing?", &g_caption);
+            nt_ui_label(
+                ctx, NT_UI_DATA_LAYER(LAYER_TEXT),
+                s_confirm_draft
+                    ? "Uncommitted edit"
+                    : "Unsaved changes",
+                &g_body);
+            nt_ui_label(
+                ctx, NT_UI_DATA_LAYER(LAYER_TEXT),
+                s_confirm_draft
+                    ? "Apply this edit before continuing?"
+                    : "Save changes before continuing?",
+                &g_caption);
             CLAY({.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT, .childGap = Su(12), .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
-                if (ui_btn(ctx, nt_ui_id("ntpacker/modal_save"), "Save", &g_btn_primary, true, 100.0F, 34.0F, &g_onaccent)) {
+                if (ui_btn(ctx, nt_ui_id("ntpacker/modal_save"),
+                           s_confirm_draft ? "Apply & Continue" : "Save",
+                           &g_btn_primary, apply_enabled,
+                           s_confirm_draft ? 150.0F : 100.0F, 34.0F, &g_onaccent)) {
                     s_modal_action = MODAL_SAVE;
                 }
-                if (ui_btn(ctx, nt_ui_id("ntpacker/modal_discard"), "Discard", &g_btn, true, 100.0F, 34.0F, &g_body)) {
+                if (ui_btn(ctx, nt_ui_id("ntpacker/modal_discard"),
+                           s_confirm_draft ? "Discard & Continue" : "Discard",
+                           &g_btn, true,
+                           s_confirm_draft ? 165.0F : 100.0F, 34.0F, &g_body)) {
                     s_modal_action = MODAL_DISCARD;
                 }
                 if (ui_btn(ctx, nt_ui_id("ntpacker/modal_cancel"), "Cancel", &g_btn, true, 100.0F, 34.0F, &g_body)) {

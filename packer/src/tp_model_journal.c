@@ -108,40 +108,6 @@ tp_status tp_model_attach_journal(tp_model *m, tp_journal *j, tp_error *err) {
     return TP_STATUS_OK;
 }
 
-tp_status tp_model__append_history_checkpoint(tp_model *m, const tp_project *candidate, int64_t revision,
-                                              size_t snapshot_bytes, tp_error *err) {
-    if (!m || !candidate) {
-        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "null model or history candidate");
-    }
-    if (!m->journal) {
-        return TP_STATUS_OK;
-    }
-    tp_status admission = tp_journal__check_checkpoint_append_bytes(
-        m->journal, snapshot_bytes, err);
-    if (admission != TP_STATUS_OK) {
-        return admission;
-    }
-
-    /* Compact HISTORY is the normal Undo/Redo record. This full checkpoint is
-     * the fallback only for an unsupported future diff shape or an oversized
-     * compact transition. It is APPENDED, never compacted: the existing clean
-     * checkpoint remains intact until this candidate is durable, and
-     * record_count advances past the startup scan's unsaved-work threshold. */
-    char *snap = NULL;
-    size_t snap_len = 0;
-    tp_status ss = project_checkpoint_snapshot(candidate, snapshot_bytes,
-                                               &snap, &snap_len, err);
-    if (ss != TP_STATUS_OK) {
-        return ss;
-    }
-    tp_status cs = tp_journal_init_checkpoint(m->journal, (const uint8_t *)snap, snap_len, revision, err);
-    free(snap);
-    if (cs == TP_STATUS_OK) {
-        tp_model__mark_recovery_durable(m, revision);
-    }
-    return cs;
-}
-
 static tp_status compact_journal(tp_model *m, bool preserve_evidence,
                                  tp_error *err) {
     if (!m) {

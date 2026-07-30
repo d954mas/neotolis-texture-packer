@@ -63,6 +63,42 @@ typedef struct invalid_corpus_result {
     char messages[4][256];
 } invalid_corpus_result;
 
+static gui_session_client *s_parity_client;
+
+static bool wait_for_terminal_job(
+    tp_session *session, tp_session_job_progress *out,
+    tp_error *err) {
+    const size_t max_polls = 1000000U;
+    for (size_t poll = 0U; poll < max_polls; ++poll) {
+        memset(out, 0, sizeof *out);
+        if (tp_session_job_poll(session, out, err) !=
+            TP_STATUS_OK) {
+            return false;
+        }
+        if (out->state != TP_SESSION_JOB_RUNNING) {
+            return true;
+        }
+    }
+    (void)snprintf(
+        err->msg, sizeof err->msg,
+        "job did not terminate after %zu polls", max_polls);
+    return false;
+}
+
+static const char *parity_label(
+    const tp_operation *operation) {
+    switch (operation->kind) {
+        case TP_OP_ATLAS_RENAME: return "atlas.rename";
+        case TP_OP_ATLAS_SETTINGS_SET: return "atlas.settings.set";
+        case TP_OP_SOURCE_ADD: return "source.add";
+        case TP_OP_SPRITE_OVERRIDE_SET: return "sprite.settings.set";
+        case TP_OP_ANIMATION_CREATE: return "animation.create";
+        case TP_OP_ANIMATION_RENAME: return "animation.rename";
+        case TP_OP_TARGET_CREATE: return "target.create";
+        default: return "project.edit";
+    }
+}
+
 static int deterministic_fill(void *ctx, uint8_t *dst, size_t count) {
     uint8_t *value = (uint8_t *)ctx;
     for (size_t i = 0; i < count; i++) {
@@ -103,6 +139,8 @@ static tp_status headless_apply(tp_session *session, tp_operation *operation,
     request.schema = TP_TXN_SCHEMA;
     (void)snprintf(request.id_hex, sizeof request.id_hex, "%s", transaction_id);
     request.expected_revision = expected_revision;
+    request.label = (char *)parity_label(operation);
+    request.author = "human";
     request.ops = operation;
     request.op_count = 1;
 
@@ -117,21 +155,50 @@ static tp_status headless_apply(tp_session *session, tp_operation *operation,
     return status;
 }
 
+static tp_status parity_apply(
+    corpus_adapter adapter, tp_session *session,
+    tp_operation *operation,
+    int64_t expected_revision,
+    const char *transaction_id,
+    tp_error *err) {
+    if (adapter == CORPUS_HEADLESS) {
+        return headless_apply(session, operation, expected_revision,
+                              transaction_id, err);
+    }
+    const gui_session_submit_request request = {
+        .operations = operation,
+        .operation_count = 1,
+        .expected_revision = expected_revision,
+        .semantic_label = parity_label(operation),
+        .retained_transaction_id = transaction_id,
+    };
+    gui_session_submit_result result = {0};
+    const tp_status status =
+        gui_session_client_submit(
+            s_parity_client, &request, &result, err);
+    if (status != TP_STATUS_OK &&
+        result.transaction.error_count > 0 &&
+        result.transaction.errors[0].message[0]) {
+        (void)tp_error_set(
+            err, status, "%s",
+            result.transaction.errors[0].message);
+    }
+    gui_session_submit_result_destroy(&result);
+    return status;
+}
+
 static tp_status apply_rename(corpus_adapter adapter, tp_session *session,
                               tp_id128 atlas_id, int64_t expected_revision,
                               const char *name, const char *transaction_id,
                               tp_error *err) {
-    if (adapter == CORPUS_GUI) {
-        return gui_session_rename_atlas(session, atlas_id, expected_revision,
-                                        name, transaction_id, err);
-    }
     tp_operation operation;
     memset(&operation, 0, sizeof operation);
     operation.kind = TP_OP_ATLAS_RENAME;
     operation.atlas_id = atlas_id;
     operation.u.atlas_rename.name = (char *)name;
-    return headless_apply(session, &operation, expected_revision,
-                          transaction_id, err);
+    return parity_apply(
+        adapter, session, &operation, expected_revision,
+        transaction_id, err);
 }
 
 static tp_status apply_padding(corpus_adapter adapter, tp_session *session,
@@ -142,30 +209,20 @@ static tp_status apply_padding(corpus_adapter adapter, tp_session *session,
     memset(&settings, 0, sizeof settings);
     settings.mask = TP_AF_PADDING;
     settings.padding = padding;
-    if (adapter == CORPUS_GUI) {
-        return gui_session_set_atlas_settings(session, atlas_id,
-                                              expected_revision, &settings,
-                                              transaction_id, err);
-    }
     tp_operation operation;
     memset(&operation, 0, sizeof operation);
     operation.kind = TP_OP_ATLAS_SETTINGS_SET;
     operation.atlas_id = atlas_id;
     operation.u.atlas_settings = settings;
-    return headless_apply(session, &operation, expected_revision,
-                          transaction_id, err);
+    return parity_apply(
+        adapter, session, &operation, expected_revision,
+        transaction_id, err);
 }
 
 static tp_status apply_source_add(corpus_adapter adapter, tp_session *session,
                                   tp_id128 atlas_id, tp_id128 source_id,
                                   int64_t expected_revision, const char *path,
                                   const char *transaction_id, tp_error *err) {
-    if (adapter == CORPUS_GUI) {
-        const char *paths[1] = {path};
-        return gui_session_add_sources(
-            session, atlas_id, &source_id, paths, 1,
-            TP_SNAPSHOT_SOURCE_FILE, expected_revision, transaction_id, err);
-    }
     tp_operation operation;
     memset(&operation, 0, sizeof operation);
     operation.kind = TP_OP_SOURCE_ADD;
@@ -173,8 +230,9 @@ static tp_status apply_source_add(corpus_adapter adapter, tp_session *session,
     operation.u.source_add.source_id = source_id;
     operation.u.source_add.kind = TP_SOURCE_KIND_FILE;
     operation.u.source_add.key = (char *)path;
-    return headless_apply(session, &operation, expected_revision,
-                          transaction_id, err);
+    return parity_apply(
+        adapter, session, &operation, expected_revision,
+        transaction_id, err);
 }
 
 static tp_status apply_sprite_origin(corpus_adapter adapter,
@@ -190,11 +248,6 @@ static tp_status apply_sprite_origin(corpus_adapter adapter,
     settings.mask = TP_SPF_ORIGIN;
     settings.origin_x = origin_x;
     settings.origin_y = origin_y;
-    if (adapter == CORPUS_GUI) {
-        return gui_session_set_sprite_override(
-            session, atlas_id, source_id, source_key, expected_revision,
-            &settings, transaction_id, err);
-    }
     tp_operation operation;
     memset(&operation, 0, sizeof operation);
     operation.kind = TP_OP_SPRITE_OVERRIDE_SET;
@@ -202,8 +255,9 @@ static tp_status apply_sprite_origin(corpus_adapter adapter,
     operation.u.sprite_set = settings;
     operation.u.sprite_set.source_id = source_id;
     operation.u.sprite_set.src_key = (char *)source_key;
-    return headless_apply(session, &operation, expected_revision,
-                          transaction_id, err);
+    return parity_apply(
+        adapter, session, &operation, expected_revision,
+        transaction_id, err);
 }
 
 static tp_status apply_animation_create(
@@ -211,11 +265,6 @@ static tp_status apply_animation_create(
     tp_id128 animation_id, tp_id128 source_id, int64_t expected_revision,
     const char *source_key, const char *transaction_id, tp_error *err) {
     tp_op_sprite_ref frame = {source_id, (char *)source_key};
-    if (adapter == CORPUS_GUI) {
-        return gui_session_create_animation(
-            session, atlas_id, animation_id, expected_revision, "walk", &frame,
-            1, transaction_id, err);
-    }
     tp_operation operation;
     memset(&operation, 0, sizeof operation);
     operation.kind = TP_OP_ANIMATION_CREATE;
@@ -226,8 +275,9 @@ static tp_status apply_animation_create(
     operation.u.anim_create.playback = TP_PROJECT_ANIM_PLAYBACK_DEFAULT;
     operation.u.anim_create.frames = &frame;
     operation.u.anim_create.frame_count = 1;
-    return headless_apply(session, &operation, expected_revision,
-                          transaction_id, err);
+    return parity_apply(
+        adapter, session, &operation, expected_revision,
+        transaction_id, err);
 }
 
 static tp_status apply_target_create(corpus_adapter adapter,
@@ -236,11 +286,6 @@ static tp_status apply_target_create(corpus_adapter adapter,
                                      int64_t expected_revision,
                                      const char *transaction_id,
                                      tp_error *err) {
-    if (adapter == CORPUS_GUI) {
-        return gui_session_create_target(
-            session, atlas_id, target_id, expected_revision, "json-neotolis",
-            "out/golden", true, transaction_id, err);
-    }
     tp_operation operation;
     memset(&operation, 0, sizeof operation);
     operation.kind = TP_OP_TARGET_CREATE;
@@ -249,8 +294,9 @@ static tp_status apply_target_create(corpus_adapter adapter,
     operation.u.target_create.exporter_id = "json-neotolis";
     operation.u.target_create.out_path = "out/golden";
     operation.u.target_create.enabled = true;
-    return headless_apply(session, &operation, expected_revision,
-                          transaction_id, err);
+    return parity_apply(
+        adapter, session, &operation, expected_revision,
+        transaction_id, err);
 }
 
 static corpus_result run_corpus(corpus_adapter adapter) {
@@ -260,6 +306,15 @@ static corpus_result run_corpus(corpus_adapter adapter) {
     tp_session *session = NULL;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
                           tp_session_create_default_project(&rng, &session, &err));
+    gui_session_client client;
+    gui_session_client_init(&client);
+    if (adapter == CORPUS_GUI) {
+        TEST_ASSERT_EQUAL_INT(
+            TP_STATUS_OK,
+            gui_session_client_attach(
+                &client, session, &err));
+        s_parity_client = &client;
+    }
 
     tp_session_snapshot *initial = NULL;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
@@ -350,6 +405,10 @@ static corpus_result run_corpus(corpus_adapter adapter) {
                           tp_session_events_after(session, 0, out.events,
                                                   sizeof out.events / sizeof out.events[0],
                                                   &out.event_count, &out.event_resync, &err));
+    if (adapter == CORPUS_GUI) {
+        gui_session_client_detach(&client);
+        s_parity_client = NULL;
+    }
     tp_session_destroy(session);
     return out;
 }
@@ -361,6 +420,15 @@ static invalid_corpus_result run_invalid_corpus(corpus_adapter adapter) {
     tp_session *session = NULL;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
                           tp_session_create_default_project(&rng, &session, &err));
+    gui_session_client client;
+    gui_session_client_init(&client);
+    if (adapter == CORPUS_GUI) {
+        TEST_ASSERT_EQUAL_INT(
+            TP_STATUS_OK,
+            gui_session_client_attach(
+                &client, session, &err));
+        s_parity_client = &client;
+    }
     tp_session_snapshot *initial = NULL;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
                           tp_session_snapshot_create(session, &initial, &err));
@@ -372,11 +440,21 @@ static invalid_corpus_result run_invalid_corpus(corpus_adapter adapter) {
     const tp_id128 animation_id = {{
         0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41,
         0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42}};
+    tp_operation create_animation = {0};
+    create_animation.kind = TP_OP_ANIMATION_CREATE;
+    create_animation.atlas_id = atlas_id;
+    create_animation.u.anim_create.anim_id =
+        animation_id;
+    create_animation.u.anim_create.name = "walk";
+    create_animation.u.anim_create.fps =
+        TP_PROJECT_ANIM_FPS_DEFAULT;
+    create_animation.u.anim_create.playback =
+        TP_PROJECT_ANIM_PLAYBACK_DEFAULT;
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
-        gui_session_create_animation(session, atlas_id, animation_id, 0,
-                                     "walk", NULL, 0,
-                                     "41414141414141414141414141414141", &err));
+        parity_apply(
+            adapter, session, &create_animation, 0,
+            "41414141414141414141414141414141", &err));
 
     invalid_corpus_result out;
     memset(&out, 0, sizeof out);
@@ -387,67 +465,44 @@ static invalid_corpus_result run_invalid_corpus(corpus_adapter adapter) {
     (void)snprintf(out.messages[0], sizeof out.messages[0], "%s", err.msg);
 
     err = (tp_error){{0}};
-    if (adapter == CORPUS_GUI) {
-        out.empty_animation_name = gui_session_rename_animation(
-            session, atlas_id, animation_id, 1, "",
-            "43434343434343434343434343434343", &err);
-    } else {
-        tp_operation operation;
-        memset(&operation, 0, sizeof operation);
-        operation.kind = TP_OP_ANIMATION_RENAME;
-        operation.atlas_id = atlas_id;
-        operation.u.anim_rename.anim_id = animation_id;
-        operation.u.anim_rename.name = "";
-        out.empty_animation_name = headless_apply(
-            session, &operation, 1,
-            "43434343434343434343434343434343", &err);
-    }
+    tp_operation rename_animation = {0};
+    rename_animation.kind = TP_OP_ANIMATION_RENAME;
+    rename_animation.atlas_id = atlas_id;
+    rename_animation.u.anim_rename.anim_id =
+        animation_id;
+    rename_animation.u.anim_rename.name = "";
+    out.empty_animation_name = parity_apply(
+        adapter, session, &rename_animation, 1,
+        "43434343434343434343434343434343", &err);
     (void)snprintf(out.messages[1], sizeof out.messages[1], "%s", err.msg);
 
     const tp_id128 source_id = {{
         0x51, 0x51, 0x51, 0x51, 0x51, 0x51, 0x51, 0x51,
         0x52, 0x52, 0x52, 0x52, 0x52, 0x52, 0x52, 0x52}};
-    const tp_id128 source_ids[1] = {source_id};
-    const char *empty_paths[1] = {""};
     err = (tp_error){{0}};
-    if (adapter == CORPUS_GUI) {
-        out.empty_source_path = gui_session_add_sources(
-            session, atlas_id, source_ids, empty_paths, 1,
-            TP_SNAPSHOT_SOURCE_FILE, 1,
-            "44444444444444444444444444444444", &err);
-    } else {
-        tp_operation operation;
-        memset(&operation, 0, sizeof operation);
-        operation.kind = TP_OP_SOURCE_ADD;
-        operation.atlas_id = atlas_id;
-        operation.u.source_add.source_id = source_id;
-        operation.u.source_add.kind = TP_SOURCE_KIND_FILE;
-        operation.u.source_add.key = "";
-        out.empty_source_path = headless_apply(
-            session, &operation, 1,
-            "44444444444444444444444444444444", &err);
-    }
+    tp_operation empty_source = {0};
+    empty_source.kind = TP_OP_SOURCE_ADD;
+    empty_source.atlas_id = atlas_id;
+    empty_source.u.source_add.source_id = source_id;
+    empty_source.u.source_add.kind = TP_SOURCE_KIND_FILE;
+    empty_source.u.source_add.key = "";
+    out.empty_source_path = parity_apply(
+        adapter, session, &empty_source, 1,
+        "44444444444444444444444444444444", &err);
     (void)snprintf(out.messages[2], sizeof out.messages[2], "%s", err.msg);
 
-    const char *valid_paths[1] = {"sprites/coin.png"};
     err = (tp_error){{0}};
-    if (adapter == CORPUS_GUI) {
-        out.invalid_source_kind = gui_session_add_sources(
-            session, atlas_id, source_ids, valid_paths, 1,
-            (tp_snapshot_source_kind)99, 1,
-            "45454545454545454545454545454545", &err);
-    } else {
-        tp_operation operation;
-        memset(&operation, 0, sizeof operation);
-        operation.kind = TP_OP_SOURCE_ADD;
-        operation.atlas_id = atlas_id;
-        operation.u.source_add.source_id = source_id;
-        operation.u.source_add.kind = (tp_source_kind)99;
-        operation.u.source_add.key = "sprites/coin.png";
-        out.invalid_source_kind = headless_apply(
-            session, &operation, 1,
-            "45454545454545454545454545454545", &err);
-    }
+    tp_operation invalid_source = {0};
+    invalid_source.kind = TP_OP_SOURCE_ADD;
+    invalid_source.atlas_id = atlas_id;
+    invalid_source.u.source_add.source_id = source_id;
+    invalid_source.u.source_add.kind =
+        (tp_source_kind)99;
+    invalid_source.u.source_add.key =
+        "sprites/coin.png";
+    out.invalid_source_kind = parity_apply(
+        adapter, session, &invalid_source, 1,
+        "45454545454545454545454545454545", &err);
     (void)snprintf(out.messages[3], sizeof out.messages[3], "%s", err.msg);
 
     tp_session_snapshot *after = NULL;
@@ -456,6 +511,10 @@ static invalid_corpus_result run_invalid_corpus(corpus_adapter adapter) {
     out.revision = tp_session_snapshot_revision(after);
     out.event_sequence = tp_session_snapshot_event_sequence(after);
     tp_session_snapshot_destroy(after);
+    if (adapter == CORPUS_GUI) {
+        gui_session_client_detach(&client);
+        s_parity_client = NULL;
+    }
     tp_session_destroy(session);
     return out;
 }
@@ -693,12 +752,9 @@ void test_live_headless_runs_real_pack_job_and_export_command(void) {
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
                           tp_session_invalidate_sources(session, &err));
 
-    tp_session_job_progress progress;
-    do {
-        memset(&progress, 0, sizeof progress);
-        TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
-                              tp_session_job_poll(session, &progress, &err));
-    } while (progress.state == TP_SESSION_JOB_RUNNING);
+    tp_session_job_progress progress = {0};
+    TEST_ASSERT_TRUE_MESSAGE(
+        wait_for_terminal_job(session, &progress, &err), err.msg);
     TEST_ASSERT_EQUAL_INT(TP_SESSION_JOB_PACK, progress.kind);
     TEST_ASSERT_EQUAL_INT(TP_SESSION_JOB_SUCCEEDED, progress.state);
     TEST_ASSERT_EQUAL_INT(1, progress.current);
@@ -742,16 +798,14 @@ void test_live_headless_runs_real_pack_job_and_export_command(void) {
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
                           tp_session_export_start(session, &export_request,
                                                   &err));
-    do {
-        memset(&progress, 0, sizeof progress);
-        TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
-                              tp_session_job_poll(session, &progress, &err));
-    } while (progress.state == TP_SESSION_JOB_RUNNING);
+    TEST_ASSERT_TRUE_MESSAGE(
+        wait_for_terminal_job(session, &progress, &err), err.msg);
     TEST_ASSERT_EQUAL_INT(TP_SESSION_JOB_EXPORT, progress.kind);
-    TEST_ASSERT_EQUAL_INT(TP_SESSION_JOB_SUCCEEDED, progress.state);
     memset(&result, 0, sizeof result);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
                           tp_session_job_take_result(session, &result, &err));
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_SESSION_JOB_SUCCEEDED, progress.state, result.error.msg);
     TEST_ASSERT_EQUAL_INT(TP_SESSION_JOB_EXPORT, result.kind);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, result.status);
     TEST_ASSERT_EQUAL_INT(1, result.export_result.targets);
@@ -761,6 +815,8 @@ void test_live_headless_runs_real_pack_job_and_export_command(void) {
     tp_session_destroy(session);
 }
 
+/* USA-08 partial: equal GUI/headless typed transactions produce equal
+ * snapshot/event/revision/result; history rows are not compared. */
 void test_gui_and_headless_share_golden_transaction_session_corpus(void) {
     const corpus_result gui = run_corpus(CORPUS_GUI);
     const corpus_result headless = run_corpus(CORPUS_HEADLESS);

@@ -25,6 +25,200 @@
 #define SEL_SORT_INIT_CAP 64
 #define ROWS_INIT_CAP 256
 
+typedef struct gui_row_identity {
+    tp_id128 source_id;
+    char source_key[TP_SRCKEY_MAX];
+    bool source_row;
+    bool valid;
+} gui_row_identity;
+
+typedef struct gui_selection_state {
+    tp_id128 atlas_id;
+    gui_row_identity primary;
+    gui_row_identity focus;
+    gui_row_identity anchor;
+    tp_id128 animation_id;
+    tp_id128 frame_animation_id;
+    uint64_t frame_model_generation;
+    int frame_index;
+} gui_selection_state;
+
+static gui_selection_state s_selection = {.frame_index = -1};
+
+gui_selected_sprite *s_multi_sel;
+int s_multi_sel_count;
+int s_multi_sel_cap;
+bool s_focus_follow;
+bool s_filter_active;
+
+static void row_identity_clear(gui_row_identity *identity) {
+    if (identity) {
+        memset(identity, 0, sizeof *identity);
+    }
+}
+
+static void row_identity_set(gui_row_identity *identity,
+                             tp_id128 source_id, const char *source_key,
+                             bool source_row) {
+    if (!identity || tp_id128_is_nil(source_id)) {
+        row_identity_clear(identity);
+        return;
+    }
+    memset(identity, 0, sizeof *identity);
+    identity->source_id = source_id;
+    identity->source_row = source_row;
+    identity->valid = true;
+    (void)snprintf(identity->source_key, sizeof identity->source_key, "%s",
+                   source_key ? source_key : "");
+}
+
+static bool row_identity_matches(const gui_row_identity *identity,
+                                 tp_id128 source_id,
+                                 const char *source_key,
+                                 bool source_row) {
+    return identity && identity->valid &&
+           identity->source_row == source_row &&
+           tp_id128_eq(identity->source_id, source_id) &&
+           strcmp(identity->source_key,
+                  source_key ? source_key : "") == 0;
+}
+
+static void clear_atlas_selection(void) {
+    row_identity_clear(&s_selection.primary);
+    row_identity_clear(&s_selection.focus);
+    row_identity_clear(&s_selection.anchor);
+    s_selection.animation_id = tp_id128_nil();
+    s_selection.frame_animation_id = tp_id128_nil();
+    s_selection.frame_model_generation = 0U;
+    s_selection.frame_index = -1;
+}
+
+void gui_view_reset(void) {
+    memset(&s_selection, 0, sizeof s_selection);
+    s_selection.frame_index = -1;
+}
+
+tp_id128 gui_view_atlas_id(void) {
+    return s_selection.atlas_id;
+}
+
+void gui_view_select_atlas(tp_id128 atlas_id) {
+    if (!tp_id128_eq(s_selection.atlas_id, atlas_id)) {
+        s_selection.atlas_id = atlas_id;
+        clear_atlas_selection();
+    }
+}
+
+int gui_view_atlas_index(const tp_session_snapshot *snapshot) {
+    const int count =
+        snapshot ? tp_session_snapshot_atlas_count(snapshot) : 0;
+    for (int index = 0; index < count; ++index) {
+        const tp_snapshot_atlas *atlas =
+            tp_session_snapshot_atlas_at(snapshot, index);
+        if (atlas &&
+            tp_id128_eq(atlas->id, s_selection.atlas_id)) {
+            return index;
+        }
+    }
+    return -1;
+}
+
+tp_id128 gui_view_animation_id(void) {
+    return s_selection.animation_id;
+}
+
+void gui_view_select_animation(tp_id128 animation_id) {
+    if (!tp_id128_eq(s_selection.animation_id, animation_id)) {
+        s_selection.animation_id = animation_id;
+        s_selection.frame_animation_id = tp_id128_nil();
+        s_selection.frame_model_generation = 0U;
+        s_selection.frame_index = -1;
+    }
+}
+
+int gui_view_animation_index(const tp_session_snapshot *snapshot) {
+    const int atlas_index = gui_view_atlas_index(snapshot);
+    const tp_snapshot_atlas *atlas =
+        atlas_index >= 0
+            ? tp_session_snapshot_atlas_at(snapshot, atlas_index)
+            : NULL;
+    for (int index = 0;
+         atlas && index < atlas->animation_count; ++index) {
+        const tp_snapshot_animation *animation =
+            tp_session_snapshot_animation_at(snapshot, atlas->id, index);
+        if (animation &&
+            tp_id128_eq(animation->id, s_selection.animation_id)) {
+            return index;
+        }
+    }
+    return -1;
+}
+
+void gui_view_select_animation_frame(
+    const tp_session_snapshot *snapshot, int frame_index) {
+    if (!snapshot || frame_index < 0 ||
+        tp_id128_is_nil(s_selection.animation_id)) {
+        s_selection.frame_animation_id = tp_id128_nil();
+        s_selection.frame_model_generation = 0U;
+        s_selection.frame_index = -1;
+        return;
+    }
+    s_selection.frame_animation_id = s_selection.animation_id;
+    s_selection.frame_model_generation =
+        tp_session_snapshot_model_generation(snapshot);
+    s_selection.frame_index = frame_index;
+}
+
+int gui_view_animation_frame(const tp_session_snapshot *snapshot) {
+    if (!snapshot || s_selection.frame_index < 0 ||
+        !tp_id128_eq(s_selection.frame_animation_id,
+                     s_selection.animation_id) ||
+        s_selection.frame_model_generation !=
+            tp_session_snapshot_model_generation(snapshot)) {
+        return -1;
+    }
+    return s_selection.frame_index;
+}
+
+uint64_t gui_view_animation_frame_generation(void) {
+    return s_selection.frame_model_generation;
+}
+
+void gui_view_reconcile_observation(
+    const tp_session_snapshot *snapshot) {
+    /* USA-24: a structural change either PRESERVES the stable selection or
+     * EXPLICITLY CLEARS it. Retargeting a vanished atlas to whatever now sits at
+     * index 0 does neither -- it silently points the panels, canvas and every
+     * "the selected atlas" action at a different atlas. Adopting a first atlas is
+     * a separate, explicit decision (gui_view_adopt_default_atlas), taken only
+     * where a project becomes current. */
+    if (!tp_id128_is_nil(s_selection.atlas_id) &&
+        gui_view_atlas_index(snapshot) < 0) {
+        gui_view_select_atlas(tp_id128_nil());
+    }
+    if (!tp_id128_is_nil(s_selection.animation_id) &&
+        gui_view_animation_index(snapshot) < 0) {
+        gui_view_select_animation(tp_id128_nil());
+    }
+    if (gui_view_animation_frame(snapshot) < 0) {
+        gui_view_select_animation_frame(snapshot, -1);
+    }
+}
+
+void gui_view_adopt_default_atlas(
+    const tp_session_snapshot *snapshot) {
+    if (!tp_id128_is_nil(s_selection.atlas_id)) {
+        return;
+    }
+    const tp_snapshot_atlas *first =
+        snapshot && tp_session_snapshot_atlas_count(snapshot) > 0
+            ? tp_session_snapshot_atlas_at(snapshot, 0)
+            : NULL;
+    if (first) {
+        gui_view_select_atlas(first->id);
+    }
+}
+
 // #region shared path/name string helpers
 void normalize_slashes(char *s) {
     for (; *s; s++) {
@@ -266,13 +460,9 @@ void gui_rows_context_refocus(int view_index) {
         return;
     }
     const sprite_row *row = &s_rows[row_index];
-    s_sel_src = row->src;
-    s_sel_child = row->child;
-    s_sel_missing = row->missing;
-    (void)snprintf(s_sel_abs, sizeof s_sel_abs, "%s",
-                   row->abs ? row->abs : "");
-    s_sel_anchor_row = view_index;
-    s_focus_view = view_index;
+    gui_rows_select_primary(row);
+    gui_rows_set_anchor_view_index(view_index);
+    gui_rows_set_focus_view_index(view_index);
     s_focus_follow = true;
 }
 
@@ -394,23 +584,26 @@ static uint64_t s_row_cache_source_generation;
 static uint64_t s_row_cache_snapshot_lifetime;
 static uint64_t s_row_cache_pack_version; /* packed-area (§61.1 size) source: a repack must re-stamp row sizes */
 static uint64_t s_row_cache_generation;
-static bool s_anchor_ref_pending;
-static bool s_anchor_ref_is_source;
-static tp_id128 s_anchor_ref_source_id;
-static char s_anchor_ref_source_key[TP_SRCKEY_MAX];
+static uint64_t s_selection_reconciled_row_generation;
 static bool s_selected_cache_valid;
 static uint64_t s_selected_cache_row_generation;
-static int s_selected_cache_src;
-static int s_selected_cache_child;
+static gui_row_identity s_selected_cache_identity;
 static int s_selected_cache_row;
 static const tp_snapshot_sprite *s_selected_cache_override;
 
+/* FNV-1a/64 over (source id, source key). The 0xFF separator makes the field
+ * boundary unforgeable -- it is not a legal UTF-8 byte, so no source key can
+ * contain one and no two distinct (id, key) pairs can fold to the same byte
+ * stream. Process-local bucket index only: every hit is confirmed by a full
+ * id + key comparison, so the value is never an identity. */
 static uint64_t override_hash(tp_id128 source_id, const char *source_key) {
-    uint64_t hash = UINT64_C(1469598103934665603);
+    uint64_t hash = UINT64_C(14695981039346656037);
     for (size_t i = 0; i < sizeof source_id.bytes; ++i) {
         hash ^= (uint64_t)source_id.bytes[i];
         hash *= UINT64_C(1099511628211);
     }
+    hash ^= UINT64_C(0xFF);
+    hash *= UINT64_C(1099511628211);
     for (const unsigned char *p = (const unsigned char *)source_key; *p; ++p) {
         hash ^= (uint64_t)*p;
         hash *= UINT64_C(1099511628211);
@@ -571,11 +764,14 @@ static long long row_packed_area(tp_id128 source_id, const char *source_key) {
     if (tp_id128_is_nil(source_id) || !source_key || source_key[0] == '\0') {
         return 0;
     }
-    const tp_result *result = gui_pack_result(s_sel_atlas);
+    const int atlas_index =
+        gui_view_atlas_index(gui_project_snapshot());
+    const tp_result *result = gui_pack_result(atlas_index);
     if (!result) {
         return 0;
     }
-    const int idx = gui_pack_find_sprite_ref(s_sel_atlas, source_id, source_key);
+    const int idx = gui_pack_find_sprite_ref(
+        atlas_index, source_id, source_key);
     if (idx < 0 || idx >= result->sprite_count) {
         return 0;
     }
@@ -598,38 +794,26 @@ void build_rows(void) {
     s_bench_counters.cache_key_checks++;
 #endif
     const tp_session_snapshot *snapshot = gui_project_snapshot();
+    const int atlas_index = gui_view_atlas_index(snapshot);
     const tp_snapshot_atlas *a = snapshot
-                                     ? tp_session_snapshot_atlas_at(snapshot, s_sel_atlas)
+                                     ? tp_session_snapshot_atlas_at(snapshot, atlas_index)
                                      : NULL;
     const uint64_t snapshot_generation =
         tp_session_snapshot_model_generation(snapshot);
     const uint64_t source_generation =
-        tp_session_snapshot_source_generation(snapshot);
+        gui_project_source_runtime_generation();
     const uint64_t snapshot_lifetime =
         gui_project_snapshot_lifetime_generation();
     /* §61.1 size reads live pack regions: a repack publishes a new result (new version) without touching
      * the model/source generations, so fold the pack version into the key or sort-by-size would stay stale. */
-    const uint64_t pack_version = gui_pack_result_version(s_sel_atlas);
+    const uint64_t pack_version =
+        gui_pack_result_version(atlas_index);
     if (a && s_row_cache_valid && tp_id128_eq(s_row_cache_atlas_id, a->id) &&
         s_row_cache_snapshot_generation == snapshot_generation &&
         s_row_cache_source_generation == source_generation &&
         s_row_cache_snapshot_lifetime == snapshot_lifetime &&
         s_row_cache_pack_version == pack_version) {
         return;
-    }
-    s_anchor_ref_pending = false;
-    if (s_sel_anchor_row >= 0 && s_sel_anchor_row < s_view_count) {
-        const int row_index = s_view[s_sel_anchor_row];
-        if (row_index >= 0 && row_index < s_row_count) {
-            const sprite_row *anchor = &s_rows[row_index];
-            s_anchor_ref_is_source = anchor->is_source;
-            s_anchor_ref_source_id = anchor->source_id;
-            (void)snprintf(s_anchor_ref_source_key,
-                           sizeof s_anchor_ref_source_key, "%s",
-                           anchor->source_key ? anchor->source_key : "");
-            s_anchor_ref_pending =
-                !tp_id128_is_nil(s_anchor_ref_source_id);
-        }
     }
     s_row_cache_valid = false;
     s_selected_cache_valid = false;
@@ -641,7 +825,7 @@ void build_rows(void) {
 #if defined(NTPACKER_GUI_BENCH)
     s_bench_counters.rebuilds++;
 #endif
-    if (!override_index_build(snapshot, s_sel_atlas, a)) {
+    if (!override_index_build(snapshot, atlas_index, a)) {
         set_status_ex(STATUS_ERROR, "Out of memory: sprite override index unavailable.");
         return;
     }
@@ -654,7 +838,7 @@ void build_rows(void) {
         char abs[TP_IDENTITY_PATH_MAX];
         tp_error error = {0};
         const tp_status path_status = tp_session_snapshot_source_resolved_at(
-            snapshot, s_sel_atlas, si, &source, abs, sizeof abs, &error);
+            snapshot, atlas_index, si, &source, abs, sizeof abs, &error);
         if (!source) {
             continue;
         }
@@ -820,7 +1004,6 @@ static uint64_t s_view_epoch = 1;
 static bool s_view_cache_valid;
 static uint64_t s_view_cache_row_generation;
 static uint64_t s_view_cache_epoch;
-static bool s_focus_reveal_pending;
 
 /* Reused per-frame scratch (grow-only, freed in shutdown): one span per source row + a child buffer. */
 typedef struct view_span {
@@ -832,6 +1015,125 @@ static view_span *s_spans;
 static int s_spans_cap;
 static int *s_child_scratch;
 static int s_child_scratch_cap;
+
+static bool identity_matches_row(
+    const gui_row_identity *identity,
+    const sprite_row *row) {
+    return row &&
+           row_identity_matches(
+               identity, row->source_id,
+               row->source_key ? row->source_key : "",
+               row->is_source);
+}
+
+static int row_index_for_identity(
+    const gui_row_identity *identity) {
+    if (!identity || !identity->valid) {
+        return -1;
+    }
+    for (int index = 0; index < s_row_count; ++index) {
+        if (identity_matches_row(identity, &s_rows[index])) {
+            return index;
+        }
+    }
+    return -1;
+}
+
+static int view_index_for_identity(
+    const gui_row_identity *identity) {
+    if (!identity || !identity->valid) {
+        return -1;
+    }
+    for (int index = 0; index < s_view_count; ++index) {
+        const int row_index = s_view[index];
+        if (row_index >= 0 && row_index < s_row_count &&
+            identity_matches_row(
+                identity, &s_rows[row_index])) {
+            return index;
+        }
+    }
+    return -1;
+}
+
+const sprite_row *gui_rows_primary(void) {
+    const int index =
+        row_index_for_identity(&s_selection.primary);
+    return index >= 0 ? &s_rows[index] : NULL;
+}
+
+bool gui_rows_primary_is_set(void) {
+    return s_selection.primary.valid;
+}
+
+bool gui_rows_focus_is_set(void) {
+    return s_selection.focus.valid;
+}
+
+bool gui_rows_anchor_is_set(void) {
+    return s_selection.anchor.valid;
+}
+
+bool gui_rows_primary_matches(tp_id128 source_id, const char *source_key,
+                              bool source_row) {
+    return row_identity_matches(&s_selection.primary, source_id, source_key,
+                                source_row);
+}
+
+bool gui_rows_focus_matches(tp_id128 source_id, const char *source_key,
+                            bool source_row) {
+    return row_identity_matches(&s_selection.focus, source_id, source_key,
+                                source_row);
+}
+
+int gui_rows_focus_view_index(void) {
+    return view_index_for_identity(&s_selection.focus);
+}
+
+int gui_rows_anchor_view_index(void) {
+    return view_index_for_identity(&s_selection.anchor);
+}
+
+void gui_rows_select_primary(const sprite_row *row) {
+    if (!row) {
+        row_identity_clear(&s_selection.primary);
+        return;
+    }
+    row_identity_set(
+        &s_selection.primary, row->source_id,
+        row->source_key ? row->source_key : "",
+        row->is_source);
+}
+
+void gui_rows_select_primary_ref(tp_id128 source_id, const char *source_key,
+                                 bool source_row) {
+    row_identity_set(&s_selection.primary, source_id, source_key, source_row);
+}
+
+static void set_view_identity(
+    gui_row_identity *identity, int view_index) {
+    if (view_index < 0 || view_index >= s_view_count) {
+        row_identity_clear(identity);
+        return;
+    }
+    const int row_index = s_view[view_index];
+    if (row_index < 0 || row_index >= s_row_count) {
+        row_identity_clear(identity);
+        return;
+    }
+    const sprite_row *row = &s_rows[row_index];
+    row_identity_set(
+        identity, row->source_id,
+        row->source_key ? row->source_key : "",
+        row->is_source);
+}
+
+void gui_rows_set_focus_view_index(int view_index) {
+    set_view_identity(&s_selection.focus, view_index);
+}
+
+void gui_rows_set_anchor_view_index(int view_index) {
+    set_view_identity(&s_selection.anchor, view_index);
+}
 
 #if defined(TP_GUI_VIEW_TEST_DIR)
 static bool s_test_fail_next_view_alloc;
@@ -1061,10 +1363,6 @@ static void view_fallback_identity(void) {
      * leave it invalid here or the next frame early-returns this identity view and never retries the
      * real filtered/sorted build once memory frees. */
     s_view_cache_valid = false;
-    s_focus_view = -1;
-    s_sel_anchor_row = -1;
-    s_focus_reveal_pending = false;
-    s_anchor_ref_pending = false;
     s_view_count = 0;
     for (int i = 0; i < s_row_count; ++i) {
         if (!view_push(i)) {
@@ -1317,40 +1615,14 @@ static void collapsed_prune_missing(void) {
     }
 }
 
-/* Forward decl: defined in the selection-preservation region below. build_view calls it at the END of a
- * MODEL REBUILD to re-anchor the keyboard focus onto the row still carrying the primary selection -- the
- * view-only re-pin only covers reorders where the row model itself is unchanged. */
-static void focus_sync_to_selection(void);
-
-static bool row_carries_primary(const sprite_row *row) {
-    return row &&
-           (row->is_source
-                ? (s_sel_src == row->src && s_sel_child == -1)
-                : (s_sel_src == row->src && s_sel_child == row->child));
-}
-
 void build_view(void) {
     if (s_view_cache_valid &&
         s_view_cache_row_generation == s_row_cache_generation &&
         s_view_cache_epoch == s_view_epoch) {
         return;
     }
-    /* A view-only change (filter/sort/collapse) reorders s_view but not s_rows, so the keyboard
-     * focus + shift-anchor (both s_view positions) can be re-pinned to the SAME row afterwards.
-     * Capture their target rows first; only meaningful when the row model itself is unchanged. */
     const bool rows_unchanged = s_view_cache_valid &&
                                 s_view_cache_row_generation == s_row_cache_generation;
-    const int keep_focus_row =
-        (rows_unchanged && s_focus_view >= 0 && s_focus_view < s_view_count)
-            ? s_view[s_focus_view]
-            : -1;
-    const bool keep_focus_is_primary =
-        keep_focus_row >= 0 &&
-        row_carries_primary(&s_rows[keep_focus_row]);
-    const int keep_anchor_row =
-        (rows_unchanged && s_sel_anchor_row >= 0 && s_sel_anchor_row < s_view_count)
-            ? s_view[s_sel_anchor_row]
-            : -1;
     if (!rows_unchanged) {
         /* A structural rebuild is the pruning boundary. The snapshot-wide scan
          * preserves live off-screen folders while dropping deleted owners. */
@@ -1361,8 +1633,7 @@ void build_view(void) {
     s_view_cache_row_generation = s_row_cache_generation;
     s_view_cache_epoch = s_view_epoch;
     if (s_row_count == 0) {
-        s_sel_anchor_row = -1;
-        s_anchor_ref_pending = false;
+        gui_rows_reconcile_view_state();
         return;
     }
     /* Sort-by-size needs each leaf's packed area, one pack-ref lookup per row. Compute it lazily HERE
@@ -1454,59 +1725,7 @@ void build_view(void) {
             }
         }
     }
-    /* Re-pin keyboard focus + shift-anchor onto their original rows in the reordered view. If a row
-     * was filtered/collapsed out of the rebuilt view, clear the index to -1: leaving the stale
-     * numeric index in place would silently alias a DIFFERENT visible row (or point out of range). */
-    if (keep_focus_row >= 0) {
-        bool found = false;
-        for (int k = 0; k < s_view_count; ++k) {
-            if (s_view[k] == keep_focus_row) {
-                s_focus_view = k;
-                found = true;
-                break;
-            }
-        }
-        if (!found) {
-            s_focus_view = -1;
-            if (keep_focus_is_primary) {
-                s_focus_reveal_pending = true;
-            }
-        }
-    }
-    if (keep_anchor_row >= 0) {
-        bool found = false;
-        for (int k = 0; k < s_view_count; ++k) {
-            if (s_view[k] == keep_anchor_row) {
-                s_sel_anchor_row = k;
-                found = true;
-                break;
-            }
-        }
-        if (!found) {
-            s_sel_anchor_row = -1;
-        }
-    }
-    if (!rows_unchanged) {
-        s_sel_anchor_row = -1;
-        if (s_anchor_ref_pending) {
-            for (int k = 0; k < s_view_count; ++k) {
-                const sprite_row *row = &s_rows[s_view[k]];
-                const char *key = row->source_key ? row->source_key : "";
-                if (row->is_source == s_anchor_ref_is_source &&
-                    tp_id128_eq(row->source_id, s_anchor_ref_source_id) &&
-                    strcmp(key, s_anchor_ref_source_key) == 0) {
-                    s_sel_anchor_row = k;
-                    break;
-                }
-            }
-        }
-        s_anchor_ref_pending = false;
-    }
-    /* A model rebuild invalidates row indices. Re-anchor focus to the visible
-     * primary selection; selection revalidation corrects it again after undo. */
-    if (!rows_unchanged || s_focus_reveal_pending) {
-        focus_sync_to_selection();
-    }
+    gui_rows_reconcile_view_state();
 }
 // #endregion
 
@@ -1524,8 +1743,10 @@ static void selected_cache_refresh(void) {
     }
     if (s_selected_cache_valid &&
         s_selected_cache_row_generation == s_row_cache_generation &&
-        s_selected_cache_src == s_sel_src &&
-        s_selected_cache_child == s_sel_child) {
+        memcmp(
+            &s_selected_cache_identity,
+            &s_selection.primary,
+            sizeof s_selected_cache_identity) == 0) {
 #if defined(NTPACKER_GUI_BENCH)
         s_bench_counters.selected_cache_hits++;
 #endif
@@ -1533,8 +1754,7 @@ static void selected_cache_refresh(void) {
     }
     s_selected_cache_valid = true;
     s_selected_cache_row_generation = s_row_cache_generation;
-    s_selected_cache_src = s_sel_src;
-    s_selected_cache_child = s_sel_child;
+    s_selected_cache_identity = s_selection.primary;
     s_selected_cache_row = -1;
     s_selected_cache_override = NULL;
     for (int i = 0; i < s_row_count; ++i) {
@@ -1542,11 +1762,9 @@ static void selected_cache_refresh(void) {
         s_bench_counters.selected_row_iterations++;
 #endif
         const sprite_row *row = &s_rows[i];
-        const bool selected = row->is_source
-                                  ? (s_sel_src == row->src && s_sel_child == -1)
-                                  : (s_sel_src == row->src &&
-                                     s_sel_child == row->child);
-        if (selected && !row->is_folder && !row->missing &&
+        if (identity_matches_row(
+                &s_selection.primary, row) &&
+            !row->is_folder && !row->missing &&
             !tp_id128_is_nil(row->source_id) && row->source_key &&
             row->source_key[0] != '\0') {
             s_selected_cache_row = i;
@@ -1611,7 +1829,6 @@ void gui_rows_shutdown(void) {
     s_view_cache_valid = false;
     s_view_cache_row_generation = 0U;
     s_view_cache_epoch = 0U;
-    s_focus_reveal_pending = false;
 
     free(s_override_index);
     s_override_index = NULL;
@@ -1625,14 +1842,12 @@ void gui_rows_shutdown(void) {
     s_row_cache_snapshot_lifetime = 0U;
     s_row_cache_pack_version = 0U;
     s_row_cache_generation = 0U;
-    s_anchor_ref_pending = false;
-    s_anchor_ref_is_source = false;
-    s_anchor_ref_source_id = tp_id128_nil();
-    s_anchor_ref_source_key[0] = '\0';
+    s_selection_reconciled_row_generation = 0U;
     s_selected_cache_valid = false;
     s_selected_cache_row_generation = 0U;
-    s_selected_cache_src = -1;
-    s_selected_cache_child = -1;
+    memset(
+        &s_selected_cache_identity, 0,
+        sizeof s_selected_cache_identity);
     s_selected_cache_row = -1;
     s_selected_cache_override = NULL;
 }
@@ -1682,17 +1897,13 @@ void select_row_for_result_region(const tp_result *result, int region_idx) {
                 row->source_id, row->source_key, canonical_name,
                 sizeof canonical_name, NULL) == TP_STATUS_OK &&
             strcmp(packed_name, canonical_name) == 0) {
-            s_sel_src = s_rows[i].src;
-            s_sel_child = s_rows[i].child;
-            s_sel_missing = false;
-            (void)snprintf(s_sel_abs, sizeof s_sel_abs, "%s", s_rows[i].abs);
-            /* Re-pin keyboard focus + the Shift-range anchor onto the newly selected row so F2/arrows
-             * act on THIS sprite, not the previously focused one. focus_sync lands -1 when the row is
-             * hidden (filtered/collapsed) -- clearing the anchor too, so a stale Shift anchor cannot
-             * mis-range (mirrors undo_redo_settle). Request an ensure-visible only for a visible focus. */
-            focus_sync_to_selection();
-            s_sel_anchor_row = s_focus_view;
-            if (s_focus_view >= 0) {
+            gui_rows_select_primary(row);
+            const int view_index =
+                view_index_for_identity(
+                    &s_selection.primary);
+            gui_rows_set_focus_view_index(view_index);
+            gui_rows_set_anchor_view_index(view_index);
+            if (view_index >= 0) {
                 s_focus_follow = true;
             }
             return;
@@ -1701,7 +1912,10 @@ void select_row_for_result_region(const tp_result *result, int region_idx) {
 }
 
 void select_row_for_region(int region_idx) {
-    select_row_for_result_region(gui_pack_result(s_sel_atlas), region_idx);
+    select_row_for_result_region(
+        gui_pack_result(
+            gui_view_atlas_index(gui_project_snapshot())),
+        region_idx);
 }
 // #endregion
 
@@ -1798,109 +2012,27 @@ static bool row_ref_index_contains(const row_ref_slot *slots, size_t capacity,
     return false;
 }
 
-/* Re-pin the keyboard focus (an s_view index) onto whichever visible row now carries the primary
- * selection, so the focus ring and the selection highlight stay together after an undo/redo
- * re-resolves the selection onto a shifted row. -1 when the selected row is hidden (collapsed or
- * filtered out) or nothing is selected; focus_clamp then restarts nav from a list edge. */
-static void focus_sync_to_selection(void) {
-    s_focus_view = -1;
-    s_focus_reveal_pending = false;
-    if (s_sel_src < 0) {
+void gui_rows_reconcile_view_state(void) {
+    /* A failed projection is not an authoritative empty model. Keep canonical
+     * identities intact so the next successful rebuild can resolve them. */
+    if (!s_row_cache_valid) {
         return;
     }
-    for (int k = 0; k < s_view_count; ++k) {
-        const sprite_row *row = &s_rows[s_view[k]];
-        const bool match = row->is_source
-                               ? (s_sel_src == row->src && s_sel_child == -1)
-                               : (s_sel_src == row->src && s_sel_child == row->child);
-        if (match) {
-            s_focus_view = k;
-            return;
+    if (s_selection_reconciled_row_generation !=
+        s_row_cache_generation) {
+        s_selection_reconciled_row_generation =
+            s_row_cache_generation;
+        if (s_selection.primary.valid &&
+            row_index_for_identity(
+                &s_selection.primary) < 0) {
+            row_identity_clear(&s_selection.primary);
         }
-    }
-    s_focus_reveal_pending = true;
-}
+        if (s_selection.focus.valid &&
+            row_index_for_identity(
+                &s_selection.focus) < 0) {
+            row_identity_clear(&s_selection.focus);
+        }
 
-void gui_selection_capture_reselect(void) {
-    const sprite_row *leaf = gui_rows_selected_leaf();
-    s_reselect_source_id = tp_id128_nil();
-    s_reselect_key[0] = '\0';
-    /* Preserve the viewed atlas by its stable id regardless of row kind, so an
-     * undo/redo that inserts or removes an atlas before it -- shifting s_sel_atlas -- re-resolves onto the
-     * same atlas, not a positional neighbour. nil when there is no atlas at s_sel_atlas. */
-    s_reselect_atlas_id = tp_id128_nil();
-    {
-        const tp_session_snapshot *snapshot = gui_project_snapshot();
-        const tp_snapshot_atlas *atlas =
-            snapshot ? tp_session_snapshot_atlas_at(snapshot, s_sel_atlas) : NULL;
-        if (atlas) {
-            s_reselect_atlas_id = atlas->id;
-        }
-    }
-    if (leaf && leaf->source_key && leaf->source_key[0] != '\0') {
-        const int n = snprintf(s_reselect_key, sizeof s_reselect_key, "%s", leaf->source_key);
-        if (n >= 0 && (size_t)n < sizeof s_reselect_key) {
-            s_reselect_source_id = leaf->source_id;
-        } else {
-            /* Defensive: tp_scan bounds rel by TP_SRCKEY_MAX so this cannot happen today, but a
-             * truncated key would silently re-resolve onto the wrong row -- drop the ref instead. */
-            s_reselect_key[0] = '\0';
-        }
-    } else if (s_sel_src >= 0 && s_sel_child == -1) {
-        /* A folder/source row is the primary (no leaf ref). Preserve it by its stable source id so
-         * an undo that re-inserts sources does not leave s_sel_src pointing at a shifted neighbour. */
-        for (int i = 0; i < s_row_count; ++i) {
-            if (s_rows[i].is_source && s_rows[i].src == s_sel_src &&
-                !tp_id128_is_nil(s_rows[i].source_id)) {
-                s_reselect_source_id = s_rows[i].source_id;
-                break;
-            }
-        }
-    }
-    s_reselect_pending = true;
-}
-
-void gui_selection_revalidate(void) {
-    if (!s_reselect_pending) {
-        return;
-    }
-    s_reselect_pending = false;
-    /* Re-resolve the primary selection to the row still carrying the captured ref (else clear it).
-     * A non-empty key means a leaf sprite (match by source id + key); an empty key with a non-nil id
-     * means a folder/source primary (match the source row that owns the id). */
-    if (!tp_id128_is_nil(s_reselect_source_id)) {
-        bool found = false;
-        for (int i = 0; i < s_row_count; ++i) {
-            const sprite_row *row = &s_rows[i];
-            if (!tp_id128_eq(row->source_id, s_reselect_source_id)) {
-                continue;
-            }
-            if (s_reselect_key[0] != '\0') {
-                if (row->is_folder || !row->source_key || row->source_key[0] == '\0' ||
-                    strcmp(row->source_key, s_reselect_key) != 0) {
-                    continue;
-                }
-                s_sel_child = row->child;
-                s_sel_missing = row->missing;
-            } else {
-                if (!row->is_source) {
-                    continue;
-                }
-                s_sel_child = -1;
-                s_sel_missing = row->missing; /* Missing state survives reselect. */
-            }
-            s_sel_src = row->src;
-            (void)snprintf(s_sel_abs, sizeof s_sel_abs, "%s", row->abs);
-            found = true;
-            break;
-        }
-        if (!found) {
-            s_sel_src = -1;
-            s_sel_child = -1;
-            s_sel_missing = false;
-            s_sel_abs[0] = '\0';
-        }
-    }
     /* Prune against one borrowed canonical row index, then compact once. */
     size_t row_ref_capacity = 0U;
     row_ref_slot *row_refs = row_ref_index_build(&row_ref_capacity);
@@ -1933,8 +2065,14 @@ void gui_selection_revalidate(void) {
     }
     s_multi_sel_count = write;
     free(row_refs);
-    /* Keep the keyboard focus ring on the row that now carries the selection. revalidate runs right
-     * after build_view (main loop), so s_view is current and this cannot read a stale index. */
-    focus_sync_to_selection();
+    }
+
+    /* A Shift anchor is meaningful only while its exact row is visible.
+     * Focus may remain canonical while filtered/collapsed and resolve to no
+     * current view index. */
+    if (s_selection.anchor.valid &&
+        view_index_for_identity(&s_selection.anchor) < 0) {
+        row_identity_clear(&s_selection.anchor);
+    }
 }
 // #endregion

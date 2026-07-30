@@ -19,7 +19,6 @@ char *tp_txn_request_encode_bounded(const tp_txn_request *req, size_t max_bytes,
  * builder, so durable byte admission can be exact without allocating. */
 bool tp_operation_emit_canonical(struct tp_sb *sb, const tp_operation *op,
                                  int depth, bool trailing_newline);
-bool tp_txn_request_encoded_size(const tp_txn_request *req, size_t *size_out);
 char *tp_txn_request_encode_bounded_for_project(
     const tp_txn_request *req, const tp_project *project, size_t max_bytes,
     bool *too_large);

@@ -30,8 +30,6 @@ bool nt_win_utf16_to_utf8(const wchar_t *wide, char *out,
  * encoding, or capacity failure and leave a diagnostic in `error`. */
 bool nt_win_current_directory_utf8(char *out, size_t output_capacity,
                                    char *error, size_t error_capacity);
-bool nt_win_temp_path_utf8(char *out, size_t output_capacity, char *error,
-                           size_t error_capacity);
 bool nt_win_module_path_utf8(char *out, size_t output_capacity, char *error,
                              size_t error_capacity);
 bool nt_win_environment_utf8(const wchar_t *name, char *out,

@@ -20,7 +20,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "tp_core/tp_diff.h"
+#include "tp_diff.h"
 #include "tp_core/tp_export.h" /* TP_EXPORTER_ID_JSON_NEOTOLIS */
 #include "tp_core/tp_operation.h"
 #include "tp_core/tp_project.h"

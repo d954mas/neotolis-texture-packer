@@ -261,11 +261,15 @@ tp_status tp_export_predict_loss_snapshot(const struct tp_session_snapshot *snap
 /* Page PNG writer (shared helper used by every exporter).              */
 /* ------------------------------------------------------------------ */
 
-/* Writes each page of `result` to "<out_path_base>-<page>.png". Pages are
+/* Writes each page of `result` to "<write_path_base>-<page>.png". Pages are
  * straight-alpha by default; `premultiply` premultiplies RGB by alpha first
- * (ROADMAP toggle). The parent directory of out_path_base must already exist
- * (tp_core has no dir-creation opinion). Deterministic. */
-tp_status tp_export_write_pages(const tp_result *result, const char *out_path_base, bool premultiply, tp_error *err);
+ * (ROADMAP toggle). The parent directory of write_path_base must already exist
+ * (tp_core has no dir-creation opinion). Deterministic.
+ *
+ * Plain writes: under the set publication below this base is the private staging
+ * directory, whose whole point is that nothing there is observable until the set
+ * is promoted, so a per-file temp+replace would buy nothing. */
+tp_status tp_export_write_pages(const tp_result *result, const char *write_path_base, bool premultiply, tp_error *err);
 
 /* Sink for enumerating an exporter's output files (for the structured export
  * report / introspection). Each call receives one output path; `ud` is the
@@ -291,12 +295,33 @@ tp_status tp_export_list_page_files(const tp_result *result, const char *out_pat
 /* Exporter registry (data + one write fn over the canonical model).    */
 /* ------------------------------------------------------------------ */
 
-/* Writes `prep` to files rooted at `out_path_base` (no extension; the exporter
- * appends its own). `caps` is the target's capability set: the writer emits
- * only what caps allows and raises a metadata-loss notice for genuine drops.
- * Never a hard error for a capability gap. */
-typedef tp_status (*tp_export_write_fn)(const tp_export_prepared *prep, const tp_export_caps *caps,
-                                        const char *out_path_base, tp_export_notices *notices, tp_error *err);
+/* Everything a writer is given. The two bases are deliberately separate:
+ *
+ *   write_path_base -- WHERE the files go. Every file a writer creates must be
+ *     "<write_path_base><suffix>" and nothing else. Under the set publication
+ *     below this is a private staging directory, so the writes are plain (the
+ *     directory is unobservable until the whole set is promoted).
+ *   out_path_base   -- WHERE the files will end up. Read-only: a writer consults
+ *     it when its CONTENT must reference the published location (the Defold
+ *     exporter resolves its project-relative .tpatlas ref by walking up from the
+ *     final directory). Never write here.
+ *
+ * The two share a basename, so "<base>.<ext>" naming is identical either way. A
+ * direct caller that wants the files where they land -- a golden test, a tool --
+ * passes the same base for both.
+ *
+ * `caps` is the target's capability set: the writer emits only what caps allows
+ * and raises a metadata-loss notice for genuine drops. Never a hard error for a
+ * capability gap. `notices` is nullable. */
+typedef struct tp_export_write_ctx {
+    const tp_export_prepared *prep;
+    const tp_export_caps *caps;
+    const char *write_path_base;
+    const char *out_path_base;
+    tp_export_notices *notices;
+} tp_export_write_ctx;
+
+typedef tp_status (*tp_export_write_fn)(const tp_export_write_ctx *ctx, tp_error *err);
 
 /* Optional: enumerate the files write() produces for `prep` rooted at
  * out_path_base, via `sink`. Lets the run layer report every written file honestly
@@ -317,6 +342,67 @@ typedef struct tp_exporter {
     tp_export_list_outputs_fn list_outputs; /* nullable; NULL => "<base>.<ext>" + page PNGs */
 } tp_exporter;
 
+/* Publishes a target's whole output SET or none of it.
+ *
+ * `output_files` is the target's complete enumerated output list (the run
+ * layer's collect step) and it is the CONTRACT, checked before anything runs:
+ *
+ *   1. Every entry must be a direct child of out_path_base's own directory.
+ *      A path outside that directory (including any deeper subdirectory) or one
+ *      whose staged form would exceed the path limit is a structured error --
+ *      the writer never runs and nothing on disk is touched. Arbitrarily placed
+ *      outputs are out of scope, and publishing part of a set is not an
+ *      acceptable substitute for saying so.
+ *   2. No two entries may name the same file, comparing ASCII case-INSENSITIVELY.
+ *      Windows and macOS resolve "Atlas.png" and "atlas.png" to one file, so a
+ *      list that collides on case cannot describe a set on those hosts and is
+ *      rejected everywhere, keeping the contract host-independent. Non-ASCII
+ *      case collisions (Turkish dotted I, full-width forms) are out of scope.
+ *      The error names both colliding entries.
+ *
+ * Then: a private staging directory is created as a SIBLING of the output
+ * directory (same volume, so every publish step is a pure rename), the writer is
+ * told to write there, and the produced set is verified before anything is
+ * published -- every listed output present, no destination an existing
+ * directory, and no staged file the list missed. The leftover match is
+ * BYTE-EXACT, including case: an enumerated output name must equal the name the
+ * writer produced byte for byte. The scan is part of the guarantee, so a staging
+ * directory that cannot be opened or cannot be enumerated to its end fails
+ * CLOSED -- an unverified set is exactly what this rejects.
+ *
+ * Publication itself is a two-phase swap with rollback. Phase one renames each
+ * existing destination aside to a ".tp-old-" sibling; phase two renames each
+ * staged file onto its destination. ANY failure in either phase rolls the whole
+ * thing back -- every displaced file returns to its destination and every
+ * already-promoted file is removed -- so the caller sees the complete new set or
+ * the complete old set, never a mix. On success the displaced copies are
+ * deleted. If the rollback itself cannot complete, the error says so explicitly
+ * rather than reporting a clean failure.
+ *
+ * A process killed mid-swap leaves those private names behind; the sweep at the
+ * start of each publish reclaims them by owner liveness (a ".tp-old-" file whose
+ * destination exists means the swap completed and is deleted; one whose
+ * destination is missing means it was interrupted and is restored).
+ *
+ * `out_writer_ran` (nullable) reports whether `exp->write` was invoked at all,
+ * so a caller's report can distinguish a rejected output list from a failed
+ * writer. The staging dir is removed on every path. */
+tp_status tp_export_write_and_publish_set(const tp_exporter *exp,
+                                          const tp_export_prepared *prep,
+                                          const char *out_path_base,
+                                          const char *const *output_files,
+                                          int output_file_count,
+                                          tp_export_notices *notices,
+                                          bool *out_writer_ran,
+                                          tp_error *err);
+
+#ifdef TP_ENABLE_TEST_SEAMS
+/* Fails the `nth` (0-based) rename the two-phase swap performs, counting the
+ * displace and promote phases together in execution order, so the rollback path
+ * is constructible without a real filesystem fault. Negative disarms. */
+void tp_export_publish__test_fail_rename_at(int nth);
+#endif
+
 /* Lookup by id across built-in + runtime-registered exporters. NULL on miss. */
 const tp_exporter *tp_exporter_find(const char *id);
 
@@ -331,8 +417,7 @@ tp_status tp_exporter_register(const tp_exporter *e);
 
 /* The json-neotolis serializer, exposed so tools/tests can drive it through a
  * custom capability-restricted descriptor over the same writer. */
-tp_status tp_export_json_neotolis_write(const tp_export_prepared *prep, const tp_export_caps *caps,
-                                        const char *out_path_base, tp_export_notices *notices, tp_error *err);
+tp_status tp_export_json_neotolis_write(const tp_export_write_ctx *ctx, tp_error *err);
 
 /* json-neotolis schema version emitted in the "version" field. */
 #define TP_JSON_NEOTOLIS_SCHEMA_VERSION 1
@@ -344,10 +429,10 @@ tp_status tp_export_json_neotolis_write(const tp_export_prepared *prep, const tp
 
 /* The Defold serializer (extension-texturepacker `.tpinfo` + `.tpatlas` + page
  * PNGs), exposed so tools/tests can drive it directly. Writes three artifacts at
- * out_path_base: "<base>.tpinfo", "<base>.tpatlas", "<base>-<N>.png". Contract:
- * docs/formats/defold-tpinfo.md. */
-tp_status tp_export_defold_write(const tp_export_prepared *prep, const tp_export_caps *caps, const char *out_path_base,
-                                 tp_export_notices *notices, tp_error *err);
+ * ctx->write_path_base: "<base>.tpinfo", "<base>.tpatlas", "<base>-<N>.png"; the
+ * .tpatlas `file:` resource ref is resolved from ctx->out_path_base, the location
+ * the atlas will actually be loaded from. Contract: docs/formats/defold-tpinfo.md. */
+tp_status tp_export_defold_write(const tp_export_write_ctx *ctx, tp_error *err);
 
 /* Enumerates the Defold writer's outputs ("<base>.tpinfo", "<base>.tpatlas", and
  * the page PNGs). Wired into the Defold exporter descriptor's list_outputs so the

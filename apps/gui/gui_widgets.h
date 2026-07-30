@@ -76,7 +76,10 @@ void ui_label_fit(nt_ui_context_t *ctx, const char *text, const nt_ui_label_styl
 bool tp_checkbox(nt_ui_context_t *ctx, uint32_t id, bool cur, bool enabled);
 
 /* The single inline rename field, sized to fill its (bounded) parent so it clips to the row. */
-bool render_rename_field(nt_ui_context_t *ctx);
+bool render_rename_field(nt_ui_context_t *ctx,
+                         const char *draft_value,
+                         bool *changed);
+const char *rename_field_changed_value(void);
 
 /* Compact D4 transform decode for the hover/selection readout (ux.md §2.4). */
 const char *transform_decode_str(uint8_t t);

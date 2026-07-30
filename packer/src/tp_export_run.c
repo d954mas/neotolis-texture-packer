@@ -104,10 +104,6 @@ static tp_status export_cancel_poll(const tp_cancel_token *cancel,
                : TP_STATUS_OK;
 }
 
-static bool export_pack_cancel_poll(void *context) {
-    return tp_cancel_requested((const tp_cancel_token *)context);
-}
-
 static void *report_alloc(tp_arena *arena, size_t size) {
 #ifdef TP_ENABLE_TEST_SEAMS
     if (s_report_alloc_fail == 0) {
@@ -583,11 +579,14 @@ tp_status tp_export_run_ex(const tp_project *project, int atlas_index, const tp_
             if (st != TP_STATUS_OK) {
                 return st;
             }
-            st = tp_pack_cancellable(
-                &eff, arena, &groups[g].result,
-                cancel ? export_pack_cancel_poll : NULL, (void *)cancel, err);
+            st = tp_pack_cancellable(&eff, arena, &groups[g].result, cancel, err);
             if (st != TP_STATUS_OK) {
-                if (report) {
+                /* A cancelled Pack is not a failed Pack: it produced no result
+                 * BECAUSE the caller asked to stop, so the report must not blame
+                 * the pack phase. Before cancellation became a status this branch
+                 * was unreachable for cancel (produce returned OK with a NULL
+                 * result) and the run continued on a NULL group result. */
+                if (report && st != TP_STATUS_CANCELLED) {
                     report->pack_failed = true;
                 }
                 return st;
@@ -700,15 +699,22 @@ tp_status tp_export_run_ex(const tp_project *project, int atlas_index, const tp_
         }
 
         /* Deterministic test seam at the last reversible boundary. Production is
-         * a no-op; after release, poll before invoking the irreversible writer. */
+         * a no-op; after release, poll before staging the irreversible target. */
         export_before_write_gate_wait();
         st = export_cancel_poll(cancel, err);
         if (st != TP_STATUS_OK) {
             return st;
         }
-        st = exp->write(prep, &exp->caps, out_bases[t], notices, err);
+        bool writer_ran = false;
+        st = tp_export_write_and_publish_set(exp, prep, out_bases[t],
+                                             output_files, output_file_count,
+                                             notices, &writer_ran, err);
         if (rt) {
-            rt->writer_outcome = st == TP_STATUS_OK
+            /* A rejected output list is decided BEFORE the writer runs, so it is
+             * not a writer failure -- the report must not blame a writer that
+             * never executed. */
+            rt->writer_outcome = !writer_ran ? TP_EXPORT_WRITER_NOT_ATTEMPTED
+                                 : st == TP_STATUS_OK
                                      ? TP_EXPORT_WRITER_SUCCEEDED
                                      : TP_EXPORT_WRITER_FAILED;
         }
@@ -876,18 +882,6 @@ tp_status tp_export_snapshot_job_atlas_info(const tp_export_snapshot_job *job,
         out->enabled_target_count += atlas->targets[ti].enabled ? 1 : 0;
     }
     return TP_STATUS_OK;
-}
-
-tp_status tp_export_snapshot_job_run_atlas(tp_export_snapshot_job *job,
-                                           int atlas_index,
-                                           tp_arena *arena,
-                                           tp_export_notices *notices,
-                                           int *out_pack_runs,
-                                           int *out_missing_sources,
-                                           tp_error *err) {
-    return tp_export_snapshot_job_run_atlas_ex(
-        job, atlas_index, arena, notices, NULL, out_pack_runs, NULL,
-        out_missing_sources, err);
 }
 
 tp_status tp_export_snapshot_job_run_atlas_ex(tp_export_snapshot_job *job,

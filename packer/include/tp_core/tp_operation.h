@@ -69,14 +69,28 @@ typedef enum tp_op_class {
 
 /* One catalog row. `target_kind` is the ID kind of the op's PRIMARY target;
  * atlas-scoped ops also carry a parent atlas id in the payload. `cli_verb` is the
- * current ntpacker verb that lowers to this op, or NULL for a reserved op. */
+ * current ntpacker verb that lowers to this op, or NULL for a reserved op.
+ *
+ * `label`/`label_template` are the §6 "palette-ready operation registry"
+ * requirement: a history entry, an undo toast, and a command palette render an
+ * operation from the catalog instead of a per-command switch table. Every
+ * {placeholder} in a template is either a field key of that op (see
+ * tp_op_field_allowed) or one of the reserved TP_OP_LABEL_* tokens below, which
+ * only a field-presence SET op may use. */
 typedef struct tp_op_info {
     tp_op_kind kind;
     const char *wire;          /* canonical "op" string, e.g. "atlas.create" */
     tp_op_class effect;        /* before/after diff class */
     tp_id_kind target_kind;    /* primary target ID kind (INVALID = project-level) */
     const char *cli_verb;      /* current CLI verb, or NULL if reserved */
+    const char *label;         /* short human label, e.g. "Create atlas" */
+    const char *label_template;/* e.g. "Set {field} {value}" (spec §6) */
 } tp_op_info;
+
+/* Reserved label-template placeholders of a field-presence SET op: the affected
+ * field's human label, and the value it is set to ("Set padding 4"). */
+#define TP_OP_LABEL_FIELD "{field}"
+#define TP_OP_LABEL_VALUE "{value}"
 
 const tp_op_info *tp_op_info_by_kind(tp_op_kind kind);
 const tp_op_info *tp_op_info_by_wire(const char *wire);
@@ -85,10 +99,9 @@ const char *tp_op_wire(tp_op_kind kind);           /* "" for INVALID/out-of-rang
 const char *tp_op_class_name(tp_op_class cls);     /* "create"/"remove"/"move"/"set" */
 bool tp_op_catalog_selfcheck(void);                /* row order == enum; pinned by a test */
 
-/* The CLOSED canonical field vocabulary of an op (addressing `*_id` keys + typed
- * payload keys; excludes the "op" discriminator). Makes "no raw field patch"
- * (§6.2) executable: a key outside this set is unknown. Writes *count (>=0). */
-const char *const *tp_op_fields(tp_op_kind kind, int *count);
+/* Admits a key against the CLOSED canonical field vocabulary of an op (addressing
+ * `*_id` keys + typed payload keys, plus the "op" discriminator). Makes "no raw
+ * field patch" (§6.2) executable: a key outside that set is unknown. */
 bool tp_op_field_allowed(tp_op_kind kind, const char *key);
 
 /* ---- field presence masks (SET ops apply a SUBSET of fields) ------------- */
@@ -138,6 +151,121 @@ enum tp_target_field_mask {
     TP_TF_ENABLED = 1u << 2,
     TP_TF_ALL = 0x7u /* all three (full replace) */
 };
+
+/* ---- machine-readable field registry (spec §6) --------------------------- *
+ * One row per canonical wire key of a field-presence SET family. This is the
+ * single enumeration every codec walks -- apply, the canonical encoder, the
+ * JSON lowering, the semantic-diff fast path, and the CLI key parser -- so a
+ * new field is one row here plus a widget, not ten parallel switch arms.
+ *
+ * Row ORDER is the family's declaration order. The canonical encoder sorts keys
+ * ascending, so order is not a wire contract there; it IS the order of the
+ * sprite clear-token array, of the CLI "known:" list, and of JSON lowering (which
+ * fixes which value fault is reported first).
+ *
+ * A GROUPED field spends one mask bit over consecutive rows (sprite origin =
+ * {origin_x, origin_y}; slice9 = {l,r,t,b}); `group` labels the run for the
+ * all-or-none arity rule. `clear_token` is the per-BIT clear vocabulary token
+ * (first row of the run owns it) and `reset` the value a clear writes. */
+typedef enum tp_field_type {
+    TP_FIELD_INT = 0, /* op int    -> record int      */
+    TP_FIELD_INT_I16, /* op int    -> record int16_t  */
+    TP_FIELD_INT_U16, /* op int    -> record uint16_t */
+    TP_FIELD_BOOL,    /* op bool   -> record bool     */
+    TP_FIELD_FLOAT,   /* op float  -> record float    */
+    TP_FIELD_STR      /* op char*  -> record char*    */
+} tp_field_type;
+
+typedef enum tp_field_family {
+    TP_FIELD_FAMILY_ATLAS = 0, /* atlas.settings.set     -> tp_project_atlas  */
+    TP_FIELD_FAMILY_SPRITE,    /* sprite.override.set    -> tp_project_sprite */
+    TP_FIELD_FAMILY_ANIM,      /* animation.settings.set -> tp_project_anim   */
+    TP_FIELD_FAMILY_TARGET     /* target.set             -> tp_project_target */
+} tp_field_family;
+
+/* ---- the per-field ARGUMENT SCHEMA (spec §6) ----------------------------- *
+ * §6 makes a machine-readable argument schema (name, type, range/enum) a hard
+ * requirement on the operation engine: a palette / MCP client renders a widget and
+ * pre-validates a value from the registry, never from a hand-written per-field
+ * table. The WIRE is unchanged -- an enum-domain field still travels as its
+ * integer; `token` is the stable machine spelling a client shows and accepts.
+ *
+ * The schema is the field's STATIC domain. Cross-field and effective-value rules
+ * (an atlas spacing knob is additionally capped by the effective max_size --
+ * see `cap_key`; extrude > 0 requires shape RECT; a sprite override is capped by
+ * the PARENT atlas's max_size) stay with tp_operation_validate, which remains the
+ * single admission authority. Every bound below is the SAME named constant the
+ * validate families use (tp_pack.h / tp_project.h); the registry never restates a
+ * number. */
+typedef struct tp_field_enum_value {
+    int value;         /* the canonical wire integer */
+    const char *token; /* stable machine token, e.g. "convex_hull" */
+    const char *label; /* short human label, e.g. "Convex hull" */
+} tp_field_enum_value;
+
+typedef enum tp_field_domain {
+    TP_FIELD_DOMAIN_ANY = 0,     /* every value of the row's type is admissible */
+    TP_FIELD_DOMAIN_RANGE,       /* numeric [range_min..range_max] */
+    TP_FIELD_DOMAIN_ENUM,        /* one of values[0..value_count) */
+    TP_FIELD_DOMAIN_EXPORTER_ID  /* a live id from the exporter registry (tp_export.h) */
+} tp_field_domain;
+
+typedef struct tp_field_row {
+    /* -- codec columns: what apply / encode / lowering / diff walk -- */
+    uint32_t bit;            /* presence-mask bit (shared across a group's rows) */
+    const char *key;         /* canonical wire/JSON key */
+    tp_field_type type;
+    uint16_t op_off;         /* offsetof inside the op payload struct */
+    uint16_t rec_off;        /* offsetof inside the project record */
+    const char *clear_token; /* per-bit clear token, or NULL (not clearable / not the run's first row) */
+    const char *group;       /* arity label of a multi-row bit, else NULL */
+    double reset;            /* value a clear writes (grouped bits share it) */
+
+    /* -- schema columns: what a palette / MCP client renders and pre-validates -- */
+    const char *label;       /* short human label, e.g. "Padding" */
+    tp_field_domain domain;
+    double range_min;        /* DOMAIN_RANGE: inclusive unless min_exclusive */
+    double range_max;        /* DOMAIN_RANGE: inclusive */
+    bool min_exclusive;      /* DOMAIN_RANGE: range_min itself is NOT admissible */
+    const char *cap_key;     /* DOMAIN_RANGE: the effective max is additionally capped
+                              * by this key's effective value in the op's scope (the
+                              * atlas being set, or a sprite's parent atlas), else NULL */
+    const tp_field_enum_value *values; /* DOMAIN_ENUM: the closed value set */
+    uint8_t value_count;
+    bool has_unset;          /* the field admits an unset/inherit sentinel; that
+                              * sentinel's value is `reset` (what a clear writes) */
+    bool nonempty;           /* TP_FIELD_STR: a masked value must not be empty */
+} tp_field_row;
+
+/* The family's rows in declaration order. Writes *count (>=0); NULL for an
+ * out-of-range family. */
+const tp_field_row *tp_op_field_rows(tp_field_family family, size_t *count);
+
+/* ---- schema walk: operations -> fields -> type/range/enum/label ---------- *
+ * The entry points a schema-driven client uses. tp_op_info_by_kind gives the op
+ * (wire, class, label, label template); tp_op_fields gives its typed arguments. */
+
+/* The op's field-presence family. False (and *out_family untouched) when the op
+ * carries no presence mask -- its remaining payload keys are then name-only,
+ * admitted through tp_op_field_allowed. */
+bool tp_op_field_family_of(tp_op_kind kind, tp_field_family *out_family);
+
+/* The op's schema fields: its family's rows, or NULL with *count = 0. */
+const tp_field_row *tp_op_fields(tp_op_kind kind, size_t *count);
+
+/* The family row owning `key`, or NULL. */
+const tp_field_row *tp_op_field_row_by_key(tp_field_family family, const char *key);
+
+/* DOMAIN_ENUM helpers: value -> token (NULL when not a member) and token ->
+ * value (false when unknown). The unset/inherit sentinel is NOT an enum member;
+ * test `row->has_unset` and compare against `row->reset`. */
+const char *tp_field_enum_token(const tp_field_row *row, int value);
+bool tp_field_enum_lookup(const tp_field_row *row, const char *token, int *out_value);
+
+/* Admissible against the row's STATIC domain (range / enum, plus the unset
+ * sentinel when the row has one). Context-dependent caps stay with
+ * tp_operation_validate -- this is a client-side pre-check, not admission. */
+bool tp_field_value_admissible(const tp_field_row *row, double value);
 
 /* ---- typed payload arms (tagged union) ----------------------------------- *
  * Canonical operations store IDs only (§5.4). A human selector resolves to one ID
@@ -340,19 +468,10 @@ char *tp_op_result_encode(const tp_operation *op, const tp_op_reject *rej);
  * ONLY on TP_STATUS_AMBIGUOUS_SELECTOR. On success *out owns its strings (free with
  * tp_operation_free). See tp_op_build.c for the full per-verb set. */
 
-/* Resolve a human `selector` to exactly one entity id of the wanted kind, for op
- * building. Wraps tp_selector_resolve + a kind check. */
-tp_status tp_op_resolve_target(const tp_project *p, const struct tp_sprite_index *sprites, int sprite_atlas_index,
-                               tp_selector_kind want, const char *selector, tp_selector_result *out,
-                               tp_selector_candidates *cand, tp_error *err);
-
 /* atlas.create: no selector (creates a new entity). `new_id` is the atlas's id. */
 tp_status tp_op_build_atlas_create(tp_id128 new_id, const char *name, tp_operation *out);
 /* atlas.rename: resolve `atlas_sel` -> atlas_id, set new name. */
 tp_status tp_op_build_atlas_rename(const tp_project *p, const char *atlas_sel, const char *new_name, tp_operation *out,
-                                   tp_selector_candidates *cand, tp_error *err);
-/* atlas.remove: resolve `atlas_sel` -> atlas_id. */
-tp_status tp_op_build_atlas_remove(const tp_project *p, const char *atlas_sel, tp_operation *out,
                                    tp_selector_candidates *cand, tp_error *err);
 /* target.set: resolve `target_sel` within atlas `atlas_sel` -> target_id. */
 tp_status tp_op_build_target_set(const tp_project *p, const char *atlas_sel, const char *target_sel,

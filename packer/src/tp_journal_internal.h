@@ -214,8 +214,4 @@ size_t tp_journal_io_memory__sync_count(tp_journal_io io);
  * for the checksum-mismatch test). No-op if `at` is out of range. */
 void tp_journal_io_memory__poke(tp_journal_io io, size_t at, uint8_t val);
 
-/* Force the backing store's length to `len` (truncate to any byte boundary for the
- * short-write-at-every-boundary test). No-op if `len` exceeds the current length. */
-void tp_journal_io_memory__set_len(tp_journal_io io, size_t len);
-
 #endif /* TP_CORE_SRC_TP_JOURNAL_INTERNAL_H */

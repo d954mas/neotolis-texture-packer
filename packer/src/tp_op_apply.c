@@ -114,61 +114,6 @@ static tp_status sprite_set_rename(tp_project_atlas *atlas,
         atlas, source_id, src_key, name);
 }
 
-/* ---- override field set / clear ----------------------------------------- */
-static void sprite_apply_set(tp_project_sprite *s, const tp_op_sprite_set *o) {
-    if (o->mask & TP_SPF_ORIGIN) {
-        s->origin_x = o->origin_x;
-        s->origin_y = o->origin_y;
-    }
-    if (o->mask & TP_SPF_SLICE9) {
-        for (int k = 0; k < 4; k++) {
-            s->slice9_lrtb[k] = (uint16_t)o->slice9[k];
-        }
-    }
-    if (o->mask & TP_SPF_SHAPE) {
-        s->ov_shape = (int16_t)o->ov_shape;
-    }
-    if (o->mask & TP_SPF_ALLOW_ROTATE) {
-        s->ov_allow_rotate = (int16_t)o->ov_allow_rotate;
-    }
-    if (o->mask & TP_SPF_MAX_VERTICES) {
-        s->ov_max_vertices = (int16_t)o->ov_max_vertices;
-    }
-    if (o->mask & TP_SPF_MARGIN) {
-        s->ov_margin = (int16_t)o->ov_margin;
-    }
-    if (o->mask & TP_SPF_EXTRUDE) {
-        s->ov_extrude = (int16_t)o->ov_extrude;
-    }
-}
-
-static void sprite_apply_clear(tp_project_sprite *s, uint32_t mask) {
-    if (mask & TP_SPF_ORIGIN) {
-        s->origin_x = TP_PROJECT_ORIGIN_DEFAULT;
-        s->origin_y = TP_PROJECT_ORIGIN_DEFAULT;
-    }
-    if (mask & TP_SPF_SLICE9) {
-        for (int k = 0; k < 4; k++) {
-            s->slice9_lrtb[k] = 0;
-        }
-    }
-    if (mask & TP_SPF_SHAPE) {
-        s->ov_shape = TP_PROJECT_OV_INHERIT;
-    }
-    if (mask & TP_SPF_ALLOW_ROTATE) {
-        s->ov_allow_rotate = TP_PROJECT_OV_INHERIT;
-    }
-    if (mask & TP_SPF_MAX_VERTICES) {
-        s->ov_max_vertices = TP_PROJECT_OV_INHERIT;
-    }
-    if (mask & TP_SPF_MARGIN) {
-        s->ov_margin = TP_PROJECT_OV_INHERIT;
-    }
-    if (mask & TP_SPF_EXTRUDE) {
-        s->ov_extrude = TP_PROJECT_OV_INHERIT;
-    }
-}
-
 /* ---- animation.create / .frames.set staging ------------------------------ *
  * Build every frame in a staging array (through the fault seam) BEFORE touching
  * the model. On any allocation failure, free the partial staging and return OOM --
@@ -309,38 +254,9 @@ tp_status tp_op__apply_prevalidated(tp_project *p, const tp_operation *op,
             st = tp_project_set_atlas_name(atlas_by_id(p, op->atlas_id), op->u.atlas_rename.name);
             break;
         case TP_OP_ATLAS_SETTINGS_SET: {
-            tp_project_atlas *a = atlas_by_id(p, op->atlas_id);
             const tp_op_atlas_settings *s = &op->u.atlas_settings;
-            if (s->mask & TP_AF_MAX_SIZE) {
-                a->max_size = s->max_size;
-            }
-            if (s->mask & TP_AF_PADDING) {
-                a->padding = s->padding;
-            }
-            if (s->mask & TP_AF_MARGIN) {
-                a->margin = s->margin;
-            }
-            if (s->mask & TP_AF_EXTRUDE) {
-                a->extrude = s->extrude;
-            }
-            if (s->mask & TP_AF_ALPHA_THRESHOLD) {
-                a->alpha_threshold = s->alpha_threshold;
-            }
-            if (s->mask & TP_AF_MAX_VERTICES) {
-                a->max_vertices = s->max_vertices;
-            }
-            if (s->mask & TP_AF_SHAPE) {
-                a->shape = s->shape;
-            }
-            if (s->mask & TP_AF_ALLOW_TRANSFORM) {
-                a->allow_transform = s->allow_transform;
-            }
-            if (s->mask & TP_AF_POWER_OF_TWO) {
-                a->power_of_two = s->power_of_two;
-            }
-            if (s->mask & TP_AF_PIXELS_PER_UNIT) {
-                a->pixels_per_unit = s->pixels_per_unit;
-            }
+            tp_op__fields_apply(TP_FIELD_FAMILY_ATLAS, s, s->mask,
+                                atlas_by_id(p, op->atlas_id));
             st = TP_STATUS_OK;
             break;
         }
@@ -376,7 +292,8 @@ tp_status tp_op__apply_prevalidated(tp_project *p, const tp_operation *op,
             st = sprite_add(a, op->u.sprite_set.source_id,
                             op->u.sprite_set.src_key, &s);
             if (st == TP_STATUS_OK) {
-                sprite_apply_set(s, &op->u.sprite_set);
+                tp_op__fields_apply(TP_FIELD_FAMILY_SPRITE, &op->u.sprite_set,
+                                    op->u.sprite_set.mask, s);
                 (void)sprite_prune(a, op->u.sprite_set.source_id,
                                    op->u.sprite_set.src_key);
             }
@@ -395,7 +312,8 @@ tp_status tp_op__apply_prevalidated(tp_project *p, const tp_operation *op,
                     a, op->u.sprite_clear.source_id,
                     op->u.sprite_clear.src_key);
                 if (s) {
-                    sprite_apply_clear(s, op->u.sprite_clear.mask);
+                    tp_op__fields_clear(TP_FIELD_FAMILY_SPRITE,
+                                        op->u.sprite_clear.mask, s);
                     (void)sprite_prune(a, op->u.sprite_clear.source_id,
                                        op->u.sprite_clear.src_key);
                 }
@@ -421,21 +339,11 @@ tp_status tp_op__apply_prevalidated(tp_project *p, const tp_operation *op,
             st = apply_anim_rename(atlas_by_id(p, op->atlas_id), &op->u.anim_rename);
             break;
         case TP_OP_ANIMATION_SETTINGS_SET: {
-            tp_project_anim *an = tp_project_atlas_find_animation_by_id(atlas_by_id(p, op->atlas_id),
-                                                                       op->u.anim_settings.anim_id);
             const tp_op_anim_settings *s = &op->u.anim_settings;
-            if (s->mask & TP_ANF_FPS) {
-                an->fps = s->fps;
-            }
-            if (s->mask & TP_ANF_PLAYBACK) {
-                an->playback = s->playback;
-            }
-            if (s->mask & TP_ANF_FLIP_H) {
-                an->flip_h = s->flip_h;
-            }
-            if (s->mask & TP_ANF_FLIP_V) {
-                an->flip_v = s->flip_v;
-            }
+            tp_op__fields_apply(
+                TP_FIELD_FAMILY_ANIM, s, s->mask,
+                tp_project_atlas_find_animation_by_id(
+                    atlas_by_id(p, op->atlas_id), s->anim_id));
             st = TP_STATUS_OK;
             break;
         }
@@ -530,9 +438,7 @@ tp_status tp_op__apply_prevalidated(tp_project *p, const tp_operation *op,
                 free(t->out_path);
                 t->out_path = new_op;
             }
-            if (s->mask & TP_TF_ENABLED) {
-                t->enabled = s->enabled;
-            }
+            tp_op__fields_apply(TP_FIELD_FAMILY_TARGET, s, s->mask, t); /* the scalar half */
             st = TP_STATUS_OK;
             break;
         }

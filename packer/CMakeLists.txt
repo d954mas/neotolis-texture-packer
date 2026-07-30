@@ -13,13 +13,16 @@ add_library(tp_core STATIC
     src/tp_arena.c src/tp_fs_io.c src/tp_image.c src/tp_json_internal.c src/tp_utf8.c src/tp_names.c src/tp_name_map.c src/tp_pack_read.c src/tp_project.c src/tp_project_parse.c src/tp_project_path.c src/tp_project_save.c src/tp_project_write.c src/tp_project_pack_bridge.c
     src/tp_pack_settings.c src/tp_pack_constraints.c src/tp_transform.c src/tp_scan.c src/tp_input.c src/tp_validate.c src/tp_validate_index.c src/tp_validate_report.c src/tp_validate_source.c src/tp_validate_sprite.c src/tp_validate_target_settings.c
     # F3-03: canonical semantic pack_input_hash + per-file image-hash cache, and
-    # the memory-only hash-keyed result store (byte-budget LRU + selection).
+    # the memory-only hash-keyed result store (byte-budget LRU + selection +
+    # the S28 compressed cold tier).
     src/tp_pack_hash.c src/tp_pack_result_cache.c
     src/tp_export.c src/tp_normalize.c src/tp_export_png.c src/tp_export_json_neotolis.c
     src/tp_export_defold.c
     # Project identity, canonical paths, leases, source plans, and recovery.
     src/tp_id.c src/tp_identity.c src/tp_identity_session.c src/tp_source_path_text.c src/tp_source_plan.c
     src/tp_project_lease.c src/tp_recovery.c src/tp_recovery_store.c src/tp_recovery_claim.c src/tp_recovery_scan.c
+    # Latching producer side of tp_cancel_token over a destructive-read channel.
+    src/tp_cancel_source.c
     # Fixed client capability vocabulary and matrix.
     src/tp_client_capability.c
     # Canonical schema identity assignment and validation.
@@ -34,7 +37,7 @@ add_library(tp_core STATIC
     src/tp_idset.c
     src/tp_project_clone.c src/tp_semantic.c src/tp_txn_idset.c src/tp_model.c src/tp_model_journal.c src/tp_txn_result.c src/tp_txn_apply.c
     # Synchronous orchestration and the owned immutable snapshot boundary.
-    src/tp_session.c src/tp_session_snapshot.c src/tp_session_snapshot_query.c src/tp_project_generation.c
+    src/tp_session.c src/tp_session_observation.c src/tp_session_job_observation.c src/tp_session_snapshot.c src/tp_session_snapshot_query.c src/tp_project_generation.c
     src/tp_txn_parse.c src/tp_txn_lower.c src/tp_txn_encode.c
     # Semantic diff, exact inverse/redo, and bounded in-memory history.
     src/tp_diff_entity.c src/tp_diff_capture.c src/tp_diff_apply.c src/tp_history_codec.c src/tp_history_codec_read.c src/tp_history.c
@@ -72,6 +75,12 @@ target_link_libraries(tp_core PUBLIC nt_shared nt_hash nt_log PRIVATE Threads::T
 # utf8proc (vendored, MIT) powers src/tp_srckey.c's NFC + case-fold. PRIVATE:
 # tp_srckey.h never exposes utf8proc types; its allocations are freed in-TU.
 target_link_libraries(tp_core PRIVATE cjson stb_image stb_image_write utf8proc)
+# miniz + tinycthread (both engine-vendored, no basisu, no nt_builder) power the
+# pack-result store's compressed cold tier (packet S28): raw deflate for the page
+# blobs, C11 threads for the one background encoder and the fork-join promote.
+# PRIVATE: tp_pack_result_cache.h exposes neither, and every buffer either library
+# touches is allocated and freed inside tp_pack_result_cache.c.
+target_link_libraries(tp_core PRIVATE miniz tinycthread)
 target_compile_definitions(tp_core PRIVATE _CRT_SECURE_NO_WARNINGS)
 # CRT: tp_core no longer links the static-CRT builder, so it DROPS -U_DLL and uses the
 # engine runtime's default CRT -- matching its own deps (nt_hash/nt_log/cjson) and the
@@ -91,7 +100,9 @@ nt_set_sanitizer_flags(tp_core)
 # pack re-execs the host in a hidden __build-worker mode so an nt_builder
 # abort/alloc/codec/write failure lands in a child, not the host.
 add_library(tp_build STATIC src/tp_pack.c src/tp_build_driver.c src/tp_build_proto.c
-    src/tp_build_worker.c src/tp_build_worker_main.c src/tp_export_run.c src/tp_job.c)
+    src/tp_build_worker.c src/tp_build_worker_main.c src/tp_export_run.c
+    src/tp_job.c src/tp_job_worker.c src/tp_job_worker_main.c
+    src/tp_job_worker_proto.c)
 if(WIN32)
     target_sources(tp_build PRIVATE src/tp_proc_win32.c)
 else()
@@ -103,10 +114,179 @@ endif()
 # failed (lld/ld64 don't care about order). nt_log repeated after nt_builder
 # as belt-and-suspenders against future reordering.
 target_link_libraries(tp_build PUBLIC nt_builder tp_core nt_log)
+if(NOT WIN32)
+    target_link_libraries(tp_build PRIVATE tinycthread)
+endif()
 target_compile_definitions(tp_build PRIVATE _CRT_SECURE_NO_WARNINGS)
 target_compile_options(tp_build PRIVATE -U_DLL)   # static CRT: match nt_builder (see apps/smoke)
 nt_set_warning_flags(tp_build)
 nt_set_sanitizer_flags(tp_build)
 
 enable_testing()
+
+# --- Boundary checkers: ONE launch mechanism ------------------------------------
+# Both boundary gates are ctests, so `ctest --preset <p>` is the single entry point
+# on every platform and neither gate needs a bespoke CI step. The grep gate
+# (scripts/check_boundaries.sh, rule ids R1..R22) needs a POSIX shell; bash is
+# present on all three CI runners. A machine without bash still configures -- but
+# the gate is registered as a FAILING stand-in there (fail-closed), so the missing
+# prerequisite is a red tp_boundaries_grep at ctest time instead of R1..R22
+# silently vanishing from the test list.
+find_program(TP_BASH NAMES bash)
+if(TP_BASH)
+    add_test(NAME tp_boundaries_grep
+        COMMAND "${TP_BASH}" "${CMAKE_SOURCE_DIR}/scripts/check_boundaries.sh")
+    # The script is a POSIX shell program: it needs grep/sed/awk/find/xargs/
+    # mktemp, not just an interpreter. A non-login bash inherits the caller's
+    # PATH verbatim, so on a plain Windows shell the gate either dies on
+    # "grep: command not found" or, worse, resolves Windows' System32 find.exe
+    # instead of GNU find. The toolbox always ships in the same directory as
+    # the bash we just located (Git for Windows usr/bin, /usr/bin or /bin on
+    # POSIX), so prepend exactly that directory -- no login shell (whose
+    # profile may cd elsewhere and defeat WORKING_DIRECTORY), no PATH probing,
+    # and no cost at run time. A genuinely missing bash still lands in the
+    # fail-closed stand-in below.
+    get_filename_component(TP_BASH_TOOL_DIR "${TP_BASH}" DIRECTORY)
+    set_tests_properties(tp_boundaries_grep PROPERTIES
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+        LABELS "architecture"
+        ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${TP_BASH_TOOL_DIR}")
+else()
+    # The stand-in prints the reason and FAIL_REGULAR_EXPRESSION turns that
+    # output into a test failure (cmake -E echo itself exits 0), keeping the
+    # command portable with zero shell dependencies.
+    add_test(NAME tp_boundaries_grep
+        COMMAND "${CMAKE_COMMAND}" -E echo
+            "bash not found: scripts/check_boundaries.sh (R1..R22) cannot run on this machine. Install bash so the boundary gate can execute.")
+    set_tests_properties(tp_boundaries_grep PROPERTIES
+        LABELS "architecture"
+        FAIL_REGULAR_EXPRESSION "bash not found")
+endif()
+
+# The CMake gate (rule ids A1a..A6) owns the view/core/async structural rules.
+set(TP_ARCHITECTURE_CHECK
+    "${CMAKE_SOURCE_DIR}/cmake/check_architecture_boundaries.cmake")
+add_test(NAME tp_architecture_boundaries
+    COMMAND "${CMAKE_COMMAND}"
+        "-DARCH_ROOT=${CMAKE_SOURCE_DIR}"
+        -P "${TP_ARCHITECTURE_CHECK}")
+set_tests_properties(tp_architecture_boundaries PROPERTIES
+    LABELS "architecture")
+
+foreach(TP_ARCH_RULE IN ITEMS
+        VIEW_ADMISSION
+        VIEW_ACTION_STATE
+        VIEW_IO
+        VIEW_PLATFORM
+        VIEW_MODEL_POLICY
+        CORE_FRONTEND
+        ASYNC_RAW_SESSION
+        HOST_QUEUE_RAW_SESSION_STORAGE)
+    string(TOLOWER "${TP_ARCH_RULE}" TP_ARCH_FIXTURE)
+    add_test(NAME "tp_architecture_negative_${TP_ARCH_FIXTURE}"
+        COMMAND "${CMAKE_COMMAND}"
+            "-DARCH_ROOT=${CMAKE_SOURCE_DIR}"
+            "-DARCH_SCAN_ROOT=${CMAKE_SOURCE_DIR}/cmake/fixtures/architecture_boundaries/${TP_ARCH_FIXTURE}"
+            "-DARCH_EXPECT_RULE=${TP_ARCH_RULE}"
+            -P "${TP_ARCHITECTURE_CHECK}")
+    set_tests_properties("tp_architecture_negative_${TP_ARCH_FIXTURE}"
+        PROPERTIES LABELS "architecture")
+endforeach()
+
+foreach(TP_ARCH_CALL_FIXTURE IN ITEMS
+        view_admission
+        view_io
+        view_platform
+        view_model_policy
+        core_frontend)
+    string(TOUPPER "${TP_ARCH_CALL_FIXTURE}" TP_ARCH_CALL_RULE)
+    add_test(NAME "tp_architecture_negative_${TP_ARCH_CALL_FIXTURE}_call"
+        COMMAND "${CMAKE_COMMAND}"
+            "-DARCH_ROOT=${CMAKE_SOURCE_DIR}"
+            "-DARCH_SCAN_ROOT=${CMAKE_SOURCE_DIR}/cmake/fixtures/architecture_boundaries/${TP_ARCH_CALL_FIXTURE}_call"
+            "-DARCH_EXPECT_RULE=${TP_ARCH_CALL_RULE}"
+            -P "${TP_ARCHITECTURE_CHECK}")
+    set_tests_properties("tp_architecture_negative_${TP_ARCH_CALL_FIXTURE}_call"
+        PROPERTIES LABELS "architecture")
+endforeach()
+
+# Scan completeness, one fixture per scan kind. Every fixture seeds TWO
+# violations of a single rule and asserts the exact count: a scan that reports
+# only its first hit per file yields 1 and fails here. That count is the whole
+# point -- "a hit was reported" stays green while the rest of the file goes
+# unchecked, which is precisely how an allowed first site used to absorb every
+# later violation of the same family.
+foreach(TP_ARCH_ALL_FIXTURE IN ITEMS
+        # include directives
+        "view_platform_second_include|VIEW_PLATFORM"
+        # call sites
+        "view_io_second_call|VIEW_IO"
+        "view_platform_second_call|VIEW_PLATFORM"
+        "core_frontend_second_call|CORE_FRONTEND"
+        # declarators
+        "async_raw_session_second_declaration|ASYNC_RAW_SESSION"
+        "host_queue_second_member|HOST_QUEUE_RAW_SESSION_STORAGE"
+        # the lexical layer the scans above read: comments and literals must be
+        # removed in ONE pass, or a `'"'` character literal / a `//` inside a
+        # string silently blanks real code and every scan under-reports
+        "view_platform_quote_char_literal|VIEW_PLATFORM"
+        "view_io_comment_in_string|VIEW_IO")
+    string(REPLACE "|" ";" TP_ARCH_ALL_PARTS "${TP_ARCH_ALL_FIXTURE}")
+    list(GET TP_ARCH_ALL_PARTS 0 TP_ARCH_ALL_DIR)
+    list(GET TP_ARCH_ALL_PARTS 1 TP_ARCH_ALL_RULE)
+    add_test(NAME "tp_architecture_negative_${TP_ARCH_ALL_DIR}"
+        COMMAND "${CMAKE_COMMAND}"
+            "-DARCH_ROOT=${CMAKE_SOURCE_DIR}"
+            "-DARCH_SCAN_ROOT=${CMAKE_SOURCE_DIR}/cmake/fixtures/architecture_boundaries/${TP_ARCH_ALL_DIR}"
+            "-DARCH_EXPECT_RULE=${TP_ARCH_ALL_RULE}"
+            "-DARCH_EXPECT_HITS=2"
+            -P "${TP_ARCHITECTURE_CHECK}")
+    set_tests_properties("tp_architecture_negative_${TP_ARCH_ALL_DIR}"
+        PROPERTIES LABELS "architecture")
+endforeach()
+
+# Lexical fail-closed: a `/*` inside a string literal makes the include scan's
+# comment strip swallow real directives. The checker compares its directive
+# count against the correctly-lexed text and aborts rather than reporting "no
+# violations" for a file it cannot see. The fixture asserts that abort, so a
+# silent pass fails this test.
+add_test(NAME tp_architecture_negative_include_scan_lexical_desync
+    COMMAND "${CMAKE_COMMAND}"
+        "-DARCH_ROOT=${CMAKE_SOURCE_DIR}"
+        "-DARCH_SCAN_ROOT=${CMAKE_SOURCE_DIR}/cmake/fixtures/architecture_boundaries/include_scan_lexical_desync"
+        "-DARCH_EXPECT_RULE=VIEW_ADMISSION"
+        -P "${TP_ARCHITECTURE_CHECK}")
+set_tests_properties(tp_architecture_negative_include_scan_lexical_desync
+    PROPERTIES LABELS "architecture"
+    PASS_REGULAR_EXPRESSION "include scan lost a directive")
+
+# Role classification is not a hit-counted rule: an undeclared gui_view_* file
+# must abort the checker instead of being scanned as a non-view (the bypass
+# the P1 review demonstrated). The fixture asserts the abort message, so a
+# silent pass fails this test.
+add_test(NAME tp_architecture_negative_unclassified_view
+    COMMAND "${CMAKE_COMMAND}"
+        "-DARCH_ROOT=${CMAKE_SOURCE_DIR}"
+        "-DARCH_SCAN_ROOT=${CMAKE_SOURCE_DIR}/cmake/fixtures/architecture_boundaries/unclassified_view"
+        "-DARCH_EXPECT_RULE=VIEW_ADMISSION"
+        -P "${TP_ARCHITECTURE_CHECK}")
+set_tests_properties(tp_architecture_negative_unclassified_view PROPERTIES
+    LABELS "architecture"
+    PASS_REGULAR_EXPRESSION "unclassified view TU: apps/gui/gui_view_ghost\\.c")
+
+# A6 seam-fence walker fixture: a COMPOUND guard condition
+# (#if defined(TP_ENABLE_TEST_SEAMS) || ...) is not a fence -- it can compile
+# the seam into every build -- so the walker must report the symbol under it as
+# unfenced. The fixture asserts that exact abort message; a silent pass (the
+# walker accepting the compound form) fails this test.
+add_test(NAME tp_architecture_negative_seam_fence_compound
+    COMMAND "${CMAKE_COMMAND}"
+        "-DARCH_ROOT=${CMAKE_SOURCE_DIR}"
+        "-DARCH_SCAN_ROOT=${CMAKE_SOURCE_DIR}/cmake/fixtures/architecture_boundaries/seam_fence_compound"
+        "-DARCH_EXPECT_RULE=SEAM_FENCE"
+        -P "${TP_ARCHITECTURE_CHECK}")
+set_tests_properties(tp_architecture_negative_seam_fence_compound PROPERTIES
+    LABELS "architecture"
+    PASS_REGULAR_EXPRESSION "OUTSIDE a #ifdef TP_ENABLE_TEST_SEAMS fence")
+
 add_subdirectory(tests)

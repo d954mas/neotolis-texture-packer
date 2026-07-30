@@ -56,8 +56,9 @@ static tp_status validate_sprite_set(const tp_project_atlas *atlas,
         static const char *const fields[4] = {
             "slice9_l", "slice9_r", "slice9_t", "slice9_b"};
         for (int i = 0; i < 4; i++) {
-            if ((st = range_i(rej, fields[i], s->slice9[i], 0,
-                              UINT16_MAX)) != TP_STATUS_OK) {
+            if ((st = range_i(rej, fields[i], s->slice9[i],
+                              TP_PROJECT_SLICE9_MIN,
+                              TP_PROJECT_SLICE9_MAX)) != TP_STATUS_OK) {
                 return st;
             }
         }
@@ -101,14 +102,16 @@ static tp_status validate_sprite_set(const tp_project_atlas *atlas,
         s->ov_max_vertices != TP_PROJECT_OV_INHERIT &&
         facts.max_vertices_not_wire_representable) {
         return tp_op__reject(rej, TP_STATUS_OUT_OF_RANGE, "ov_max_vertices",
-                             "ov_max_vertices = %d must be in [1..%d]",
-                             s->ov_max_vertices, TP_PACK_MAX_VERTICES);
+                             "ov_max_vertices = %d must be in [%d..%d]",
+                             s->ov_max_vertices, TP_PACK_MIN_VERTICES,
+                             TP_PACK_MAX_VERTICES);
     }
     if ((s->mask & TP_SPF_MARGIN) && s->ov_margin != TP_PROJECT_OV_INHERIT &&
         facts.margin_not_wire_representable) {
         return tp_op__reject(
             rej, TP_STATUS_OUT_OF_RANGE, "ov_margin",
-            "ov_margin = %d must be in [1..%d]", s->ov_margin, UINT8_MAX);
+            "ov_margin = %d must be in [%d..%d]", s->ov_margin,
+            TP_PACK_SPRITE_SPACING_MIN, TP_PACK_SPRITE_SPACING_MAX);
     }
     if ((s->mask & TP_SPF_MARGIN) &&
         s->ov_margin != TP_PROJECT_OV_INHERIT &&
@@ -122,8 +125,8 @@ static tp_status validate_sprite_set(const tp_project_atlas *atlas,
         facts.extrude_not_wire_representable) {
         return tp_op__reject(
             rej, TP_STATUS_OUT_OF_RANGE, "ov_extrude",
-            "ov_extrude = %d must be in [1..%d]", s->ov_extrude,
-            UINT8_MAX);
+            "ov_extrude = %d must be in [%d..%d]", s->ov_extrude,
+            TP_PACK_SPRITE_SPACING_MIN, TP_PACK_SPRITE_SPACING_MAX);
     }
     if ((s->mask & TP_SPF_EXTRUDE) &&
         s->ov_extrude != TP_PROJECT_OV_INHERIT &&

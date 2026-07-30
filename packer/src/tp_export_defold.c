@@ -4,9 +4,11 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "tp_export_geom.h"
 #include "tp_fs_internal.h"
+#include "tp_strutil.h" /* shared tp_path_basename (one core definition) */
 
-#include "tp_sb.h"
+#include "tp_core/tp_sb.h"
 
 /* Defold exporter: emits the extension-texturepacker `.tpinfo` (packed layout,
  * protobuf TEXT format) + a starter `.tpatlas` (animation wrapper) + straight-
@@ -44,19 +46,6 @@
 /* ------------------------------------------------------------------ */
 /* helpers                                                            */
 /* ------------------------------------------------------------------ */
-
-/* Basename of a '/'- or '\\'-separated path (page/tpinfo files sit next to the
- * .tpatlas; bob resolves page `name` and the .tpatlas `file` relative to their
- * own directory -- verified against AtlasBuilder.java 2.7.0). */
-static const char *path_basename(const char *p) {
-    const char *base = p;
-    for (const char *c = p; *c; c++) {
-        if (*c == '/' || *c == '\\') {
-            base = c + 1;
-        }
-    }
-    return base;
-}
 
 /* True if a regular, non-reparse file exists at `path`. */
 static bool file_probe(const char *path) {
@@ -121,39 +110,6 @@ static bool resolve_tpatlas_file_ref(const char *out_path_base, const char *tpin
     }
     (void)snprintf(out, out_sz, "%s.tpinfo", tpinfo_basename);
     return false;
-}
-
-/* True when the sprite's hull is exactly the axis-aligned trim quad (a plain
- * RECT) -- then the canonical source-rect quad is emitted, not the hull mesh.
- * Mirrors the json-neotolis writer's test (verts are trim-local, 0..frame.w/h). */
-static bool is_rect_quad(const tp_sprite *s) {
-    if (s->vert_count != 4 || !s->verts) {
-        return false;
-    }
-    int w = s->frame.w;
-    int h = s->frame.h;
-    bool seen[4] = {false, false, false, false};
-    for (int i = 0; i < 4; i++) {
-        int x = s->verts[i].x;
-        int y = s->verts[i].y;
-        int ci;
-        if (x == 0 && y == 0) {
-            ci = 0;
-        } else if (x == w && y == 0) {
-            ci = 1;
-        } else if (x == 0 && y == h) {
-            ci = 2;
-        } else if (x == w && y == h) {
-            ci = 3;
-        } else {
-            return false;
-        }
-        if (seen[ci]) {
-            return false;
-        }
-        seen[ci] = true;
-    }
-    return true;
 }
 
 /* Our stable playback id -> Defold Playback enum token. The stable enum is pinned
@@ -347,7 +303,7 @@ static void emit_sprite(tp_sb *sb, int depth, const tp_export_prepared *prep, co
         solid = region_is_solid(&r->pages[s->page], s->frame.x, s->frame.y, foot_w, foot_h);
     }
 
-    bool poly = (s->vert_count > 0 && !is_rect_quad(s));
+    bool poly = (s->vert_count > 0 && !tp_export_is_rect_quad(s));
     if (poly && !caps->polygons) {
         if (notices) {
             (void)tp_export_notice_add_ex(notices, TP_NOTICE_FIELD_POLYGON, TP_NOTICE_REASON_CAPS_UNSUPPORTED,
@@ -522,48 +478,55 @@ static tp_status write_text(const char *base, const char *ext, const tp_sb *sb, 
     return TP_STATUS_OK;
 }
 
-tp_status tp_export_defold_write(const tp_export_prepared *prep, const tp_export_caps *caps, const char *out_path_base,
-                                 tp_export_notices *notices, tp_error *err) {
-    if (!prep || !caps || !out_path_base) {
-        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "defold: NULL prep/caps/out_path_base");
+tp_status tp_export_defold_write(const tp_export_write_ctx *ctx, tp_error *err) {
+    if (!ctx || !ctx->prep || !ctx->caps || !ctx->write_path_base || !ctx->out_path_base) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "defold: incomplete write context");
     }
+    const tp_export_prepared *prep = ctx->prep;
+    const char *write_base = ctx->write_path_base;
+    tp_export_notices *notices = ctx->notices;
 
-    tp_status st = tp_export_defold_list_outputs(prep, out_path_base, ignore_output_path, NULL, err);
+    tp_status st = tp_export_defold_list_outputs(prep, write_base, ignore_output_path, NULL, err);
     if (st != TP_STATUS_OK) {
         return st;
     }
 
     /* Page PNGs: straight-alpha (Defold texture profiles premultiply at build). */
-    st = tp_export_write_pages(prep->result, out_path_base, false, err);
+    st = tp_export_write_pages(prep->result, write_base, false, err);
     if (st != TP_STATUS_OK) {
         return st;
     }
 
-    const char *base = path_basename(out_path_base);
+    /* Page/tpinfo files sit next to the .tpatlas; bob resolves page `name` and the
+     * .tpatlas `file` relative to their own directory (AtlasBuilder.java 2.7.0).
+     * Both references describe where the atlas will BE, so they are derived from
+     * the published base -- staging shares its basename, and the game.project
+     * walk must climb the real output tree, not the staging dir. */
+    const char *base = tp_path_basename(ctx->out_path_base);
 
     tp_sb info = {0};
-    st = emit_tpinfo(&info, prep, caps, base, notices, err);
+    st = emit_tpinfo(&info, prep, ctx->caps, base, notices, err);
     if (st != TP_STATUS_OK) {
         free(info.buf);
         return st;
     }
-    st = write_text(out_path_base, ".tpinfo", &info, err);
+    st = write_text(write_base, ".tpinfo", &info, err);
     free(info.buf);
     if (st != TP_STATUS_OK) {
         return st;
     }
 
     char tpinfo_ref[TP_DEFOLD_PATH_MAX];
-    if (!resolve_tpatlas_file_ref(out_path_base, base, tpinfo_ref, sizeof tpinfo_ref) && notices) {
+    if (!resolve_tpatlas_file_ref(ctx->out_path_base, base, tpinfo_ref, sizeof tpinfo_ref) && notices) {
         (void)tp_export_notice_addf(
             notices,
             "could not locate game.project above '%s' -- .tpatlas 'file' reference '%s' may not resolve in Defold "
             "(expected a project-absolute \"/path/%s\")",
-            out_path_base, tpinfo_ref, tpinfo_ref);
+            ctx->out_path_base, tpinfo_ref, tpinfo_ref);
     }
     tp_sb atlas = {0};
     emit_tpatlas(&atlas, prep, tpinfo_ref, notices);
-    st = write_text(out_path_base, ".tpatlas", &atlas, err);
+    st = write_text(write_base, ".tpatlas", &atlas, err);
     free(atlas.buf);
     return st;
 }

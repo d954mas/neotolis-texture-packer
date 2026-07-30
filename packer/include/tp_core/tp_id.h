@@ -84,9 +84,6 @@ typedef enum tp_id_kind {
  * (never a const size_t: macos -Wgnu-folding-constant rejects that as a VLA). */
 #define TP_ID_TEXT_CAP 40
 
-/* "atlas_"/"source_"/"anim_"/"target_", or "" for INVALID. */
-const char *tp_id_kind_prefix(tp_id_kind kind);
-
 /* Canonical text: <prefix> + 32 LOWERCASE hex. `cap` must be >= TP_ID_TEXT_CAP.
  * Rejects TP_ID_KIND_INVALID -> TP_STATUS_ID_MALFORMED; a too-small buffer ->
  * TP_STATUS_OUT_OF_BOUNDS; NULL out -> TP_STATUS_INVALID_ARGUMENT. Formats the

@@ -11,6 +11,7 @@
 
 #define _CRT_SECURE_NO_WARNINGS
 
+#include <locale.h>
 #include <math.h>
 #include <stdbool.h>
 #include <stdarg.h>
@@ -36,10 +37,13 @@
 #include "tp_core/tp_pack.h"
 #include "tp_core/tp_project.h"
 #include "tp_core/tp_transaction.h"
+#include "tp_ascii.h" /* shared locale-free fold -- same code production uses (drift guard) */
 #include "tp_project_identity_internal.h"
 #include "unity.h"
 #include "../src/tp_project_internal.h"
 #include "tp_project_mutation_internal.h"
+#include "tp_project_parse_internal.h" /* tp_project_json_admit: the production admission entry */
+#include "tp_project_path_internal.h"  /* tp_relativize: the production save-path relativizer */
 
 void setUp(void) {
     tp_project__test_serialization_stats_reset();
@@ -184,7 +188,7 @@ void test_json_admission_exact_limits_and_escaped_punctuation(void) {
     };
     tp_error error = {{0}};
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
-                          tp_project__test_json_admit(
+                          tp_project_json_admit(
                               json, sizeof json - 1U, &limits, &error));
 }
 
@@ -199,7 +203,7 @@ void test_json_admission_rejects_nodes_entries_and_depth(void) {
         sizeof node_bomb - 1U, 7U, 3U, 2U,
     };
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OUT_OF_BOUNDS,
-                          tp_project__test_json_admit(
+                          tp_project_json_admit(
                               node_bomb, sizeof node_bomb - 1U,
                               &node_limits, &error));
 
@@ -208,7 +212,7 @@ void test_json_admission_rejects_nodes_entries_and_depth(void) {
     };
     memset(&error, 0, sizeof error);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OUT_OF_BOUNDS,
-                          tp_project__test_json_admit(
+                          tp_project_json_admit(
                               node_bomb, sizeof node_bomb - 1U,
                               &entry_limits, &error));
 
@@ -217,7 +221,7 @@ void test_json_admission_rejects_nodes_entries_and_depth(void) {
     };
     memset(&error, 0, sizeof error);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OUT_OF_BOUNDS,
-                          tp_project__test_json_admit(
+                          tp_project_json_admit(
                               depth_bomb, sizeof depth_bomb - 1U,
                               &depth_limits, &error));
 }
@@ -2212,30 +2216,117 @@ void test_relativize_is_unc_aware_reentrant_and_component_unbounded(void) {
     }
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
-        tp_project__test_relativize(absolute, "/foundation/base", relative,
+        tp_relativize(absolute, "/foundation/base", relative,
                                     sizeof relative));
     TEST_ASSERT_EQUAL_STRING(expected, relative);
 
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
-        tp_project__test_relativize(
+        tp_relativize(
             "//Server/Share/project/assets/hero.png",
             "//server/share/project", relative, sizeof relative));
     TEST_ASSERT_EQUAL_STRING("assets/hero.png", relative);
 
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
-        tp_project__test_relativize(
+        tp_relativize(
             "//server/other/assets/hero.png", "//server/share/project",
             relative, sizeof relative));
     TEST_ASSERT_EQUAL_STRING("//server/other/assets/hero.png", relative);
 
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
-        tp_project__test_relativize("//other/share/assets/hero.png",
+        tp_relativize("//other/share/assets/hero.png",
                                     "//server/share/project", relative,
                                     sizeof relative));
     TEST_ASSERT_EQUAL_STRING("//other/share/assets/hero.png", relative);
+}
+
+/* Spec §4.3 determinism: path identity carries no locale input. The shared
+ * ASCII fold classifies and folds by explicit range, so no LC_CTYPE can move a
+ * byte into a different equivalence class -- a drive root still compares
+ * case-insensitively over ASCII only, and a high byte that a single-byte locale
+ * calls a cased letter is still not a drive letter.
+ *
+ * Failures are recorded and reported after the locale is restored: an assert
+ * fired inside the loop would longjmp out and leave the whole test binary in a
+ * foreign LC_CTYPE. */
+void test_path_folding_is_locale_independent(void) {
+    static const char *const locales[] = {
+        "C",
+        "tr_TR.ISO-8859-9", "tr_TR.UTF-8", "Turkish",
+        "de_DE.ISO-8859-1", "de_DE.UTF-8", "German",
+        "en_US.ISO-8859-1", "en_US.ISO8859-1", ".1252",
+    };
+    const char *const current = setlocale(LC_CTYPE, NULL);
+    char saved[128];
+    (void)snprintf(saved, sizeof saved, "%s", current ? current : "C");
+
+    unsigned applied = 0U;
+    char failure[256];
+    failure[0] = '\0';
+
+    for (size_t i = 0U; i < sizeof locales / sizeof locales[0]; i++) {
+        if (!setlocale(LC_CTYPE, locales[i])) {
+            continue; /* not installed on this platform */
+        }
+        applied++;
+
+        for (unsigned c = 0U; c <= 0xFFU; c++) {
+            const unsigned char byte = (unsigned char)c;
+            const bool alpha =
+                (byte >= 'A' && byte <= 'Z') || (byte >= 'a' && byte <= 'z');
+            const unsigned char lower =
+                (byte >= 'A' && byte <= 'Z')
+                    ? (unsigned char)(byte + ('a' - 'A'))
+                    : byte;
+            if (tp_ascii_is_alpha(byte) == alpha &&
+                tp_ascii_tolower(byte) == lower) {
+                continue;
+            }
+            if (failure[0] == '\0') {
+                (void)snprintf(failure, sizeof failure,
+                               "byte 0x%02X classifies or folds differently "
+                               "under LC_CTYPE=%s",
+                               c, locales[i]);
+            }
+        }
+
+        char relative[TP_IDENTITY_PATH_MAX] = {0};
+        if (tp_relativize("C:/proj/assets/hero.png", "c:/proj",
+                                        relative, sizeof relative) !=
+                TP_STATUS_OK ||
+            strcmp(relative, "assets/hero.png") != 0) {
+            if (failure[0] == '\0') {
+                (void)snprintf(failure, sizeof failure,
+                               "drive root lost ASCII case-insensitivity under "
+                               "LC_CTYPE=%s (got '%s')",
+                               locales[i], relative);
+            }
+        }
+
+        /* 0xC9/0xE9 are a cased letter pair in Latin-1 locales and nothing at
+         * all in ASCII. Neither path may acquire a drive root, so the two
+         * differ from their first component onward. */
+        relative[0] = '\0';
+        if (tp_relativize("\xC9:/proj/hero.png", "\xE9:/proj",
+                                        relative, sizeof relative) !=
+                TP_STATUS_OK ||
+            strcmp(relative, "../../\xC9:/proj/hero.png") != 0) {
+            if (failure[0] == '\0') {
+                (void)snprintf(failure, sizeof failure,
+                               "a high byte was read as a drive letter under "
+                               "LC_CTYPE=%s (got '%s')",
+                               locales[i], relative);
+            }
+        }
+    }
+
+    TEST_ASSERT_NOT_NULL(setlocale(LC_CTYPE, saved));
+    TEST_ASSERT_GREATER_THAN_UINT(0U, applied);
+    if (failure[0] != '\0') {
+        TEST_FAIL_MESSAGE(failure);
+    }
 }
 
 int main(int argc, char **argv) {
@@ -2307,5 +2398,6 @@ int main(int argc, char **argv) {
     RUN_TEST(test_core_owns_animation_and_target_defaults_without_truncation);
     RUN_TEST(test_target_exporter_id_bound_is_enforced_at_model_and_load_boundaries);
     RUN_TEST(test_relativize_is_unc_aware_reentrant_and_component_unbounded);
+    RUN_TEST(test_path_folding_is_locale_independent);
     return UNITY_END();
 }

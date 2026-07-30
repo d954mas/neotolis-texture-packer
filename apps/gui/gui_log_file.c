@@ -3,7 +3,6 @@
 /* libc first (before the vendored/engine headers) -- matches gui_pack.c; on macOS clang a vendored
  * header pulling <stdio.h> first otherwise leaves snprintf undeclared here (implicit-decl = hard error). */
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
@@ -174,10 +173,11 @@ void gui_log_file_install(void) {
     if (s_active) {
         return;
     }
-    /* Headless CI (GUI selftest #50) must not need a writable app-data dir -> no file logging at all. */
-    if (getenv("NTPACKER_GUI_HEADLESS") != NULL) {
-        return;
-    }
+#ifdef NTPACKER_GUI_HEADLESS_CI
+    /* Headless CI (GUI selftest #50) must not need a writable app-data dir -> no file logging at all.
+     * Compile-time (CMake option NTPACKER_GUI_HEADLESS_CI): the shipped binary reads no environment. */
+    return;
+#endif
     char root[GUI_PATHS_MAX];
     if (!gui_paths_app_data_root(root, sizeof root)) {
         return;

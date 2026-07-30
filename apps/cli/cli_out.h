@@ -7,32 +7,18 @@
 
 #include "tp_core/tp_error.h"
 #include "tp_core/tp_id.h"
+#include "tp_core/tp_sb.h"
 
 struct tp_session_save_result;
 struct tp_txn_result;
 
-/* Minimal local JSON/text string builder for the CLI. Deliberately NOT
- * packer/src/tp_sb.h -- that is a tp_core-PRIVATE header and apps/ must not
- * reach into src/. Same output conventions (LF, %.9g floats, escaped strings).
- * Whether a public tp_core JSON writer is warranted is revisited in B3. */
-typedef struct cli_sb {
-    char *buf;
-    size_t len;
-    size_t cap;
-    bool oom; /* sticky: a failed grow poisons the builder; callers check before emit */
-} cli_sb;
-
-void cli_sb_free(cli_sb *sb);
-void cli_sb_putc(cli_sb *sb, char c);
-void cli_sb_str(cli_sb *sb, const char *s);
-void cli_sb_int(cli_sb *sb, long v);
-void cli_sb_size(cli_sb *sb, size_t v);
-void cli_sb_num(cli_sb *sb, double v);           /* %.9g; relies on LC_NUMERIC="C" (main) */
-void cli_sb_json_str(cli_sb *sb, const char *s); /* quoted + JSON-escaped */
-void cli_sb_indent(cli_sb *sb, int depth);       /* 2 spaces per depth level */
+/* CLI payloads are built with the shared tp_core writer (tp_core/tp_sb.h), so
+ * --json output escapes, sanitizes, and formats numbers exactly like every other
+ * machine-facing document the tool emits. `oom` is sticky: a failed grow poisons
+ * the builder and callers check it before emitting. */
 
 /* Writes sb's bytes to stdout followed by one trailing newline. */
-void cli_out_stdout(const cli_sb *sb);
+void cli_out_stdout(const tp_sb *sb);
 
 #if defined(__GNUC__) || defined(__clang__)
 #define CLI_PRINTF_ATTR(f, a) __attribute__((format(printf, f, a)))

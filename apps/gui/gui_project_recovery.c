@@ -4,8 +4,10 @@
 #include <string.h>
 #include <time.h>
 
+#include "core/nt_assert.h"
 #include "tp_core/tp_id.h"
 #include "tp_core/tp_recovery.h"
+#include "tp_core/tp_session.h"
 static int64_t recovery_now(void) {
     return (int64_t)time(NULL);
 }
@@ -23,7 +25,7 @@ static tp_id128 recovery_key(void) {
  * from the drainable operation-rejection channel: editing and Undo stay live. */
 void gui_project__note_recovery_degraded(tp_status status) {
     const tp_session_recovery_health health =
-        tp_session_recovery_health_query(s_project.session);
+        tp_session_recovery_health_query(gui_project__borrow_active_session());
     s_project.recovery_notice_active = true;
     s_project.recovery_notice.notice_id = health.notice_id;
     s_project.recovery_notice.generation = health.generation;
@@ -55,51 +57,146 @@ static bool recovery_configured(void) {
     return s_project.recovery_root[0] != '\0';
 }
 
-/* Attach one shared live recovery owner after the session identity is final.
- * The session owns the handle on every accepted attach path, including degraded
- * filesystem outcomes; GUI retains only configuration and presentation state. */
-void gui_project__attach_recovery_live(tp_session *session) {
-    if (!session) {
-        return;
+static const char *snapshot_project_name(
+    const tp_session_snapshot *snapshot,
+    char *out, size_t capacity) {
+    const tp_session_identity identity =
+        tp_session_snapshot_identity(snapshot);
+    const char *path =
+        identity.kind == TP_IDENTITY_SAVED
+            ? identity.canonical_path
+            : "";
+    const char *base = path;
+    for (const char *cursor = path;
+         *cursor; ++cursor) {
+        if (*cursor == '/' ||
+            *cursor == '\\') {
+            base = cursor + 1;
+        }
     }
+    (void)snprintf(
+        out, capacity, "%s",
+        base[0] ? base : "untitled");
+    return out;
+}
+
+static void attach_recovery_with_snapshot(
+    tp_session *session,
+    const tp_session_snapshot *snapshot,
+    bool active_session) {
+    NT_ASSERT(session != NULL);
+    NT_ASSERT(snapshot != NULL);
     tp_error err = {0};
     if (s_project.recovery_required &&
         tp_session_require_recovery(session, &err) != TP_STATUS_OK) {
-        gui_project_note_recovery_setup_failure(
-            err.msg[0] ? err.msg : "recovery could not be required");
+        if (active_session) {
+            gui_project_note_recovery_setup_failure(
+                err.msg[0] ? err.msg
+                           : "recovery could not be required");
+        }
         return;
     }
     if (!recovery_configured()) {
-        if (s_project.recovery_required) {
+        if (active_session &&
+            s_project.recovery_required) {
             gui_project_note_recovery_setup_failure(
                 "the recovery directory is not configured");
         }
         return;
     }
-    const tp_session_snapshot *snapshot = gui_project_snapshot();
-    const tp_session_identity identity = tp_session_snapshot_identity(snapshot);
+    const tp_session_identity identity =
+        tp_session_snapshot_identity(snapshot);
     tp_id128 saved_fingerprint = tp_id128_nil();
     const bool has_saved_fingerprint =
-        tp_session_snapshot_saved_file_fingerprint(snapshot, &saved_fingerprint);
+        tp_session_snapshot_saved_file_fingerprint(
+            snapshot, &saved_fingerprint);
+    char project_name[256];
     const tp_recovery_metadata metadata = {
         .timestamp = recovery_now(),
-        .project_path = identity.kind == TP_IDENTITY_SAVED
-                            ? identity.canonical_path
-                            : "",
-        .project_name = s_project.name,
-        .file_fingerprint = has_saved_fingerprint ? &saved_fingerprint : NULL,
+        .project_path =
+            identity.kind == TP_IDENTITY_SAVED
+                ? identity.canonical_path
+                : "",
+        .project_name = snapshot_project_name(
+            snapshot, project_name,
+            sizeof project_name),
+        .file_fingerprint =
+            has_saved_fingerprint
+                ? &saved_fingerprint
+                : NULL,
     };
     tp_rng rng = tp_rng_os();
-    const tp_status status = tp_recovery_session_attach(
-        s_project.recovery_root, recovery_key(), &rng, session, &metadata, &err);
-    if (status != TP_STATUS_OK && !tp_session_recovery_available(session)) {
-        gui_project_note_recovery_setup_failure(
-            status == TP_STATUS_RECOVERY_BUSY
-                ? "another ntpacker window owns this recovery slot"
-                : "the recovery storage lock could not be acquired");
-        gui_project__note_recovery_degraded(status);
+    const tp_status status =
+        tp_recovery_session_attach(
+            s_project.recovery_root,
+            recovery_key(), &rng, session,
+            &metadata, &err);
+    if (status != TP_STATUS_OK &&
+        !tp_session_recovery_available(session)) {
+        if (active_session) {
+            gui_project_note_recovery_setup_failure(
+                status == TP_STATUS_RECOVERY_BUSY
+                    ? "another ntpacker window owns this recovery slot"
+                    : "the recovery storage lock could not be acquired");
+            gui_project__note_recovery_degraded(
+                status);
+        }
     }
-    gui_project__sync_recovery_notice();
+    if (active_session) {
+        gui_project__sync_recovery_notice();
+    }
+}
+
+/* Attach one shared live recovery owner after the session identity is final.
+ * The session owns the handle on every accepted attach path, including degraded
+ * filesystem outcomes; GUI retains only configuration and presentation state.
+ * Recovery is the remaining session-borrow owner: the core recovery API is
+ * session-scoped, so the borrow stays here instead of leaking to the caller. */
+void gui_project__attach_recovery_live(void) {
+    tp_session *session =
+        gui_project__borrow_active_session();
+    if (!session) {
+        return;
+    }
+    tp_session_snapshot *snapshot = NULL;
+    tp_error err = {{0}};
+    const tp_status status =
+        tp_session_snapshot_create(
+            session, &snapshot, &err);
+    if (status != TP_STATUS_OK) {
+        gui_project_note_recovery_setup_failure(
+            err.msg[0] ? err.msg
+                       : "the saved project identity could not be observed");
+        gui_project__note_recovery_degraded(status);
+        return;
+    }
+    attach_recovery_with_snapshot(
+        session, snapshot, true);
+    tp_session_snapshot_destroy(snapshot);
+}
+
+tp_status gui_project__prepare_candidate_recovery(
+    tp_session *session, tp_error *err) {
+    if (!session) {
+        return tp_error_set(
+            err, TP_STATUS_INVALID_ARGUMENT,
+            "recovery preparation requires a session");
+    }
+    if (!s_project.recovery_required &&
+        !recovery_configured()) {
+        return TP_STATUS_OK;
+    }
+    tp_session_snapshot *snapshot = NULL;
+    const tp_status status =
+        tp_session_snapshot_create(
+            session, &snapshot, err);
+    if (status != TP_STATUS_OK) {
+        return status;
+    }
+    attach_recovery_with_snapshot(
+        session, snapshot, false);
+    tp_session_snapshot_destroy(snapshot);
+    return TP_STATUS_OK;
 }
 
 
@@ -162,7 +259,7 @@ int gui_recovery_collect(gui_recovery_list *out) {
     }
     tp_error err = {0};
     tp_status status = tp_recovery_scan_root(
-        s_project.recovery_root, recovery_key(), s_project.session, out, &err);
+        s_project.recovery_root, recovery_key(), gui_project__borrow_active_session(), out, &err);
     if (status != TP_STATUS_OK) {
         gui_project_note_recovery_setup_failure("the recovery directory could not be scanned");
         return 0;
@@ -219,7 +316,7 @@ gui_recovery_resolve(const char *journal_path, gui_recovery_action action,
     tp_rng rng = tp_rng_os();
     tp_recovery_resolve_result result;
     const tp_status status = tp_recovery_resolve_journal(
-        s_project.recovery_root, recovery_key(), journal_path, s_project.session, core_action,
+        s_project.recovery_root, recovery_key(), journal_path, gui_project__borrow_active_session(), core_action,
         target_path, &rng, &result, &err);
     if (status != TP_STATUS_OK) {
         recovery_copy_error(err_out, err_cap, status, &err);

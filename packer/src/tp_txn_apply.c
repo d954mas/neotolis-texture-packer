@@ -307,30 +307,15 @@ tp_status tp_txn__commit_validated(tp_model *m, const tp_txn_request *req, tp_tx
                 no_change = strcmp(before->name,
                                    only->u.atlas_rename.name) == 0;
             } else if (only->kind == TP_OP_ATLAS_SETTINGS_SET) {
+                /* One registry walk answers "did any masked knob actually
+                 * move?". A differing FLOAT raises needs_fold instead of a
+                 * verdict: semantic identity follows canonical %.9g text, so
+                 * unequal binary values can still fold to the same atlas. */
                 const tp_op_atlas_settings *s = &only->u.atlas_settings;
-                no_change_known = true;
-                no_change = true;
-#define TP_SETTING_DIFF(BIT, FIELD)                                            \
-                if ((s->mask & (BIT)) && before->FIELD != s->FIELD) {          \
-                    no_change = false;                                         \
-                }
-                TP_SETTING_DIFF(TP_AF_MAX_SIZE, max_size)
-                TP_SETTING_DIFF(TP_AF_PADDING, padding)
-                TP_SETTING_DIFF(TP_AF_MARGIN, margin)
-                TP_SETTING_DIFF(TP_AF_EXTRUDE, extrude)
-                TP_SETTING_DIFF(TP_AF_ALPHA_THRESHOLD, alpha_threshold)
-                TP_SETTING_DIFF(TP_AF_MAX_VERTICES, max_vertices)
-                TP_SETTING_DIFF(TP_AF_SHAPE, shape)
-                TP_SETTING_DIFF(TP_AF_ALLOW_TRANSFORM, allow_transform)
-                TP_SETTING_DIFF(TP_AF_POWER_OF_TWO, power_of_two)
-#undef TP_SETTING_DIFF
-                /* Float semantic identity follows canonical %.9g text. An
-                 * exact equality is a known no-change; a different binary
-                 * value needs the canonical atlas fold to catch equal text. */
-                if ((s->mask & TP_AF_PIXELS_PER_UNIT) &&
-                    before->pixels_per_unit != s->pixels_per_unit) {
-                    no_change_known = false;
-                }
+                bool needs_fold = false;
+                no_change = tp_op__fields_match(TP_FIELD_FAMILY_ATLAS, s,
+                                                s->mask, before, &needs_fold);
+                no_change_known = !needs_fold;
             }
             if (!no_change_known) {
                 no_change = tp_id128_eq(

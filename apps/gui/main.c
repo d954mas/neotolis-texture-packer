@@ -20,7 +20,6 @@
 #include "core/nt_assert.h"
 #include "core/nt_core.h"
 #include "font/nt_font.h"
-#include "fpng/nt_fpng.h"
 #include "fs/nt_fs.h"
 #include "graphics/nt_gfx.h"
 #include "hash/nt_hash.h"
@@ -52,6 +51,7 @@
 #include "ui/nt_ui_vlist.h"
 #include "window/nt_window.h"
 
+#include "app_scratch.h" /* shared <user cache dir>/ntpacker/work resolver (CLI uses it too) */
 #include "ntpacker_ui_assets.h"
 #if defined(_WIN32)
 #include "nt_utf8_argv.h"
@@ -126,7 +126,9 @@ static nt_buffer_t s_frame_ubo;
 // #endregion
 
 // #region editor state
-static const tp_result *s_shown_result; /* pack result currently bound to the canvas (sync guard) */
+static tp_id128 s_shown_atlas_id;
+static uint64_t s_shown_result_version;
+static bool s_shown_export_preview;
 /* Canvas mouse model: a left press arms a potential click; if the pointer moves past a small
  * threshold while held it becomes a PAN (no selection on release); otherwise release = click-select.
  * Middle-drag always pans; wheel always zooms. Selection never captures later pan/zoom. */
@@ -139,7 +141,7 @@ static const nt_ui_events_cfg_t s_canvas_dbl_cfg = {
 };
 #define CANVAS_DRAG_THRESHOLD 4.0F
 
-/* The deferred side-effect queue (s_pending_*), the new/open/exit confirm-flow flags (s_after_confirm/
+/* The deferred-intent queue (enqueued through gui_request_*), the new/open/exit confirm-flow flags (s_after_confirm/
  * s_confirm_open/s_modal_action) and the last-pack timing (s_last_pack_*) live in gui_actions. The
  * modal open flags (s_about_open / s_export_open) live in gui_state (shared with the selftest); so
  * does s_blur_inputs -- set here by frame(), read by the settings-panel field widgets in the view TU. */
@@ -147,7 +149,7 @@ static const nt_ui_events_cfg_t s_canvas_dbl_cfg = {
 /* s_pack_has_sources/s_pack_stale (pack-button state cached for the tooltip pass) live in
  * gui_state (written by gui_view_canvas's declare_canvas_strip, read by gui_view_chrome's
  * declare_tooltips). The right settings panel's disclosure/dropdown-open bits and numeric-field edit
- * buffers are panel-local statics in gui_view_settings.c. GUI_MAX_TARGETS and k_playback_names
+ * buffers are panel-local statics in gui_view_settings.c. k_playback_names
  * live in gui_defs.h (shared with gui_view_chrome's declare_export_modal / gui_view_canvas's
  * declare_canvas_preview). */
 
@@ -162,7 +164,9 @@ static const nt_ui_events_cfg_t s_canvas_dbl_cfg = {
  * next frame binds the then-current result without reusing the old borrow. */
 void gui_shell_reset_shown_result(void) {
     gui_canvas_rebind_result(&s_canvas, &s_canvas_input.double_click, NULL);
-    s_shown_result = NULL;
+    s_shown_atlas_id = tp_id128_nil();
+    s_shown_result_version = 0U;
+    s_shown_export_preview = false;
 }
 
 /* Empty atlas space clears the shared tree/inspector selection. reset_selection
@@ -172,7 +176,9 @@ static void clear_canvas_shared_selection(void) {
     reset_selection();
     const tp_result *native = preview_target_result();
     gui_canvas_rebind_result(&s_canvas, &s_canvas_input.double_click, native);
-    s_shown_result = native;
+    s_shown_atlas_id = gui_view_atlas_id();
+    s_shown_result_version = preview_target_result_version();
+    s_shown_export_preview = preview_target_result_is_export();
 }
 // #endregion
 
@@ -228,7 +234,8 @@ static void handle_canvas_input(void) {
     const bool transient_owner =
         gui_canvas_get_mode(&s_canvas) != GUI_CANVAS_ATLAS ||
         !gui_canvas_has_atlas(&s_canvas) || s_confirm_open || s_about_open ||
-        s_export_open || s_recovery_open || s_edit_kind != EDIT_NONE;
+        s_export_open || s_recovery_open ||
+        gui_draft_phase() != GUI_EDIT_IDLE;
     if (gui_canvas_input_blocked(&s_canvas_input,
                                  gui_view_chrome_any_menu_open(),
                                  transient_owner)) {
@@ -323,7 +330,8 @@ static void handle_canvas_double_click(void) {
     const bool transient_owner =
         gui_canvas_get_mode(&s_canvas) != GUI_CANVAS_ATLAS ||
         !gui_canvas_has_atlas(&s_canvas) || s_confirm_open || s_about_open ||
-        s_export_open || s_recovery_open || s_edit_kind != EDIT_NONE;
+        s_export_open || s_recovery_open ||
+        gui_draft_phase() != GUI_EDIT_IDLE;
     if (gui_canvas_input_blocked(&s_canvas_input,
                                  gui_view_chrome_any_menu_open(),
                                  transient_owner)) {
@@ -337,7 +345,7 @@ static void handle_canvas_double_click(void) {
     const nt_pointer_t *pointer = &g_nt_input.pointers[0];
     const int hit = gui_canvas_hit(&s_canvas, pointer->x, pointer->y);
     if (gui_canvas_double_click_press(&s_canvas_input.double_click,
-                                      s_canvas.result,
+                                      s_canvas.result_generation,
                                       hit, ev.double_clicked)) {
         gui_canvas_select(&s_canvas, hit);
         select_row_for_result_region(s_canvas.result, hit);
@@ -384,18 +392,23 @@ static void handle_shortcuts(void) {
     if (s_preview_active && nt_input_key_is_pressed(NT_KEY_SPACE)) {
         preview_toggle_play();
     }
-    if (s_edit_kind == EDIT_NONE && s_sel_anim >= 0 && s_sel_anim_frame >= 0 &&
+    const tp_session_snapshot *snapshot =
+        gui_project_snapshot();
+    const int selected_frame =
+        gui_view_animation_frame(snapshot);
+    if (gui_draft_phase() == GUI_EDIT_IDLE &&
+        !tp_id128_is_nil(gui_view_animation_id()) &&
+        selected_frame >= 0 &&
         nt_input_key_is_pressed(NT_KEY_DELETE)) {
-        /* Clear the frame selection only after a real removal. On rejection the
-         * frame remains, so its selection must remain too. */
-        gui_animation_ref animation;
-        if (gui_project_animation_ref_at(s_sel_atlas, s_sel_anim, &animation) &&
-            gui_project_anim_remove_frame(&animation, s_sel_anim_frame)) {
-            s_sel_anim_frame = -1;
-        }
+        const gui_animation_ref animation = {
+            gui_view_atlas_id(),
+            gui_view_animation_id(),
+            tp_session_snapshot_revision(snapshot)};
+        gui_edit_anim_frame_remove(
+            &animation, selected_frame);
     }
     if (nt_input_key_is_pressed(NT_KEY_F5)) {
-        s_pending_refresh = true;
+        gui_request_refresh();
     }
     const bool ctrl = nt_input_key_is_down(NT_KEY_LCTRL) || nt_input_key_is_down(NT_KEY_RCTRL);
     if (!ctrl) {
@@ -408,20 +421,20 @@ static void handle_shortcuts(void) {
         request_open();
     } else if (nt_input_key_is_pressed(NT_KEY_S)) {
         if (shift) {
-            s_pending_save_as = true;
+            gui_request_save_as();
         } else {
-            s_pending_save = true;
+            gui_request_save();
         }
     } else if (nt_input_key_is_pressed(NT_KEY_Z)) {
         if (shift) {
-            do_redo(); /* Ctrl+Shift+Z alias */
+            gui_request_redo(); /* Ctrl+Shift+Z alias */
         } else {
-            do_undo();
+            gui_request_undo();
         }
     } else if (nt_input_key_is_pressed(NT_KEY_Y)) {
-        do_redo();
+        gui_request_redo();
     } else if (nt_input_key_is_pressed(NT_KEY_P)) {
-        s_pending_pack = true;
+        gui_request_pack();
     } else if (nt_input_key_is_pressed(NT_KEY_E)) {
         s_export_open = true;
     } else if (nt_input_key_is_pressed(NT_KEY_F)) {
@@ -438,7 +451,7 @@ static void handle_list_nav(void) {
     }
     if (nt_ui_input_any_focused(s_ctx) || gui_view_chrome_any_menu_open() ||
         s_confirm_open || s_about_open || s_export_open || s_recovery_open ||
-        s_edit_kind != EDIT_NONE) {
+        gui_draft_phase() != GUI_EDIT_IDLE) {
         return;
     }
     if (nt_input_key_is_down(NT_KEY_LCTRL) || nt_input_key_is_down(NT_KEY_RCTRL)) {
@@ -466,8 +479,10 @@ static void handle_list_nav(void) {
 // #endregion
 
 // #region frame
+#ifdef NTPACKER_GUI_DEV_SEAMS
 /* DEV (--auto-pack): after resources bind, start ONE async pack of atlas 0 and quit when it lands.
- * Headless driver for the heartbeat proof (an interactive Pack is otherwise human-driven). */
+ * Headless driver for the heartbeat proof (an interactive Pack is otherwise human-driven).
+ * Dev seam: compiled out (with its argv branch) unless NTPACKER_GUI_DEV_SEAMS is on. */
 static bool s_auto_pack;
 static int s_auto_pack_frame;
 static bool s_auto_pack_started;
@@ -477,7 +492,15 @@ static void auto_pack_tick(void) {
     }
     s_auto_pack_frame++;
     if (!s_auto_pack_started && s_auto_pack_frame == 8) {
-        s_sel_atlas = 0;
+        const tp_session_snapshot *snapshot =
+            gui_project_snapshot();
+        const tp_snapshot_atlas *first =
+            snapshot
+                ? tp_session_snapshot_atlas_at(
+                      snapshot, 0)
+                : NULL;
+        gui_view_select_atlas(
+            first ? first->id : tp_id128_nil());
         do_pack(); /* async */
         s_auto_pack_started = true;
     } else if (s_auto_pack_started && s_auto_pack_frame > 8 && !gui_pack_async_busy()) {
@@ -485,12 +508,14 @@ static void auto_pack_tick(void) {
         nt_app_quit();
     }
 }
+#else
+static inline void auto_pack_tick(void) {}
+#endif /* NTPACKER_GUI_DEV_SEAMS */
 
 static void frame(void) {
     nt_window_poll();
     nt_input_poll();
     nt_mem_scratch_reset();
-    gui_project_tick(g_nt_app.time); /* history coalescing clock */
 
 #ifdef NTPACKER_GUI_SELFTEST
     /* Verification build: render real frames (proves the canvas draw + walk + a pixel-level proof that
@@ -500,16 +525,35 @@ static void frame(void) {
 
     /* dialogs + model mutations queued last frame run here, cleanly between frames */
     apply_pending();
+    /* The benchmark model suite intentionally performs edit/Undo/Redo probes.
+     * Run it at the same between-frame semantic ingress boundary, never after
+     * the immutable observation has been pinned for declaration. */
+    gui_bench_tick();
+    /* --shot: dead-stick input, advance the shot liveness counter, and run the blocking
+     * pack at the same pre-pin ingress boundary the bench suite uses. The pack itself is
+     * gated on RENDERED frames (gui_shot_note_rendered), not on this counter. */
+    gui_shot_pre_pin_tick();
 
-    /* Fallback commit for a buffered gesture that never got a release/blur/discrete boundary
-     * (decision 0015). GATED on no active gesture -- no held pointer and no focused
-     * input -- so it can never split a live drag or a mid-typing field; the 0.30 s window inside
-     * only fires when the edit has truly gone idle. Primary commits are gesture-scoped. */
-    if (!g_nt_input.pointers[0].buttons[NT_BUTTON_LEFT].is_down && !nt_ui_input_any_focused(s_ctx)) {
-        gui_project_flush_elapsed();
+    gui_actions_pump_lifecycle();
+    if (gui_project_lifecycle_state_query() ==
+        GUI_PROJECT_LIFECYCLE_CLOSED) {
+        return;
     }
 
-    /* Heartbeat: the frame loop keeps ticking while a pack/export runs on the worker thread, so a slow
+    tp_error observation_error = {{0}};
+    const tp_status observation_status =
+        gui_project_frame_begin(&observation_error);
+    if (observation_status != TP_STATUS_OK) {
+        set_statusf_ex(
+            STATUS_ERROR,
+            "Presentation observation failed: %s",
+            observation_error.msg[0]
+                ? observation_error.msg
+                : tp_status_str(observation_status));
+    }
+    gui_actions_poll_host_completion();
+
+    /* Heartbeat: the frame loop keeps ticking while a pack/export runs in the owned process, so a slow
      * concave pack never freezes the window. Throttled to ~2 Hz; the frames-since count shows the rate. */
     if (gui_pack_async_busy()) {
         static double s_hb_last;
@@ -525,15 +569,15 @@ static void frame(void) {
         }
     }
     auto_pack_tick(); /* dev (--auto-pack): drive a headless async pack for the heartbeat proof */
-    gui_bench_tick(); /* dev (--bench-perf): drive the perf-probe state machine; no-op unless active */
 
     if (nt_input_key_is_pressed(NT_KEY_ESCAPE)) {
         if (gui_view_chrome_consume_escape()) {
             /* Menus own Escape while open. Do not also clear filters or stop
              * either preview mode on the same key press. */
-        } else if (s_edit_kind != EDIT_NONE) {
+        } else if (gui_draft_phase() !=
+                   GUI_EDIT_IDLE) {
             cancel_edit();
-            set_status("Rename cancelled.");
+            set_status("Edit discarded.");
         } else if (s_export_open) {
             s_export_open = false;
         } else if (s_about_open) {
@@ -542,7 +586,8 @@ static void frame(void) {
             s_recovery_open = false; /* Esc = "Later": leave every orphan on disk, no data loss */
         } else if (s_confirm_open) {
             s_confirm_open = false;
-            s_after_confirm = AFTER_NONE;
+            s_confirm_draft = false;
+            s_after_confirm = GUI_LIFECYCLE_REQUEST_NONE;
         } else if (s_filter_active || gui_rows_filter_active()) {
             gui_rows_set_filter(""); /* Esc clears the sprite-tree speed-search. */
             s_filter_active = false;
@@ -563,14 +608,14 @@ static void frame(void) {
     /* Click/right-click OUTSIDE the active inline editor commits it (Enter-equivalent desktop UX);
      * Esc still cancels. Uses last frame's field bbox vs this frame's press. The UI is configured
      * STRETCH with ref = framebuffer, so logical bbox coords and framebuffer pointer px coincide. */
-    if (s_edit_kind != EDIT_NONE) {
+    if (gui_inline_text_edit_active()) {
         const nt_pointer_t *p = &g_nt_input.pointers[0];
         if (p->buttons[NT_BUTTON_LEFT].is_pressed || p->buttons[NT_BUTTON_RIGHT].is_pressed) {
             const nt_ui_bbox_t fb = nt_ui_get_bbox(s_ctx, s_id_rename);
             const bool inside = fb.width > 0.0F && p->x >= fb.x && p->x < (fb.x + fb.width) &&
                                 p->y >= fb.y && p->y < (fb.y + fb.height);
             if (!inside) {
-                s_pending_commit_edit = true;
+                gui_request_gesture_commit();
             }
         }
     }
@@ -627,6 +672,7 @@ static void frame(void) {
     nt_font_step();
 
     if (sprite_info) {
+        gui_shot_note_rendered(); /* screenshot mode: this frame reaches the render path */
         nt_gfx_update_buffer(s_frame_ubo, &uniforms, sizeof(uniforms));
         nt_gfx_bind_uniform_buffer(s_frame_ubo, 0);
 
@@ -635,29 +681,19 @@ static void frame(void) {
         gui_canvas_set_frame_ubo(&s_canvas, s_frame_ubo);
         gui_canvas_set_ui_scale(&s_canvas, g_ui_scale); /* overlay line widths scale with DPI */
 
-        clamp_selection();
-        /* keep the animation selection valid after undo/redo/atlas changes */
-        {
-            const tp_session_snapshot *snapshot = gui_project_snapshot();
-            const tp_snapshot_atlas *sel_a = snapshot
-                                                 ? tp_session_snapshot_atlas_at(snapshot, s_sel_atlas)
-                                                 : NULL;
-            if (!sel_a || s_sel_anim >= sel_a->animation_count) {
-                s_sel_anim = -1;
-                s_sel_anim_frame = -1;
-                if (s_preview_active) {
-                    preview_stop();
-                }
-            }
+        gui_view_reconcile_observation(
+            gui_project_snapshot());
+        if (s_preview_active &&
+            !preview_animation()) {
+            preview_stop();
         }
         build_rows();
         filter_type_pump();
         build_view();
-        gui_selection_revalidate();
         handle_list_nav();
         s_content_w = scale.logical_w; /* for caption/status truncation */
         compute_panel_widths(scale.logical_w); /* clamp side-panel widths so they never leave the screen */
-        gui_shot_tick(); /* screenshot mode: pack + select + (post-draw) capture; no-op unless --shot */
+        gui_shot_tick(); /* screenshot mode: select the packed region; no-op unless --shot */
 
         /* Blur focused text fields when a press/scroll lands outside the settings panel (desktop UX).
          * The engine exposes no programmatic blur, so we declare the inputs disabled for one frame,
@@ -675,9 +711,8 @@ static void frame(void) {
                 s_blur_inputs = !in_panel;
             }
         }
-        /* A blur (press outside the panel while a field held focus) is a field's gesture boundary:
-         * flush its buffered edit as ONE undo step (decision 0015). The value is already
-         * in gui_project's pending buffer from the last keystroke; apply_pending commits it next frame. */
+        /* A blur outside the panel is the numeric field's gesture boundary.
+         * The reducer-owned value submits once on the next frame. */
         if (s_blur_inputs) {
             gui_request_gesture_commit();
         }
@@ -685,23 +720,30 @@ static void frame(void) {
         /* Bind the result the canvas shows (repack / atlas switch / clear): the export-target preview
          * while one is active + visible, else the native session pack (preview_target_result). */
         const tp_result *want = preview_target_result();
-        if (want != s_shown_result) {
+        const uint64_t want_version = preview_target_result_version();
+        const bool want_export_preview = preview_target_result_is_export();
+        if (!tp_id128_eq(gui_view_atlas_id(), s_shown_atlas_id) ||
+            want_version != s_shown_result_version ||
+            want_export_preview != s_shown_export_preview) {
             gui_canvas_rebind_result(&s_canvas, &s_canvas_input.double_click,
                                      want);
-            s_shown_result = want;
-            /* Result rebinding clears the highlight. Restore it from the
-             * primary leaf before canvas input when that leaf exists in the
-             * displayed atlas result. */
-            if (want && gui_canvas_get_mode(&s_canvas) == GUI_CANVAS_ATLAS) {
-                const sprite_row *leaf = gui_rows_selected_leaf();
-                if (leaf && leaf->source_key && leaf->source_key[0] != '\0') {
-                    const int region = gui_pack_find_sprite_ref_in_result(
-                        want, leaf->source_id, leaf->source_key);
-                    if (region >= 0 && region < want->sprite_count) {
-                        gui_canvas_select(&s_canvas, region);
-                    }
-                }
-            }
+            s_shown_atlas_id = gui_view_atlas_id();
+            s_shown_result_version = want_version;
+            s_shown_export_preview = want_export_preview;
+        }
+        /* Canvas indices are a projection of the canonical row identity, not
+         * retained selection state. Re-resolve every frame so model changes
+         * cannot leave a stale region index highlighted. */
+        if (want && gui_canvas_get_mode(&s_canvas) == GUI_CANVAS_ATLAS) {
+            const sprite_row *leaf = gui_rows_selected_leaf();
+            const int region =
+                leaf && leaf->source_key && leaf->source_key[0] != '\0'
+                    ? gui_pack_find_sprite_ref_in_result(
+                          want, leaf->source_id, leaf->source_key)
+                    : -1;
+            gui_canvas_select(
+                &s_canvas,
+                region >= 0 && region < want->sprite_count ? region : -1);
         }
         /* Feed the selected region's LIVE slice9 override to the canvas guides: the project is the
          * source of truth, so typing in the Region panel moves the lines this same frame (no repack;
@@ -710,30 +752,26 @@ static void frame(void) {
         if (want && s_canvas.sel_sprite >= 0 && s_canvas.sel_sprite < want->sprite_count) {
             const sprite_row *selected = gui_rows_selected_leaf();
             const tp_session_snapshot *snapshot = gui_project_snapshot();
+            const int atlas_index =
+                gui_view_atlas_index(snapshot);
             const tp_snapshot_atlas *atlas = snapshot
                                                   ? tp_session_snapshot_atlas_at(snapshot,
-                                                                                 s_sel_atlas)
+                                                                                 atlas_index)
                                                   : NULL;
             if (selected && atlas) {
                 const gui_sprite_ref sprite = {
                     atlas->id, selected->source_id, selected->source_key,
                     tp_session_snapshot_revision(snapshot)};
-                /* A slice9 edit buffers until the gesture boundary, so the committed
-                 * record freezes mid-typing. Prefer the buffered slice9 (peek) when one is in flight for
-                 * this atlas+sprite, so the guides move THIS frame; else read the committed record. */
-                int eff[4];
-                if (gui_project_peek_pending_slice9(&sprite, eff)) {
-                    for (int k = 0; k < 4; k++) {
-                        s_canvas.sel_slice9[k] = eff[k];
-                    }
-                } else {
-                    const tp_snapshot_sprite *s9ov =
-                        gui_rows_selected_override();
-                    if (s9ov) {
-                        for (int k = 0; k < 4; k++) {
-                            s_canvas.sel_slice9[k] = (int)s9ov->slice9_lrtb[k];
-                        }
-                    }
+                const tp_snapshot_sprite *s9ov =
+                    gui_rows_selected_override();
+                for (int k = 0; k < 4; k++) {
+                    int value =
+                        s9ov ? (int)s9ov->slice9_lrtb[k]
+                             : 0;
+                    (void)gui_sprite_edit_value(
+                        &sprite, GUI_SPRITE_EDIT_SLICE9,
+                        k, &value, NULL);
+                    s_canvas.sel_slice9[k] = value;
                 }
             }
         }
@@ -792,13 +830,18 @@ static void frame(void) {
         /* SOURCE mode: refresh the decoded image for the selection before the walk draws it. In
          * ATLAS mode the canvas draws the packed pages, so leave the source texture alone. */
         if (gui_canvas_get_mode(&s_canvas) == GUI_CANVAS_SOURCE) {
-            if (s_sel_missing) {
+            const sprite_row *primary =
+                gui_rows_primary();
+            if (primary && primary->missing) {
                 gui_canvas_clear(&s_canvas); /* placeholder is drawn by declare_canvas (§3.7) */
-            } else if (s_sel_abs[0] != '\0') {
+            } else if (primary && primary->abs &&
+                       primary->abs[0] != '\0') {
                 char err[256];
-                if (!gui_canvas_set_image(&s_canvas, s_sel_abs, err, sizeof err)) {
+                if (!gui_canvas_set_image(
+                        &s_canvas, primary->abs,
+                        err, sizeof err)) {
                     set_statusf_ex(STATUS_ERROR, "Decode failed: %s", err);
-                    s_sel_missing = true; /* show the missing placeholder instead of a blank canvas */
+                    gui_canvas_clear(&s_canvas);
                 }
             } else {
                 gui_canvas_clear(&s_canvas);
@@ -831,6 +874,9 @@ static void frame(void) {
     gui_bench_post_draw(); /* perf-probe mode: accrue frame-time samples, write output, then quit */
 
     nt_window_swap_buffers();
+    if (gui_project_frame_is_pinned()) {
+        gui_project_frame_end();
+    }
 }
 // #endregion
 
@@ -858,16 +904,20 @@ static int gui_main_utf8(int argc, char *argv[]) {
 
     /* dev screenshot flags + optional project path (first non-flag arg; see gui_shot.c) */
     const char *proj_arg = NULL;
+#ifdef NTPACKER_GUI_DEV_SEAMS
     bool selftest_crash = false; /* D2 hidden dev arg: fault after install to exercise the handler */
+#endif
     for (int i = 1; i < argc; i++) {
         if (gui_shot_parse_arg(argv[i])) {
             /* consumed by the dev screenshot seam (--shot/--size/--scale/--shot-stale/--shot-packing) */
         } else if (gui_bench_parse_arg(argv[i])) {
             /* consumed by the dev perf-probe seam (--bench-perf[=out.txt]) */
+#ifdef NTPACKER_GUI_DEV_SEAMS
         } else if (strcmp(argv[i], "--auto-pack") == 0) {
             s_auto_pack = true; /* dev: headless async pack of atlas 0 for the heartbeat proof */
         } else if (strcmp(argv[i], "--selftest-crash") == 0) {
             selftest_crash = true; /* parse here so it's never mistaken for a project path below */
+#endif
         } else if (proj_arg == NULL) {
             proj_arg = argv[i];
         }
@@ -882,8 +932,8 @@ static int gui_main_utf8(int argc, char *argv[]) {
      * FILE). Crash handler goes in FIRST (before the log) so it protects the log install + the build
      * line too. NOT literally main()'s first statement: a fault before this point falls back to the OS
      * default (identical to not-installed, no ntpacker dump) -- acceptable, since the value is catching
-     * interactive-session crashes, and the dev seams must stay clean. Both no-op under
-     * NTPACKER_GUI_HEADLESS and if the app-data dir can't be created; crash install must NOT call nt_log
+     * interactive-session crashes, and the dev seams must stay clean. Both compile to a no-op in a
+     * NTPACKER_GUI_HEADLESS_CI build and no-op if the app-data dir can't be created; crash install must NOT call nt_log
      * (see gui_crash_install). --selftest-crash is not a --shot arg, so install still runs for it. The
      * --bench-perf probe skips this block too: it must stay side-effect-free and never block on the
      * crash-report native modal. */
@@ -905,9 +955,11 @@ static int gui_main_utf8(int argc, char *argv[]) {
     /* D2 hidden hand-verification hook: fault NOW (the handler is installed + the log sink is live, so
      * a real run produces a dump/backtrace + marker AND proves the log tail survived). Self-guards to a
      * no-op under headless, so it can never fire in CI. */
+#ifdef NTPACKER_GUI_DEV_SEAMS
     if (selftest_crash) {
         gui_crash_selftest();
     }
+#endif
 
     gui_shot_apply_window_size(); /* dev (--shot): request the shot window size before window init */
     nt_window_init();
@@ -1010,13 +1062,22 @@ static int gui_main_utf8(int argc, char *argv[]) {
     }
 #endif
 
-    /* in-process packing: session .ntpack goes under the exe dir (existing convention) */
-    char pack_session[GUI_PATHS_MAX + 128];
-    (void)snprintf(pack_session, sizeof pack_session, "%s/pack_session", s_exe_dir);
-    const bool pack_work_ready = gui_pack_init(pack_session);
+    /* Transient job output goes to the one app scratch root the CLI uses too
+     * (<user cache dir>/ntpacker/work). An exe-dir convention cannot work: an
+     * installed exe dir is read-only, and every instance of the app would share
+     * one transient namespace. There is no fallback -- an unresolvable scratch
+     * root is a reported failure, not a quietly different location. */
+    char scratch_root[GUI_PATHS_MAX];
+    tp_error scratch_error = {{0}};
+    const bool pack_work_ready =
+        app_scratch_root(scratch_root, sizeof scratch_root, &scratch_error) ==
+            TP_STATUS_OK &&
+        gui_pack_init(scratch_root);
     if (!pack_work_ready) {
         set_status_ex(STATUS_ERROR,
-                      "Pack work directory is unavailable or exceeds the supported path limit.");
+                      scratch_error.msg[0]
+                          ? scratch_error.msg
+                          : "Pack work directory is unavailable or exceeds the supported path limit.");
     }
 
     /* open a project passed on the command line (errors go to the status bar).
@@ -1044,8 +1105,23 @@ static int gui_main_utf8(int argc, char *argv[]) {
                 set_statusf_ex(STATUS_WARNING, "project not found: %s", proj_arg);
             }
             break;
-        case GUI_STARTUP_OPEN:
-            if (gui_project_open(proj_arg, err, sizeof err) == TP_STATUS_OK) {
+        case GUI_STARTUP_OPEN: { /* block scope: a label may not be followed by a declaration (C17) */
+            tp_error open_error = {{0}};
+            gui_project_lifecycle_kind
+                open_completed =
+                    GUI_PROJECT_LIFECYCLE_NONE;
+            tp_status open_status =
+                gui_project_lifecycle_begin_open(
+                    proj_arg, &open_error);
+            if (open_status == TP_STATUS_OK) {
+                open_status =
+                    gui_project_lifecycle_pump(
+                        &open_completed,
+                        &open_error);
+            }
+            if (open_status == TP_STATUS_OK &&
+                open_completed ==
+                    GUI_PROJECT_LIFECYCLE_OPEN) {
                 if (!recovery_warn_shown) { /* routine confirmation must not clobber the recovery warning */
                     set_statusf("Opened %s", gui_project_display_name());
                 }
@@ -1054,9 +1130,16 @@ static int gui_main_utf8(int argc, char *argv[]) {
                  * user-initiated failure the user is actively waiting on (they asked to open THIS file), it
                  * is higher severity (STATUS_ERROR > STATUS_WARNING), and it is rare. Present actionable
                  * failure wins over the latent recovery warning. */
+                (void)snprintf(
+                    err, sizeof err, "%s",
+                    open_error.msg[0]
+                        ? open_error.msg
+                        : tp_status_str(
+                              open_status));
                 set_statusf_ex(STATUS_ERROR, "Open '%s' failed: %s", proj_arg, err);
             }
             break;
+        }
         case GUI_STARTUP_IDLE:
             break; /* unreachable with proj_arg != NULL; listed for switch exhaustiveness */
         }
@@ -1070,21 +1153,120 @@ static int gui_main_utf8(int argc, char *argv[]) {
     run_selftest();
 #endif
 
-    clamp_selection();
+    gui_view_reconcile_observation(gui_project_snapshot());
+    gui_view_adopt_default_atlas(gui_project_snapshot());
     nt_log_info("ntpacker-gui: starting (typed session jobs + atlas-page canvas)");
 
     nt_app_run(frame);
 
-    /* The window closed while a session job was still active. Cancellation is cooperative, so keep
-     * the OS message pump alive and poll until the typed job reaches a terminal state. */
-    if (gui_pack_worker_active()) {
-        gui_pack_async_cancel();
-        while (gui_pack_worker_active()) {
-            nt_window_poll();
-            (void)gui_pack_poll(NULL); /* joins + frees the job the frame it signals done */
+    /* Finish any accepted replacement first, then close the session through
+     * the same non-blocking lifecycle owner. A persistently failing request or
+     * pump must not spin the exit path at 100% CPU with a log line per iteration:
+     * every iteration pumps the window, the failure log is rate-limited, and a
+     * bounded CONSECUTIVE-failure budget falls through to a forced teardown that
+     * really terminalizes and closes the owner. */
+    int shutdown_failures = 0;
+    bool shutdown_forced = false;
+    static const int k_shutdown_failure_budget = 600;
+    static const int k_shutdown_log_every = 60;
+    while (gui_project_lifecycle_state_query() !=
+           GUI_PROJECT_LIFECYCLE_CLOSED) {
+        tp_error shutdown_error = {{0}};
+        /* Every step of one iteration is a shutdown PREREQUISITE, so any of
+         * them failing is one failed attempt. Observation especially: the
+         * staged completion is classified only by an atomic observation, so a
+         * persistently failing observe is exactly as terminal as a failing
+         * pump -- counting only the pump left that case as an infinite
+         * DRAINING spin with no budget. */
+        bool iteration_failed = false;
+        nt_window_poll();
+        if (gui_project_lifecycle_state_query() ==
+            GUI_PROJECT_LIFECYCLE_OPEN_IDLE) {
+            const tp_status begin_status =
+                gui_project_lifecycle_begin_shutdown(
+                    false, &shutdown_error);
+            if (begin_status != TP_STATUS_OK) {
+                iteration_failed = true;
+                if (shutdown_failures %
+                        k_shutdown_log_every ==
+                    0) {
+                    nt_log_error(
+                        "GUI host shutdown request failed: %s",
+                        shutdown_error.msg[0]
+                            ? shutdown_error.msg
+                            : tp_status_str(
+                                  begin_status));
+                }
+            }
+        } else {
+            const tp_status pump_status =
+                gui_project_lifecycle_pump(
+                    NULL, &shutdown_error);
+            if (pump_status != TP_STATUS_OK) {
+                iteration_failed = true;
+                if (shutdown_failures %
+                        k_shutdown_log_every ==
+                    0) {
+                    nt_log_error(
+                        "GUI host shutdown pump failed: %s",
+                        shutdown_error.msg[0]
+                            ? shutdown_error.msg
+                            : tp_status_str(
+                                  pump_status));
+                }
+            } else if (
+                gui_project_lifecycle_state_query() ==
+                GUI_PROJECT_LIFECYCLE_DRAINING) {
+                const tp_status observe_status =
+                    gui_project_frame_begin(
+                        &shutdown_error);
+                if (observe_status == TP_STATUS_OK) {
+                    gui_actions_poll_host_completion();
+                } else {
+                    iteration_failed = true;
+                    if (shutdown_failures %
+                            k_shutdown_log_every ==
+                        0) {
+                        nt_log_error(
+                            "GUI shutdown observation failed: %s",
+                            shutdown_error.msg[0]
+                                ? shutdown_error.msg
+                                : tp_status_str(
+                                      observe_status));
+                    }
+                }
+                if (gui_project_frame_is_pinned()) {
+                    gui_project_frame_end();
+                }
+            }
+        }
+        if (!iteration_failed) {
+            /* CONSECUTIVE failures, not lifetime ones: a long drain that
+             * makes progress must not accumulate its way into a forced
+             * teardown. One clean iteration means the negotiation is alive. */
+            shutdown_failures = 0;
+            continue;
+        }
+        if (++shutdown_failures >=
+            k_shutdown_failure_budget) {
+            nt_log_error(
+                "GUI host shutdown gave up after %d consecutive failures; forcing teardown",
+                shutdown_failures);
+            shutdown_forced = true;
+            break;
         }
     }
+    if (shutdown_forced) {
+        /* Leaving the loop is not leaving the session: the teardown below and
+         * gui_project_shutdown both require a CLOSED owner, so the forced path
+         * must establish it rather than assume it. */
+        gui_project_lifecycle_force_close();
+    }
 
+    /* Above canvas/pack/rows/project and holding no reference to any of them:
+     * whatever the user left queued never runs now, so its payloads are disposed
+     * before the owners below start tearing their own state down. */
+    gui_actions_shutdown();
     gui_canvas_shutdown(&s_canvas);
     gui_pack_shutdown();
     gui_rows_shutdown();

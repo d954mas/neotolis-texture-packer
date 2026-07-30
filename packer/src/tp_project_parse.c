@@ -37,6 +37,9 @@ const tp_project_json_limits TP_PROJECT_JSON_LIMITS = {
     (size_t)TP_PROJECT_JSON_MAX_DEPTH,
 };
 
+/* Load-path work probes. Both the arming state and the production sites that feed
+ * it are compiled out of a shipping build. */
+#ifdef TP_ENABLE_TEST_SEAMS
 static _Thread_local bool s_test_measure_load_lookups;
 static _Thread_local tp_project_load_lookup_work s_test_load_lookup_work;
 static _Thread_local bool s_test_measure_load_resources;
@@ -62,10 +65,6 @@ tp_project_load_resources tp_project__test_load_resources_take(void) {
     return s_test_load_resources;
 }
 
-bool tp_project__test_load_resources_enabled(void) {
-    return s_test_measure_load_resources;
-}
-
 void tp_project__test_note_id_resources(size_t refs_bytes,
                                         size_t index_bytes) {
     if (!s_test_measure_load_resources) {
@@ -78,6 +77,7 @@ void tp_project__test_note_id_resources(size_t refs_bytes,
         s_test_load_resources.id_index_bytes = index_bytes;
     }
 }
+#endif
 
 /* ======================================================================== */
 /* load                                                                     */
@@ -216,12 +216,14 @@ static bool tp_load_lookup_init(tp_load_lookup *lookup, int expected) {
         return false;
     }
     lookup->capacity = capacity;
+#ifdef TP_ENABLE_TEST_SEAMS
     if (s_test_measure_load_resources) {
         const size_t bytes = capacity * sizeof *lookup->slots;
         if (bytes > s_test_load_resources.source_index_peak_bytes) {
             s_test_load_resources.source_index_peak_bytes = bytes;
         }
     }
+#endif
     return true;
 }
 
@@ -245,9 +247,11 @@ static tp_load_lookup_slot *tp_load_lookup_find(tp_load_lookup *lookup,
             slot->hash = hash;
             return slot;
         }
+#ifdef TP_ENABLE_TEST_SEAMS
         if (s_test_measure_load_lookups) {
             s_test_load_lookup_work.source_path_comparisons++;
         }
+#endif
         if (slot->hash == hash) {
             if (tp_source_path_text_equal(slot->key, key)) {
                 return slot;
@@ -478,7 +482,8 @@ static tp_status tp_load_sprite(tp_project_atlas *a, const cJSON *js,
         for (int k = 0; k < 4; k++) {
             int value = 0;
             st = tp_json_int_in_range(cJSON_GetArrayItem(slice9, k),
-                                      "slice9 item", 0, UINT16_MAX, &value,
+                                      "slice9 item", TP_PROJECT_SLICE9_MIN,
+                                      TP_PROJECT_SLICE9_MAX, &value,
                                       err);
             if (st != TP_STATUS_OK) {
                 return st;
@@ -497,14 +502,17 @@ static tp_status tp_load_sprite(tp_project_atlas *a, const cJSON *js,
     } ov_fields[] = {
         {"shape", offsetof(tp_project_sprite, ov_shape), TP_PACK_SHAPE_MIN,
          TP_PACK_SHAPE_MAX, tp_pack_sprite_shape_wire_representable},
-        {"allow_rotate", offsetof(tp_project_sprite, ov_allow_rotate), 0, 0,
+        {"allow_rotate", offsetof(tp_project_sprite, ov_allow_rotate),
+         TP_PACK_OV_ALLOW_ROTATE_OFF, TP_PACK_OV_ALLOW_ROTATE_OFF,
          tp_pack_sprite_rotate_wire_representable},
-        {"max_vertices", offsetof(tp_project_sprite, ov_max_vertices), 1,
-         TP_PACK_MAX_VERTICES,
+        {"max_vertices", offsetof(tp_project_sprite, ov_max_vertices),
+         TP_PACK_MIN_VERTICES, TP_PACK_MAX_VERTICES,
          tp_pack_sprite_max_vertices_wire_representable},
-        {"margin", offsetof(tp_project_sprite, ov_margin), 1, UINT8_MAX,
+        {"margin", offsetof(tp_project_sprite, ov_margin),
+         TP_PACK_SPRITE_SPACING_MIN, TP_PACK_SPRITE_SPACING_MAX,
          tp_pack_sprite_spacing_wire_representable},
-        {"extrude", offsetof(tp_project_sprite, ov_extrude), 1, UINT8_MAX,
+        {"extrude", offsetof(tp_project_sprite, ov_extrude),
+         TP_PACK_SPRITE_SPACING_MIN, TP_PACK_SPRITE_SPACING_MAX,
          tp_pack_sprite_spacing_wire_representable},
     };
     for (size_t i = 0; i < sizeof ov_fields / sizeof ov_fields[0]; i++) {
@@ -952,12 +960,6 @@ tp_status tp_project_json_admit(
         }
     }
     return TP_STATUS_OK;
-}
-
-tp_status tp_project__test_json_admit(
-    const char *text, size_t len, const tp_project_json_limits *limits,
-    tp_error *err) {
-    return tp_project_json_admit(text, len, limits, err);
 }
 
 /* Parse core shared by load (from file) + load_buffer (from memory). Borrows

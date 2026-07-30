@@ -1,6 +1,8 @@
 #include "tp_fs_internal.h"
 
 #include <errno.h>
+#include <limits.h>
+#include <signal.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -94,6 +96,20 @@ bool tp_fs_stat(const char *path_utf8, tp_fs_info *out) {
         return false;
     }
     return stat_to_info(&value, out);
+}
+
+tp_fs_create_dir_result tp_fs_create_dir_exclusive(const char *path_utf8) {
+    if (!tp_fs_path_is_valid_utf8(path_utf8)) {
+        return TP_FS_CREATE_DIR_ERROR;
+    }
+    if (path_utf8[0] == '\0') {
+        errno = EINVAL;
+        return TP_FS_CREATE_DIR_ERROR;
+    }
+    if (mkdir(path_utf8, 0755) == 0) {
+        return TP_FS_CREATE_DIR_OK;
+    }
+    return errno == EEXIST ? TP_FS_CREATE_DIR_EXISTS : TP_FS_CREATE_DIR_ERROR;
 }
 
 bool tp_fs_create_dir(const char *path_utf8) {
@@ -298,4 +314,15 @@ bool tp_fs_sync_parent(const char *path_utf8) {
     (void)close(fd);
     errno = saved;
     return ok;
+}
+
+/* Contract in tp_fs_internal.h: only a definitively absent pid is reported dead.
+ * kill(pid, 0) is the portable existence probe; EPERM means the process exists
+ * but belongs to another user, which is still LIVE. 0 and out-of-range values
+ * have special or unsafe kill() semantics, so they are never called dead. */
+bool tp_fs_process_is_live(unsigned long pid) {
+    if (pid == 0UL || pid > (unsigned long)INT_MAX) {
+        return true;
+    }
+    return !(kill((pid_t)pid, 0) == -1 && errno == ESRCH);
 }

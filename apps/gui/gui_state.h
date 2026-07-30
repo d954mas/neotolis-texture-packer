@@ -1,10 +1,9 @@
 #ifndef NTPACKER_GUI_STATE_H
 #define NTPACKER_GUI_STATE_H
 
-/* Shared mutable editor/UI state for the ntpacker GUI: selection, multi-select set, inline-edit,
- * disclosure bits, animation preview, runtime panel widths, the nt_ui context + canvas, executable
- * dir, UI ids, per-frame row tooltips, the status line, and the ~30 per-frame-scaled style objects
- * (written by apply_ui_scale in gui_widgets + seeded once in ensure_ids; read everywhere).
+/* Shared shell/presentation state for the ntpacker GUI: status, animation
+ * preview playback, panel widths, the nt_ui context + canvas, executable dir,
+ * shared UI ids, row tooltips, and the per-frame-scaled style objects.
  *
  * Include discipline: this header pulls in ENGINE ui/font/atlas headers (for the style + context
  * types) plus the one MODEL header gui_canvas.h (for the gui_canvas type). It must NEVER include a
@@ -16,7 +15,7 @@
 
 #include "tp_core/tp_id.h"
 #include "tp_core/tp_identity.h"
-#include "tp_core/tp_scan.h"
+#include "tp_core/tp_srckey.h"
 
 #include "font/nt_font.h"        /* nt_font_t (s_font) */
 #include "ui/nt_ui.h"            /* nt_ui_context_t (s_ctx) */
@@ -94,44 +93,10 @@ extern uint32_t s_id_recovery;     /* R6b: the startup crash-recovery modal */
 extern uint32_t s_id_mb_file, s_id_mb_edit, s_id_mb_atlas, s_id_mb_view, s_id_mb_help;
 extern uint32_t s_id_menu_file, s_id_menu_edit, s_id_menu_atlas, s_id_menu_view, s_id_menu_help;
 
-/* --- primary selection (s_sel_src/child stays the last-clicked selection for the region panel + canvas sync) --- */
-extern int s_sel_atlas;      /* selected atlas index */
-extern int s_sel_src;        /* selected source index within the atlas */
-extern int s_sel_child;      /* selected folder-child index (-1 = the source row / a file) */
-extern char s_sel_abs[TP_IDENTITY_PATH_MAX]; /* authoritative resolved image path */
-extern bool s_sel_missing;   /* selection is a missing file -> canvas shows a placeholder (§3.7) */
-
-/* Multi-select set over canonical leaf sprite identities (rows rebuild each frame). Drives
- * "Create animation from selection" + the editor's "Add frames" (ux.md §3.7b). Growable storage:
- * the old fixed 4096 cap silently ignored selections past it. Grows
- * geometrically in multi_sel_add_ref (gui_rows.c); see the growth-policy note there. */
-typedef struct gui_selected_sprite {
-    tp_id128 source_id;
-    char *source_key; /* malloc-owned exact canonical key */
-} gui_selected_sprite;
-extern gui_selected_sprite *s_multi_sel;
-extern int s_multi_sel_count;
-extern int s_multi_sel_cap;  /* allocated slots in s_multi_sel (grow-only; 0 == unallocated) */
-extern int s_sel_anchor_row; /* VIEW index anchor for Shift-range selection (s_view space) */
-extern int s_focus_view;     /* keyboard-focused row (index into s_view; -1 none) — U-02 list focus model */
-extern bool s_focus_follow;  /* one-shot ensure-visible request; set by keyboard nav AND canvas-click re-pin, consumed by declare_sprite_list */
-extern bool s_filter_active; /* Ctrl+F speed-search armed: typed chars edit the sprite-tree filter (U-02 T1) */
-
-/* U-02 T5: preserve the sprite selection across Undo/Redo. do_undo captures the primary leaf's
- * canonical ref BEFORE the model shifts indices; after the rows rebuild, gui_selection_revalidate
- * re-resolves the primary + prunes the (ref-based) multi-select of sprites that no longer exist. */
-extern bool s_reselect_pending;
-extern tp_id128 s_reselect_source_id;
-extern char s_reselect_key[TP_SRCKEY_MAX];
-/* F2: the VIEWED atlas's stable id, captured alongside the primary ref so undo_redo_settle can
- * re-resolve s_sel_atlas (a positional index) onto the same atlas after an atlas insert/remove. */
-extern tp_id128 s_reselect_atlas_id;
-/* F3: one-shot -- undo_redo_settle raises it so the frame loop re-derives the canvas region highlight
- * from the preserved primary leaf (gui_shell_reset_shown_result/set_result drop sel_sprite on rebind). */
-
-/* Animation selection + editor state (ux.md §3.7b). */
-extern int s_sel_anim;       /* selected animation index in the current atlas, -1 none */
-extern int s_sel_anim_frame; /* selected frame row in the editor (for the Del hotkey), -1 none */
+/* Stable view identity. Positional indices are derived from the current
+ * frame-pinned snapshot and row projection; they are never retained here. */
+uint32_t gui_stable_entity_ui_id(const char *scope,
+                                 tp_id128 entity_id);
 
 /* --- export-target preview (packet EXP-PREVIEW): a view-only overlay that shows what a chosen exporter
  * would produce from the CURRENT settings, without touching the native session pack. `s_preview_target`
@@ -149,14 +114,6 @@ extern bool s_preview_finished;
 extern double s_preview_time;
 extern int s_preview_cur;         /* resolved current frame index (0-based) this frame */
 extern int s_preview_frame_count; /* resolved (missing-frame-skipped) frame count this frame */
-
-/* Inline rename edit (F1): one active at a time. kind 0 none / 1 atlas / 2 sprite / 3 animation. */
-enum { EDIT_NONE = 0, EDIT_ATLAS, EDIT_SPRITE, EDIT_ANIM };
-extern int s_edit_kind;
-extern int s_edit_atlas;        /* atlas being renamed (EDIT_ATLAS) */
-extern int s_edit_anim;         /* animation index being renamed (EDIT_ANIM) */
-extern char s_edit_sprite[TP_SRCKEY_MAX]; /* atlas-relative sprite name being renamed */
-extern char s_edit_buf[TP_SRCKEY_MAX];    /* the input buffer */
 
 /* Runtime (already SCALED) column widths. Clamped narrow when the window can't fit both side panels +
  * a minimal canvas, so the panels never get pushed off-screen (recomputed each frame). */
@@ -201,8 +158,8 @@ extern tp_id128 s_ctx_sprite_source_id;
 extern int64_t s_ctx_sprite_revision;
 extern char s_ctx_sprite_source_key[TP_SRCKEY_MAX];
 extern char s_ctx_sprite_display_name[TP_SRCKEY_MAX];
-/* F12: the right-clicked row's resolved abs path, FROZEN at menu-arm time. "Show in Explorer" reads
- * this (not the live s_sel_abs) so a keyboard-Down after opening the menu can't reveal the wrong row. */
+/* The right-clicked row's resolved path is frozen at menu-arm time, so later
+ * keyboard navigation cannot retarget the context-menu action. */
 extern char s_ctx_sprite_abs[TP_IDENTITY_PATH_MAX];
 extern bool s_ctx_leaf;        /* a renamable leaf sprite (file source or folder child) */
 extern bool s_ctx_removable;   /* a removable source row (has an [x] today) */

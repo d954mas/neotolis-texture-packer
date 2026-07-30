@@ -10,7 +10,7 @@
 
 #include "nt_builder.h"
 
-#include "tp_core/tp_name_map.h"
+#include "tp_name_map.h"
 
 /* Largest fixture sprite is 200x120 (sprite_eq_page); keep a headroom buffer. */
 #define TP_FIX_BUF_DIM 256

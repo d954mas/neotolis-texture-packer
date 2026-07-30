@@ -2,6 +2,7 @@
 
 #if defined(_WIN32)
 
+#include <direct.h>
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
@@ -86,7 +87,19 @@ int nt_utf8_rename(const char *source_utf8, const char *destination_utf8) {
     return result;
 }
 
+int nt_utf8_rmdir(const char *path_utf8) {
+    wchar_t *path = path_alloc(path_utf8);
+    if (!path) {
+        return -1;
+    }
+    const int result = _wrmdir(path);
+    free(path);
+    return result;
+}
+
 #else
+
+#include <unistd.h>
 
 FILE *nt_utf8_fopen(const char *path_utf8, const char *mode) {
     return fopen(path_utf8, mode);
@@ -97,5 +110,7 @@ int nt_utf8_remove(const char *path_utf8) { return remove(path_utf8); }
 int nt_utf8_rename(const char *source_utf8, const char *destination_utf8) {
     return rename(source_utf8, destination_utf8);
 }
+
+int nt_utf8_rmdir(const char *path_utf8) { return rmdir(path_utf8); }
 
 #endif

@@ -10,7 +10,31 @@
  * canonical lookup below; human/export names remain presentation only.
  *
  * gui_pack_atlas/gui_pack_export are synchronous adapters used by selftest/shot; they drain the
- * same session-owned typed jobs as interactive use. */
+ * same session-owned typed jobs as interactive use.
+ *
+ * RESULT RESIDENCY (packets S18/S28, master spec §10.4). Native results are not
+ * held one-per-atlas forever. They live in a session-lifetime
+ * `tp_pack_result_cache` behind this adapter: the atlas the presentation reads is
+ * the store's PINNED active result, and every other packed atlas is an INACTIVE
+ * entry in a byte-budget LRU. Switching atlas demotes the outgoing result rather
+ * than dropping it, so switching back is a store hit and never repacks; the store
+ * pins each result through the session Pack receipt, and releases that receipt --
+ * destroying the Pack arena exactly once -- when the LRU evicts the entry OR when
+ * the entry's pages have been compressed into the store's own cold tier.
+ *
+ * That cold tier is the reason a demoted atlas can stay resident at all: the
+ * store compresses its pages in the BACKGROUND (one low-priority thread, applied
+ * on the per-frame pump inside gui_pack_poll) and decompresses them in parallel
+ * when the atlas is switched back to. The only thing a caller of the functions
+ * below can observe about it is that switching to a long-untouched atlas costs a
+ * decode (tens of milliseconds for a big atlas) instead of nothing.
+ *
+ * The store is behind this boundary on purpose: no view, and no caller of the
+ * functions below, sees a cache, a budget, a compression, or a residency state.
+ * What a caller must know is that an evicted result reads as "not packed" (NULL
+ * result, version 0) exactly like an atlas that was never packed -- which is the
+ * §10.4 cache-miss presentation: the preview is out of date and the user runs
+ * Pack. Nothing here ever auto-packs. */
 
 #include <stddef.h>
 #include <stdbool.h>
@@ -18,13 +42,17 @@
 
 #include "tp_core/tp_model.h" /* tp_result */
 #include "tp_core/tp_id.h"
+#include "tp_core/tp_session.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-/* Stores the work-dir intent used when starting typed Pack jobs and creates it.
- * Returns false instead of retaining a truncated or unusable directory. */
+/* Stores the work-dir intent used when starting typed Pack/Export jobs and
+ * creates it. Returns false instead of retaining a truncated or unusable
+ * directory. The shipped GUI passes the shared app scratch root
+ * (app_scratch_root(), apps/common); tests pass their own sandbox. Each job
+ * gets its own `req-` directory UNDER this one, created by the job worker. */
 bool gui_pack_init(const char *work_dir);
 
 /* Packs atlas `atlas_index` through a typed session job and stores the returned
@@ -35,9 +63,45 @@ bool gui_pack_init(const char *work_dir);
  * fills `err` (nullable). An atlas with zero usable sprites is a failure (nothing to show). */
 bool gui_pack_atlas(int atlas_index, double *out_ms, char *err, size_t err_cap, char *notice, size_t notice_cap);
 
-/* The last successful result for `atlas_index`, or NULL if never packed. A
- * failed Pack leaves it intact; gui_project reports freshness separately. */
+/* The last successful result for `atlas_index`, or NULL if it was never packed
+ * or its cached entry has been evicted. A failed Pack leaves it intact;
+ * gui_project reports freshness separately -- restoring a demoted result is
+ * freshness-neutral by construction, because nothing on the freshness path
+ * (input tokens, pack_input_hash, the stale bit) is touched by residency.
+ *
+ * This read MUTATES residency: it makes `atlas_index` the resident atlas, which
+ * demotes the previously resident one into the byte-budget LRU and may evict it.
+ * Two atlases are therefore never resident at once, and the returned pointer is
+ * valid only until the next residency change -- a gui_pack_result for a DIFFERENT
+ * atlas (anyone's, not just this caller's), a published Pack, gui_pack_clear, or
+ * shutdown. It is a within-operation borrow: never hold it across a frame, and
+ * never hold two atlases' results at once. A caller that must read a SECOND
+ * atlas' result without taking the pin away from the one on screen uses
+ * gui_pack_result_peek below. */
 const tp_result *gui_pack_result(int atlas_index);
+/* The same result, read WITHOUT changing residency: no reside, no demotion, no
+ * LRU touch, no eviction, no decompression. This is the read for a consumer that
+ * is not the one driving what the canvas shows (the animation preview player), so
+ * two such consumers can never fight over the single active pin frame after
+ * frame.
+ *
+ * NULL when the atlas was never packed or its entry was evicted -- the same
+ * §10.4 cache-miss presentation as gui_pack_result, except that a miss here does
+ * not retire the presentation slot (a read decides nothing about residency).
+ * An atlas that is merely COLD (demoted long enough for the store to have
+ * compressed it) is NOT a miss and must never read as one: it answers with its
+ * result, so a consumer that latches "the result was released" on NULL cannot
+ * fire on an atlas that is still perfectly available.
+ *
+ * GEOMETRY ONLY. What a peek promises is the sprite/page geometry, not the
+ * pixels: for a cold atlas `pages[i].rgba` is NULL, because inflating the
+ * compressed pages is a residency decision and this read is defined not to make
+ * one. A consumer that needs page pixels (the canvas) uses gui_pack_result, which
+ * resides the atlas and therefore decompresses it.
+ *
+ * The pointer carries the SAME lifetime rule as gui_pack_result's: it survives
+ * only until the next residency change, so it is a within-operation borrow. */
+const tp_result *gui_pack_result_peek(int atlas_index);
 /* Changes whenever a successful Pack publishes a new result into this atlas slot. */
 uint64_t gui_pack_result_version(int atlas_index);
 
@@ -76,8 +140,8 @@ uint64_t gui_pack_preview_diff_rebuilds(void);
 bool gui_pack_export(int atlas_index, int *out_targets, int *out_notices, char *err, size_t err_cap, char *notice,
                      size_t notice_cap);
 
-/* Drops the stored result for one atlas (or all with index < 0). Frees its arena. Call on
- * project new/open and before a repack. */
+/* Drops the stored result for one atlas (or the whole store with index < 0) and
+ * releases its retained session-job result owner. Call on project new/open. */
 void gui_pack_clear(int atlas_index);
 
 /* --- export-target preview (packet EXP-PREVIEW) --------------------------------------------------
@@ -85,7 +149,7 @@ void gui_pack_clear(int atlas_index);
  * owned preview slot SEPARATE from the session slots (the native result is never clobbered). The
  * effective settings are tp_project_atlas_to_settings clamped through the exporter's caps
  * (tp_export_effective_settings). Only one preview is live at a time (dropped on atlas switch / edit),
- * so a single slot keyed by atlas_index guarantees coherent binding. */
+ * so one slot carrying the stable atlas ID guarantees coherent binding. */
 
 /* Synchronous preview adapter for selftest/shot-preview; drains the same typed
  * session Pack job and lands its result in the preview slot. */
@@ -98,8 +162,11 @@ bool gui_pack_preview_async_start(int atlas_index, const char *exporter_id, char
 /* The stored preview result IF it belongs to `atlas_index`, else NULL (coherent binding: a stale slot
  * from another atlas never shows). */
 const tp_result *gui_pack_preview_result(int atlas_index);
+/* Changes whenever a successful export preview publishes a new result. */
+uint64_t gui_pack_preview_result_version(int atlas_index);
 
-/* Drops the preview slot (frees its arena). Call on back-to-Native / atlas switch / model edit. */
+/* Drops the preview slot and releases its retained session-job result owner.
+ * Call on back-to-Native / atlas switch / model edit. */
 void gui_pack_preview_clear(void);
 
 /* Degradation summary for `exporter_id` on `atlas_index`: diffs the native session settings
@@ -109,7 +176,7 @@ void gui_pack_preview_clear(void);
 int gui_pack_preview_diff(int atlas_index, const char *exporter_id, char *chip, size_t chip_cap, char *tip,
                           size_t tip_cap);
 
-/* --- async packing (interactive; ux.md §3 worker thread) --------------------------------------
+/* --- async packing (interactive; owned worker process) -----------------------------------------
  * One in-flight op MAX (pack OR export). The session owns the concrete worker handle and immutable
  * input; this frontend only captures intent, polls typed progress, and maps the typed result at a
  * frame boundary. The synchronous adapters above reuse and drain this exact path. */
@@ -136,7 +203,10 @@ typedef enum {
 
 typedef struct {
     gui_pack_done kind;
+    tp_session_job_rejection rejection;
+    tp_status status;
     int atlas_index;    /* pack: which atlas landed */
+    tp_id128 atlas_id;  /* stable owner of the landed pack */
     double ms;          /* pack: wall-clock pack time */
     bool input_changed; /* pack: model/source token differs -> keep preview stale */
     int missing;        /* pack: skipped-missing-source count */
@@ -166,24 +236,28 @@ bool gui_pack_async_start(int atlas_index, char *err, size_t err_cap);
 /* Starts an async export of every exporting atlas. false (fills err) if busy / nothing to export /
  * relative out-paths need a saved project. */
 bool gui_pack_export_async_start(char *err, size_t err_cap);
-/* Call once per frame. If a worker finished, joins it, applies the pack slot swap (pack), and
- * returns the completion (else GUI_PACK_DONE_NONE). Fills *out. */
+/* Consumes one completion only after host drain + atomic observation classified
+ * its envelope. Applies a Pack slot swap only for an accepted result. */
 gui_pack_done gui_pack_poll(gui_pack_result_info *out);
 bool gui_pack_async_busy(void);
-/* True only when a REAL worker thread is in flight (excludes the --shot-packing debug-forced busy that
- * gui_pack_async_busy also reports). The shutdown drain (window X-close) waits on this so it never spins
- * on the fake shot busy, which has no thread to join. */
+/* True for real queued/admitted/staged host work; excludes screenshot-only
+ * synthetic busy presentation. */
 bool gui_pack_worker_active(void);
 gui_pack_async_kind gui_pack_async_active_kind(void);
 double gui_pack_async_elapsed_sec(void);
 void gui_pack_export_progress(int *cur, int *total); /* export "atlas cur/total" for the strip */
-/* Requests cancel: the non-interruptible worker runs to completion, but its result is discarded when
- * it lands (pack) / no further atlases are started (export). */
-void gui_pack_async_cancel(void);
+/* Enqueues typed cancellation for the host admission phase. Rejections remain
+ * structured (duplicate, closed host, or no live job). */
+tp_status gui_pack_async_cancel(tp_error *err);
 bool gui_pack_async_cancelling(void);
-/* DEV (--shot-packing): force the busy strip state without a real worker, for screenshots. */
+/* DEV (--shot-packing): force the busy strip state without a real worker, for screenshots.
+ * Dev seam: declared and defined only under NTPACKER_GUI_DEV_SEAMS. */
+#ifdef NTPACKER_GUI_DEV_SEAMS
 void gui_pack_debug_force_busy(gui_pack_async_kind kind);
+#endif
 
+/* Non-blocking: stops host ingress and releases presentation-owned results.
+ * The frame/shutdown host pump owns cancellation and terminal drain. */
 void gui_pack_shutdown(void);
 
 #ifdef __cplusplus

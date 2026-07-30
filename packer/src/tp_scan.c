@@ -598,12 +598,6 @@ tp_status tp_scan_classify_checked(const char *abs, tp_scan_kind *out,
     return TP_STATUS_OK;
 }
 
-tp_scan_kind tp_scan_classify(const char *abs) {
-    tp_scan_kind kind = TP_SCAN_KIND_MISSING;
-    (void)tp_scan_classify_checked(abs, &kind, NULL);
-    return kind;
-}
-
 bool tp_scan_file_stat(const char *abs, long long *out_size,
                        long long *out_mtime) {
     if (!abs || abs[0] == '\0') {

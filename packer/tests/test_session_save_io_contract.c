@@ -93,8 +93,15 @@ static void assert_session_outcome(const session_save_fault *fault,
     (void)snprintf(name, sizeof name,
                    "session-save-io-%zu.ntpacker_project", index);
     make_path(baseline_path, sizeof baseline_path, name);
+    /* Deliberately NON-canonical: the "./" component canonicalization removes is
+     * what makes the reported-path assertion below discriminating. Compared
+     * against a path canonicalization leaves unchanged, that assertion would
+     * pass whether Save reported the caller's path or its own private canonical
+     * buffer -- i.e. it would still pass with the remap deleted. Only Save-As
+     * can pin it: tp_session_save has no path of its own to pass and hands the
+     * canonical path in as the public one. */
     (void)snprintf(name, sizeof name,
-                   "session-save-io-%zu-new.ntpacker_project", index);
+                   "./session-save-io-%zu-new.ntpacker_project", index);
     make_path(destination_path, sizeof destination_path, name);
     (void)remove(baseline_path);
     (void)remove(destination_path);
@@ -156,10 +163,12 @@ static void assert_session_outcome(const session_save_fault *fault,
     TEST_ASSERT_EQUAL_INT(0, save_result.target_path[0]);
     TEST_ASSERT_TRUE(tp_id128_is_nil(save_result.file_fingerprint));
     TEST_ASSERT_EQUAL_INT(fault->phase, error.file_io.phase);
+    /* The reported path is the PUBLIC one the caller passed, not the private
+     * canonical buffer the save path built. It is owned by value, so it stays
+     * readable no matter what happens to either of those buffers. For the
+     * create-only fault the two differ (see destination_path above), so this is
+     * the assertion the remap has to be alive for. */
     TEST_ASSERT_EQUAL_STRING(attempted_path, error.file_io.path);
-    if (fault->create_only) {
-        TEST_ASSERT_EQUAL_PTR(attempted_path, error.file_io.path);
-    }
 
     tp_session_snapshot *after_failure = NULL;
     TEST_ASSERT_EQUAL_INT(

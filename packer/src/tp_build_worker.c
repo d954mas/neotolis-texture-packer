@@ -43,7 +43,7 @@
 
 /* Internal safety timeout (decision 0018 kickoff): cancellation is the primary
  * control; this only bounds a wedged builder. Overridable by the cancel/timeout
- * test via tp_build_worker_opts.timeout_ms; never user-facing. */
+ * test via tp_build_worker_test_controls.timeout_ms; never user-facing. */
 #define TP_BUILD_WORKER_TIMEOUT_MS (5 * 60 * 1000)
 
 /* Cancel/timeout poll cadence while the child runs. */
@@ -117,8 +117,6 @@ static bool strip_last_component(char *path) {
     return true;
 }
 
-static void remove_staging_dir(const char *staging);
-
 /* True iff the process that owned a staging dir is gone, so the dir is a safe
  * cross-run leftover to reap. An access-denied / still-running process is treated
  * as ALIVE (kept) -- only a definitively absent pid is reaped. */
@@ -143,12 +141,17 @@ static bool staging_owner_is_dead(unsigned long pid) {
 #endif
 }
 
-/* Best-effort cross-run cleanup: a host killed between make_staging_dir and
- * remove_staging_dir leaves a pkw-<pid>-<serial> dir behind forever. Before each
- * pack, sweep sibling pkw-* dirs whose owning pid (the leading hex field) is no
- * longer live and remove them. Silent and never fails the pack; our own dirs and
- * those of other live hosts are kept because their pid is still alive. */
-static void reap_stale_staging_dirs(const char *parent) {
+/* Best-effort cross-run cleanup: a host killed between creating and removing a
+ * private "<prefix><hexpid>-<serial>" directory leaves it behind forever. Before
+ * each run, sweep siblings with that shape whose owning pid is no longer live and
+ * remove them. Silent and never fails the run; our own dirs and those of other
+ * live owners are kept because their pid is still alive. Shared with the outer
+ * job worker's per-request directories, which use the same naming contract. */
+void tp_worker_reap_stale_dirs(const char *parent, const char *prefix) {
+    if (!parent || !prefix || prefix[0] == '\0') {
+        return;
+    }
+    const size_t prefix_length = strlen(prefix);
     tp_fs_dir *dir = tp_fs_dir_open(parent);
     if (!dir) {
         return;
@@ -161,13 +164,13 @@ static void reap_stale_staging_dirs(const char *parent) {
         if (entry.info.kind != TP_FS_KIND_DIRECTORY || entry.info.reparse) {
             continue;
         }
-        if (strncmp(entry.name, "pkw-", 4) != 0) {
+        if (strncmp(entry.name, prefix, prefix_length) != 0) {
             continue;
         }
         char *end = NULL;
-        unsigned long pid = strtoul(entry.name + 4U, &end, 16);
-        if (end == entry.name + 4U || *end != '-') {
-            continue; /* not our "pkw-<hexpid>-..." shape: leave it alone */
+        unsigned long pid = strtoul(entry.name + prefix_length, &end, 16);
+        if (end == entry.name + prefix_length || *end != '-') {
+            continue; /* not our "<prefix><hexpid>-..." shape: leave it alone */
         }
         if (!staging_owner_is_dead(pid)) {
             continue;
@@ -176,7 +179,7 @@ static void reap_stale_staging_dirs(const char *parent) {
         if ((size_t)snprintf(child, sizeof child, "%s/%s", parent, entry.name) >= sizeof child) {
             continue;
         }
-        remove_staging_dir(child);
+        tp_worker_remove_dir_tree(child);
     }
     tp_fs_dir_close(dir);
 }
@@ -201,7 +204,7 @@ static bool make_staging_dir(const char *work_dir, char *out, size_t out_cap) {
             break;
         }
     }
-    reap_stale_staging_dirs(parent); /* best-effort sweep of dead-owner leftovers */
+    tp_worker_reap_stale_dirs(parent, "pkw-"); /* best-effort sweep of dead-owner leftovers */
     static _Atomic uint64_t counter;
     const unsigned long pid = (unsigned long)tp_getpid();
     for (unsigned int attempt = 0U; attempt < 256U; attempt++) {
@@ -230,7 +233,7 @@ static bool make_staging_dir(const char *work_dir, char *out, size_t out_cap) {
 /* Remove the staging dir and everything under it, best effort, on EVERY exit
  * path. The builder writes a single flat file, but recurse to stay correct if a
  * future builder ever drops a sidecar. */
-static void remove_staging_dir(const char *staging) {
+void tp_worker_remove_dir_tree(const char *staging) {
     tp_fs_dir *dir = tp_fs_dir_open(staging);
     if (dir) {
         tp_fs_dir_entry entry;
@@ -244,7 +247,7 @@ static void remove_staging_dir(const char *staging) {
                 continue;
             }
             if (entry.info.kind == TP_FS_KIND_DIRECTORY && !entry.info.reparse) {
-                remove_staging_dir(child);
+                tp_worker_remove_dir_tree(child);
             } else if (entry.info.kind == TP_FS_KIND_DIRECTORY) {
                 /* Directory junction / dir-symlink (Windows classifies it as
                  * DIRECTORY): remove the link itself, never descend into and delete
@@ -370,31 +373,71 @@ static tp_status map_outcome(const uint8_t *reply, size_t reply_len, bool read_o
                         (read_ok && !reply_eof) ? "oversized" : "malformed/truncated");
 }
 
+/* One run description, file-private and identical in every build so no struct
+ * ever crosses the seam fence. The production entries fill `cancel` alone; the
+ * fenced test entries add the fault-injection fields. */
+typedef struct build_worker_run_params {
+    const char *worker_exe;
+    int timeout_ms;
+    size_t reply_cap;
+    const tp_cancel_token *cancel;
+} build_worker_run_params;
+
+static tp_status build_worker_run(const tp_pack_settings *settings,
+                                  tp_image_rgba8 *loaded_images,
+                                  const char *out_path,
+                                  const build_worker_run_params *params,
+                                  tp_error *err);
+
 tp_status tp_build_worker_run(const tp_pack_settings *settings, tp_image_rgba8 *loaded_images,
                               const char *out_path, tp_error *err) {
-    return tp_build_worker_run_opts(settings, loaded_images, out_path, NULL, err);
+    return build_worker_run(settings, loaded_images, out_path, NULL, err);
 }
 
-tp_status tp_build_worker_run_exe(const tp_pack_settings *settings, tp_image_rgba8 *loaded_images,
-                                  const char *out_path, const char *worker_exe, tp_error *err) {
-    tp_build_worker_opts opts;
-    memset(&opts, 0, sizeof opts);
-    opts.worker_exe = worker_exe;
-    return tp_build_worker_run_opts(settings, loaded_images, out_path, &opts, err);
+tp_status tp_build_worker_run_cancellable(const tp_pack_settings *settings,
+                                          tp_image_rgba8 *loaded_images,
+                                          const char *out_path,
+                                          const tp_cancel_token *cancel, tp_error *err) {
+    build_worker_run_params params;
+    memset(&params, 0, sizeof params);
+    params.cancel = cancel;
+    return build_worker_run(settings, loaded_images, out_path, &params, err);
 }
 
-tp_status tp_build_worker_run_opts(const tp_pack_settings *settings, tp_image_rgba8 *loaded_images,
-                                   const char *out_path, const tp_build_worker_opts *opts,
-                                   tp_error *err) {
-    if (opts && opts->out_cancelled) {
-        *opts->out_cancelled = false;
+#ifdef TP_ENABLE_TEST_SEAMS
+tp_status tp_build_worker__test_run(const tp_pack_settings *settings,
+                                    tp_image_rgba8 *loaded_images, const char *out_path,
+                                    const tp_build_worker_test_controls *controls,
+                                    const tp_cancel_token *cancel, tp_error *err) {
+    build_worker_run_params params;
+    memset(&params, 0, sizeof params);
+    if (controls) {
+        params.worker_exe = controls->worker_exe;
+        params.timeout_ms = controls->timeout_ms;
+        params.reply_cap = controls->reply_cap;
     }
+    params.cancel = cancel;
+    return build_worker_run(settings, loaded_images, out_path, &params, err);
+}
 
+tp_status tp_build_worker__test_run_exe(const tp_pack_settings *settings,
+                                        tp_image_rgba8 *loaded_images, const char *out_path,
+                                        const char *worker_exe, tp_error *err) {
+    tp_build_worker_test_controls controls;
+    memset(&controls, 0, sizeof controls);
+    controls.worker_exe = worker_exe;
+    return tp_build_worker__test_run(settings, loaded_images, out_path, &controls, NULL, err);
+}
+#endif
+
+static tp_status build_worker_run(const tp_pack_settings *settings, tp_image_rgba8 *loaded_images,
+                                  const char *out_path, const build_worker_run_params *params,
+                                  tp_error *err) {
     /* Resolve the worker executable BEFORE consuming loaded_images. A self-path
      * failure is NOT silently downgraded to an in-process build: that would run
      * nt_builder in the host and lose containment, so it fails closed. */
     char self[4096];
-    const char *exe = opts ? opts->worker_exe : NULL;
+    const char *exe = params ? params->worker_exe : NULL;
     if (!exe) {
         if (!tp_proc_self_path(self, sizeof self)) {
             free_loaded_images(loaded_images, settings->sprite_count);
@@ -417,7 +460,7 @@ tp_status tp_build_worker_run_opts(const tp_pack_settings *settings, tp_image_rg
     char staged_path[TP_STAGING_PATH_MAX];
     if ((size_t)snprintf(staged_path, sizeof staged_path, "%s/%s", staging, TP_BUILD_WORKER_OUT_NAME) >=
         sizeof staged_path) {
-        remove_staging_dir(staging);
+        tp_worker_remove_dir_tree(staging);
         free_loaded_images(loaded_images, settings->sprite_count);
         return tp_error_set(err, TP_STATUS_BUILDER_CRASHED, "tp_pack: build worker staging path too long");
     }
@@ -429,14 +472,14 @@ tp_status tp_build_worker_run_opts(const tp_pack_settings *settings, tp_image_rg
      * decode buffers (mirrors the driver freeing before encode/assembly). */
     free_loaded_images(loaded_images, settings->sprite_count);
     if (st != TP_STATUS_OK) {
-        remove_staging_dir(staging);
+        tp_worker_remove_dir_tree(staging);
         return st;
     }
 
     tp_proc *proc = tp_proc_spawn(exe, TP_BUILD_WORKER_ARGV1, staging);
     if (!proc) {
         free(req_bytes);
-        remove_staging_dir(staging);
+        tp_worker_remove_dir_tree(staging);
         return tp_error_set(err, TP_STATUS_BUILDER_CRASHED, "tp_pack: could not spawn build worker '%s'", exe);
     }
 
@@ -451,14 +494,16 @@ tp_status tp_build_worker_run_opts(const tp_pack_settings *settings, tp_image_rg
      * runs BEFORE reading stdout: a hung child that never closes its stdout can no
      * longer wedge the parent in a blocking read -- cancel/timeout kills it, which
      * breaks the pipes and lets the subsequent read reach EOF at once. */
-    const int timeout_ms = (opts && opts->timeout_ms > 0) ? opts->timeout_ms : TP_BUILD_WORKER_TIMEOUT_MS;
+    const int timeout_ms =
+        (params && params->timeout_ms > 0) ? params->timeout_ms : TP_BUILD_WORKER_TIMEOUT_MS;
+    const tp_cancel_token *cancel = params ? params->cancel : NULL;
     const double start = now_ms();
     tp_proc_result w = {TP_PROC_END_ABNORMAL, -1};
     bool finished = false;
     bool cancelled = false;
     bool timed_out = false;
     for (;;) {
-        if (opts && opts->cancel_poll && opts->cancel_poll(opts->cancel_ctx)) {
+        if (tp_cancel_requested(cancel)) {
             tp_proc_kill(proc);
             cancelled = true;
             break;
@@ -483,7 +528,7 @@ tp_status tp_build_worker_run_opts(const tp_pack_settings *settings, tp_image_rg
      * pipe buffer) so a worker that overshoots the cap still write-and-exits and the
      * post-wait read observes the over-cap (not-EOF) fail-closed branch. */
     const size_t reply_cap =
-        (opts && opts->reply_cap > 0U) ? opts->reply_cap : TP_BUILD_WORKER_REPLY_CAP;
+        (params && params->reply_cap > 0U) ? params->reply_cap : TP_BUILD_WORKER_REPLY_CAP;
     uint8_t *reply = NULL;
     size_t reply_len = 0U;
     bool reply_eof = false;
@@ -495,15 +540,15 @@ tp_status tp_build_worker_run_opts(const tp_pack_settings *settings, tp_image_rg
     tp_proc_destroy(proc); /* reaps a killed child; a finished child is already reaped */
 
     if (cancelled) {
-        remove_staging_dir(staging);
-        if (opts && opts->out_cancelled) {
-            *opts->out_cancelled = true;
-        }
+        tp_worker_remove_dir_tree(staging);
         free(reply);
-        return TP_STATUS_OK; /* nothing published; caller maps this to a cancelled job */
+        /* Nothing published. CANCELLED is not a builder failure -- it is the one
+         * status meaning "the caller asked to stop". */
+        return tp_error_set(err, TP_STATUS_CANCELLED,
+                            "tp_pack: build worker cancelled before publication");
     }
     if (timed_out) {
-        remove_staging_dir(staging);
+        tp_worker_remove_dir_tree(staging);
         free(reply);
         return tp_error_set(err, TP_STATUS_BUILDER_CRASHED,
                             "tp_pack: build worker timed out after %d ms (builder timeout)", timeout_ms);
@@ -519,7 +564,7 @@ tp_status tp_build_worker_run_opts(const tp_pack_settings *settings, tp_image_rg
         st = tp_error_set(err, TP_STATUS_BUILDER_CRASHED,
                           "tp_pack: build worker artifact could not be published to '%s'", out_path);
     }
-    remove_staging_dir(staging);
+    tp_worker_remove_dir_tree(staging);
     free(reply);
     return st;
 }

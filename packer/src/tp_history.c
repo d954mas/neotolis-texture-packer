@@ -19,7 +19,7 @@
  * caller with a full checkpoint; recovery starts with a fresh empty history stack.
  */
 
-#include "tp_core/tp_diff.h"
+#include "tp_diff.h"
 
 #include <stdlib.h>
 #include <string.h>

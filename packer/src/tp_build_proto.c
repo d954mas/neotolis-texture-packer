@@ -1,8 +1,11 @@
 #include "tp_build_proto_internal.h"
 
 #include <stdbool.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#include "tp_utf8_internal.h"
 
 /* Fixed wire headers. #pragma pack(1) + memcpy through aligned locals mirrors
  * the .ntpack reader; sizes are _Static_assert-pinned so a field edit that
@@ -115,6 +118,70 @@ static uint8_t *dup_bytes(const uint8_t *src, size_t n) {
 }
 // #endregion
 
+// #region text fields
+/* Per-sprite field labels. TP_BUILD_PROTO_MAX_SPRITES is 65535, so the longest
+ * label this builds is "sprite 65535 name". */
+typedef struct proto_label {
+    char text[32];
+} proto_label;
+
+static const char *sprite_label(proto_label *buf, uint32_t index, const char *field) {
+    (void)snprintf(buf->text, sizeof buf->text, "sprite %u %s", (unsigned)index, field);
+    return buf->text;
+}
+
+/* Every text field of this protocol -- request atlas_name/out_name/sprite name,
+ * response artifact_name/message -- passes exactly one admission: at most
+ * TP_BUILD_PROTO_MAX_NAME_BYTES, no embedded NUL (the length travels in the
+ * head), and strict Unicode-scalar UTF-8. The NUL + UTF-8 halves are the shared
+ * tp_utf8 seam the outer job-worker codec uses, so the two codecs cannot drift.
+ *
+ * Admitting text HERE is what keeps the boundary honest: the host copies a
+ * decoded builder string into its own tp_error, which the outer codec then
+ * validates while encoding the terminal frame. A field that fails admission at
+ * this boundary is reported as a structured inner-decode fault, so a malformed
+ * builder string can never reach -- and refuse -- the outer terminal frame. */
+static tp_status text_admissible(const void *bytes, size_t length, const char *label, tp_error *err) {
+    if (length > TP_BUILD_PROTO_MAX_NAME_BYTES) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "tp_build_proto: %s length %zu exceeds %u", label, length,
+                            (unsigned)TP_BUILD_PROTO_MAX_NAME_BYTES);
+    }
+    return tp_utf8_validate_text_field(bytes, length, label, err);
+}
+
+/* Encode side: measure and admit a caller-owned C string. */
+static tp_status wr_text_len(const char *text, const char *label, size_t *out_len, tp_error *err) {
+    size_t length = strlen(text);
+    tp_status st = text_admissible(text, length, label, err);
+    if (st != TP_STATUS_OK) {
+        return st;
+    }
+    *out_len = length;
+    return TP_STATUS_OK;
+}
+
+/* Decode side: admit `len` payload bytes, then hand back an owned copy. */
+static tp_status rd_text(proto_rd *r, uint32_t len, const char *label, const char **out, tp_error *err) {
+    if ((size_t)len > TP_BUILD_PROTO_MAX_NAME_BYTES) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "tp_build_proto: %s length %u exceeds %u", label,
+                            (unsigned)len, (unsigned)TP_BUILD_PROTO_MAX_NAME_BYTES);
+    }
+    const uint8_t *ref = NULL;
+    if (!rd_ref(r, &ref, len)) {
+        return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS, "tp_build_proto: %s overruns payload", label);
+    }
+    tp_status st = text_admissible(ref, len, label, err);
+    if (st != TP_STATUS_OK) {
+        return st;
+    }
+    *out = dup_cstr(ref, len);
+    if (!*out) {
+        return tp_error_set(err, TP_STATUS_OOM, "tp_build_proto: %s alloc failed", label);
+    }
+    return TP_STATUS_OK;
+}
+// #endregion
+
 void tp_build_proto_request_free(tp_build_proto_request *req) {
     if (!req) {
         return;
@@ -162,14 +229,19 @@ tp_status tp_build_proto_encode_request(const tp_build_proto_request *req, uint8
     if (req->sprite_count > 0 && !req->sprites) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "tp_build_proto: sprites is NULL");
     }
-    size_t atlas_len = strlen(req->atlas_name);
-    size_t out_name_len = strlen(req->out_name);
-    if (atlas_len > TP_BUILD_PROTO_MAX_NAME_BYTES || out_name_len > TP_BUILD_PROTO_MAX_NAME_BYTES) {
-        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "tp_build_proto: atlas/out name length exceeds cap");
+    size_t atlas_len = 0;
+    size_t out_name_len = 0;
+    tp_status text_st = wr_text_len(req->atlas_name, "atlas_name", &atlas_len, err);
+    if (text_st != TP_STATUS_OK) {
+        return text_st;
+    }
+    text_st = wr_text_len(req->out_name, "out_name", &out_name_len, err);
+    if (text_st != TP_STATUS_OK) {
+        return text_st;
     }
 
     /* Size pass: accumulate the payload with overflow guards and per-sprite
-     * field validation (dimensions/name length) so encode fails closed too. */
+     * field validation (dimensions, name admission) so encode fails closed too. */
     size_t payload = sizeof(proto_request_head) + atlas_len + out_name_len;
     for (uint32_t i = 0; i < req->sprite_count; i++) {
         const tp_build_proto_sprite *sp = &req->sprites[i];
@@ -184,10 +256,11 @@ tp_status tp_build_proto_encode_request(const tp_build_proto_request *req, uint8
             return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "tp_build_proto: sprite %u size %ux%u out of range",
                                 (unsigned)i, (unsigned)sp->width, (unsigned)sp->height);
         }
-        size_t name_len = strlen(sp->name);
-        if (name_len > TP_BUILD_PROTO_MAX_NAME_BYTES) {
-            return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "tp_build_proto: sprite %u name length exceeds cap",
-                                (unsigned)i);
+        proto_label label;
+        size_t name_len = 0;
+        text_st = wr_text_len(sp->name, sprite_label(&label, i, "name"), &name_len, err);
+        if (text_st != TP_STATUS_OK) {
+            return text_st;
         }
         size_t rgba_len = (size_t)sp->width * (size_t)sp->height * 4U; /* <= 2^30, bounded above */
         size_t add = sizeof(proto_sprite_head);
@@ -279,6 +352,11 @@ tp_status tp_build_proto_encode_response(const tp_build_proto_response *resp, ui
     if (!resp || !out_bytes || !out_len) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "tp_build_proto: encode NULL argument");
     }
+    /* Length-only admission here, on purpose: this encoder runs in the worker
+     * child, whose ONLY channel home is this reply. Refusing to encode a reply
+     * whose message is malformed would replace a structured builder failure with
+     * silence, so the response's text admission is enforced where the fault is
+     * still reportable -- at decode in the host (see rd_text). */
     const char *artifact = resp->artifact_name ? resp->artifact_name : "";
     const char *message = resp->message ? resp->message : "";
     size_t artifact_len = strlen(artifact);
@@ -368,9 +446,6 @@ tp_status tp_build_proto_decode_request(const uint8_t *bytes, size_t len, tp_bui
     if (!rd_bytes(&r, &rh, sizeof rh)) {
         return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS, "tp_build_proto: request head overruns payload");
     }
-    if (rh.atlas_name_len > TP_BUILD_PROTO_MAX_NAME_BYTES || rh.out_name_len > TP_BUILD_PROTO_MAX_NAME_BYTES) {
-        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "tp_build_proto: atlas/out name length exceeds cap");
-    }
     if (rh.sprite_count > TP_BUILD_PROTO_MAX_SPRITES) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "tp_build_proto: sprite_count %u exceeds %u",
                             (unsigned)rh.sprite_count, (unsigned)TP_BUILD_PROTO_MAX_SPRITES);
@@ -388,23 +463,12 @@ tp_status tp_build_proto_decode_request(const uint8_t *bytes, size_t len, tp_bui
     out->pixels_per_unit = rh.pixels_per_unit;
     out->sprite_count = rh.sprite_count;
 
-    const uint8_t *ref = NULL;
-    if (!rd_ref(&r, &ref, rh.atlas_name_len)) {
-        st = tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS, "tp_build_proto: atlas_name overruns payload");
+    st = rd_text(&r, rh.atlas_name_len, "atlas_name", &out->atlas_name, err);
+    if (st != TP_STATUS_OK) {
         goto fail;
     }
-    out->atlas_name = dup_cstr(ref, rh.atlas_name_len);
-    if (!out->atlas_name) {
-        st = tp_error_set(err, TP_STATUS_OOM, "tp_build_proto: atlas_name alloc failed");
-        goto fail;
-    }
-    if (!rd_ref(&r, &ref, rh.out_name_len)) {
-        st = tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS, "tp_build_proto: out_name overruns payload");
-        goto fail;
-    }
-    out->out_name = dup_cstr(ref, rh.out_name_len);
-    if (!out->out_name) {
-        st = tp_error_set(err, TP_STATUS_OOM, "tp_build_proto: out_name alloc failed");
+    st = rd_text(&r, rh.out_name_len, "out_name", &out->out_name, err);
+    if (st != TP_STATUS_OK) {
         goto fail;
     }
 
@@ -419,11 +483,6 @@ tp_status tp_build_proto_decode_request(const uint8_t *bytes, size_t len, tp_bui
             proto_sprite_head sh;
             if (!rd_bytes(&r, &sh, sizeof sh)) {
                 st = tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS, "tp_build_proto: sprite %u head overruns payload",
-                                  (unsigned)i);
-                goto fail;
-            }
-            if (sh.name_len > TP_BUILD_PROTO_MAX_NAME_BYTES) {
-                st = tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "tp_build_proto: sprite %u name length exceeds cap",
                                   (unsigned)i);
                 goto fail;
             }
@@ -454,22 +513,18 @@ tp_status tp_build_proto_decode_request(const uint8_t *bytes, size_t len, tp_bui
             arr[i].ov_max_vertices = sh.ov_max_vertices;
             arr[i].ov_margin = sh.ov_margin;
             arr[i].ov_extrude = sh.ov_extrude;
-            if (!rd_ref(&r, &ref, sh.name_len)) {
-                st = tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS, "tp_build_proto: sprite %u name overruns payload",
-                                  (unsigned)i);
+            proto_label label;
+            st = rd_text(&r, sh.name_len, sprite_label(&label, i, "name"), &arr[i].name, err);
+            if (st != TP_STATUS_OK) {
                 goto fail;
             }
-            arr[i].name = dup_cstr(ref, sh.name_len);
-            if (!arr[i].name) {
-                st = tp_error_set(err, TP_STATUS_OOM, "tp_build_proto: sprite %u name alloc failed", (unsigned)i);
-                goto fail;
-            }
-            if (!rd_ref(&r, &ref, sh.rgba_len)) {
+            const uint8_t *pixels = NULL;
+            if (!rd_ref(&r, &pixels, sh.rgba_len)) {
                 st = tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS, "tp_build_proto: sprite %u pixels overrun payload",
                                   (unsigned)i);
                 goto fail;
             }
-            arr[i].rgba = dup_bytes(ref, sh.rgba_len);
+            arr[i].rgba = dup_bytes(pixels, sh.rgba_len);
             if (!arr[i].rgba) {
                 st = tp_error_set(err, TP_STATUS_OOM, "tp_build_proto: sprite %u pixels alloc failed", (unsigned)i);
                 goto fail;
@@ -504,29 +559,15 @@ tp_status tp_build_proto_decode_response(const uint8_t *bytes, size_t len, tp_bu
     if (!rd_bytes(&r, &rh, sizeof rh)) {
         return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS, "tp_build_proto: response head overruns payload");
     }
-    if (rh.artifact_len > TP_BUILD_PROTO_MAX_NAME_BYTES || rh.message_len > TP_BUILD_PROTO_MAX_NAME_BYTES) {
-        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "tp_build_proto: artifact/message length exceeds cap");
-    }
     out->status = rh.status;
     out->builder_code = rh.builder_code;
 
-    const uint8_t *ref = NULL;
-    if (!rd_ref(&r, &ref, rh.artifact_len)) {
-        st = tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS, "tp_build_proto: artifact_name overruns payload");
+    st = rd_text(&r, rh.artifact_len, "artifact_name", &out->artifact_name, err);
+    if (st != TP_STATUS_OK) {
         goto fail;
     }
-    out->artifact_name = dup_cstr(ref, rh.artifact_len);
-    if (!out->artifact_name) {
-        st = tp_error_set(err, TP_STATUS_OOM, "tp_build_proto: artifact_name alloc failed");
-        goto fail;
-    }
-    if (!rd_ref(&r, &ref, rh.message_len)) {
-        st = tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS, "tp_build_proto: message overruns payload");
-        goto fail;
-    }
-    out->message = dup_cstr(ref, rh.message_len);
-    if (!out->message) {
-        st = tp_error_set(err, TP_STATUS_OOM, "tp_build_proto: message alloc failed");
+    st = rd_text(&r, rh.message_len, "message", &out->message, err);
+    if (st != TP_STATUS_OK) {
         goto fail;
     }
     if (r.off != r.len) {

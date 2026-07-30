@@ -2,7 +2,7 @@
 #define _WIN32_WINNT 0x0601
 #endif
 
-#include "tp_core/tp_project_lease.h"
+#include "tp_project_lease.h"
 
 #include <errno.h>
 #include <stdio.h>

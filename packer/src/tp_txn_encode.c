@@ -1,6 +1,6 @@
 /*
  * Canonical BYTE-STABLE encode of a transaction request
- * and result. Same conventions as the tp_project writer (src/tp_sb.h): 2-space
+ * and result. Same conventions as the tp_project writer (tp_core/tp_sb.h): 2-space
  * indent, LF, keys ASCENDING with the discriminator ("schema" at the envelope, "op"
  * in an operation) first, a trailing newline; integral 64-bit numbers via PRId64
  * (no decimal point), fractional via "%.9g"; label/author sparse-omitted. Goldens
@@ -20,7 +20,7 @@
 #include "tp_core/tp_id.h"
 #include "tp_encode_internal.h"
 #include "tp_op_internal.h"
-#include "tp_sb.h"
+#include "tp_core/tp_sb.h"
 
 static _Thread_local size_t s_test_request_encode_calls;
 static _Thread_local size_t s_test_last_measure_allocations;
@@ -121,23 +121,6 @@ char *tp_txn_request_encode_bounded(const tp_txn_request *req, size_t max_bytes,
         return NULL;
     }
     return sb.buf;
-}
-
-bool tp_txn_request_encoded_size(const tp_txn_request *req, size_t *size_out) {
-    if (!size_out) {
-        return false;
-    }
-    *size_out = 0U;
-    s_test_last_measure_allocations = 0U;
-    tp_sb sb = {
-        .count_only = true,
-        .allocation_count = &s_test_last_measure_allocations,
-    };
-    if (!emit_request(&sb, req, NULL)) {
-        return false;
-    }
-    *size_out = sb.len;
-    return true;
 }
 
 char *tp_txn_request_encode_bounded_for_project(

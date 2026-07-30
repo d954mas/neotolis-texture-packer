@@ -4,8 +4,9 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "tp_core/tp_diff.h"
-#include "tp_core/tp_project_lease.h"
+#include "core/nt_assert.h"
+#include "tp_diff.h"
+#include "tp_project_lease.h"
 #include "tp_core/tp_recovery.h"
 #include "tp_core/tp_journal.h"
 #include "tp_core/tp_sprite_index.h"
@@ -19,8 +20,13 @@
 #include "tp_project_identity_internal.h"
 #include "tp_project_mutation_internal.h"
 
-// #region gate & recovery health
-bool recovery_is_healthy(const tp_session *session) {
+// #region owner thread & recovery health
+void tp_session__assert_owner_thread(const tp_session *session) {
+    NT_ASSERT(session != NULL);
+    NT_ASSERT(thrd_equal(session->owner_thread, thrd_current()));
+}
+
+static bool recovery_is_healthy(const tp_session *session) {
     if (tp_model__recovery_degraded(session->model)) {
         return false;
     }
@@ -33,7 +39,26 @@ bool recovery_is_healthy(const tp_session *session) {
     return !session->recovery_required && session->recovery_healthy;
 }
 
-tp_session_recovery_health tp_session__recovery_health_locked(
+/* Recovery health has TWO independent authorities: the model counts durability
+ * and degradation, the session counts owner attachment/requirement. The DTO
+ * exposes ONE `generation`, so it must move when either half moves -- reporting
+ * only the model half made owner-side transitions (attach_journal,
+ * attach_recovery_live, require_recovery) change `available`/`degraded` while
+ * `generation` stayed put, which is exactly the staleness the counter exists to
+ * rule out. Both halves are monotonic and saturate at UINT64_MAX, so the sum is
+ * monotonic too; it saturates rather than wrapping. */
+static uint64_t recovery_health_generation(const tp_session *session) {
+    NT_ASSERT(session != NULL);
+    const uint64_t model_half =
+        tp_model__recovery_health_generation(session->model);
+    const uint64_t owner_half = session->recovery_owner_generation;
+    if (model_half > UINT64_MAX - owner_half) {
+        return UINT64_MAX;
+    }
+    return model_half + owner_half;
+}
+
+tp_session_recovery_health tp_session_recovery_health_query(
     const tp_session *session) {
     tp_session_recovery_health health = {
         .notice_id = TP_SESSION_NOTICE_RECOVERY_DEGRADED,
@@ -42,6 +67,7 @@ tp_session_recovery_health tp_session__recovery_health_locked(
     if (!session) {
         return health;
     }
+    tp_session__assert_owner_thread(session);
     const bool model_degraded =
         tp_model__recovery_degraded(session->model);
     const bool owner_degraded =
@@ -63,8 +89,7 @@ tp_session_recovery_health tp_session__recovery_health_locked(
      * Keep the time explicitly unknown instead of sampling a global clock. */
     health.has_last_durable_time = false;
     health.last_durable_time = 0;
-    health.generation =
-        tp_model__recovery_health_generation(session->model);
+    health.generation = recovery_health_generation(session);
     return health;
 }
 
@@ -75,72 +100,47 @@ static void observe_model_recovery(tp_session *session) {
     session->recovery_healthy = false;
 }
 
+static void bump_recovery_owner_generation(tp_session *session) {
+    NT_ASSERT(session != NULL);
+    if (session->recovery_owner_generation < UINT64_MAX) {
+        session->recovery_owner_generation++;
+    }
+}
+
 bool tp_session__owns_recovery_live(const tp_session *session,
                                     const tp_recovery_live *live) {
     if (!session || !live) {
         return false;
     }
-    gate_lock(session);
-    const bool owns = session->recovery_live == live;
-    gate_unlock(session);
-    return owns;
+    tp_session__assert_owner_thread(session);
+    return session->recovery_live == live;
 }
 
 bool tp_session__has_recovery_owner(const tp_session *session) {
     if (!session) {
         return false;
     }
-    gate_lock(session);
-    const bool has_owner = session->recovery_live != NULL ||
-                           tp_model_has_journal(session->model);
-    gate_unlock(session);
-    return has_owner;
+    tp_session__assert_owner_thread(session);
+    return session->recovery_live != NULL ||
+           tp_model_has_journal(session->model);
 }
 
 const char *tp_session__recovery_journal_path(const tp_session *session) {
-    return session && session->recovery_live
+    if (!session) {
+        return NULL;
+    }
+    tp_session__assert_owner_thread(session);
+    return session->recovery_live
                ? tp_recovery_live_journal_path(session->recovery_live)
                : NULL;
-}
-
-static bool gate_init(tp_session *session) {
-#if defined(_WIN32)
-    InitializeSRWLock(&session->gate);
-    return true;
-#else
-    return pthread_mutex_init(&session->gate, NULL) == 0;
-#endif
-}
-
-static void gate_destroy(tp_session *session) {
-#if defined(_WIN32)
-    (void)session;
-#else
-    (void)pthread_mutex_destroy(&session->gate);
-#endif
-}
-
-void gate_lock(const tp_session *session) {
-#if defined(_WIN32)
-    AcquireSRWLockExclusive((SRWLOCK *)&session->gate);
-#else
-    (void)pthread_mutex_lock((pthread_mutex_t *)&session->gate);
-#endif
-}
-
-void gate_unlock(const tp_session *session) {
-#if defined(_WIN32)
-    ReleaseSRWLockExclusive((SRWLOCK *)&session->gate);
-#else
-    (void)pthread_mutex_unlock((pthread_mutex_t *)&session->gate);
-#endif
 }
 // #endregion
 
 // #region event log
 static void publish_event(tp_session *session, tp_session_event_kind kind,
                           const char *transaction_id, int64_t revision_before,
-                          int64_t revision_after) {
+                          int64_t revision_after, const char *label,
+                          const char *author) {
     const uint64_t sequence = ++session->event_sequence;
     size_t slot;
     if (session->event_count < TP_SESSION_EVENT_CAPACITY) {
@@ -162,13 +162,19 @@ static void publish_event(tp_session *session, tp_session_event_kind kind,
     if (transaction_id) {
         (void)snprintf(event->transaction_id, sizeof event->transaction_id, "%s", transaction_id);
     }
+    if (label) {
+        (void)snprintf(event->label, sizeof event->label, "%s", label);
+    }
+    if (author) {
+        (void)snprintf(event->author, sizeof event->author, "%s", author);
+    }
 }
 // #endregion
 
 // #region visible history markers
 /* Session-owned NON-undoable rows (Save checkpoints §9.2, runtime refreshes §9.3).
  * The model's undo stack owns the edit rows and the cursor; these markers only
- * annotate it. All helpers run under the gate. */
+ * annotate it. All helpers run on the owner thread. */
 static char *history_path_dup(const char *path) {
     if (!path) {
         return NULL;
@@ -319,29 +325,24 @@ static tp_status session_adopt_owned(tp_project *project, const tp_rng *rng,
         tp_project_destroy(project);
         return tp_error_set(err, TP_STATUS_OOM, "session allocation failed");
     }
-    if (!gate_init(session)) {
-        tp_project_destroy(project);
-        free(session);
-        return tp_error_set(err, TP_STATUS_OOM, "session serialization gate allocation failed");
-    }
+    /* The creating thread becomes the owner. Everything below asserts against
+     * it, so the capture must precede the first entry-point call. */
+    session->owner_thread = thrd_current();
     status = tp_session_identity_init_unsaved(&session->identity, rng, err);
     if (status != TP_STATUS_OK) {
         tp_project_destroy(project);
-        gate_destroy(session);
         free(session);
         return status;
     }
     session->model = tp_model_wrap(project);
     if (!session->model) {
         tp_project_destroy(project);
-        gate_destroy(session);
         free(session);
         return tp_error_set(err, TP_STATUS_OOM, "session model allocation failed");
     }
     status = tp_model_enable_history(session->model);
     if (status != TP_STATUS_OK) {
         tp_model_destroy(session->model);
-        gate_destroy(session);
         free(session);
         return tp_error_set(err, status, "session history allocation failed");
     }
@@ -463,12 +464,15 @@ void tp_session_destroy(tp_session *session) {
     if (!session) {
         return;
     }
+    tp_session__assert_owner_thread(session);
     if (session->active_job) {
         tp_session_owned_job *job = session->active_job;
         session->active_job = NULL;
         job->cancel(job);
         tp_session_job_release_internal(job);
     }
+    tp_session_job_release_internal(session->observed_job_owner);
+    tp_session_job_release_internal(session->observed_result_owner);
     if (session->recovery_live) {
         const bool preserve = tp_model__recovery_degraded(session->model) ||
                               !tp_recovery_live_healthy(session->recovery_live) ||
@@ -480,7 +484,6 @@ void tp_session_destroy(tp_session *session) {
     history_markers_clear(session);
     tp_model_destroy(session->model);
     tp_project_lease_release(session->project_lease);
-    gate_destroy(session);
     free(session);
 }
 // #endregion
@@ -494,7 +497,20 @@ void tp_session_owned_job_init(tp_session_owned_job *job,
     }
     atomic_init(&job->refs, 1U);
     job->cancel = cancel;
+    job->pump = NULL;
     job->destroy = destroy;
+    memset(&job->observation_descriptor, 0,
+           sizeof job->observation_descriptor);
+    job->observe = NULL;
+}
+
+void tp_session_job_retain_internal(tp_session_owned_job *job) {
+    if (!job) {
+        return;
+    }
+    const unsigned previous = atomic_fetch_add_explicit(
+        &job->refs, 1U, memory_order_relaxed);
+    NT_ASSERT(previous > 0U);
 }
 
 void tp_session_job_release_internal(tp_session_owned_job *job) {
@@ -507,6 +523,63 @@ void tp_session_job_release_internal(tp_session_owned_job *job) {
     }
 }
 
+tp_status tp_session_job_start_internal(
+    tp_session *session, tp_session_owned_job *job,
+    tp_session_job_start_fn start, void *start_context,
+    tp_error *err) {
+    if (!session || !job || !start) {
+        return tp_error_set(
+            err, TP_STATUS_INVALID_ARGUMENT,
+            "job start requires session, owner, and start callback");
+    }
+    tp_session__assert_owner_thread(session);
+    if (session->discarded) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "session was discarded");
+    }
+    if (session->active_job) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "a Pack or Export job is already active");
+    }
+    const tp_status validation_status =
+        tp_session_job_observation__validate_begin(session, job, err);
+    if (validation_status != TP_STATUS_OK) {
+        return validation_status;
+    }
+    /* Reserve the request identity before process creation so the exact
+     * admitted identity is encoded into the child request. A failed spawn may
+     * consume an id, but publishes no job/result state. Cannot fail twice:
+     * __begin below re-enters the same reservation helper and finds the id
+     * already non-zero. */
+    const tp_status reservation_status =
+        tp_session_job_observation__reserve_request_id(session, job, err);
+    if (reservation_status != TP_STATUS_OK) {
+        return reservation_status;
+    }
+    /* Process creation is fail-atomic with observable publication. The start
+     * callback only spawns/encodes; it never pumps or calls the session. */
+    const tp_status start_status = start(start_context, err);
+    if (start_status != TP_STATUS_OK) {
+        return start_status;
+    }
+    tp_session_owned_job *retired = NULL;
+    /* Cannot fail here, and that is enforced, not hoped for: __validate_begin
+     * above checked both of its rejections and the request-id reservation just
+     * made the id non-zero, with no other admission possible in between on this
+     * one owner thread. The start callback only spawns; it never touches the
+     * descriptor. So this is an invariant, not a recoverable branch -- there is
+     * no half-started job to roll back. */
+    const tp_status observation_status =
+        tp_session_job_observation__begin(session, job, &retired, err);
+    NT_ASSERT(observation_status == TP_STATUS_OK);
+    (void)observation_status;
+    session->active_job = job;
+    tp_session_job_release_internal(retired);
+    return TP_STATUS_OK;
+}
+
+#ifdef TP_ENABLE_TEST_SEAMS
+/* See tp_job_owner_internal.h: test-only lease adoption, no shipping caller. */
 tp_status tp_session_job_attach_internal(tp_session *session,
                                          tp_session_owned_job *job,
                                          tp_error *err) {
@@ -514,34 +587,39 @@ tp_status tp_session_job_attach_internal(tp_session *session,
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
                             "session job attach requires a concrete job handle");
     }
-    gate_lock(session);
+    tp_session__assert_owner_thread(session);
     if (session->discarded) {
-        gate_unlock(session);
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
                             "session was discarded");
     }
     if (session->active_job) {
-        gate_unlock(session);
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
                             "a Pack or Export job is already active");
     }
+    tp_session_owned_job *retired = NULL;
+    if (job->observe) {
+        const tp_status observation_status =
+            tp_session_job_observation__begin(session, job, &retired, err);
+        if (observation_status != TP_STATUS_OK) {
+            return observation_status;
+        }
+    }
     session->active_job = job;
-    gate_unlock(session);
+    tp_session_job_release_internal(retired);
     return TP_STATUS_OK;
 }
+#endif /* TP_ENABLE_TEST_SEAMS */
 
 tp_session_owned_job *tp_session_job_acquire_internal(
     const tp_session *session) {
     if (!session) {
         return NULL;
     }
-    gate_lock(session);
+    tp_session__assert_owner_thread(session);
     tp_session_owned_job *job = session->active_job;
     if (job) {
-        (void)atomic_fetch_add_explicit(&job->refs, 1U,
-                                        memory_order_relaxed);
+        tp_session_job_retain_internal(job);
     }
-    gate_unlock(session);
     return job;
 }
 
@@ -552,14 +630,15 @@ tp_status tp_session_job_detach_internal(tp_session *session,
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
                             "session job detach requires session and handle");
     }
-    gate_lock(session);
+    tp_session__assert_owner_thread(session);
     if (session->active_job != expected) {
-        gate_unlock(session);
         return tp_error_set(err, TP_STATUS_NOT_FOUND,
                             "session no longer owns that job handle");
     }
     session->active_job = NULL;
-    gate_unlock(session);
+    tp_session_owned_job *retired =
+        tp_session_job_observation__detach(session, expected);
+    tp_session_job_release_internal(retired);
     return TP_STATUS_OK;
 }
 // #endregion
@@ -571,12 +650,12 @@ tp_status tp_session_attach_journal(tp_session *session, tp_journal *journal,
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
                             "journal attach requires session and journal");
     }
-    gate_lock(session);
+    tp_session__assert_owner_thread(session);
     tp_status status = tp_model_attach_journal(session->model, journal, err);
     if (status == TP_STATUS_OK) {
         session->recovery_healthy = true;
+        bump_recovery_owner_generation(session);
     }
-    gate_unlock(session);
     return status;
 }
 
@@ -588,9 +667,8 @@ tp_status tp_session_attach_recovery_live(tp_session *session,
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
                             "recovery live attach requires session, live handle, and metadata");
     }
-    gate_lock(session);
+    tp_session__assert_owner_thread(session);
     if (session->recovery_live || tp_model_has_journal(session->model)) {
-        gate_unlock(session);
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
                             "session already has recovery attached");
     }
@@ -600,7 +678,7 @@ tp_status tp_session_attach_recovery_live(tp_session *session,
     if (status != TP_STATUS_OK) {
         tp_model__degrade_recovery(session->model, status);
     }
-    gate_unlock(session);
+    bump_recovery_owner_generation(session);
     return status;
 }
 
@@ -609,14 +687,15 @@ tp_status tp_session_require_recovery(tp_session *session, tp_error *err) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
                             "recovery requirement needs a session");
     }
-    gate_lock(session);
+    tp_session__assert_owner_thread(session);
     if (session->discarded) {
-        gate_unlock(session);
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
                             "session was discarded");
     }
-    session->recovery_required = true;
-    gate_unlock(session);
+    if (!session->recovery_required) {
+        session->recovery_required = true;
+        bump_recovery_owner_generation(session);
+    }
     return TP_STATUS_OK;
 }
 // #endregion
@@ -628,9 +707,8 @@ tp_status tp_session_apply(tp_session *session, const tp_txn_request *request,
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
                             "session apply requires session and request");
     }
-    gate_lock(session);
+    tp_session__assert_owner_thread(session);
     if (session->discarded) {
-        gate_unlock(session);
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "session was discarded");
     }
     session->admission_sequence++;
@@ -644,7 +722,8 @@ tp_status tp_session_apply(tp_session *session, const tp_txn_request *request,
     if (status == TP_STATUS_OK && published_result->committed) {
         session->model_generation++;
         publish_event(session, TP_SESSION_EVENT_MODEL_COMMITTED, request->id_hex,
-                      revision_before, tp_model_revision(session->model));
+                      revision_before, tp_model_revision(session->model),
+                      request->label, request->author);
         /* A committed edit may have discarded a redo branch and/or FIFO-evicted
          * old edit records; drop the markers those rows carried so visible
          * History mirrors the edit stack. */
@@ -654,7 +733,6 @@ tp_status tp_session_apply(tp_session *session, const tp_txn_request *request,
     if (!result) {
         tp_txn_result_free(&local_result);
     }
-    gate_unlock(session);
     return status;
 }
 
@@ -662,9 +740,8 @@ tp_status tp_session_undo(tp_session *session, tp_error *err) {
     if (!session) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "undo requires session");
     }
-    gate_lock(session);
+    tp_session__assert_owner_thread(session);
     if (session->discarded) {
-        gate_unlock(session);
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "session was discarded");
     }
     session->admission_sequence++;
@@ -674,9 +751,8 @@ tp_status tp_session_undo(tp_session *session, tp_error *err) {
     if (status == TP_STATUS_OK) {
         session->model_generation++;
         publish_event(session, TP_SESSION_EVENT_UNDONE, NULL, revision_before,
-                      tp_model_revision(session->model));
+                      tp_model_revision(session->model), NULL, NULL);
     }
-    gate_unlock(session);
     return status;
 }
 
@@ -684,9 +760,8 @@ tp_status tp_session_redo(tp_session *session, tp_error *err) {
     if (!session) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "redo requires session");
     }
-    gate_lock(session);
+    tp_session__assert_owner_thread(session);
     if (session->discarded) {
-        gate_unlock(session);
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "session was discarded");
     }
     session->admission_sequence++;
@@ -696,9 +771,8 @@ tp_status tp_session_redo(tp_session *session, tp_error *err) {
     if (status == TP_STATUS_OK) {
         session->model_generation++;
         publish_event(session, TP_SESSION_EVENT_REDONE, NULL, revision_before,
-                      tp_model_revision(session->model));
+                      tp_model_revision(session->model), NULL, NULL);
     }
-    gate_unlock(session);
     return status;
 }
 // #endregion
@@ -707,13 +781,22 @@ tp_status tp_session_redo(tp_session *session, tp_error *err) {
 static void remap_save_error_path(tp_status status, const char *public_path,
                                   tp_error *err) {
     if (status == TP_STATUS_FILE_IO_FAILED && err) {
-        err->file_io.path = public_path;
+        (void)snprintf(err->file_io.path, sizeof err->file_io.path, "%s",
+                       public_path ? public_path : "");
+        /* snprintf truncates on bytes, so an over-long path can be cut mid
+         * codepoint and leave the field invalid UTF-8 -- the same reason
+         * tp_error_set_file_io trims. This rewrite must obey the same rule. */
+        tp_error_trim_partial_utf8(err->file_io.path);
     }
 }
 
-static tp_status save_as_locked(tp_session *session, const char *path,
-                                bool create_only,
-                                tp_session_save_result *result, tp_error *err) {
+/* Shared publication body for Save, Save As, and Save New: canonicalizes the
+ * destination, publishes the file, then rebinds identity/lease/fingerprint,
+ * recovery, and the visible checkpoint. The three entry points differ only in
+ * how they choose `path` and `create_only`. */
+static tp_status save_to_path(tp_session *session, const char *path,
+                              bool create_only,
+                              tp_session_save_result *result, tp_error *err) {
     if (result) {
         memset(result, 0, sizeof *result);
         result->file_durability_status = TP_STATUS_OK;
@@ -891,7 +974,8 @@ static tp_status save_as_locked(tp_session *session, const char *path,
         result->has_recovery_token = session->has_recovery_token;
     }
     const int64_t revision = tp_model_revision(session->model);
-    publish_event(session, TP_SESSION_EVENT_SAVED, NULL, revision, revision);
+    publish_event(session, TP_SESSION_EVENT_SAVED, NULL, revision, revision,
+                  NULL, NULL);
     /* Only a successful publication reaches this choke point (a failed Save returned
      * earlier), so the visible checkpoint (§9.2) is never recorded for a failed Save.
      * Non-undoable: it does not touch revision, the cursor, or the edit budget. */
@@ -910,15 +994,12 @@ static tp_status session_save_as(tp_session *session, const char *path,
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
                             "Save As requires session and destination path");
     }
-    gate_lock(session);
+    tp_session__assert_owner_thread(session);
     if (session->discarded) {
-        gate_unlock(session);
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "session was discarded");
     }
     session->admission_sequence++;
-    tp_status status = save_as_locked(session, path, create_only, result, err);
-    gate_unlock(session);
-    return status;
+    return save_to_path(session, path, create_only, result, err);
 }
 
 tp_status tp_session_save_as(tp_session *session, const char *path,
@@ -942,9 +1023,8 @@ tp_status tp_session_save_detached_recovery(
     memset(result, 0, sizeof *result);
     result->file_durability_status = TP_STATUS_OK;
     result->recovery_status = TP_STATUS_OK;
-    gate_lock(session);
+    tp_session__assert_owner_thread(session);
     if (!session->has_recovery_token || session->discarded) {
-        gate_unlock(session);
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
                             "session is not an active detached recovery session");
     }
@@ -991,10 +1071,16 @@ tp_status tp_session_save_detached_recovery(
             if (file_durability_degraded && err) {
                 err->msg[0] = '\0';
             }
+            /* The adopted project + mark_saved + model_generation bump are only
+             * VISIBLE to observers once an event moves the observation token --
+             * mirror tp_session_save. Without it every observer keeps serving the
+             * pre-save dirty/freshness state until some unrelated event lands. */
+            const int64_t revision = tp_model_revision(session->model);
+            publish_event(session, TP_SESSION_EVENT_SAVED, NULL, revision,
+                          revision, NULL, NULL);
         }
         tp_project_destroy(candidate);
     }
-    gate_unlock(session);
     return status;
 }
 
@@ -1003,22 +1089,18 @@ tp_status tp_session_save(tp_session *session, tp_session_save_result *result,
     if (!session) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "Save requires session");
     }
-    gate_lock(session);
+    tp_session__assert_owner_thread(session);
     if (session->discarded) {
-        gate_unlock(session);
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "session was discarded");
     }
     if (session->identity.kind != TP_IDENTITY_SAVED ||
         session->identity.canonical_path[0] == '\0') {
-        gate_unlock(session);
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
                             "unsaved session requires Save As");
     }
     session->admission_sequence++;
-    tp_status status = save_as_locked(session, session->identity.canonical_path,
-                                      false, result, err);
-    gate_unlock(session);
-    return status;
+    return save_to_path(session, session->identity.canonical_path, false,
+                        result, err);
 }
 // #endregion
 
@@ -1027,16 +1109,15 @@ tp_status tp_session_discard(tp_session *session, tp_error *err) {
     if (!session) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "Discard requires session");
     }
-    gate_lock(session);
+    tp_session__assert_owner_thread(session);
     if (session->discarded) {
-        gate_unlock(session);
         return TP_STATUS_OK;
     }
     session->admission_sequence++;
     session->discarded = true;
     const int64_t revision = tp_model_revision(session->model);
-    publish_event(session, TP_SESSION_EVENT_DISCARDED, NULL, revision, revision);
-    gate_unlock(session);
+    publish_event(session, TP_SESSION_EVENT_DISCARDED, NULL, revision,
+                  revision, NULL, NULL);
     return TP_STATUS_OK;
 }
 
@@ -1045,19 +1126,18 @@ tp_status tp_session_invalidate_sources(tp_session *session, tp_error *err) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
                             "source invalidation requires session");
     }
-    gate_lock(session);
+    tp_session__assert_owner_thread(session);
     if (session->discarded) {
-        gate_unlock(session);
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "session was discarded");
     }
     session->admission_sequence++;
     session->source_generation++;
     const int64_t revision = tp_model_revision(session->model);
-    publish_event(session, TP_SESSION_EVENT_SOURCE_RUNTIME_CHANGED, NULL, revision, revision);
+    publish_event(session, TP_SESSION_EVENT_SOURCE_RUNTIME_CHANGED, NULL,
+                  revision, revision, NULL, NULL);
     /* A runtime source refresh is a visible NON-undoable row (§9.3). It never
      * mutates revision, dirty, or Undo history -- only the source generation. */
     history_record_refresh(session);
-    gate_unlock(session);
     return TP_STATUS_OK;
 }
 // #endregion
@@ -1067,85 +1147,56 @@ int64_t tp_session_revision(const tp_session *session) {
     if (!session) {
         return 0;
     }
-    gate_lock(session);
-    int64_t revision = tp_model_revision(session->model);
-    gate_unlock(session);
-    return revision;
+    tp_session__assert_owner_thread(session);
+    return tp_model_revision(session->model);
 }
 
 bool tp_session_recovery_available(const tp_session *session) {
     if (!session) {
         return false;
     }
-    gate_lock(session);
-    const bool available = recovery_is_healthy(session);
-    gate_unlock(session);
-    return available;
-}
-
-tp_session_recovery_health tp_session_recovery_health_query(
-    const tp_session *session) {
-    if (!session) {
-        return tp_session__recovery_health_locked(NULL);
-    }
-    gate_lock(session);
-    const tp_session_recovery_health health =
-        tp_session__recovery_health_locked(session);
-    gate_unlock(session);
-    return health;
+    tp_session__assert_owner_thread(session);
+    return recovery_is_healthy(session);
 }
 
 bool tp_session_can_undo(const tp_session *session) {
     if (!session) {
         return false;
     }
-    gate_lock(session);
-    const bool can_undo = !session->discarded &&
-                          tp_model_can_undo(session->model);
-    gate_unlock(session);
-    return can_undo;
+    tp_session__assert_owner_thread(session);
+    return !session->discarded && tp_model_can_undo(session->model);
 }
 
 bool tp_session_can_redo(const tp_session *session) {
     if (!session) {
         return false;
     }
-    gate_lock(session);
-    const bool can_redo = !session->discarded &&
-                          tp_model_can_redo(session->model);
-    gate_unlock(session);
-    return can_redo;
+    tp_session__assert_owner_thread(session);
+    return !session->discarded && tp_model_can_redo(session->model);
 }
 
 int tp_session_undo_depth(const tp_session *session) {
     if (!session) {
         return 0;
     }
-    gate_lock(session);
-    const int depth = tp_model_undo_depth(session->model);
-    gate_unlock(session);
-    return depth;
+    tp_session__assert_owner_thread(session);
+    return tp_model_undo_depth(session->model);
 }
 
 int tp_session_redo_depth(const tp_session *session) {
     if (!session) {
         return 0;
     }
-    gate_lock(session);
-    const int depth = tp_model_redo_depth(session->model);
-    gate_unlock(session);
-    return depth;
+    tp_session__assert_owner_thread(session);
+    return tp_model_redo_depth(session->model);
 }
 
 int tp_session_history_count(const tp_session *session) {
     if (!session) {
         return 0;
     }
-    gate_lock(session);
-    const int count =
-        tp_model_history_count(session->model) + (int)session->marker_count;
-    gate_unlock(session);
-    return count;
+    tp_session__assert_owner_thread(session);
+    return tp_model_history_count(session->model) + (int)session->marker_count;
 }
 
 tp_status tp_session_history_at(const tp_session *session, int index,
@@ -1155,7 +1206,7 @@ tp_status tp_session_history_at(const tp_session *session, int index,
             err, TP_STATUS_INVALID_ARGUMENT,
             "history query requires a session, output, and a non-negative index");
     }
-    gate_lock(session);
+    tp_session__assert_owner_thread(session);
     const int pos = tp_model_history_position(session->model);
     const int edit_count = tp_model_history_count(session->model);
     /* Chronological spine: markers anchored at cursor depth `a` render just before
@@ -1168,7 +1219,6 @@ tp_status tp_session_history_at(const tp_session *session, int index,
             }
             if (cursor == index) {
                 history_fill_marker(session, mi, pos, out);
-                gate_unlock(session);
                 return TP_STATUS_OK;
             }
             cursor++;
@@ -1176,13 +1226,11 @@ tp_status tp_session_history_at(const tp_session *session, int index,
         if (a < edit_count) {
             if (cursor == index) {
                 history_fill_edit(session, a, pos, out);
-                gate_unlock(session);
                 return TP_STATUS_OK;
             }
             cursor++;
         }
     }
-    gate_unlock(session);
     return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
                         "history index %d is out of range (%d rows)", index,
                         cursor);
@@ -1192,10 +1240,8 @@ uint64_t tp_session_event_sequence(const tp_session *session) {
     if (!session) {
         return 0U;
     }
-    gate_lock(session);
-    uint64_t sequence = session->event_sequence;
-    gate_unlock(session);
-    return sequence;
+    tp_session__assert_owner_thread(session);
+    return session->event_sequence;
 }
 
 tp_status tp_session_events_after(const tp_session *session, uint64_t after_sequence,
@@ -1207,14 +1253,12 @@ tp_status tp_session_events_after(const tp_session *session, uint64_t after_sequ
     }
     *out_count = 0U;
     *out_resync_required = false;
-    gate_lock(session);
+    tp_session__assert_owner_thread(session);
     if (after_sequence > session->event_sequence) {
         *out_resync_required = true;
-        gate_unlock(session);
         return TP_STATUS_OK;
     }
     if (after_sequence == session->event_sequence) {
-        gate_unlock(session);
         return TP_STATUS_OK;
     }
     const uint64_t oldest = session->event_count > 0U
@@ -1222,7 +1266,6 @@ tp_status tp_session_events_after(const tp_session *session, uint64_t after_sequ
                                 : session->event_sequence + 1U;
     if (after_sequence + 1U < oldest) {
         *out_resync_required = true;
-        gate_unlock(session);
         return TP_STATUS_OK;
     }
     for (size_t i = 0U; i < session->event_count && *out_count < capacity; ++i) {
@@ -1232,7 +1275,6 @@ tp_status tp_session_events_after(const tp_session *session, uint64_t after_sequ
             (*out_count)++;
         }
     }
-    gate_unlock(session);
     return TP_STATUS_OK;
 }
 // #endregion

@@ -10,8 +10,13 @@
 
 #define CLI_PATH_MAX TP_IDENTITY_PATH_MAX
 
-extern const char *const k_atlas_knobs;
 extern const char *const k_sprite_fields;
+
+/* key=value -> typed op payload, driven by the core field registry (see the
+ * definitions in cli_mutate.c for the return contract). */
+const char *cli_field_key_list(tp_field_family family, char *buf, size_t cap);
+int cli_fill_registry_field(tp_field_family family, void *payload, uint32_t *mask,
+                            const char *key, const char *val, bool json, bool quiet);
 
 const char *split_kv(const char *tok, char *kbuf, size_t kcap);
 bool to_long(const char *s, long *out);

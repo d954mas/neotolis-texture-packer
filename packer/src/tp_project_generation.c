@@ -12,16 +12,20 @@ struct tp_project_generation {
     tp_project *project;
 };
 
+#ifdef TP_ENABLE_TEST_SEAMS
 static _Thread_local bool s_fail_next_allocation;
+#endif
 
 tp_project_generation *tp_project_generation_create_owned(tp_project *project) {
     if (!project) {
         return NULL;
     }
+#ifdef TP_ENABLE_TEST_SEAMS
     if (s_fail_next_allocation) {
         s_fail_next_allocation = false;
         return NULL;
     }
+#endif
     tp_project_generation *generation = calloc(1U, sizeof *generation);
     if (!generation) {
         return NULL;
@@ -59,6 +63,8 @@ const tp_project *tp_project_generation_project(
     return generation ? generation->project : NULL;
 }
 
+#ifdef TP_ENABLE_TEST_SEAMS
 void tp_project_generation__test_fail_next_allocation(void) {
     s_fail_next_allocation = true;
 }
+#endif

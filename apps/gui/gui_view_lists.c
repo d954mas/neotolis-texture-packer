@@ -14,7 +14,7 @@
 #include "gui_actions.h"
 #include "gui_rows.h"
 #include "gui_canvas.h"
-#include "gui_project.h"
+#include "gui_project_view.h"
 #include "gui_shell.h" /* close_menubar_menus */
 
 #include <math.h>
@@ -104,12 +104,13 @@ static void declare_atlas_list(nt_ui_context_t *ctx, const tp_session_snapshot *
         if (!atlas) {
             continue;
         }
-        char idbuf[64];
-        (void)snprintf(idbuf, sizeof idbuf, "ntpacker/atlas_row_%d", i);
-        const uint32_t row_id = nt_ui_id(idbuf);
+        const uint32_t row_id =
+            gui_stable_entity_ui_id(
+                "ntpacker/atlas_row", atlas->id);
         const uint32_t x_id = nt_ui_child_id(row_id, "x");
         const bool editing = gui_atlas_edit_matches(atlas->id);
-        const bool selected = (i == s_sel_atlas);
+        const bool selected =
+            tp_id128_eq(atlas->id, gui_view_atlas_id());
         const nt_ui_events_t ev = nt_ui_events(ctx, row_id, &s_dbl_cfg);
         const nt_ui_events_t xev = nt_ui_events(ctx, x_id, NULL);
         const bool row_clicked =
@@ -121,21 +122,17 @@ static void declare_atlas_list(nt_ui_context_t *ctx, const tp_session_snapshot *
             gui_rows_entity_double_click_press(
                 &s_atlas_double_click, atlas->id, ev.double_clicked);
         if (x_clicked) {
-            s_pending_remove_atlas = true;
-            s_pending_remove_atlas_id = atlas->id;
-            s_pending_remove_atlas_revision = revision;
+            gui_request_remove_atlas(atlas->id, revision);
         } else if (stable_double) {
-            start_atlas_edit(i);
-        } else if (row_clicked && i != s_sel_atlas) {
-            s_sel_atlas = i;
+            start_atlas_edit_ref(atlas->id, revision);
+        } else if (row_clicked && !selected) {
+            gui_view_select_atlas(atlas->id);
             reset_selection();
-            cancel_edit();
         }
         if (nt_ui_menu_open_trigger(ctx, s_id_ctx_menu, row_id, false, &s_ctx_state)) {
             close_menubar_menus();
-            s_sel_atlas = i; /* right-click selects the row first */
+            gui_view_select_atlas(atlas->id);
             reset_selection();
-            cancel_edit();
             s_ctx_kind = CTX_ATLAS;
             s_ctx_atlas_id = atlas->id;
             s_ctx_atlas_revision = revision;
@@ -152,8 +149,15 @@ static void declare_atlas_list(nt_ui_context_t *ctx, const tp_session_snapshot *
             CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}, .childGap = Su(6), .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
                 ui_row_icon(ctx, &s_ic_layers, selected ? &g_row_strong : &g_caption);
                 if (editing) {
-                    if (render_rename_field(ctx)) {
-                        s_pending_commit_edit_enter = true; /* defer: never commit while holding `proj` */
+                    bool changed = false;
+                    if (render_rename_field(
+                            ctx, gui_text_edit_value(),
+                            &changed)) {
+                        gui_request_gesture_commit();
+                    }
+                    if (changed) {
+                        (void)gui_text_edit_update(
+                            rename_field_changed_value());
                     }
                 } else {
                     ui_label_fit(ctx, atlas->name, selected ? &g_row_strong : &g_row,
@@ -171,14 +175,14 @@ static void declare_atlas_list(nt_ui_context_t *ctx, const tp_session_snapshot *
         nt_ui_scroll_end(ctx);
     }
     if (ui_icon_btn(ctx, nt_ui_id("ntpacker/add_atlas"), &s_ic_plus, 16.0F, "Atlas", &g_btn_ghost, true, 0.0F, GUI_LEFT_ADD_ATLAS_H, &g_caption)) {
-        s_pending_add_atlas = true;
+        gui_request_add_atlas();
     }
 }
 
 /* Applies a click on VIEW row `i` (index into s_view; Ctrl toggles, Shift range-selects from the
  * anchor in view order, plain replaces) to the multi-selection, and updates the PRIMARY selection
- * (region panel / canvas sync). The anchor s_sel_anchor_row is a VIEW index so Shift-range follows
- * the filtered/sorted order the user actually sees. */
+ * (region panel / canvas sync). The stable anchor is resolved into this
+ * projection only for the current Shift gesture. */
 static void sync_primary_row_to_canvas(const sprite_row *row) {
     if (gui_canvas_get_mode(&s_canvas) != GUI_CANVAS_ATLAS) {
         return;
@@ -196,9 +200,10 @@ static bool select_sprite_row(int i, bool ctrl, bool shift) {
     const bool leaf = (!row->is_folder && !row->missing && row->sprite_name &&
                        row->sprite_name[0] != '\0');
     if (leaf) {
-        if (shift && s_sel_anchor_row >= 0 && s_sel_anchor_row < s_view_count) {
-            const int lo = (s_sel_anchor_row < i) ? s_sel_anchor_row : i;
-            const int hi = (s_sel_anchor_row < i) ? i : s_sel_anchor_row;
+        const int anchor = gui_rows_anchor_view_index();
+        if (shift && anchor >= 0 && anchor < s_view_count) {
+            const int lo = (anchor < i) ? anchor : i;
+            const int hi = (anchor < i) ? i : anchor;
             if (!multi_sel_set_view_range(lo, hi)) {
                 return false;
             }
@@ -208,43 +213,30 @@ static bool select_sprite_row(int i, bool ctrl, bool shift) {
             } else {
                 multi_sel_add_ref(row->source_id, row->source_key);
             }
-            s_sel_anchor_row = i;
+            gui_rows_set_anchor_view_index(i);
         } else {
             multi_sel_set_single_ref(row->source_id, row->source_key);
-            s_sel_anchor_row = i;
+            gui_rows_set_anchor_view_index(i);
         }
     } else if (!ctrl && !shift) {
         multi_sel_clear();
-        s_sel_anchor_row = -1;
+        gui_rows_set_anchor_view_index(-1);
     }
-    s_sel_src = row->src;
-    s_sel_child = row->child;
-    s_sel_missing = row->missing;
-    (void)snprintf(s_sel_abs, sizeof s_sel_abs, "%s", row->abs);
+    gui_rows_select_primary(row);
     sync_primary_row_to_canvas(row);
     return true;
 }
 
 /* --- keyboard focus model (U-02 T3) ---
- * s_focus_view indexes s_view (kept in gui_state so reset_selection can clear it on atlas switch).
- * s_focus_follow asks declare_sprite_list to ensure-visible ONCE after a keyboard move, so manual
- * wheel scrolling is never yanked back; it lives in gui_state (like s_focus_view) so the canvas-click
- * re-pin in gui_rows.c (select_row_for_region) can request the same scroll-into-view. */
-
-static void focus_clamp(void) {
-    if (s_view_count <= 0) {
-        s_focus_view = -1;
-    } else if (s_focus_view >= s_view_count) {
-        s_focus_view = s_view_count - 1;
-    }
-}
+ * Focus is retained canonically and resolved into s_view for the current
+ * projection. s_focus_follow requests one ensure-visible after navigation or
+ * canvas selection, without fighting manual scrolling. */
 
 void gui_list_focus_step(int delta, bool extend) {
     if (s_view_count <= 0) {
-        s_focus_view = -1;
         return;
     }
-    int f = s_focus_view;
+    int f = gui_rows_focus_view_index();
     if (f < 0) {
         f = (delta > 0) ? 0 : (s_view_count - 1);
     } else {
@@ -256,57 +248,56 @@ void gui_list_focus_step(int delta, bool extend) {
         }
     }
     if (select_sprite_row(f, false, extend)) {
-        s_focus_view = f;
+        gui_rows_set_focus_view_index(f);
         s_focus_follow = true;
     }
 }
 
 void gui_list_focus_edge(bool end, bool extend) {
     if (s_view_count <= 0) {
-        s_focus_view = -1;
         return;
     }
     const int target = end ? (s_view_count - 1) : 0;
     if (select_sprite_row(target, false, extend)) {
-        s_focus_view = target;
+        gui_rows_set_focus_view_index(target);
         s_focus_follow = true;
     }
 }
 
 void gui_list_focus_activate(void) {
-    focus_clamp();
-    if (s_focus_view < 0) {
+    const int focus = gui_rows_focus_view_index();
+    if (focus < 0) {
         return;
     }
-    const sprite_row *row = &s_rows[s_view[s_focus_view]];
+    const sprite_row *row = &s_rows[s_view[focus]];
     if (row->is_folder) {
         gui_rows_toggle_collapsed(row->source_id);
     } else {
-        select_sprite_row(s_focus_view, false, false);
+        select_sprite_row(focus, false, false);
     }
     s_focus_follow = true;
 }
 
 void gui_list_focus_rename(void) {
-    focus_clamp();
-    if (s_focus_view < 0) {
+    const int focus = gui_rows_focus_view_index();
+    if (focus < 0) {
         return;
     }
-    const sprite_row *row = &s_rows[s_view[s_focus_view]];
+    const sprite_row *row = &s_rows[s_view[focus]];
     const bool leaf = (!row->is_folder && !row->missing && row->sprite_name &&
                        row->sprite_name[0] != '\0');
     if (leaf) {
-        select_sprite_row(s_focus_view, false, false);
+        select_sprite_row(focus, false, false);
         start_sprite_edit(row);
     }
 }
 
 void gui_list_focus_collapse(bool expand) {
-    focus_clamp();
-    if (s_focus_view < 0) {
+    int focus = gui_rows_focus_view_index();
+    if (focus < 0) {
         return;
     }
-    const sprite_row *row = &s_rows[s_view[s_focus_view]];
+    const sprite_row *row = &s_rows[s_view[focus]];
     if (row->is_folder) {
         const bool collapsed = gui_rows_is_collapsed(row->source_id);
         if (expand ? collapsed : !collapsed) {
@@ -314,9 +305,9 @@ void gui_list_focus_collapse(bool expand) {
         }
     } else if (!expand && row->child >= 0) {
         /* Left on a folder child jumps focus to its parent source row. */
-        for (int k = s_focus_view - 1; k >= 0; --k) {
+        for (int k = focus - 1; k >= 0; --k) {
             if (s_rows[s_view[k]].is_source) {
-                s_focus_view = k;
+                gui_rows_set_focus_view_index(k);
                 select_sprite_row(k, false, false);
                 break;
             }
@@ -361,7 +352,7 @@ void filter_type_pump(void) {
         return; /* not armed, or an engine text field owns typed chars this frame */
     }
     if (s_confirm_open || s_about_open || s_export_open || s_recovery_open ||
-        s_edit_kind != EDIT_NONE) {
+        gui_draft_phase() != GUI_EDIT_IDLE) {
         return; /* a modal / inline-rename owns the keyboard -- don't steal its chars into the filter */
     }
     char buf[256];
@@ -474,14 +465,14 @@ static void declare_sprite_list(nt_ui_context_t *ctx) {
          * Files button is icon-only (tooltip in declare_tooltips) -- this also keeps the header on one line at
          * the owner's 450px panel where two labelled buttons overran and wrapped "Smart folder". */
         if (ui_icon_btn(ctx, nt_ui_id("ntpacker/add_files"), &s_ic_file_plus, 16.0F, NULL, &g_btn_ghost, true, 0.0F, 24.0F, &g_caption)) {
-            s_pending_add_files = true;
+            gui_request_add_files();
         }
         /* Drop the label to icon-only on a heavily-clamped panel (narrow window / high DPI) so it never
          * wraps or bleeds; the tooltip carries the meaning either way (mouse-complete). >= 240 design px keeps
          * the label at the owner's 1920/1366 @1.5 (450px panels) and every unclamped base-300 panel. */
         const char *folder_lbl = (s_left_panel_w >= S(240.0F)) ? "Smart folder" : NULL;
         if (ui_icon_btn(ctx, nt_ui_id("ntpacker/add_folder"), &s_ic_folder_plus, 16.0F, folder_lbl, &g_btn_ghost, true, 0.0F, 24.0F, &g_caption)) {
-            s_pending_add_folder = true;
+            gui_request_add_folder();
         }
     }
 
@@ -527,7 +518,7 @@ static void declare_sprite_list(nt_ui_context_t *ctx) {
         return;
     }
 
-    focus_clamp();
+    int focus_view = gui_rows_focus_view_index();
     nt_ui_vlist_style_t vs = nt_ui_vlist_style_defaults();
     vs.overscan = 3;
     vs.id_ring = UI_ROW_ID_RING; /* bound per-row state to the viewport, not project size */
@@ -536,8 +527,9 @@ static void declare_sprite_list(nt_ui_context_t *ctx) {
         &(Clay_ElementDeclaration){.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}}});
     /* Ensure-visible: after a keyboard focus move, scroll the vlist so the focused row is in view
      * (once — s_focus_follow is consumed here so wheel scrolling is never fought). */
-    if (s_focus_follow && s_focus_view >= 0 && s_focus_view < s_view_count) {
-        const uint32_t fv = (uint32_t)s_focus_view;
+    if (s_focus_follow && focus_view >= 0 &&
+        focus_view < s_view_count) {
+        const uint32_t fv = (uint32_t)focus_view;
         const nt_ui_bbox_t viewport = nt_ui_get_bbox(ctx, s_id_vlist);
         const nt_ui_bbox_t focus_bbox = nt_ui_get_bbox(
             ctx, nt_ui_vlist_item_id(ctx, fv));
@@ -581,8 +573,10 @@ static void declare_sprite_list(nt_ui_context_t *ctx) {
             const bool leaf_row = (!row->is_folder && !row->missing &&
                                    row->sprite_name &&
                                    row->sprite_name[0] != '\0');
-            const bool primary = (row->is_source ? (s_sel_src == row->src && s_sel_child == -1)
-                                                  : (s_sel_src == row->src && s_sel_child == row->child));
+            const bool primary = gui_rows_primary_matches(
+                row->source_id,
+                row->source_key ? row->source_key : "",
+                row->is_source);
             const bool selected = primary ||
                                   (leaf_row && multi_sel_contains_ref(
                                                    row->source_id,
@@ -603,34 +597,37 @@ static void declare_sprite_list(nt_ui_context_t *ctx) {
                     &xev);
                 if (x_clicked) {
                     const tp_session_snapshot *snapshot = gui_project_snapshot();
+                    const int atlas_index =
+                        gui_view_atlas_index(snapshot);
                     const tp_snapshot_atlas *atlas = snapshot
-                                                         ? tp_session_snapshot_atlas_at(snapshot, s_sel_atlas)
+                                                         ? tp_session_snapshot_atlas_at(snapshot, atlas_index)
                                                          : NULL;
                     const tp_snapshot_source *source = atlas
                                                            ? tp_session_snapshot_source_at(
                                                                  snapshot, atlas->id, row->src)
                                                            : NULL;
                     if (source) {
-                        s_pending_remove_source = true;
-                        s_pending_remove_source_atlas_id = atlas->id;
-                        s_pending_remove_source_id = source->id;
-                        s_pending_remove_source_revision =
-                            tp_session_snapshot_revision(snapshot);
+                        gui_request_remove_source(
+                            atlas->id, source->id,
+                            tp_session_snapshot_revision(snapshot));
                     }
                 }
             }
             if (canonical_double && row->is_folder) {
                 gui_rows_toggle_collapsed(row->source_id); /* U-02 T2: double-click a folder collapses/expands it */
-                s_focus_view = (int)i;
+                gui_rows_set_focus_view_index((int)i);
+                focus_view = (int)i;
             } else if (canonical_double && !row->is_folder && !row->missing) {
                 select_sprite_row((int)i, false, false);
-                s_focus_view = (int)i;
+                gui_rows_set_focus_view_index((int)i);
+                focus_view = (int)i;
                 start_sprite_edit(row);
             } else if (row_clicked && !x_clicked) {
                 const bool ctrl = nt_input_key_is_down(NT_KEY_LCTRL) || nt_input_key_is_down(NT_KEY_RCTRL);
                 const bool shift = nt_input_key_is_down(NT_KEY_LSHIFT) || nt_input_key_is_down(NT_KEY_RSHIFT);
                 if (select_sprite_row((int)i, ctrl, shift)) {
-                    s_focus_view = (int)i; /* click moves keyboard focus here too */
+                    gui_rows_set_focus_view_index((int)i);
+                    focus_view = (int)i;
                 }
             }
             if (nt_ui_menu_open_trigger(ctx, s_id_ctx_menu, hit_id, false, &s_ctx_state)) {
@@ -645,8 +642,10 @@ static void declare_sprite_list(nt_ui_context_t *ctx) {
                 }
                 s_ctx_kind = CTX_SPRITE;
                 const tp_session_snapshot *snapshot = gui_project_snapshot();
+                const int atlas_index =
+                    gui_view_atlas_index(snapshot);
                 const tp_snapshot_atlas *atlas = snapshot
-                    ? tp_session_snapshot_atlas_at(snapshot, s_sel_atlas)
+                    ? tp_session_snapshot_atlas_at(snapshot, atlas_index)
                     : NULL;
                 s_ctx_sprite_atlas_id = atlas ? atlas->id : tp_id128_nil();
                 s_ctx_sprite_source_id = row->source_id;
@@ -663,11 +662,13 @@ static void declare_sprite_list(nt_ui_context_t *ctx) {
                                row->abs ? row->abs : ""); /* F12: freeze the reveal path at arm time */
                 s_ctx_leaf = leaf_row;
                 s_ctx_removable = row->is_source;
-                s_focus_view = (int)i; /* right-click moves keyboard focus here too, so F2/arrows act from this row */
+                gui_rows_set_focus_view_index((int)i);
+                focus_view = (int)i;
                 s_focus_follow = true;
             }
             const Clay_Color bg = selected ? C_SEL : (ev.hovered ? C_HOVER : C_TRANSPARENT);
-            const uint16_t fw = ((int)i == s_focus_view) ? Su(1) : 0; /* keyboard focus ring */
+            const uint16_t fw =
+                ((int)i == focus_view) ? Su(1) : 0;
             const uint16_t indent = Su(8.0F + ((float)row->indent * 16.0F));
             /* Leading type icon: folder for a directory source, image for a sprite leaf (folder child or
              * file source); missing files reuse the image mask tinted warn. Label brightens on selection.
@@ -701,8 +702,15 @@ static void declare_sprite_list(nt_ui_context_t *ctx) {
                     }
                     ui_row_icon(ctx, ic, ic_tint);
                     if (editing) {
-                        if (render_rename_field(ctx)) {
-                            s_pending_commit_edit_enter = true; /* defer: never commit while holding row pointers */
+                        bool changed = false;
+                        if (render_rename_field(
+                                ctx, gui_text_edit_value(),
+                                &changed)) {
+                            gui_request_gesture_commit();
+                        }
+                        if (changed) {
+                            (void)gui_text_edit_update(
+                                rename_field_changed_value());
                         }
                     } else {
                         /* Folder rows carry a fixed smart-folder tooltip on the whole row (below), so skip the
@@ -736,7 +744,9 @@ static void declare_animations_list(nt_ui_context_t *ctx,
         section_rule_label(ctx, "ANIMATIONS");
         CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}}}) {}
         if (ui_icon_btn(ctx, nt_ui_id("ntpacker/add_anim"), &s_ic_plus, 16.0F, "Animation", &g_btn_ghost, true, 0.0F, 24.0F, &g_caption)) {
-            gui_request_add_animation(s_sel_atlas);
+            gui_request_add_animation(
+                a ? a->id : tp_id128_nil(),
+                snapshot ? tp_session_snapshot_revision(snapshot) : 0);
         }
     }
     if (!a || a->animation_count == 0) {
@@ -758,12 +768,13 @@ static void declare_animations_list(nt_ui_context_t *ctx,
         if (!animation) {
             continue;
         }
-        char idbuf[64];
-        (void)snprintf(idbuf, sizeof idbuf, "ntpacker/anim_row_%d", i);
-        const uint32_t row_id = nt_ui_id(idbuf);
+        const uint32_t row_id =
+            gui_stable_entity_ui_id(
+                "ntpacker/anim_row", animation->id);
         const uint32_t x_id = nt_ui_child_id(row_id, "x");
         const bool editing = gui_animation_edit_matches(a->id, animation->id);
-        const bool selected = (i == s_sel_anim);
+        const bool selected = tp_id128_eq(
+            animation->id, gui_view_animation_id());
         const nt_ui_events_t ev = nt_ui_events(ctx, row_id, &s_dbl_cfg);
         const nt_ui_events_t xev = nt_ui_events(ctx, x_id, NULL);
         const bool row_clicked = canonical_click(
@@ -776,23 +787,22 @@ static void declare_animations_list(nt_ui_context_t *ctx,
                 &s_animation_double_click, animation->id,
                 ev.double_clicked);
         if (x_clicked) {
-            gui_request_remove_animation(i);
+            const gui_animation_ref remove = {
+                a->id, animation->id,
+                tp_session_snapshot_revision(snapshot)};
+            gui_request_remove_animation_ref(&remove);
         } else if (stable_double) {
-            s_sel_anim = i;
-            s_sel_anim_frame = -1;
+            gui_view_select_animation(animation->id);
             const gui_animation_ref preview = {
                 a->id, animation->id,
                 tp_session_snapshot_revision(snapshot)};
             gui_request_open_preview(&preview);
         } else if (row_clicked) {
-            s_sel_anim = i;
-            s_sel_anim_frame = -1;
-            cancel_edit();
+            gui_view_select_animation(animation->id);
         }
         if (nt_ui_menu_open_trigger(ctx, s_id_ctx_menu, row_id, false, &s_ctx_state)) {
             close_menubar_menus();
-            s_sel_anim = i; /* right-click selects the row first */
-            s_sel_anim_frame = -1;
+            gui_view_select_animation(animation->id);
             s_ctx_kind = CTX_ANIM;
             s_ctx_anim_atlas_id = a->id;
             s_ctx_anim_id = animation->id;
@@ -809,8 +819,15 @@ static void declare_animations_list(nt_ui_context_t *ctx,
             CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}, .childGap = Su(6), .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
                 ui_row_icon(ctx, &s_ic_film, selected ? &g_row_strong : &g_caption);
                 if (editing) {
-                    if (render_rename_field(ctx)) {
-                        s_pending_commit_edit_enter = true; /* defer: never commit while holding `a` */
+                    bool changed = false;
+                    if (render_rename_field(
+                            ctx, gui_text_edit_value(),
+                            &changed)) {
+                        gui_request_gesture_commit();
+                    }
+                    if (changed) {
+                        (void)gui_text_edit_update(
+                            rename_field_changed_value());
                     }
                 } else {
                     ui_label_fit(ctx, animation->name, selected ? &g_row_strong : &g_row,
@@ -830,8 +847,9 @@ static void declare_animations_list(nt_ui_context_t *ctx,
 
 void declare_left_panel(nt_ui_context_t *ctx) {
     const tp_session_snapshot *snapshot = gui_project_snapshot();
+    const int atlas_index = gui_view_atlas_index(snapshot);
     const tp_snapshot_atlas *a = snapshot
-                                     ? tp_session_snapshot_atlas_at(snapshot, s_sel_atlas)
+                                     ? tp_session_snapshot_atlas_at(snapshot, atlas_index)
                                      : NULL;
     s_row_tip_count = 0; /* per-frame; filled by ui_label_fit when a row truncates */
     CLAY({.id = {.id = s_id_left_panel},

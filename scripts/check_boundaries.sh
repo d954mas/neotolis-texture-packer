@@ -28,18 +28,76 @@ shipping_srcs() {
         \( -name '*.c' -o -name '*.h' \)
 }
 
+# 0. Corpus guard. Every apps/-scoped rule below (R1-R3, R8, R21, and
+#    shipping_srcs' R15/R16a/R17/R18/R20) is only as strong as the file list it
+#    scans, and an over-matching exclusion in app_srcs would drain that list and
+#    turn all of them silently green. No per-regex self-test can see that: they
+#    seed a violation into a printf, not into the real corpus. Assert the list is
+#    non-empty and still names a file that must always be in scope.
+_app_srcs=$(app_srcs)
+if [ -z "$_app_srcs" ]; then
+    hit "R0 app source corpus is empty" \
+        "app_srcs matched no files -- every apps/-scoped rule below is vacuous"
+else
+    for _sentinel in apps/cli/main.c apps/gui/main.c; do
+        if ! printf '%s\n' "$_app_srcs" | grep -qx -- "$_sentinel"; then
+            hit "R0 app source corpus lost a sentinel file" \
+                "$_sentinel is absent from app_srcs -- an exclusion is over-matching"
+        fi
+    done
+fi
+
 # 1. No sprite-name extension stripping outside tp_core (tp_sprite_export_key is
 #    the single owner). Project-FILENAME helpers must carry a boundary-ok note.
-r1=$(app_srcs | xargs grep -nE "strrchr\([^,]+, *'\.'\)" 2>/dev/null | grep -v 'boundary-ok:')
+_r1_extstrip="strrchr\([^,]+, *'\.'\)"
+r1=$(app_srcs | xargs grep -nE "$_r1_extstrip" 2>/dev/null | grep -v 'boundary-ok:')
 [ -n "$r1" ] && hit "R1 ext-strip outside tp_core" "$r1"
 
 # 2. No exporter-id string literals in frontends (use TP_EXPORTER_ID_* / registry).
-r2=$(app_srcs | xargs grep -nE '"(json-neotolis|defold)"' 2>/dev/null | grep -v 'boundary-ok:')
+_r2_exporter_id='"(json-neotolis|defold)"'
+r2=$(app_srcs | xargs grep -nE "$_r2_exporter_id" 2>/dev/null | grep -v 'boundary-ok:')
 [ -n "$r2" ] && hit "R2 exporter-id literal in frontend" "$r2"
 
 # 3. No pack-desc assembly in frontends (tp_pack_input_build owns encoding).
-r3=$(app_srcs | xargs grep -nE 'ov_mask|TP_PACK_OV_' 2>/dev/null | grep -v 'boundary-ok:')
+_r3_desc_assembly='ov_mask|TP_PACK_OV_'
+r3=$(app_srcs | xargs grep -nE "$_r3_desc_assembly" 2>/dev/null | grep -v 'boundary-ok:')
 [ -n "$r3" ] && hit "R3 desc assembly in frontend" "$r3"
+
+# Self-test: R1/R2/R3 are the three oldest detectors and were the only ones left
+# without a seeded violation. Like every rule below, they now fail closed -- a
+# future edit that breaks one of the regexes is caught here, not by a silently
+# green tree -- and are pinned against false-positives on the legitimate
+# registry/constant forms they exist to steer callers toward.
+if ! printf "    const char *dot = strrchr(name, '.');\n" | grep -qE "$_r1_extstrip"; then
+    hit "R1-selftest" "R1 detector failed to catch a seeded extension strip"
+fi
+if printf '    tp_sprite_export_key(name, key, sizeof key);\n' | grep -qE "$_r1_extstrip"; then
+    hit "R1-selftest" "R1 detector false-positives on the tp_core export-key owner"
+fi
+for _seed in \
+    '    if (strcmp(id, "json-neotolis") == 0) {' \
+    '    const char *fallback = "defold";'
+do
+    if ! printf '%s\n' "$_seed" | grep -qE "$_r2_exporter_id"; then
+        hit "R2-selftest" "R2 detector failed to catch a seeded exporter-id literal: $_seed"
+    fi
+done
+if printf '    const char *id = TP_EXPORTER_ID_DEFOLD;\n    tp_exporter_at(i);\n' |
+    grep -qE "$_r2_exporter_id"; then
+    hit "R2-selftest" "R2 detector false-positives on the exporter-id constant / registry form"
+fi
+for _seed in \
+    '    desc.ov_mask |= TP_PACK_OV_PADDING;' \
+    '    settings.ov_mask = 0U;'
+do
+    if ! printf '%s\n' "$_seed" | grep -qE "$_r3_desc_assembly"; then
+        hit "R3-selftest" "R3 detector failed to catch a seeded pack-desc assembly: $_seed"
+    fi
+done
+if printf '    tp_pack_input_build(snapshot, atlas_id, &input, &err);\n' |
+    grep -qE "$_r3_desc_assembly"; then
+    hit "R3-selftest" "R3 detector false-positives on the tp_pack_input_build owner"
+fi
 
 # 4. Public tp_core headers name no engine types (comments stripped first).
 r4=$(for f in packer/include/tp_core/*.h; do
@@ -199,13 +257,14 @@ fi
 # 10. tp_session is orchestration only. It may call public recovery/lease APIs,
 #     but may not depend on a frontend/protocol or contain a recovery codec,
 #     filesystem/lock backend, Pack, or Export implementation. The snapshot/query
-#     TU tp_session_snapshot.c is the same orchestration boundary and is gated too.
+#     Snapshot creation/query TUs are the same orchestration boundary and are
+#     gated too.
 _session_deps='#include[[:space:]]*[<"][^>"]*(apps/|gui|cli|protocol|cJSON)'
 _session_impl='(^|[^A-Za-z0-9_])(fopen|fwrite|open|CreateFile|LockFile|tp_journal_(encode|decode)[A-Za-z0-9_]*|tp_pack|tp_export_run)[[:space:]]*\('
-# Both session TUs plus the shared private header. R10c's mutable-project-ownership
-# scan runs over the two .c TUs only (the header declares no ->project code).
-_session_gate_srcs="packer/src/tp_session.c packer/src/tp_session_snapshot.c packer/src/tp_session_internal.h"
-_session_gate_owner_srcs="packer/src/tp_session.c packer/src/tp_session_snapshot.c"
+# All session TUs plus the shared private header. R10c's
+# mutable-project-ownership scan runs over the .c TUs only.
+_session_gate_srcs="packer/src/tp_session.c packer/src/tp_session_observation.c packer/src/tp_session_job_observation.c packer/src/tp_session_snapshot.c packer/src/tp_session_snapshot_query.c packer/src/tp_session_internal.h packer/src/tp_session_job_observation_internal.h"
+_session_gate_owner_srcs="packer/src/tp_session.c packer/src/tp_session_observation.c packer/src/tp_session_job_observation.c packer/src/tp_session_snapshot.c packer/src/tp_session_snapshot_query.c"
 r10a=$(grep -nE "$_session_deps" $_session_gate_srcs 2>/dev/null |
     grep -v 'boundary-ok:')
 [ -n "$r10a" ] && hit "R10a frontend/protocol dependency in tp_session" "$r10a"
@@ -483,7 +542,7 @@ fi
 _internal_header_registry() {
     cat <<'EOF'
 cli_mutate_internal     cli_mutate|cli_mutate_source|cli_mutate_atlas|cli_mutate_sprite|cli_mutate_anim|cli_mutate_target
-gui_actions_internal    gui_actions|gui_actions_dialogs|gui_actions_edits|gui_actions_pack|gui_actions_preview|gui_actions_recovery
+gui_actions_internal    gui_actions|gui_actions_dialogs|gui_actions_edits|gui_actions_intents|gui_actions_pack|gui_actions_preview|gui_actions_recovery
 gui_canvas_internal     gui_canvas|gui_canvas_resources
 gui_pack_internal       gui_pack|gui_pack_jobs|gui_pack_preview
 gui_project_internal    gui_project|gui_project_file|gui_project_mutations|gui_project_pending|gui_project_recovery
@@ -491,31 +550,32 @@ tp_diff_internal        tp_diff_entity|tp_diff_apply|tp_diff_capture|tp_history|
 tp_op_internal          tp_op_catalog|tp_op_validate|tp_op_validate_atlas|tp_op_validate_source_sprite|tp_op_validate_animation|tp_op_validate_target|tp_op_apply|tp_op_build|tp_op_encode|tp_model_journal|tp_txn_encode|tp_txn_apply|tp_txn_lower|tp_txn_parse|tp_txn_result
 tp_op_validate_family_internal tp_op_validate|tp_op_validate_atlas|tp_op_validate_source_sprite|tp_op_validate_animation|tp_op_validate_target
 tp_encode_internal      tp_op_encode|tp_txn_encode|tp_txn_apply
-tp_fs_internal          tp_fs_io|tp_fs_win32|tp_fs_posix|tp_build_worker|tp_export_defold|tp_export_json_neotolis|tp_export_png|tp_identity|tp_image|tp_journal_io|tp_pack_hash|tp_pack_read|tp_project_parse|tp_project_save|tp_project_lease|tp_recovery|tp_recovery_backend_win32|tp_recovery_scan|tp_recovery_store|tp_scan
+tp_fs_internal          tp_fs_io|tp_fs_win32|tp_fs_posix|tp_build_worker|tp_job_worker_main|tp_job|tp_export_defold|tp_export_json_neotolis|tp_export_png|tp_identity|tp_image|tp_journal_io|tp_pack_hash|tp_pack_read|tp_project_parse|tp_project_save|tp_project_lease|tp_recovery|tp_recovery_backend_win32|tp_recovery_scan|tp_recovery_store|tp_scan
 tp_pack_constraints_internal tp_pack_constraints|tp_op_validate_atlas|tp_op_validate_source_sprite|tp_pack|tp_project_identity|tp_project_parse|tp_validate_target_settings
 tp_history_codec_internal tp_history|tp_history_codec|tp_history_codec_read|tp_model_journal|tp_txn_apply
 tp_journal_internal     tp_journal|tp_journal_io|tp_journal_read|tp_journal_wire|tp_history|tp_model|tp_model_journal|tp_txn_apply|tp_recovery_backend_posix|tp_recovery_backend_win32|tp_recovery_claim|tp_recovery_scan|tp_recovery_store
 tp_json_internal        tp_json_internal|tp_project_parse|tp_txn_parse
-tp_utf8_internal        tp_utf8|tp_fs_io|tp_image|tp_json_internal|tp_op_validate|tp_project_identity|tp_source_path_text
+tp_utf8_internal        tp_utf8|tp_build_proto|tp_fs_io|tp_image|tp_job_worker_proto|tp_json_internal|tp_op_validate|tp_project_identity|tp_source_path_text
 tp_idset_internal       tp_idset|tp_txn_idset|tp_journal|tp_journal_internal|tp_journal_read|tp_model_journal
-tp_project_internal     tp_project|tp_project_identity|tp_project_parse|tp_project_parse_internal|tp_project_save|tp_project_write_internal|tp_project_write|tp_history|tp_model_journal|tp_session
+tp_project_internal     tp_project|tp_project_identity|tp_project_parse|tp_project_parse_internal|tp_project_save|tp_project_write_internal|tp_project_write|tp_history|tp_job|tp_model_journal|tp_session
 tp_project_path_internal tp_project|tp_project_parse|tp_project_path|tp_project_save|tp_project_write
 tp_project_model_internal tp_project|tp_project_parse
 tp_project_parse_internal tp_project_parse|tp_project_write
 tp_project_write_internal tp_project_parse|tp_project_write
 tp_project_identity_internal tp_project_identity|tp_project_parse|tp_project_write|tp_history_codec_read|tp_input|tp_model|tp_model_journal|tp_op_validate_atlas|tp_op_validate_source_sprite|tp_op_validate_animation|tp_op_validate_target|tp_session|tp_txn_apply
-tp_project_generation_internal tp_model|tp_project_generation|tp_session_snapshot
+tp_project_generation_internal tp_model|tp_project_generation|tp_session_snapshot|tp_session_observation
 tp_project_mutation_internal tp_project|tp_project_parse|tp_diff_entity|tp_diff_apply|tp_diff_capture|tp_export_run|tp_input|tp_op_apply|tp_op_validate|tp_op_validate_animation|tp_op_validate_target|tp_session|tp_session_snapshot|tp_session_snapshot_query
 tp_txn_internal         tp_model|tp_model_journal|tp_txn_apply|tp_txn_parse|tp_txn_encode|tp_txn_idset|tp_txn_lower|tp_txn_result|tp_project_clone|tp_history
-tp_model_seam           tp_session|tp_session_snapshot|tp_recovery_claim|tp_recovery_store|tp_txn_internal|tp_txn_apply|tp_txn_parse|tp_txn_encode|tp_txn_idset|tp_txn_lower|tp_project_clone|tp_history
+tp_model_seam           tp_session|tp_session_snapshot|tp_session_observation|tp_session_job_observation|tp_recovery_claim|tp_recovery_store|tp_txn_internal|tp_txn_apply|tp_txn_parse|tp_txn_encode|tp_txn_idset|tp_txn_lower|tp_project_clone|tp_history
 tp_recovery_live_seam   tp_session|tp_recovery|tp_recovery_internal
-tp_session_internal     tp_session|tp_session_snapshot|tp_session_layout|tp_recovery|tp_recovery_claim|tp_validate|tp_validate_target_settings|tp_export|tp_export_run|tp_input|tp_sprite_index
-tp_session_layout       tp_session|tp_session_snapshot
-tp_session_snapshot_internal tp_session_snapshot|tp_session_snapshot_query
+tp_session_internal     tp_session|tp_session_observation|tp_session_job_observation|tp_session_snapshot|tp_session_layout|tp_recovery|tp_recovery_claim|tp_validate|tp_validate_target_settings|tp_export|tp_export_run|tp_input|tp_sprite_index
+tp_session_job_observation_internal tp_session|tp_session_observation|tp_session_job_observation|tp_job|tp_job_owner_internal
+tp_session_layout       tp_session|tp_session_observation|tp_session_job_observation|tp_session_snapshot
+tp_session_snapshot_internal tp_job|tp_session_observation|tp_session_snapshot|tp_session_snapshot_query
 tp_recovery_backend_types_internal tp_recovery_backend_posix|tp_recovery_backend_win32|tp_recovery_state_internal
 tp_recovery_internal    tp_recovery|tp_recovery_state_internal|tp_recovery_claim|tp_recovery_scan|tp_recovery_store
 tp_recovery_state_internal tp_recovery|tp_recovery_claim|tp_recovery_scan|tp_recovery_store
-tp_job_owner_internal   tp_session|tp_job
+tp_job_owner_internal   tp_session|tp_session_observation|tp_session_job_observation|tp_job
 tp_source_plan_internal tp_source_plan|tp_op_validate|tp_op_validate_source_sprite
 tp_source_path_text_internal tp_source_path_text|tp_op_validate|tp_project|tp_project_identity|tp_project_parse|tp_source_plan
 tp_srckey_internal      tp_srckey|tp_project_identity|tp_op_validate_animation|tp_validate_source|tp_validate_sprite
@@ -527,8 +587,10 @@ tp_identity_internal    tp_identity|tp_identity_session
 tp_pack_read_internal   tp_pack_read
 tp_build_driver_internal tp_build_driver|tp_build_worker|tp_build_worker_main
 tp_build_proto_internal tp_build_proto|tp_build_worker|tp_build_worker_main
-tp_build_worker_internal tp_build_worker|tp_pack
-tp_proc_internal        tp_proc_win32|tp_proc_posix|tp_build_worker
+tp_build_worker_internal tp_build_worker|tp_pack|tp_job_worker_main
+tp_job_worker_internal  tp_build_worker_main|tp_job_worker_main|tp_job_worker_process_internal|tp_job_worker_proto
+tp_job_worker_process_internal tp_job|tp_job_worker
+tp_proc_internal        tp_proc_win32|tp_proc_posix|tp_build_worker|tp_job_worker|tp_job_worker_main
 EOF
 }
 
@@ -737,6 +799,509 @@ else
     [ -z "$(_frontend_fs_policy_scan "$_r21_dir/apps/cli/seeded_decode_policy.c")" ] &&
         hit "R21-selftest" "R21 failed to catch seeded CLI decode policy"
     rm -rf "$_r21_dir"
+    trap - EXIT
+fi
+
+# 22. Spec §16 verification-id traceability. Every USA-01..USA-32 must be OWNED,
+#     and ownership has exactly two classes:
+#       test -- a `/* USA-nn ... */` tag within 3 lines of the `void test_`
+#               definition it claims, in a TEST source file, AND that function
+#               must be invoked somewhere in the same file (RUN_TEST(name); --
+#               same-line or with the name wrapped to the next line -- or a bare
+#               name();). Test functions are non-static, so deleting only the
+#               RUN_TEST line compiles warning-free; without the call-site
+#               requirement the tag would keep crediting a test that no longer
+#               runs;
+#       gate -- a registry line in a build check (cmake/, scripts/) carrying both
+#               the id and the literal marker `owner: gate`, for the handful of
+#               requirements whose proof IS a build gate and not a runtime test.
+#     Partial coverage is recorded with a "partial:" note -- in the test tag, or
+#     on the gate registry line for a gate-class owner -- and still counts as
+#     owned: the gate proves a requirement has not silently lost its last owner,
+#     not that the owner is exhaustive. A gate owner whose rule carries
+#     per-symbol debt allowances is partial by construction and says so.
+#
+#     The corpus used to be a bare `grep -r USA- apps packer/tests`, which any
+#     production comment, CMakeLists note, or the gate's own self-test text
+#     satisfied: an id could keep its tag long after its last test was deleted.
+_usa_ids() {
+    _usa_i=1
+    while [ "$_usa_i" -le 32 ]; do
+        printf 'USA-%02d\n' "$_usa_i"
+        _usa_i=$((_usa_i + 1))
+    done
+}
+# Reads the ids present in a corpus on $1, prints the ids that are absent.
+_usa_missing() {
+    _usa_present="$1"
+    _usa_ids | while read -r _usa_id; do
+        printf '%s\n' "$_usa_present" | grep -qx -- "$_usa_id" ||
+            printf '%s\n' "$_usa_id"
+    done
+}
+# Both app test-file spellings are corpus: apps/gui uses `test_*.c`, apps/cli
+# uses `*_test.c` (cli_out_contract_test.c), so a tag placed under the CLI
+# convention is visible to this gate instead of silently unowned.
+_usa_test_sources() {
+    ls apps/*/test_*.c apps/*/*_test.c apps/gui/gui_selftest.c packer/tests/*.c \
+        2>/dev/null
+}
+# Ids claimed by a tag adjacent to the `void test_` definition it owns. A tag
+# with no test under it (deleted owner) contributes nothing, and neither does a
+# definition that is never invoked in its own file: the id is credited only
+# when the file also carries a call site for the claimed function -- the
+# trailing `name);` of a RUN_TEST(name); (same-line or wrapped) or a bare
+# direct call `name();`. Prototypes (`void name(void);`) match neither form.
+#
+# The call scan is textual, so a call site that the COMPILER never sees must be
+# removed before it is recorded, or the tag keeps crediting a test that no
+# longer runs. Two such forms are stripped here: text inside a /* ... */ block
+# comment (and after a // line comment) but NOT inside a string or character
+# literal, and text inside an `#if 0 ... #endif` region (nesting tracked; the
+# `#else` branch of an `#if 0` is live code and is NOT stripped). Only the
+# literal `#if 0` / `#elif 0` conditions are treated as dead -- this is a
+# greppable gate, not a preprocessor, so no other condition is evaluated.
+# Tag scanning deliberately reads the RAW line, because the `/* USA-nn */` tags
+# themselves live in comments; only `#if 0` regions drop out of both scans.
+#
+# Known limits (documented rather than detected -- each needs analysis this gate
+# does not do):
+#   - dead call graph: a `RUN_TEST(test_foo);` inside a function that main()
+#     never calls still counts. Proving otherwise needs whole-file call-graph
+#     analysis, and a runner file's entry point is not a fixed name here;
+#   - conditional compilation other than `#if 0` (e.g. a registration under
+#     `#ifdef _WIN32`) counts on every platform;
+#   - a call site in a DIFFERENT file than the definition is not seen, so a
+#     shared runner would read as unregistered.
+_usa_test_owned() {
+    awk '
+        function flush_file(   fn, n, i, part) {
+            for (fn in claim)
+                if (fn in called) {
+                    n = split(claim[fn], part, " ")
+                    for (i = 1; i <= n; i++)
+                        if (part[i] != "") print part[i]
+                }
+            split("", claim); split("", called)
+        }
+        # Removes commented-out text, carrying /* ... */ state across lines.
+        # String and character literals are TEXT, not comment openers: a "%s/*"
+        # glob and a "//server/share" UNC path are both live in this corpus, and
+        # reading either as a comment start swallows the live code that follows
+        # it -- including #else/#endif directives, which desyncs the dead-region
+        # depth counters below. A literal never spans a line here, so literal
+        # state resets per line; the block-comment state deliberately does not.
+        # ("\047" is the apostrophe: this awk program is shell-single-quoted, so
+        # a literal one cannot appear in it.)
+        function strip_comments(line,   out, i, n, c, c2, in_str, in_chr) {
+            if (!in_comment && index(line, "/") == 0 &&
+                index(line, "\"") == 0 && index(line, "\047") == 0)
+                return line
+            out = ""
+            in_str = 0
+            in_chr = 0
+            n = length(line)
+            i = 1
+            while (i <= n) {
+                c = substr(line, i, 1)
+                c2 = substr(line, i, 2)
+                if (in_comment) {
+                    if (c2 == "*/") { in_comment = 0; i += 2 } else { i++ }
+                    continue
+                }
+                if (in_str || in_chr) {
+                    out = out c
+                    if (c == "\\") {
+                        out = out substr(line, i + 1, 1)
+                        i += 2
+                        continue
+                    }
+                    if (in_str && c == "\"") in_str = 0
+                    else if (in_chr && c == "\047") in_chr = 0
+                    i++
+                    continue
+                }
+                if (c2 == "/*") { in_comment = 1; i += 2; continue }
+                if (c2 == "//") break
+                out = out c
+                if (c == "\"") in_str = 1
+                else if (c == "\047") in_chr = 1
+                i++
+            }
+            return out
+        }
+        # Tracks `#if 0` regions on already-comment-stripped text. Returns 1 for
+        # a preprocessor directive line (never a call site itself).
+        function track_dead_regions(line,   t) {
+            t = line
+            sub(/^[ \t]*/, "", t)
+            if (t !~ /^#/) return 0
+            if (t ~ /^#[ \t]*(if|ifdef|ifndef)([^A-Za-z0-9_]|$)/) {
+                cond_depth++
+                if (dead_depth == 0 && t ~ /^#[ \t]*if[ \t]+0[ \t]*$/)
+                    dead_depth = cond_depth
+                return 1
+            }
+            if (t ~ /^#[ \t]*endif([^A-Za-z0-9_]|$)/) {
+                if (dead_depth == cond_depth) dead_depth = 0
+                if (cond_depth > 0) cond_depth--
+                return 1
+            }
+            if (t ~ /^#[ \t]*(else|elif)([^A-Za-z0-9_]|$)/) {
+                if (dead_depth == cond_depth) dead_depth = 0
+                # A literal `#elif 0` opens a dead branch exactly like `#if 0`;
+                # every other #elif condition stays live (this is a greppable
+                # gate, not a preprocessor).
+                if (dead_depth == 0 && t ~ /^#[ \t]*elif[ \t]+0[ \t]*$/)
+                    dead_depth = cond_depth
+                return 1
+            }
+            return 0
+        }
+        function record_calls(line,   s, m) {
+            s = line
+            while (match(s, /test_[A-Za-z0-9_]*[ \t]*\)[ \t]*;/)) {
+                if (RSTART == 1 || substr(s, RSTART - 1, 1) !~ /[A-Za-z0-9_]/) {
+                    m = substr(s, RSTART, RLENGTH)
+                    sub(/[ \t]*\).*/, "", m)
+                    called[m] = 1
+                }
+                s = substr(s, RSTART + RLENGTH)
+            }
+            s = line
+            while (match(s, /test_[A-Za-z0-9_]*[ \t]*\([ \t]*\)[ \t]*;/)) {
+                if (RSTART == 1 || substr(s, RSTART - 1, 1) !~ /[A-Za-z0-9_]/) {
+                    m = substr(s, RSTART, RLENGTH)
+                    sub(/[ \t]*\(.*/, "", m)
+                    called[m] = 1
+                }
+                s = substr(s, RSTART + RLENGTH)
+            }
+        }
+        FNR == 1 {
+            flush_file()
+            p1 = ""; p2 = ""; p3 = ""
+            in_comment = 0; cond_depth = 0; dead_depth = 0
+        }
+        {
+            code = strip_comments($0)
+            directive = track_dead_regions(code)
+            if (dead_depth > 0 || directive) { p3 = p2; p2 = p1; p1 = $0; next }
+            record_calls(code)
+            if (match($0, /(^|[^A-Za-z0-9_])void[ \t]+test_[A-Za-z0-9_]*[ \t]*\(/)) {
+                d = substr($0, RSTART, RLENGTH)
+                sub(/.*void[ \t]+/, "", d)
+                sub(/[ \t]*\(/, "", d)
+                s = p3 " " p2 " " p1 " " $0
+                while (match(s, /USA-[0-9][0-9]/)) {
+                    claim[d] = claim[d] " " substr(s, RSTART, RLENGTH)
+                    s = substr(s, RSTART + RLENGTH)
+                }
+            }
+            p3 = p2; p2 = p1; p1 = $0
+        }
+        END { flush_file() }
+    ' "$@" 2>/dev/null | sort -u
+}
+# Ids explicitly registered as build-gate-owned.
+_usa_gate_owned() {
+    grep -hoE 'USA-[0-9]{2}.*owner: gate' "$@" 2>/dev/null |
+        grep -oE 'USA-[0-9]{2}' | sort -u
+}
+_usa_found=$( { _usa_test_owned $(_usa_test_sources)
+                _usa_gate_owned cmake/*.cmake scripts/*.sh; } | sort -u)
+r22=$(_usa_missing "$_usa_found")
+[ -n "$r22" ] && hit "R22 spec §16 verification id with no owning test or gate" "$r22"
+
+# Seeded self-test (R21 shape): a scratch tree proves each ownership class
+# accepts what it must and, above all, that the gate FAILS when the owning test
+# disappears and only its tag is left behind.
+_r22_dir=$(mktemp -d 2>/dev/null)
+if [ -z "$_r22_dir" ] || [ ! -d "$_r22_dir" ]; then
+    hit "R22-selftest" "R22 self-test could not create a scratch dir (mktemp failed)"
+else
+    trap 'rm -rf "$_r22_dir"' EXIT
+    printf '/* USA-77 partial: owned. */\nvoid test_owned(void) {\n}\nRUN_TEST(test_owned);\n' \
+        >"$_r22_dir/test_owned.c"
+    printf '/* USA-77 owned via wrapped registration. */\nvoid test_wrapped(void) {\n}\n/* USA-77 owned via bare call. */\nvoid test_bare(void) {\n}\nvoid run_all(void) {\n    RUN_TEST(\n        test_wrapped);\n    test_bare();\n}\n' \
+        >"$_r22_dir/test_wrapped.c"
+    printf '/* USA-77 tagged, defined, but its RUN_TEST line was deleted. */\nvoid test_unregistered(void) {\n}\n' \
+        >"$_r22_dir/test_unregistered.c"
+    printf '/* USA-77 tagged, but its registration is compiled out. */\nvoid test_if0(void) {\n}\nvoid run_all(void) {\n#if 0\n    RUN_TEST(test_if0);\n#endif\n}\n' \
+        >"$_r22_dir/test_if0.c"
+    printf '/* USA-77 tagged, but its registration is inside a nested dead region. */\nvoid test_if0_nested(void) {\n}\nvoid run_all(void) {\n#if 0\n#ifdef _WIN32\n    RUN_TEST(test_if0_nested);\n#endif\n#endif\n}\n' \
+        >"$_r22_dir/test_if0_nested.c"
+    printf '/* USA-77 tagged, but its registration is commented out. */\nvoid test_blockcomment(void) {\n}\nvoid run_all(void) {\n    /* RUN_TEST(test_blockcomment); */\n    /*\n    test_blockcomment();\n    */\n    // RUN_TEST(test_blockcomment);\n}\n' \
+        >"$_r22_dir/test_blockcomment.c"
+    printf '/* USA-77 owned via the LIVE else branch of an #if 0. */\nvoid test_if0_else(void) {\n}\nvoid run_all(void) {\n#if 0\n    test_never();\n#else\n    RUN_TEST(test_if0_else);\n#endif\n}\n' \
+        >"$_r22_dir/test_if0_else.c"
+    printf '/* USA-77 tagged, but its registration is in an #elif 0 branch. */\nvoid test_elif0(void) {\n}\nvoid run_all(void) {\n#if 0\n    test_never();\n#elif 0\n    RUN_TEST(test_elif0);\n#endif\n}\n' \
+        >"$_r22_dir/test_elif0.c"
+    printf '/* USA-77 owned; a string literal above it merely CONTAINS a comment opener. */\nvoid test_string_open(void) {\n}\nvoid run_all(void) {\n    const char *glob = "dir/*";\n    RUN_TEST(test_string_open);\n}\n' \
+        >"$_r22_dir/test_string_open.c"
+    printf '/* USA-77 owned; the registration shares its line with a UNC string literal. */\nvoid test_string_slashes(void) {\n}\nvoid run_all(void) {\n    note("//server/share"); RUN_TEST(test_string_slashes);\n}\n' \
+        >"$_r22_dir/test_string_slashes.c"
+    printf '/* USA-77: the test that owned this was deleted. */\n' \
+        >"$_r22_dir/test_orphan.c"
+    printf 'void helper(void) { /* USA-77 in production prose */ }\n' \
+        >"$_r22_dir/prod.c"
+    printf '# USA-77 named in a build file with no owner marker\n' \
+        >"$_r22_dir/note.cmake"
+    printf '# USA-78 owner: gate -- proven by a build check\n' \
+        >"$_r22_dir/gate.cmake"
+
+    [ "$(_usa_test_owned "$_r22_dir/test_owned.c")" = "USA-77" ] ||
+        hit "R22-selftest" "R22 failed to credit a tag adjacent to its owning test"
+    [ "$(_usa_test_owned "$_r22_dir/test_wrapped.c")" = "USA-77" ] ||
+        hit "R22-selftest" "R22 failed to credit a wrapped RUN_TEST or bare-call registration"
+    [ -n "$(_usa_test_owned "$_r22_dir/test_unregistered.c")" ] &&
+        hit "R22-selftest" "R22 credited a defined-but-unregistered test (deleted RUN_TEST line)"
+    [ -n "$(_usa_test_owned "$_r22_dir/test_if0.c")" ] &&
+        hit "R22-selftest" "R22 credited a registration inside an #if 0 region"
+    [ -n "$(_usa_test_owned "$_r22_dir/test_if0_nested.c")" ] &&
+        hit "R22-selftest" "R22 credited a registration inside a nested #if 0 region"
+    [ -n "$(_usa_test_owned "$_r22_dir/test_blockcomment.c")" ] &&
+        hit "R22-selftest" "R22 credited a commented-out registration"
+    [ "$(_usa_test_owned "$_r22_dir/test_if0_else.c")" = "USA-77" ] ||
+        hit "R22-selftest" "R22 dropped a registration in the LIVE #else branch of an #if 0"
+    [ -n "$(_usa_test_owned "$_r22_dir/test_elif0.c")" ] &&
+        hit "R22-selftest" "R22 credited a registration inside an #elif 0 branch"
+    [ "$(_usa_test_owned "$_r22_dir/test_string_open.c")" = "USA-77" ] ||
+        hit "R22-selftest" "R22 read a comment opener inside a string literal as a real comment"
+    [ "$(_usa_test_owned "$_r22_dir/test_string_slashes.c")" = "USA-77" ] ||
+        hit "R22-selftest" "R22 read // inside a string literal as a line comment"
+    [ -n "$(_usa_test_owned "$_r22_dir/test_orphan.c")" ] &&
+        hit "R22-selftest" "R22 credited a tag whose owning test disappeared"
+    [ -n "$(_usa_test_owned "$_r22_dir/prod.c")" ] &&
+        hit "R22-selftest" "R22 credited a production comment as a test owner"
+    [ -n "$(_usa_gate_owned "$_r22_dir/note.cmake")" ] &&
+        hit "R22-selftest" "R22 credited a build-file note with no owner: gate marker"
+    [ "$(_usa_gate_owned "$_r22_dir/gate.cmake")" = "USA-78" ] ||
+        hit "R22-selftest" "R22 failed to credit an explicit gate owner"
+    rm -rf "$_r22_dir"
+    trap - EXIT
+fi
+if [ -z "$(_usa_missing "$(_usa_ids | grep -v '^USA-07$')")" ]; then
+    hit "R22-selftest" "R22 detector failed to catch an id with no owning test"
+fi
+if [ -n "$(_usa_missing "$(_usa_ids)")" ]; then
+    hit "R22-selftest" "R22 detector false-positives on a fully covered id set"
+fi
+
+# 23. Spec §4.3 determinism: no locale-dependent byte classification or folding
+#     in shipping code. The <ctype.h>/<wctype.h> case and character-class
+#     functions consult the active LC_CTYPE, so the same path text, id text, or
+#     token would land in different equivalence classes depending on the locale
+#     the process happens to run under. packer/src/tp_ascii.h is the shared
+#     replacement and needs no exception here -- it classifies by explicit ASCII
+#     range and calls nothing. isdigit/isxdigit are deliberately NOT banned:
+#     C17 §7.4.1.5 and §7.4.1.12 pin them to the decimal / hexadecimal digits in
+#     every locale, so they carry no locale input. A legit exception carries a
+#     "boundary-ok:" note on the same line.
+_locale_ctype='(^|[^A-Za-z0-9_])(is|to)w?(alpha|alnum|upper|lower|space|punct|print|graph|cntrl|blank)[[:space:]]*\('
+_locale_ctype_scan() {
+    grep -nE "$_locale_ctype" "$@" 2>/dev/null | grep -v 'boundary-ok:'
+}
+r23=$(_locale_ctype_scan $(shipping_srcs))
+[ -n "$r23" ] && hit "R23 locale-dependent ctype in shipping code" "$r23"
+
+_r23_dir=$(mktemp -d 2>/dev/null)
+if [ -z "$_r23_dir" ] || [ ! -d "$_r23_dir" ]; then
+    hit "R23-selftest" "R23 self-test could not create a scratch dir (mktemp failed)"
+else
+    trap 'rm -rf "$_r23_dir"' EXIT
+    printf '    if (isalpha((unsigned char)p[0]) && p[1] == 0x3A) {\n' \
+        >"$_r23_dir/seeded_classify.c"
+    printf '    return tolower(a) == tolower(b);\n' >"$_r23_dir/seeded_fold.c"
+    printf '    return towupper(wc);\n' >"$_r23_dir/seeded_wide.c"
+    printf '    return tp_ascii_tolower(a) == tp_ascii_tolower(b) &&\n           tp_ascii_is_alpha(a);\n' \
+        >"$_r23_dir/shared_fold.c"
+    printf '    if (!isdigit(byte) && !(byte >= 0x61 && byte <= 0x66)) {\n' \
+        >"$_r23_dir/digit_grammar.c"
+    [ -z "$(_locale_ctype_scan "$_r23_dir/seeded_classify.c")" ] &&
+        hit "R23-selftest" "R23 failed to catch a seeded locale classification"
+    [ -z "$(_locale_ctype_scan "$_r23_dir/seeded_fold.c")" ] &&
+        hit "R23-selftest" "R23 failed to catch a seeded locale case fold"
+    [ -z "$(_locale_ctype_scan "$_r23_dir/seeded_wide.c")" ] &&
+        hit "R23-selftest" "R23 failed to catch a seeded wide-character locale fold"
+    [ -n "$(_locale_ctype_scan "$_r23_dir/shared_fold.c")" ] &&
+        hit "R23-selftest" "R23 false-positives on the shared ASCII fold"
+    [ -n "$(_locale_ctype_scan "$_r23_dir/digit_grammar.c")" ] &&
+        hit "R23-selftest" "R23 false-positives on the locale-independent digit predicates"
+    rm -rf "$_r23_dir"
+    trap - EXIT
+fi
+
+# 24. Test seams are not a shipping surface. `<owner>__test_<name>` marks a symbol
+#     that exists only so a test can observe or break its owner. Compiled into the
+#     shipped library it is an unaudited entry point any consumer can call, it
+#     widens the internal contract, and it hides which functions are real API --
+#     a fault-injection one also leaves the production path carrying a branch whose
+#     only purpose is to fail. Every such symbol must therefore sit inside a live
+#     `#ifdef TP_ENABLE_TEST_SEAMS` region, or in a translation unit that refuses to
+#     compile without the define (the `#ifndef TP_ENABLE_TEST_SEAMS` + `#error` file
+#     guard, e.g. packer/src/tp_test_seams.h). Consumers recompile the owning TU
+#     with the define via tp_add_test's SEAMS keyword.
+#     Complement to cmake A6, which pins two NAMED job-owner seams to their fences:
+#     A6 proves those specific seams stay fenced, this proves no unfenced seam
+#     appears anywhere in shipping code.
+#     A compound guard (`#if defined(TP_ENABLE_TEST_SEAMS) || X`) is NOT a fence --
+#     it can compile the seam into every build -- and neither is the `#else`/`#elif`
+#     branch of one, matching A6's walker.
+_seam_fence_awk='
+FNR == 1 { in_block = 0; depth = 0; split("", seam); seam_only = 0; pending = 0 }
+{
+    line = $0
+    out = ""
+    i = 1
+    n = length(line)
+    while (i <= n) {
+        c = substr(line, i, 2)
+        if (in_block) {
+            if (c == "*/") { in_block = 0; i += 2 } else { i++ }
+            continue
+        }
+        if (c == "/*") { in_block = 1; i += 2; continue }
+        if (c == "//") { break }
+        out = out substr(line, i, 1)
+        i++
+    }
+    line = out
+    trimmed = line
+    sub(/^[ \t]+/, "", trimmed)
+    sub(/[ \t\r]+$/, "", trimmed)
+    if (pending && trimmed != "") {
+        if (trimmed ~ /^#[ \t]*error/) { seam_only = 1 }
+        pending = 0
+    }
+    if (trimmed ~ /^#[ \t]*(if|ifdef|ifndef)([^A-Za-z0-9_]|$)/) {
+        depth++
+        seam[depth] = (trimmed ~ /^#[ \t]*ifdef[ \t]+TP_ENABLE_TEST_SEAMS$/ ||
+                       trimmed ~ /^#[ \t]*if[ \t]+defined[ \t]*\([ \t]*TP_ENABLE_TEST_SEAMS[ \t]*\)$/) ? 1 : 0
+        if (trimmed ~ /^#[ \t]*ifndef[ \t]+TP_ENABLE_TEST_SEAMS$/) { pending = 1 }
+        next
+    }
+    if (trimmed ~ /^#[ \t]*endif/) { seam[depth] = 0; if (depth > 0) depth--; next }
+    if (trimmed ~ /^#[ \t]*(else|elif)/) { seam[depth] = 0; next }
+    if (seam_only) next
+    for (d = 1; d <= depth; d++) { if (seam[d]) next }
+    rest = line
+    while (match(rest, /[A-Za-z_][A-Za-z0-9_]*__test_[A-Za-z0-9_]*/)) {
+        printf "%s:%d:%s\n", FILENAME, FNR, substr(rest, RSTART, RLENGTH)
+        rest = substr(rest, RSTART + RLENGTH)
+    }
+}
+'
+# DEBT, not design. Each name below is a seam that predates this rule and whose
+# owning component is not fenced yet. The list is exact -- full symbol names, no
+# prefixes, no patterns -- so a NEW unfenced seam, including one in an
+# already-listed component, is still a hit. Packet W1-P6 fenced the session,
+# project, and build-worker families and could not reach past its file zone; the
+# owners still owed a fence are tp_diff/tp_history, tp_idset, tp_image, tp_journal,
+# tp_model, tp_op, tp_recovery, tp_txn, tp_validate, the CLI pack-fault binary's
+# tp_export_run arming call, and the GUI's gui_project__test_session.
+# Shrink this list; never grow it.
+_seam_fence_allowed='gui_project__test_session
+tp_diff__test_alloc_count
+tp_diff__test_reset_alloc_count
+tp_diff__test_set_alloc_fail
+tp_export_run__test_set_report_alloc_fail
+tp_history__test_fail_next_reserve
+tp_history__test_set_limits
+tp_idset__test_force_bucket
+tp_idset__test_probe_reset
+tp_idset__test_probe_take
+tp_image__test_decode_count
+tp_image__test_reset_decode_count
+tp_journal__test_fail_next_metadata_materialize
+tp_journal__test_has_valid_record_after
+tp_journal__test_recovery_copy_stats
+tp_journal__test_recovery_ops_borrow_raw
+tp_journal__test_set_file_limit
+tp_journal__test_set_record_limit
+tp_model__test_set_revision
+tp_op__test_apply_count_publish
+tp_op__test_apply_count_reset
+tp_op__test_apply_count_take
+tp_op__test_set_alloc_fail
+tp_recovery__test_candidate_insert
+tp_recovery__test_craft_metadata_journal
+tp_recovery__test_fail_next_live_retire_cleanup
+tp_recovery__test_fail_next_quarantine_unlink
+tp_recovery__test_fail_next_resolve_verify
+tp_recovery__test_hold_foreign_lock
+tp_recovery__test_peek_candidate
+tp_recovery__test_release_foreign_lock
+tp_recovery__test_session_attach_at
+tp_txn__test_complexity_reset
+tp_txn__test_count_op_walk
+tp_txn__test_encode_stats_reset
+tp_txn__test_error_allocations
+tp_txn__test_fail_next_request_encode
+tp_txn__test_json_precheck
+tp_txn__test_last_measure_allocations
+tp_txn__test_op_walk_steps
+tp_txn__test_request_encode_calls
+tp_txn__test_set_add_error_fail
+tp_txn__test_set_result_echo_fail
+tp_validate__test_fail_sprite_index
+tp_validate__test_set_alloc_fail
+tp_validate__test_work_get
+tp_validate__test_work_reset'
+# The allowance list reaches awk through the ENVIRONMENT, not `-v`: a `-v`
+# assignment is a single lexical string, and awks other than gawk reject an
+# embedded newline in one ("newline in string"), which kills the program before
+# it reads a line -- a scan that cannot run must not look like a clean scan.
+# stderr is deliberately NOT discarded here for the same reason: an awk that
+# refuses the program has to be visible.
+_seam_fence_scan() {
+    awk "$_seam_fence_awk" "$@" |
+        SEAM_FENCE_ALLOWED="$_seam_fence_allowed" awk -F: '
+            BEGIN {
+                n = split(ENVIRON["SEAM_FENCE_ALLOWED"], a, "\n")
+                for (i = 1; i <= n; i++) ok[a[i]] = 1
+            }
+            !($3 in ok)'
+}
+r24=$(_seam_fence_scan $(shipping_srcs))
+[ -n "$r24" ] && hit "R24 test seam outside a TP_ENABLE_TEST_SEAMS fence" "$r24"
+
+_r24_dir=$(mktemp -d 2>/dev/null)
+if [ -z "$_r24_dir" ] || [ ! -d "$_r24_dir" ]; then
+    hit "R24-selftest" "R24 self-test could not create a scratch dir (mktemp failed)"
+else
+    trap 'rm -rf "$_r24_dir"' EXIT
+    printf 'void tp_thing__test_fail_next(void);\n' >"$_r24_dir/seeded_plain.h"
+    printf '#ifdef TP_ENABLE_TEST_SEAMS\nvoid tp_thing__test_fail_next(void);\n#endif\n' \
+        >"$_r24_dir/fenced.h"
+    printf '#ifdef TP_ENABLE_TEST_SEAMS\n#ifdef _WIN32\nvoid tp_thing__test_fail_next(void);\n#endif\n#endif\n' \
+        >"$_r24_dir/fenced_nested.h"
+    printf '#if defined(TP_ENABLE_TEST_SEAMS) || defined(TP_OTHER)\nvoid tp_thing__test_fail_next(void);\n#endif\n' \
+        >"$_r24_dir/compound.h"
+    printf '#ifdef TP_ENABLE_TEST_SEAMS\nvoid a(void);\n#else\nvoid tp_thing__test_fail_next(void);\n#endif\n' \
+        >"$_r24_dir/else_branch.h"
+    printf '#ifndef TP_ENABLE_TEST_SEAMS\n#error "seam-only header"\n#endif\nvoid tp_thing__test_fail_next(void);\n' \
+        >"$_r24_dir/seam_only.h"
+    printf '/* tp_thing__test_fail_next is named here in prose only. */\nvoid tp_thing_real(void);\n' \
+        >"$_r24_dir/comment.h"
+    printf 'void tp_txn__test_complexity_reset(void);\n' >"$_r24_dir/allowed.h"
+    [ -z "$(_seam_fence_scan "$_r24_dir/seeded_plain.h")" ] &&
+        hit "R24-selftest" "R24 failed to catch an unfenced seam declaration"
+    [ -n "$(_seam_fence_scan "$_r24_dir/fenced.h")" ] &&
+        hit "R24-selftest" "R24 false-positives on a properly fenced seam"
+    [ -n "$(_seam_fence_scan "$_r24_dir/fenced_nested.h")" ] &&
+        hit "R24-selftest" "R24 false-positives on a seam nested inside its fence"
+    [ -z "$(_seam_fence_scan "$_r24_dir/compound.h")" ] &&
+        hit "R24-selftest" "R24 accepted a compound #if condition as a seam fence"
+    [ -z "$(_seam_fence_scan "$_r24_dir/else_branch.h")" ] &&
+        hit "R24-selftest" "R24 accepted the #else branch of a seam fence as fenced"
+    [ -n "$(_seam_fence_scan "$_r24_dir/seam_only.h")" ] &&
+        hit "R24-selftest" "R24 false-positives on a header that #errors without the define"
+    [ -n "$(_seam_fence_scan "$_r24_dir/comment.h")" ] &&
+        hit "R24-selftest" "R24 read a seam name in a comment as a declaration"
+    [ -n "$(_seam_fence_scan "$_r24_dir/allowed.h")" ] &&
+        hit "R24-selftest" "R24 ignored its exact debt allowance"
+    rm -rf "$_r24_dir"
     trap - EXIT
 fi
 

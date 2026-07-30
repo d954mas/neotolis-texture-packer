@@ -334,6 +334,23 @@ bool tp_fs_stat(const char *path_utf8, tp_fs_info *out) {
     return win32_info_from_data(&data, out);
 }
 
+tp_fs_create_dir_result tp_fs_create_dir_exclusive(const char *path_utf8) {
+    wchar_t *path = tp_fs_win32_path_alloc(path_utf8);
+    if (!path) {
+        return TP_FS_CREATE_DIR_ERROR;
+    }
+    if (CreateDirectoryW(path, NULL)) {
+        free(path);
+        return TP_FS_CREATE_DIR_OK;
+    }
+    DWORD error = GetLastError();
+    free(path);
+    win32_error_to_errno(error);
+    return (error == ERROR_ALREADY_EXISTS || error == ERROR_FILE_EXISTS)
+               ? TP_FS_CREATE_DIR_EXISTS
+               : TP_FS_CREATE_DIR_ERROR;
+}
+
 bool tp_fs_create_dir(const char *path_utf8) {
     wchar_t *path = tp_fs_win32_path_alloc(path_utf8);
     if (!path) {
@@ -546,4 +563,24 @@ bool tp_fs_sync_parent(const char *path_utf8) {
      * durability primitive used above; Windows has no portable directory-fsync
      * equivalent for ordinary application handles. */
     return true;
+}
+
+/* Contract in tp_fs_internal.h: only a definitively absent pid is reported dead.
+ * OpenProcess failing with ERROR_INVALID_PARAMETER is the one answer that means
+ * "no such pid"; access-denied means the process exists under another account,
+ * which is LIVE. A handle that opens but reports a real exit code is a reaped
+ * zombie whose id is no longer doing work, so it counts as dead. */
+bool tp_fs_process_is_live(unsigned long pid) {
+    if (pid == 0UL || pid > 0xFFFFFFFFUL) {
+        return true;
+    }
+    HANDLE process =
+        OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, (DWORD)pid);
+    if (!process) {
+        return GetLastError() != ERROR_INVALID_PARAMETER;
+    }
+    DWORD code = 0;
+    const bool dead = GetExitCodeProcess(process, &code) && code != STILL_ACTIVE;
+    (void)CloseHandle(process);
+    return !dead;
 }

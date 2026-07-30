@@ -244,10 +244,12 @@ A frontend presenting a live session observes committed state through an owned
 session observation plus the ordered event/resync contract. One observation has
 a single linearization point: its composite observation token, high-water event
 sequence, retained immutable model generation, snapshot scalars, coalesced
-source/job/result generations, and copied events/resync result describe the same
-session cut. The token advances when any observable generation changes, even
-when no model event is published. A frontend must not compose correctness from
-independently sampled event and snapshot calls.
+source/recovery-owner/recovery-health/job/result generations, and copied
+events/resync result describe the same session cut. The token advances when any
+observable generation changes, even when no model event is published. Recovery
+scalars are available directly from the observation so a recovery-only change
+does not force project materialization. A frontend must not compose correctness
+from independently sampled event and snapshot calls.
 
 Frontend correctness must not depend on private invalidation performed only by
 the frontend that submitted the command. A client observes its own
@@ -259,7 +261,10 @@ change event.
 The native GUI uses a session-observing controller with passive boundaries:
 
 - a frame pins one immutable observation/snapshot;
-- simple views may read that snapshot through a read-only query API;
+- simple views may read that snapshot through
+  `tp_core/tp_session_snapshot_query.h`, which exposes immutable DTOs and
+  read-only operations over a caller-pinned snapshot but no session/snapshot
+  lifetime, admission, command, mutation-preview, or job-start API;
 - derived, virtualized, identity-sensitive, or policy-bearing presentation is
   prepared by explicit projections/reducers;
 - a view emits typed semantic actions and does not mutate the session;
@@ -296,6 +301,30 @@ in a joinable in-process thread. It polls progress non-blockingly, requests
 cooperative cancellation, and may terminate the owned process after the bounded
 deadline. Process exit, protocol failure, and forced termination become
 structured terminal results; they never mutate the project model directly.
+
+The dependency direction remains `tp_build -> tp_core`. Job code publishes a
+retained immutable job/result projection into a narrow core-owned session slot.
+Publication is an explicit host-thread job poll/admission pull from a
+constant-time projection callback on the opaque refcounted job owner; workers
+never push into the session. `tp_session_observe()` only reads already-admitted
+state and never pumps transport or performs admission. The slot, atomic
+observations, owned result receipts, and presentation caches share the
+type-erased result owner, so the final release destroys the heavy Pack arena
+exactly once. Session observation never includes or inspects `tp_build` private
+job state.
+
+For session jobs, cancellation versus terminal completion linearizes in the
+host process owner. A cancellation accepted before the owner admits the bounded
+terminal frame owns the cancelled outcome; any completed Export side effects
+remain explicit in the frame's full/partial/uncertain publication metadata.
+After terminal admission, cancellation is rejected. The worker never maintains
+a competing terminal authority.
+
+The accepted-result slot retains its own immutable completion envelope. A later
+job start changes the current job projection without relabelling the prior
+accepted result. Worker creation is part of admission: failure publishes no
+job-state or result-token change and preserves the prior owners. Pack/Export
+use process creation at this boundary; no in-process job thread exists.
 
 A candidate for the same canonical saved identity must not acquire a second
 writer lease or destroy the old session merely to retry. Until a dedicated
@@ -949,6 +978,28 @@ runs Pack, except where a future explicit auto-pack mode is introduced.
 The cache exists only for the live session. It is not written into the project or
 to a disk cache in the first implementation.
 
+The Pack artifact file the job worker writes (§10.6) is not a counter-example to
+that rule. It is a transient private handoff, not a cache: one file inside a
+per-request private directory under the host-chosen work directory, keyed by the
+HOST pid and the request id (the pid whose death makes the directory garbage —
+the directory outlives the worker until the host has read the artifact), read
+exactly once by the host and then deleted — on adoption, on cancel, on failure,
+and on job destroy. Every Export request gets its own private directory under
+the same work directory and by the same naming rule; nothing in it is published
+to the host, so the worker removes it on success, failure, and cancellation
+alike. A pid-liveness reaper removes directories orphaned by a crash. Nothing
+reads it a second time, nothing looks it up by pack-input hash, and it never
+outlives the request that produced it. Result reuse remains memory-only.
+
+That work directory is one shared application scratch root — `<user cache
+dir>/ntpacker/work` (`%LOCALAPPDATA%` on Windows, `$XDG_CACHE_HOME` else
+`$HOME/.cache` elsewhere) — resolved identically by every client. It is
+deliberately neither the executable's directory (read-only for an installed
+build, and shared by every running instance) nor the system temp directory
+(RAM-backed on most Linux distributions, and swept by Windows disk cleaners
+mid-job). A scratch root that cannot be resolved or created fails the job
+request as structured data; there is no fallback location.
+
 Inactive Pack results are stored in a compressed representation containing
 layout/metadata/notices and compressed atlas pages or the normal serialized
 runtime artifact where practical. They do not retain GPU textures or independent
@@ -990,10 +1041,35 @@ While the engine builder exposes aborting assertions or narrow path-based output
 the production integration runs it in a private worker process. The worker
 receives a versioned bounded request containing validated settings and raw pixels,
 uses only private ASCII relative staging names, and returns a versioned result.
-The parent owns cancellation, timeout, crash detection, UTF-8 filesystem reads,
-and final publication. A worker exit, signal, malformed response, or missing
-artifact becomes a structured `builder_crashed`/`builder_failed` result and cannot
-replace the last successful preview.
+The parent owns cancellation, timeout, crash detection, admission, and retained
+result publication. The outer job worker owns source traversal/current-read,
+UTF-8 file I/O, decode, builder execution, and Export publication. It returns a
+bounded completion envelope and a bounded Pack readback manifest; the host
+never rescans live sources to reconstruct a result. A worker exit, signal,
+malformed response, or missing artifact becomes a structured
+`builder_crashed`/`builder_failed` result and cannot replace the last successful
+preview.
+
+The outer worker protocol is version 2. Its bounded frames carry the request,
+coalesced progress, and the terminal response; the Pack artifact itself no
+longer travels on the wire. The terminal Pack frame carries the per-request
+artifact path plus its `u64` byte size, and the host validates that file by
+size, magic, and stat before a budgeted chunked read. No full-file digest is
+taken: this is the host's own private output under its own work directory, not
+untrusted input. The UTF-8 sprite name table stays on the wire because it must
+describe the names as they were at pack time — a rename admitted while Pack runs
+must not relabel the sprites in the completed result. Cancellation and transport
+failure fold into the terminal state for both Pack and Export, so a cancelled
+Pack reports `cancelled` rather than a crash.
+
+Inside that outer job process, the raw-RGBA build-worker containment remains as
+a nested child around the assertion-capable engine builder, for Pack and for
+Export alike: Export reaches the same nested worker through the shared
+cancellable pack path. The outer process is its parent and owns its bounded
+protocol; the host owns the outer process group/Job Object, so forced
+cancellation terminates both levels without stranding the nested builder. This
+is one job authority with a nested fault-containment detail, not two competing
+job owners.
 
 An upstream fallible memory/sink builder API may replace the process boundary
 after its error, ownership, cancellation, and UTF-8 contracts are executable-test
@@ -1196,6 +1272,14 @@ ntpacker-gui
 ```
 
 CLI and MCP are not the same mode.
+
+The killable job worker (§10.6) is not a fourth binary. Every first-party
+executable is its own worker: the host spawns its own resolved image with the
+reserved worker argv flag, and the child then selects which service to run by
+reading the frame magic of the first request on its stdin — outer job worker or
+nested build worker. Parent and child are therefore always the same build, and
+no dispatch decision depends on a second executable being installed, findable on
+`PATH`, or version-matched. Failure to resolve the running image fails closed.
 
 ### 14.2 CLI
 

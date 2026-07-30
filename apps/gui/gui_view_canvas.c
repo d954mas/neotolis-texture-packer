@@ -18,7 +18,7 @@
 #include "gui_rows.h"
 #include "gui_canvas.h"
 #include "gui_pack.h"
-#include "gui_project.h"
+#include "gui_project_view.h"
 #include "gui_shell.h" /* close_menubar_menus */
 
 #include <math.h>
@@ -72,10 +72,20 @@ static void strip_group_actions(nt_ui_context_t *ctx, bool accent, bool labels, 
         (void)ui_icon_btn(ctx, s_id_btn_pack, &s_ic_refresh, 16.0F, busy, &g_btn_primary, false, 0.0F, h, &g_onaccent);
         if (ui_icon_btn(ctx, s_id_btn_export, &s_ic_x, 16.0F, labels ? "Cancel" : NULL, &g_btn,
                         !gui_pack_async_cancelling(), 0.0F, h, &g_body)) {
-            gui_pack_async_cancel();
+            tp_error error = {{0}};
+            const tp_status status =
+                gui_pack_async_cancel(&error);
+            if (status != TP_STATUS_OK) {
+                set_statusf_ex(
+                    STATUS_ERROR,
+                    "Cancel rejected: %s",
+                    error.msg[0]
+                        ? error.msg
+                        : tp_status_str(status));
+            }
         }
         if (ui_icon_btn(ctx, s_id_btn_refresh, &s_ic_refresh, 16.0F, NULL, &g_btn_ghost, true, 0.0F, h, &g_caption)) {
-            s_pending_refresh = true;
+            gui_request_refresh();
         }
         return;
     }
@@ -86,14 +96,14 @@ static void strip_group_actions(nt_ui_context_t *ctx, bool accent, bool labels, 
     const nt_ui_label_style_t *pack_lbl = accent ? &g_onwarn : &g_onaccent;
     if (ui_icon_btn(ctx, s_id_btn_pack, pack_ic, 16.0F, labels ? "Pack" : NULL, pack_st, s_pack_has_sources,
                     0.0F, h, pack_lbl)) {
-        s_pending_pack = true;
+        gui_request_pack();
     }
     if (ui_icon_btn(ctx, s_id_btn_export, &s_ic_download, 16.0F, labels ? "Export" : NULL, &g_btn,
                     s_pack_has_sources, 0.0F, h, &g_body)) {
         s_export_open = true;
     }
     if (ui_icon_btn(ctx, s_id_btn_refresh, &s_ic_refresh, 16.0F, NULL, &g_btn_ghost, true, 0.0F, h, &g_caption)) {
-        s_pending_refresh = true;
+        gui_request_refresh();
     }
 }
 
@@ -155,7 +165,7 @@ static void preview_target_short(int combo_index, char *out, size_t cap) {
 }
 
 /* The [Native | <exporters...>] combo. Trigger shows the short label; the open list shows Native + each
- * exporter's full display_name. A pick queues s_pending_preview_target (applied next frame). Disabled to a
+ * exporter's full display_name. A pick queues a preview-target intent (applied next frame). Disabled to a
  * static label while a pack/export/preview is in flight (only one worker op at a time). */
 static void strip_preview_selector(nt_ui_context_t *ctx, float h) {
     const int ne = tp_exporter_count();
@@ -174,13 +184,13 @@ static void strip_preview_selector(nt_ui_context_t *ctx, float h) {
             if (nt_ui_combo_begin(ctx, NT_UI_DATA_LAYER(LAYER_IMG), LAYER_TEXT, nt_ui_id("ntpacker/strip_preview"),
                                   trig, &s_dd_style, &s_dd_preview_open)) {
                 if (nt_ui_combo_selectable(ctx, 0U, "Native", s_preview_target == 0)) {
-                    s_pending_preview_target = 0;
+                    gui_request_preview_target(0);
                 }
                 for (int i = 0; i < ne; i++) {
                     const tp_exporter *e = tp_exporter_at(i);
                     const char *lbl = (e && e->display_name) ? e->display_name : (e ? e->id : "?");
                     if (nt_ui_combo_selectable(ctx, (uint32_t)(i + 1), lbl, s_preview_target == i + 1)) {
-                        s_pending_preview_target = i + 1;
+                        gui_request_preview_target(i + 1);
                     }
                 }
                 nt_ui_combo_end(ctx);
@@ -203,7 +213,9 @@ static bool strip_preview_chip(nt_ui_context_t *ctx, float h) {
     }
     char chip[96];
     char tip[224];
-    const int nd = gui_pack_preview_diff(s_sel_atlas, e->id, chip, sizeof chip, tip, sizeof tip);
+    const int nd = gui_pack_preview_diff(
+        gui_view_atlas_index(gui_project_snapshot()),
+        e->id, chip, sizeof chip, tip, sizeof tip);
     if (nd <= 0) {
         return false; /* format holds everything -> no degradation chip (canvas simply shows the preview) */
     }
@@ -243,7 +255,10 @@ static void declare_status_pill(nt_ui_context_t *ctx); /* floating message pill,
 
 static void declare_canvas_strip(nt_ui_context_t *ctx, bool atlas) {
     const tp_session_snapshot *snapshot = gui_project_snapshot();
-    const tp_snapshot_atlas *a = snapshot ? tp_session_snapshot_atlas_at(snapshot, s_sel_atlas) : NULL;
+    const int atlas_index = gui_view_atlas_index(snapshot);
+    const tp_snapshot_atlas *a = snapshot
+        ? tp_session_snapshot_atlas_at(snapshot, atlas_index)
+        : NULL;
     s_pack_has_sources = a && a->source_count > 0;
     s_pack_stale = gui_project_is_stale();
     const bool accent = s_pack_has_sources && s_pack_stale;
@@ -317,7 +332,7 @@ static void declare_canvas_strip(nt_ui_context_t *ctx, bool atlas) {
         if (accent && s_preview_target == 0 && s_canvas_w >= S(STRIP_CHIP_MIN_W)) {
             if (ui_icon_btn(ctx, nt_ui_id("ntpacker/stale_chip"), &s_ic_triangle_alert, 14.0F, "outdated",
                             &g_btn_stale, true, 0.0F, 24.0F, &g_onwarn)) {
-                s_pending_pack = true;
+                gui_request_pack();
             }
         }
     }
@@ -381,7 +396,10 @@ static void declare_canvas_preview(nt_ui_context_t *ctx) {
                 nt_ui_custom(ctx, NT_UI_DATA_LAYER(LAYER_IMG), &s_canvas);
             } else if (an && an->frame_count == 0) {
                 nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), "This animation has no frames yet.", &g_canvas_hint);
-            } else if (an && gui_pack_result(s_sel_atlas) == NULL) {
+            } else if (
+                an &&
+                gui_pack_result(gui_view_atlas_index(
+                    gui_project_snapshot())) == NULL) {
                 nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), "Pack to preview \xE2\x80\x94 press Pack (Ctrl+P).", &g_canvas_hint);
             } else {
                 nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), "No frames resolve to packed regions \xE2\x80\x94 repack (Ctrl+P).", &g_canvas_hint);
@@ -401,6 +419,7 @@ void declare_canvas(nt_ui_context_t *ctx) {
     }
     const bool atlas = gui_canvas_get_mode(&s_canvas) == GUI_CANVAS_ATLAS && gui_canvas_has_atlas(&s_canvas);
     const bool has_img = gui_canvas_has_image(&s_canvas);
+    const sprite_row *primary = gui_rows_primary();
     const float cap_w = s_content_w - s_left_panel_w - s_right_panel_w - S(70.0F);
 
     /* caption / hover readout */
@@ -428,7 +447,10 @@ void declare_canvas(nt_ui_context_t *ctx) {
                 tv += r->sprites[i].vert_count;
             }
             const char *sep = "  \xC2\xB7  "; /* U+00B7 middle dot (now baked) */
-            if (s_last_pack_atlas == s_sel_atlas && s_last_pack_ms > 0.0) {
+            if (tp_id128_eq(
+                    s_last_pack_atlas_id,
+                    gui_view_atlas_id()) &&
+                s_last_pack_ms > 0.0) {
                 (void)snprintf(label, sizeof label,
                                "%d sprites%s%d pages%s%dx%d%s%.0f%% filled%s%d verts%spacked %.0f ms", r->sprite_count,
                                sep, r->page_count, sep, pw, ph, sep, (double)atlas_fill_pct(r), sep, tv, sep,
@@ -441,11 +463,12 @@ void declare_canvas(nt_ui_context_t *ctx) {
         } else {
             (void)snprintf(label, sizeof label, "No atlas");
         }
-    } else if (has_img) {
-        (void)snprintf(label, sizeof label, "%s  --  %d x %d", path_last(s_sel_abs), gui_canvas_img_w(&s_canvas),
+    } else if (has_img && primary && primary->abs) {
+        (void)snprintf(label, sizeof label, "%s  --  %d x %d", path_last(primary->abs), gui_canvas_img_w(&s_canvas),
                        gui_canvas_img_h(&s_canvas));
-    } else if (s_sel_missing) {
-        (void)snprintf(label, sizeof label, "file missing: %s", s_sel_abs);
+    } else if (primary && primary->missing) {
+        (void)snprintf(label, sizeof label, "file missing: %s",
+                       primary->abs ? primary->abs : "");
     } else {
         (void)snprintf(label, sizeof label, "No image selected");
     }
@@ -471,13 +494,15 @@ void declare_canvas(nt_ui_context_t *ctx) {
               .clip = {.horizontal = true, .vertical = true}}) {
             if (atlas || has_img) {
                 nt_ui_custom(ctx, NT_UI_DATA_LAYER(LAYER_IMG), &s_canvas);
-            } else if (s_sel_missing) {
+            } else if (primary && primary->missing) {
                 ui_label_fit(ctx, label, &g_warn, cap_w, 0U);
                 nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), "Restore the file and press Refresh (F5) to bring it back.", &g_caption);
             } else {
                 const tp_session_snapshot *snapshot = gui_project_snapshot();
+                const int atlas_index =
+                    gui_view_atlas_index(snapshot);
                 const tp_snapshot_atlas *ea = snapshot
-                                                  ? tp_session_snapshot_atlas_at(snapshot, s_sel_atlas)
+                                                  ? tp_session_snapshot_atlas_at(snapshot, atlas_index)
                                                   : NULL;
                 const bool no_sources = (ea == NULL || ea->source_count == 0);
                 if (no_sources) {
@@ -495,7 +520,7 @@ void declare_canvas(nt_ui_context_t *ctx) {
                         nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), "Add a smart folder to start", &g_canvas_hint);
                         if (ui_icon_btn(ctx, nt_ui_id("ntpacker/empty_add_folder"), &s_ic_folder_plus, 16.0F,
                                         "Add smart folder", &g_btn_primary, true, 0.0F, 28.0F, &g_onaccent)) {
-                            s_pending_add_folder = true;
+                            gui_request_add_folder();
                         }
                     }
                 } else {

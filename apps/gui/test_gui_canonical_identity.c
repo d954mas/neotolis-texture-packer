@@ -1,11 +1,14 @@
 #include <stdbool.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #ifdef _WIN32
 #include <direct.h>
+#include <windows.h>
 #define test_rmdir _rmdir
 #else
+#include <dirent.h>
 #include <unistd.h>
 #define test_rmdir rmdir
 #endif
@@ -15,12 +18,14 @@
 #include "gui_pack.h"
 #include "gui_pack_internal.h"
 #include "gui_project.h"
+#include "gui_project_test_driver.h"
 #include "gui_recovery_indicator.h"
 #include "gui_rows.h"
 #include "gui_scan.h"
 #include "gui_state.h"
 
 #include "time/nt_time.h"
+#include "tp_core/tp_identity.h"
 #include "tp_core/tp_input.h"
 #include "tp_core/tp_scan.h"
 #include "tp_core/tp_journal.h"
@@ -37,6 +42,179 @@ static char s_left_dir[512];
 static char s_right_dir[512];
 static char s_left_file[512];
 static char s_right_file[512];
+static uint64_t s_test_submit_id;
+
+static gui_session_submit_identity test_submit_identity(
+    char transaction_id[33]) {
+    gui_session_submit_identity identity = {0};
+    identity.origin_view_id.bytes[0] = 1U;
+    ++s_test_submit_id;
+    identity.draft_instance_id.bytes[0] = 2U;
+    memcpy(
+        &identity.draft_instance_id.bytes[8],
+        &s_test_submit_id, sizeof s_test_submit_id);
+    (void)snprintf(
+        transaction_id, 33, "%016llx%016llx",
+        1ULL, (unsigned long long)s_test_submit_id);
+    return identity;
+}
+
+static bool test_offer_atlas_draft(
+    tp_id128 atlas_id, int64_t revision,
+    gui_atlas_field field, int ivalue, float fvalue) {
+    gui_edit_atlas_setting(
+        atlas_id, revision, field, ivalue, fvalue);
+    return gui_atlas_edit_value(
+        atlas_id, field, NULL, NULL);
+}
+
+static bool test_submit_atlas_name(
+    tp_id128 atlas_id, int64_t revision,
+    const char *name) {
+    char transaction_id[33];
+    const gui_session_submit_identity identity =
+        test_submit_identity(transaction_id);
+    gui_session_submit_terminal terminal = {0};
+    tp_error error = {{0}};
+    const gui_text_ref ref = {
+        atlas_id, tp_id128_nil(), tp_id128_nil(), NULL,
+        revision};
+    return gui_project_submit_text(
+               TP_OP_ATLAS_RENAME, &ref, name, identity,
+               transaction_id, &terminal, &error) ==
+           TP_STATUS_OK;
+}
+
+static bool test_submit_animation_name(
+    const gui_animation_ref *animation,
+    const char *name) {
+    char transaction_id[33];
+    const gui_session_submit_identity identity =
+        test_submit_identity(transaction_id);
+    gui_session_submit_terminal terminal = {0};
+    tp_error error = {{0}};
+    const gui_text_ref ref = {
+        animation->atlas_id, animation->animation_id,
+        tp_id128_nil(), NULL,
+        animation->expected_revision};
+    return gui_project_submit_text(
+               TP_OP_ANIMATION_RENAME, &ref, name, identity,
+               transaction_id, &terminal, &error) ==
+           TP_STATUS_OK;
+}
+
+static bool test_submit_sprite_name(
+    const gui_sprite_ref *sprite,
+    const char *name) {
+    char transaction_id[33];
+    const gui_session_submit_identity identity =
+        test_submit_identity(transaction_id);
+    gui_session_submit_terminal terminal = {0};
+    tp_error error = {{0}};
+    const gui_text_ref ref = {
+        sprite->atlas_id, tp_id128_nil(),
+        sprite->source_id, sprite->source_key,
+        sprite->expected_revision};
+    return gui_project_submit_text(
+               TP_OP_SPRITE_NAME_SET, &ref, name, identity,
+               transaction_id, &terminal, &error) ==
+           TP_STATUS_OK;
+}
+
+static bool test_animation_ref_at(
+    int atlas_index, int animation_index,
+    gui_animation_ref *out) {
+    const tp_session_snapshot *snapshot =
+        gui_project_snapshot();
+    const tp_snapshot_atlas *atlas =
+        snapshot
+            ? tp_session_snapshot_atlas_at(
+                  snapshot, atlas_index)
+            : NULL;
+    const tp_snapshot_animation *animation =
+        atlas
+            ? tp_session_snapshot_animation_at(
+                  snapshot, atlas->id, animation_index)
+            : NULL;
+    if (!animation || !out) {
+        return false;
+    }
+    *out = (gui_animation_ref){
+        atlas->id,
+        animation->id,
+        tp_session_snapshot_revision(snapshot),
+    };
+    return true;
+}
+
+static bool test_target_ref_at(
+    int atlas_index, int target_index,
+    gui_target_ref *out) {
+    const tp_session_snapshot *snapshot =
+        gui_project_snapshot();
+    const tp_snapshot_atlas *atlas =
+        snapshot
+            ? tp_session_snapshot_atlas_at(
+                  snapshot, atlas_index)
+            : NULL;
+    const tp_snapshot_target *target =
+        atlas
+            ? tp_session_snapshot_target_at(
+                  snapshot, atlas->id, target_index)
+            : NULL;
+    if (!target || !out) {
+        return false;
+    }
+    *out = (gui_target_ref){
+        atlas->id,
+        target->id,
+        tp_session_snapshot_revision(snapshot),
+    };
+    return true;
+}
+
+static bool remove_flat_test_dir(const char *root) {
+#ifdef _WIN32
+    char pattern[TP_IDENTITY_PATH_MAX];
+    (void)snprintf(
+        pattern, sizeof pattern, "%s/*", root);
+    WIN32_FIND_DATAA item;
+    HANDLE find = FindFirstFileA(pattern, &item);
+    if (find != INVALID_HANDLE_VALUE) {
+        do {
+            if (strcmp(item.cFileName, ".") != 0 &&
+                strcmp(item.cFileName, "..") != 0) {
+                char path[TP_IDENTITY_PATH_MAX];
+                (void)snprintf(
+                    path, sizeof path, "%s/%s",
+                    root, item.cFileName);
+                (void)DeleteFileA(path);
+            }
+        } while (FindNextFileA(find, &item));
+        (void)FindClose(find);
+    }
+    return RemoveDirectoryA(root) != 0 ||
+           GetLastError() == ERROR_PATH_NOT_FOUND;
+#else
+    DIR *dir = opendir(root);
+    if (dir) {
+        struct dirent *item;
+        while ((item = readdir(dir)) != NULL) {
+            if (strcmp(item->d_name, ".") != 0 &&
+                strcmp(item->d_name, "..") != 0) {
+                char path[TP_IDENTITY_PATH_MAX];
+                (void)snprintf(
+                    path, sizeof path, "%s/%s",
+                    root, item->d_name);
+                (void)remove(path);
+            }
+        }
+        (void)closedir(dir);
+    }
+    return rmdir(root) == 0 ||
+           access(root, F_OK) != 0;
+#endif
+}
 
 static tp_journal_io attach_memory_recovery(void) {
     tp_journal_io io = tp_journal_io_memory();
@@ -49,7 +227,7 @@ static tp_journal_io attach_memory_recovery(void) {
     tp_error error = {{0}};
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
-        tp_session_attach_journal(gui_project_session_for_jobs(), journal,
+        tp_session_attach_journal(gui_project__test_session(), journal,
                                   &error));
     return io;
 }
@@ -57,6 +235,32 @@ static tp_journal_io attach_memory_recovery(void) {
 /* gui_actions owns several shell-facing commands that are linked into this
  * headless target but never exercised here. */
 void gui_shell_reset_shown_result(void) {}
+
+static gui_pack_done pump_pack_frame(
+    gui_pack_result_info *info) {
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_project_lifecycle_pump(NULL, &error));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_project_frame_begin(&error));
+    const gui_pack_done done =
+        gui_pack_poll(info);
+    gui_project_frame_end();
+    return done;
+}
+
+static void admit_queued_job(void) {
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_project_lifecycle_pump(NULL, &error));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_project_frame_begin(&error));
+    gui_project_frame_end();
+}
 
 static void remove_fixture_files(void) {
     (void)remove(s_left_file);
@@ -138,7 +342,7 @@ static bool prepare_two_source_project(tp_id128 *left_id,
 
     gui_sprite_ref left_ref = {atlas->id, left->id, "shared.png",
                                tp_session_snapshot_revision(snapshot)};
-    if (!gui_project_set_sprite_rename(&left_ref, "left-name")) {
+    if (!test_submit_sprite_name(&left_ref, "left-name")) {
         char error[256];
         error[0] = '\0';
         (void)gui_project_take_op_error(error, sizeof error);
@@ -148,7 +352,7 @@ static bool prepare_two_source_project(tp_id128 *left_id,
     snapshot = gui_project_snapshot();
     gui_sprite_ref right_ref = {*atlas_id, *right_id, "shared.png",
                                 tp_session_snapshot_revision(snapshot)};
-    if (!gui_project_set_sprite_rename(&right_ref, "right-name")) {
+    if (!test_submit_sprite_name(&right_ref, "right-name")) {
         char error[256];
         error[0] = '\0';
         (void)gui_project_take_op_error(error, sizeof error);
@@ -156,7 +360,7 @@ static bool prepare_two_source_project(tp_id128 *left_id,
         return false;
     }
     gui_project_invalidate_sources();
-    s_sel_atlas = 0;
+    gui_view_select_atlas(*atlas_id);
     build_rows();
     return true;
 }
@@ -171,7 +375,8 @@ static const sprite_row *row_for_source(tp_id128 source_id) {
     return NULL;
 }
 
-static tp_id128 add_coin_source_to_atlas(int atlas_index) {
+static tp_id128 add_sprite_source_to_atlas(int atlas_index,
+                                           const char *file_name) {
     const tp_session_snapshot *snapshot = gui_project_snapshot();
     const tp_snapshot_atlas *atlas = snapshot
                                          ? tp_session_snapshot_atlas_at(snapshot,
@@ -181,14 +386,18 @@ static tp_id128 add_coin_source_to_atlas(int atlas_index) {
     const tp_id128 atlas_id = atlas->id;
     char source_path[1024];
     (void)snprintf(source_path, sizeof source_path,
-                   "%s/apps/cli/testdata/sprites/coin.png",
-                   TP_TEST_SOURCE_DIR);
+                   "%s/apps/cli/testdata/sprites/%s",
+                   TP_TEST_SOURCE_DIR, file_name);
     TEST_ASSERT_EQUAL_INT(
         GUI_ADD_ADDED,
         gui_project_add_source_kind(atlas_id,
                                     tp_session_snapshot_revision(snapshot),
                                     source_path, TP_SOURCE_KIND_FILE));
     return atlas_id;
+}
+
+static tp_id128 add_coin_source_to_atlas(int atlas_index) {
+    return add_sprite_source_to_atlas(atlas_index, "coin.png");
 }
 
 static tp_id128 add_coin_source(void) {
@@ -222,7 +431,12 @@ void setUp(void) {
     tp_job__test_reset_all();
     TEST_ASSERT_TRUE(prepare_files());
     gui_project_init();
-    s_sel_atlas = 0;
+    gui_project_set_controller_status_port(
+        (gui_project_controller_status_port){
+            0});
+    gui_view_reset();
+    gui_view_reconcile_observation(gui_project_snapshot());
+    gui_view_adopt_default_atlas(gui_project_snapshot());
     multi_sel_clear();
 }
 
@@ -231,8 +445,11 @@ void tearDown(void) {
     tp_journal__test_set_record_limit(0U);
     tp_journal__test_set_file_limit(0U);
     multi_sel_clear();
+    /* The action layer owns heap of its own (undrained intents + the preview
+     * frame map); releasing it between cases is what the app does at exit. */
+    gui_actions_shutdown();
     gui_pack_shutdown();
-    gui_project_shutdown();
+    gui_project_test_shutdown(true);
     gui_scan_shutdown();
     remove_fixture_files();
 }
@@ -285,18 +502,94 @@ void test_canvas_result_rebind_resets_double_click_identity(void) {
     gui_canvas canvas = {0};
     gui_canvas_double_click_ref click = {0};
 
+    gui_canvas_rebind_result(&canvas, &click, &first);
+    const uint64_t first_generation =
+        canvas.result_generation;
     TEST_ASSERT_FALSE(
-        gui_canvas_double_click_press(&click, &first, 0, false));
+        gui_canvas_double_click_press(
+            &click, first_generation, 0, false));
     TEST_ASSERT_TRUE(click.valid);
-    TEST_ASSERT_EQUAL_PTR(&first, click.result);
+    TEST_ASSERT_EQUAL_UINT64(
+        first_generation, click.result_generation);
+    TEST_ASSERT_EQUAL_INT(0, click.sprite_index);
 
     gui_canvas_rebind_result(&canvas, &click, &second);
 
     TEST_ASSERT_EQUAL_PTR(&second, canvas.result);
+    TEST_ASSERT_NOT_EQUAL(
+        first_generation, canvas.result_generation);
     TEST_ASSERT_FALSE(click.valid);
-    TEST_ASSERT_NULL(click.result);
+    TEST_ASSERT_EQUAL_UINT64(0U, click.result_generation);
     TEST_ASSERT_FALSE(
-        gui_canvas_double_click_press(&click, &second, 0, true));
+        gui_canvas_double_click_press(
+            &click, canvas.result_generation, 0, true));
+}
+
+void test_selected_atlas_id_survives_preceding_atlas_removal(void) {
+    const tp_session_snapshot *snapshot =
+        gui_project_snapshot();
+    const tp_snapshot_atlas *first =
+        tp_session_snapshot_atlas_at(snapshot, 0);
+    TEST_ASSERT_NOT_NULL(first);
+    const tp_id128 first_id = first->id;
+    const gui_project_create_result second =
+        gui_project_add_atlas();
+    TEST_ASSERT_TRUE(second.committed);
+
+    gui_view_select_atlas(second.created_id);
+    snapshot = gui_project_snapshot();
+    TEST_ASSERT_EQUAL_INT(
+        1, gui_view_atlas_index(snapshot));
+    TEST_ASSERT_TRUE(gui_project_remove_atlas(
+        first_id,
+        tp_session_snapshot_revision(snapshot)));
+
+    snapshot = gui_project_snapshot();
+    gui_view_reconcile_observation(snapshot);
+    TEST_ASSERT_TRUE(tp_id128_eq(
+        second.created_id, gui_view_atlas_id()));
+    TEST_ASSERT_EQUAL_INT(
+        0, gui_view_atlas_index(snapshot));
+}
+
+void test_selected_animation_id_survives_preceding_animation_removal(void) {
+    const tp_session_snapshot *snapshot =
+        gui_project_snapshot();
+    const tp_snapshot_atlas *atlas =
+        tp_session_snapshot_atlas_at(snapshot, 0);
+    TEST_ASSERT_NOT_NULL(atlas);
+    const tp_id128 atlas_id = atlas->id;
+    const gui_project_create_result first =
+        gui_project_create_animation(
+            atlas_id,
+            tp_session_snapshot_revision(snapshot),
+            "first", NULL, 0);
+    TEST_ASSERT_TRUE(first.committed);
+    snapshot = gui_project_snapshot();
+    const gui_project_create_result second =
+        gui_project_create_animation(
+            atlas_id,
+            tp_session_snapshot_revision(snapshot),
+            "second", NULL, 0);
+    TEST_ASSERT_TRUE(second.committed);
+
+    gui_view_select_atlas(atlas_id);
+    gui_view_select_animation(second.created_id);
+    snapshot = gui_project_snapshot();
+    TEST_ASSERT_EQUAL_INT(
+        1, gui_view_animation_index(snapshot));
+    gui_animation_ref first_ref = {0};
+    TEST_ASSERT_TRUE(
+        test_animation_ref_at(0, 0, &first_ref));
+    TEST_ASSERT_TRUE(
+        gui_project_remove_animation(&first_ref));
+
+    snapshot = gui_project_snapshot();
+    gui_view_reconcile_observation(snapshot);
+    TEST_ASSERT_TRUE(tp_id128_eq(
+        second.created_id, gui_view_animation_id()));
+    TEST_ASSERT_EQUAL_INT(
+        0, gui_view_animation_index(snapshot));
 }
 
 void test_preview_result_rejects_source_refresh_after_job_capture(void) {
@@ -305,12 +598,13 @@ void test_preview_result_rejects_source_refresh_after_job_capture(void) {
     char error[256] = {0};
     TEST_ASSERT_TRUE(gui_pack_preview_async_start(0, "defold", error,
                                                   sizeof error));
+    admit_queued_job();
     gui_project_invalidate_sources();
 
     gui_pack_result_info info;
     gui_pack_done done = GUI_PACK_DONE_NONE;
     for (int i = 0; i < 5000 && done == GUI_PACK_DONE_NONE; ++i) {
-        done = gui_pack_poll(&info);
+        done = pump_pack_frame(&info);
         if (done == GUI_PACK_DONE_NONE) {
             nt_time_sleep(0.001);
         }
@@ -320,9 +614,31 @@ void test_preview_result_rejects_source_refresh_after_job_capture(void) {
     TEST_ASSERT_NULL(gui_pack_preview_result(0));
 }
 
-void test_native_pack_ignores_unrelated_atlas_edit_during_job(void) {
+void test_preview_after_native_pack_uses_observed_runtime_generation(void) {
+    (void)add_coin_source();
+    TEST_ASSERT_TRUE(gui_pack_init(TP_GUI_IDENTITY_TEST_DIR));
+
+    double elapsed_ms = 0.0;
+    char error[256] = {0};
+    char notice[128] = {0};
+    TEST_ASSERT_TRUE(gui_pack_atlas(
+        0, &elapsed_ms, error, sizeof error,
+        notice, sizeof notice));
+    TEST_ASSERT_NOT_NULL(gui_pack_result(0));
+
+    error[0] = '\0';
+    TEST_ASSERT_TRUE(gui_pack_preview_blocking(
+        0, "defold", error, sizeof error));
+    TEST_ASSERT_NOT_NULL(gui_pack_preview_result(0));
+}
+
+/* USA-27 partial: staleness comes only from the observed composite token, so
+ * the GUI keeps no second freshness probe; the no-duplicate-implementation
+ * invariant itself is a build gate. */
+void test_native_pack_marks_token_change_stale_without_host_side_probe(void) {
     const tp_id128 packed_atlas_id = add_coin_source_to_atlas(0);
-    TEST_ASSERT_EQUAL_INT(1, gui_project_add_atlas());
+    TEST_ASSERT_EQUAL_INT(
+        1, gui_project_add_atlas().visible_index);
     const tp_session_snapshot *snapshot = gui_project_snapshot();
     const tp_snapshot_atlas *other =
         tp_session_snapshot_atlas_at(snapshot, 1);
@@ -330,35 +646,29 @@ void test_native_pack_ignores_unrelated_atlas_edit_during_job(void) {
     const tp_id128 other_atlas_id = other->id;
 
     TEST_ASSERT_TRUE(gui_pack_init(TP_GUI_IDENTITY_TEST_DIR));
-    tp_job__test_arm_before_terminal_gate();
     char error[256] = {0};
     TEST_ASSERT_TRUE(gui_pack_async_start(0, error, sizeof error));
-    bool gated = false;
-    for (int i = 0; i < 5000; ++i) {
-        if (tp_job__test_before_terminal_gate_entered()) {
-            gated = true;
-            break;
-        }
-        nt_time_sleep(0.001);
-    }
-    TEST_ASSERT_TRUE(gated);
+    admit_queued_job();
 
     snapshot = gui_project_snapshot();
-    TEST_ASSERT_TRUE(gui_project_set_atlas_name(
+    TEST_ASSERT_TRUE(test_submit_atlas_name(
         other_atlas_id, tp_session_snapshot_revision(snapshot),
         "unrelated-edit"));
-    tp_job__test_release_before_terminal_gate();
 
     gui_pack_result_info info = {0};
     gui_pack_done done = GUI_PACK_DONE_NONE;
     for (int i = 0; i < 5000 && done == GUI_PACK_DONE_NONE; ++i) {
-        done = gui_pack_poll(&info);
+        done = pump_pack_frame(&info);
         if (done == GUI_PACK_DONE_NONE) {
             nt_time_sleep(0.001);
         }
     }
     TEST_ASSERT_EQUAL_INT(GUI_PACK_DONE_PACK_OK, done);
-    TEST_ASSERT_FALSE(info.input_changed);
+    /* R1c removes the worker's raw-session freshness dereference. Until the
+     * separate source-runtime/hash remediation, a changed composite input
+     * token is intentionally conservative: the host never decodes or reads
+     * files to refine this result during GUI polling. */
+    TEST_ASSERT_TRUE(info.input_changed);
     snapshot = gui_project_snapshot();
     const tp_snapshot_atlas *packed =
         tp_session_snapshot_atlas_by_id(snapshot, packed_atlas_id);
@@ -405,22 +715,16 @@ void test_failed_current_hash_probe_is_stale(void) {
         gui_pack__test_native_pack_input_changed_since(&completed));
 }
 
+/* Behavioural companion to the view-boundary build gate (the VIEW_* rules in
+ * cmake/check_architecture_boundaries.cmake, which OWN that requirement): no
+ * source decode happens on the UI thread. A companion is not an owner, so this
+ * case deliberately carries no verification-id tag. */
 void test_gui_poll_does_not_decode_sources_on_gui_thread(void) {
     const tp_id128 atlas_id = add_coin_source();
     TEST_ASSERT_TRUE(gui_pack_init(TP_GUI_IDENTITY_TEST_DIR));
-    tp_job__test_arm_before_terminal_gate();
     char error[256] = {0};
     TEST_ASSERT_TRUE(gui_pack_async_start(0, error, sizeof error));
-
-    bool gated = false;
-    for (int i = 0; i < 5000; ++i) {
-        if (tp_job__test_before_terminal_gate_entered()) {
-            gated = true;
-            break;
-        }
-        nt_time_sleep(0.001);
-    }
-    TEST_ASSERT_TRUE(gated);
+    admit_queued_job();
 
     const tp_session_snapshot *snapshot = gui_project_snapshot();
     char hero_path[1024];
@@ -434,31 +738,389 @@ void test_gui_poll_does_not_decode_sources_on_gui_thread(void) {
             TP_SOURCE_KIND_FILE));
 
     tp_image__test_reset_decode_count();
-    tp_job__test_release_before_terminal_gate();
 
-    tp_session_job_progress progress = {0};
-    for (int i = 0; i < 5000; ++i) {
-        TEST_ASSERT_EQUAL_INT(
-            TP_STATUS_OK,
-            tp_session_job_poll(gui_project_session_for_jobs(), &progress,
-                                NULL));
-        if (progress.state != TP_SESSION_JOB_RUNNING) {
+    gui_pack_result_info info = {0};
+    gui_pack_done done = GUI_PACK_DONE_NONE;
+    uint64_t decodes_before_poll = 0U;
+    for (int i = 0;
+         i < 5000 &&
+         done == GUI_PACK_DONE_NONE; ++i) {
+        decodes_before_poll =
+            tp_image__test_decode_count();
+        done = pump_pack_frame(&info);
+        if (done != GUI_PACK_DONE_NONE) {
             break;
         }
         nt_time_sleep(0.001);
     }
-    TEST_ASSERT_NOT_EQUAL(TP_SESSION_JOB_RUNNING, progress.state);
 
-    const uint64_t decodes_before_poll = tp_image__test_decode_count();
-    gui_pack_result_info info = {0};
-    const gui_pack_done done = gui_pack_poll(&info);
     TEST_ASSERT_EQUAL_INT(GUI_PACK_DONE_PACK_OK, done);
     TEST_ASSERT_TRUE(info.input_changed);
     TEST_ASSERT_EQUAL_UINT64(
         decodes_before_poll, tp_image__test_decode_count());
 }
 
-void test_long_sprite_keys_with_shared_prefix_never_coalesce(void) {
+static bool controller_attached(
+    void *context) {
+    return context &&
+           *(const bool *)context;
+}
+
+/* USA-29: a cross-identity Save As cannot silently move a bound
+ * controller. */
+void test_controller_guard_rejects_identity_change_before_flush_or_write(void) {
+    char first_path[TP_IDENTITY_PATH_MAX];
+    char cross_path[TP_IDENTITY_PATH_MAX];
+    (void)snprintf(
+        first_path, sizeof first_path,
+        "%s/controller-first.ntpacker_project",
+        TP_GUI_IDENTITY_TEST_DIR);
+    (void)snprintf(
+        cross_path, sizeof cross_path,
+        "%s/controller-cross.ntpacker_project",
+        TP_GUI_IDENTITY_TEST_DIR);
+    (void)remove(first_path);
+    (void)remove(cross_path);
+
+    const tp_session_snapshot *snapshot =
+        gui_project_snapshot();
+    const tp_snapshot_atlas *atlas =
+        tp_session_snapshot_atlas_at(
+            snapshot, 0);
+    TEST_ASSERT_NOT_NULL(atlas);
+    const int64_t revision =
+        tp_session_snapshot_revision(snapshot);
+    const int undo_depth =
+        gui_project_undo_depth();
+    TEST_ASSERT_TRUE(
+        test_offer_atlas_draft(
+            atlas->id, revision,
+            GUI_ATLAS_PADDING,
+            atlas->padding + 1, 0.0F));
+
+    bool attached = true;
+    gui_project_set_controller_status_port(
+        (gui_project_controller_status_port){
+            .attached =
+                controller_attached,
+            .context = &attached,
+        });
+    char error[256] = {0};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_UNSUPPORTED_CAPABILITY,
+        gui_project_save_as_preflight(
+            first_path, error,
+            sizeof error));
+    TEST_ASSERT_EQUAL_INT(
+        revision,
+        tp_session_revision(
+            gui_project__test_session()));
+    TEST_ASSERT_EQUAL_INT(
+        undo_depth,
+        gui_project_undo_depth());
+    TEST_ASSERT_FALSE(
+        gui_scan_exists(first_path));
+    TEST_ASSERT_EQUAL_INT(
+        GUI_EDIT_EDITING,
+        gui_draft_phase());
+    int preserved_padding = 0;
+    TEST_ASSERT_TRUE(
+        gui_atlas_edit_value(
+            atlas->id, GUI_ATLAS_PADDING,
+            &preserved_padding, NULL));
+    TEST_ASSERT_EQUAL_INT(
+        atlas->padding + 1,
+        preserved_padding);
+
+    attached = false;
+    gui_request_gesture_commit();
+    apply_pending();
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_project_save_as(
+            first_path, error,
+            sizeof error));
+    TEST_ASSERT_EQUAL_INT(
+        revision + 1,
+        tp_session_revision(
+            gui_project__test_session()));
+    TEST_ASSERT_EQUAL_INT(
+        undo_depth + 1,
+        gui_project_undo_depth());
+    attached = true;
+    /* No intervening frame observation: the guard must refresh through the
+     * session client and recognize this as the same identity. */
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_project_save_as_preflight(
+            first_path, error,
+            sizeof error));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_project_save_as(
+            first_path, error,
+            sizeof error));
+    snapshot = gui_project_snapshot();
+    atlas = tp_session_snapshot_atlas_at(
+        snapshot, 0);
+    TEST_ASSERT_NOT_NULL(atlas);
+    const int64_t cross_revision =
+        tp_session_revision(
+            gui_project__test_session());
+    const int cross_undo_depth =
+        gui_project_undo_depth();
+    TEST_ASSERT_TRUE(
+        test_offer_atlas_draft(
+            atlas->id,
+            tp_session_snapshot_revision(
+                snapshot),
+            GUI_ATLAS_PADDING,
+            atlas->padding + 1, 0.0F));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_UNSUPPORTED_CAPABILITY,
+        gui_project_save_as_preflight(
+            cross_path, error,
+            sizeof error));
+    TEST_ASSERT_EQUAL_INT64(
+        cross_revision,
+        tp_session_revision(
+            gui_project__test_session()));
+    TEST_ASSERT_EQUAL_INT(
+        cross_undo_depth,
+        gui_project_undo_depth());
+    TEST_ASSERT_EQUAL_STRING(
+        first_path, gui_project_path());
+    TEST_ASSERT_FALSE(
+        gui_scan_exists(cross_path));
+    TEST_ASSERT_EQUAL_INT(
+        GUI_EDIT_EDITING,
+        gui_draft_phase());
+
+    attached = false;
+    gui_request_gesture_commit();
+    apply_pending();
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_project_save_as(
+            cross_path, error,
+            sizeof error));
+    TEST_ASSERT_EQUAL_INT64(
+        cross_revision + 1,
+        tp_session_revision(
+            gui_project__test_session()));
+    TEST_ASSERT_EQUAL_INT(
+        cross_undo_depth + 1,
+        gui_project_undo_depth());
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_project_frame_begin(NULL));
+    gui_project_frame_end();
+    TEST_ASSERT_EQUAL_STRING(
+        cross_path, gui_project_path());
+
+    gui_project_set_controller_status_port(
+        (gui_project_controller_status_port){
+            0});
+    TEST_ASSERT_TRUE(gui_project_test_new());
+    (void)remove(first_path);
+    (void)remove(cross_path);
+}
+
+void test_save_as_preflight_success_does_not_submit_or_write(void) {
+    char path[TP_IDENTITY_PATH_MAX];
+    (void)snprintf(
+        path, sizeof path,
+        "%s/preflight-read-only.ntpacker_project",
+        TP_GUI_IDENTITY_TEST_DIR);
+    (void)remove(path);
+
+    const tp_session_snapshot *snapshot =
+        gui_project_snapshot();
+    const tp_snapshot_atlas *atlas =
+        tp_session_snapshot_atlas_at(snapshot, 0);
+    TEST_ASSERT_NOT_NULL(atlas);
+    const tp_id128 atlas_id = atlas->id;
+    const int value = atlas->padding + 1;
+    const int64_t revision =
+        tp_session_snapshot_revision(snapshot);
+    const int undo_depth =
+        gui_project_undo_depth();
+    TEST_ASSERT_TRUE(
+        test_offer_atlas_draft(
+            atlas_id, revision,
+            GUI_ATLAS_PADDING, value, 0.0F));
+
+    char error[256] = {0};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_project_save_as_preflight(
+            path, error, sizeof error));
+    TEST_ASSERT_EQUAL_INT64(
+        revision,
+        tp_session_revision(
+            gui_project__test_session()));
+    TEST_ASSERT_EQUAL_INT(
+        undo_depth,
+        gui_project_undo_depth());
+    TEST_ASSERT_FALSE(gui_scan_exists(path));
+    TEST_ASSERT_EQUAL_INT(
+        GUI_EDIT_EDITING,
+        gui_draft_phase());
+    int preserved = 0;
+    TEST_ASSERT_TRUE(
+        gui_atlas_edit_value(
+            atlas_id, GUI_ATLAS_PADDING,
+            &preserved, NULL));
+    TEST_ASSERT_EQUAL_INT(value, preserved);
+
+    gui_draft_discard();
+    (void)remove(path);
+}
+
+void test_save_as_preflight_observe_failure_preserves_draft_and_model(void) {
+    char path[TP_IDENTITY_PATH_MAX];
+    (void)snprintf(
+        path, sizeof path,
+        "%s/preflight-observe-failure.ntpacker_project",
+        TP_GUI_IDENTITY_TEST_DIR);
+    (void)remove(path);
+
+    const tp_session_snapshot *snapshot =
+        gui_project_snapshot();
+    const tp_snapshot_atlas *atlas =
+        tp_session_snapshot_atlas_at(snapshot, 0);
+    TEST_ASSERT_NOT_NULL(atlas);
+    const tp_id128 atlas_id = atlas->id;
+    const int value = atlas->padding + 1;
+    const int64_t revision =
+        tp_session_snapshot_revision(snapshot);
+    const int undo_depth =
+        gui_project_undo_depth();
+    TEST_ASSERT_TRUE(
+        test_offer_atlas_draft(
+            atlas_id, revision,
+            GUI_ATLAS_PADDING, value, 0.0F));
+
+    gui_project__test_fail_next_observe();
+    char error[256] = {0};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OOM,
+        gui_project_save_as_preflight(
+            path, error, sizeof error));
+    TEST_ASSERT_NOT_NULL(
+        strstr(error, "observation test allocation failure"));
+    TEST_ASSERT_EQUAL_INT64(
+        revision,
+        tp_session_revision(
+            gui_project__test_session()));
+    TEST_ASSERT_EQUAL_INT(
+        undo_depth,
+        gui_project_undo_depth());
+    TEST_ASSERT_FALSE(gui_scan_exists(path));
+    TEST_ASSERT_EQUAL_INT(
+        GUI_EDIT_EDITING,
+        gui_draft_phase());
+    int preserved = 0;
+    TEST_ASSERT_TRUE(
+        gui_atlas_edit_value(
+            atlas_id, GUI_ATLAS_PADDING,
+            &preserved, NULL));
+    TEST_ASSERT_EQUAL_INT(value, preserved);
+
+    gui_draft_discard();
+    (void)remove(path);
+}
+
+void test_open_current_canonical_identity_rejects_before_replacement(void) {
+    char path[TP_IDENTITY_PATH_MAX];
+    (void)snprintf(
+        path, sizeof path,
+        "%s/already-open.ntpacker_project",
+        TP_GUI_IDENTITY_TEST_DIR);
+    (void)remove(path);
+    char error_text[256] = {0};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_project_save_as(
+            path, error_text,
+            sizeof error_text));
+    tp_session *active =
+        gui_project__test_session();
+    const uint64_t generation =
+        gui_project_session_instance_generation();
+    const uint64_t open_calls =
+        gui_project__test_open_call_count();
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_PROJECT_LIVE,
+        gui_project_lifecycle_begin_open(
+            path, &error));
+    TEST_ASSERT_NOT_NULL(
+        strstr(error.msg, path));
+    TEST_ASSERT_EQUAL_UINT64(
+        open_calls,
+        gui_project__test_open_call_count());
+    TEST_ASSERT_EQUAL_PTR(
+        active,
+        gui_project__test_session());
+    TEST_ASSERT_EQUAL_UINT64(
+        generation,
+        gui_project_session_instance_generation());
+    TEST_ASSERT_EQUAL_INT(
+        GUI_PROJECT_LIFECYCLE_OPEN_IDLE,
+        gui_project_lifecycle_state_query());
+    TEST_ASSERT_TRUE(gui_project_test_new());
+    (void)remove(path);
+}
+
+void test_deleted_pack_target_is_typed_failure_not_cancelled(void) {
+    TEST_ASSERT_EQUAL_INT(
+        1, gui_project_add_atlas().visible_index);
+    const tp_id128 target_atlas_id =
+        add_coin_source_to_atlas(1);
+    TEST_ASSERT_TRUE(
+        gui_pack_init(
+            TP_GUI_IDENTITY_TEST_DIR));
+    char error[256] = {0};
+    TEST_ASSERT_TRUE(
+        gui_pack_async_start(
+            1, error, sizeof error));
+
+    /* Host admission captures the target before the model mutation, but
+     * observation classification intentionally happens after deletion. */
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_project_lifecycle_pump(NULL, NULL));
+    const tp_session_snapshot *snapshot =
+        gui_project_snapshot();
+    TEST_ASSERT_TRUE(
+        gui_project_remove_atlas(
+            target_atlas_id,
+            tp_session_snapshot_revision(
+                snapshot)));
+
+    gui_pack_result_info info = {0};
+    gui_pack_done done =
+        GUI_PACK_DONE_NONE;
+    for (int attempt = 0;
+         attempt < 5000 &&
+         done == GUI_PACK_DONE_NONE;
+         ++attempt) {
+        done = pump_pack_frame(&info);
+        if (done == GUI_PACK_DONE_NONE) {
+            nt_time_sleep(0.001);
+        }
+    }
+    TEST_ASSERT_EQUAL_INT(
+        GUI_PACK_DONE_PACK_FAIL, done);
+    TEST_ASSERT_EQUAL_INT(
+        TP_SESSION_JOB_REJECTION_TARGET_DELETED,
+        info.rejection);
+    TEST_ASSERT_NOT_NULL(
+        strstr(info.err, "target was deleted"));
+}
+
+void test_long_sprite_keys_with_shared_prefix_keep_distinct_draft_identity(void) {
     const tp_id128 atlas_id = add_coin_source();
     const tp_session_snapshot *snapshot = gui_project_snapshot();
     const tp_snapshot_source *source =
@@ -476,14 +1138,26 @@ void test_long_sprite_keys_with_shared_prefix_never_coalesce(void) {
     second[sizeof second - 1U] = '\0';
     TEST_ASSERT_EQUAL_MEMORY(first, second, 255U);
 
-    const int64_t revision = tp_session_snapshot_revision(snapshot);
-    const gui_sprite_ref first_ref = {atlas_id, source_id, first, revision};
-    const gui_sprite_ref second_ref = {atlas_id, source_id, second, revision};
-    TEST_ASSERT_TRUE(gui_project_set_sprite_override(
-        &first_ref, GUI_SPRITE_OV_MARGIN, 3));
-    TEST_ASSERT_TRUE(gui_project_set_sprite_override(
-        &second_ref, GUI_SPRITE_OV_MARGIN, 7));
-    TEST_ASSERT_TRUE(gui_project_flush_pending());
+    gui_sprite_ref first_ref = {
+        atlas_id, source_id, first,
+        tp_session_snapshot_revision(snapshot)
+    };
+    gui_edit_sprite_override(
+        &first_ref, GUI_SPRITE_OV_MARGIN, 3);
+    gui_request_gesture_commit();
+    apply_pending();
+    TEST_ASSERT_EQUAL_INT(GUI_EDIT_IDLE, gui_draft_phase());
+
+    snapshot = gui_project_snapshot();
+    gui_sprite_ref second_ref = {
+        atlas_id, source_id, second,
+        tp_session_snapshot_revision(snapshot)
+    };
+    gui_edit_sprite_override(
+        &second_ref, GUI_SPRITE_OV_MARGIN, 7);
+    gui_request_gesture_commit();
+    apply_pending();
+    TEST_ASSERT_EQUAL_INT(GUI_EDIT_IDLE, gui_draft_phase());
 
     snapshot = gui_project_snapshot();
     const tp_snapshot_sprite *first_sprite =
@@ -505,16 +1179,20 @@ void test_oversized_names_cannot_enter_a_truncating_editor(void) {
     const tp_snapshot_atlas *atlas = tp_session_snapshot_atlas_at(snapshot, 0);
     TEST_ASSERT_NOT_NULL(atlas);
     const tp_id128 atlas_id = atlas->id;
-    TEST_ASSERT_TRUE(gui_project_set_atlas_name(
+    TEST_ASSERT_TRUE(test_submit_atlas_name(
         atlas_id, tp_session_snapshot_revision(snapshot), oversized));
     snapshot = gui_project_snapshot();
     cancel_edit();
     start_atlas_edit_ref(atlas_id, tp_session_snapshot_revision(snapshot));
-    TEST_ASSERT_EQUAL_INT(EDIT_NONE, s_edit_kind);
+    TEST_ASSERT_EQUAL_INT(
+        GUI_EDIT_IDLE, gui_draft_phase());
 
-    const int animation_index = gui_project_create_animation(
-        atlas_id, tp_session_snapshot_revision(snapshot), "long-name-fixture",
-        NULL, 0);
+    const int animation_index =
+        gui_project_create_animation(
+            atlas_id,
+            tp_session_snapshot_revision(snapshot),
+            "long-name-fixture", NULL, 0)
+            .visible_index;
     TEST_ASSERT_EQUAL_INT(0, animation_index);
     snapshot = gui_project_snapshot();
     const tp_snapshot_animation *animation =
@@ -522,12 +1200,13 @@ void test_oversized_names_cannot_enter_a_truncating_editor(void) {
     TEST_ASSERT_NOT_NULL(animation);
     gui_animation_ref animation_ref = {
         atlas_id, animation->id, tp_session_snapshot_revision(snapshot)};
-    TEST_ASSERT_TRUE(gui_project_set_anim_id(&animation_ref, oversized));
+    TEST_ASSERT_TRUE(test_submit_animation_name(&animation_ref, oversized));
     snapshot = gui_project_snapshot();
     animation_ref.expected_revision = tp_session_snapshot_revision(snapshot);
     cancel_edit();
     start_anim_edit_ref(&animation_ref);
-    TEST_ASSERT_EQUAL_INT(EDIT_NONE, s_edit_kind);
+    TEST_ASSERT_EQUAL_INT(
+        GUI_EDIT_IDLE, gui_draft_phase());
 
     (void)add_coin_source();
     snapshot = gui_project_snapshot();
@@ -540,14 +1219,15 @@ void test_oversized_names_cannot_enter_a_truncating_editor(void) {
     const gui_sprite_ref sprite = {
         atlas_id, source_id, "coin.png",
         tp_session_snapshot_revision(snapshot)};
-    TEST_ASSERT_TRUE(gui_project_set_sprite_rename(&sprite, oversized));
+    TEST_ASSERT_TRUE(test_submit_sprite_name(&sprite, oversized));
     snapshot = gui_project_snapshot();
     const gui_sprite_ref renamed = {
         atlas_id, source_id, "coin.png",
         tp_session_snapshot_revision(snapshot)};
     cancel_edit();
     start_sprite_edit_ref(&renamed, oversized);
-    TEST_ASSERT_EQUAL_INT(EDIT_NONE, s_edit_kind);
+    TEST_ASSERT_EQUAL_INT(
+        GUI_EDIT_IDLE, gui_draft_phase());
 }
 
 void test_recovery_entry_keeps_core_path_capacity(void) {
@@ -593,7 +1273,7 @@ void test_undo_redo_keep_last_successful_pack_result(void) {
     const int page_count = packed->page_count;
 
     const tp_session_snapshot *snapshot = gui_project_snapshot();
-    TEST_ASSERT_TRUE(gui_project_set_atlas_name(
+    TEST_ASSERT_TRUE(test_submit_atlas_name(
         atlas_id, tp_session_snapshot_revision(snapshot), "edited"));
     assert_atlas_name(atlas_id, "edited");
 
@@ -614,15 +1294,535 @@ void test_undo_redo_keep_last_successful_pack_result(void) {
     TEST_ASSERT_TRUE(gui_project_is_stale());
 }
 
+/* Sum of the RAW RGBA8 page bytes a result holds -- the quantity the store
+ * charges an inactive entry until its background compression lands, and the one
+ * the budgets below are expressed in. */
+static uint64_t result_raw_page_bytes(const tp_result *result) {
+    uint64_t bytes = 0U;
+    for (int i = 0; result && i < result->page_count; ++i) {
+        if (result->pages[i].w > 0 && result->pages[i].h > 0) {
+            bytes += (uint64_t)result->pages[i].w *
+                     (uint64_t)result->pages[i].h * 4ULL;
+        }
+    }
+    return bytes;
+}
+
+/* S18 / master spec §10.4 + S28: switching away from a packed atlas neither
+ * retains it forever nor drops it -- the result becomes an INACTIVE entry in the
+ * byte-budget store, the store compresses its pages in the background, and
+ * switching back is a store hit that decompresses them again instead of packing
+ * a second time. The bytes that come back are the bytes that went in. */
+void test_switching_atlas_demotes_the_inactive_result_into_the_store(void) {
+    (void)add_coin_source_to_atlas(0);
+    TEST_ASSERT_TRUE(gui_pack_init(TP_GUI_IDENTITY_TEST_DIR));
+    do_pack_blocking();
+    const tp_result *first = gui_pack_result(0);
+    TEST_ASSERT_NOT_NULL(first);
+
+    /* Copied out before the switch: the store releases the Pack receipt behind
+     * `first` when the entry goes cold, so the comparison below cannot borrow it. */
+    const uint64_t first_raw = result_raw_page_bytes(first);
+    const size_t first_page_bytes = (size_t)first->pages[0].w *
+                                    (size_t)first->pages[0].h * 4U;
+    uint8_t *first_pixels = malloc(first_page_bytes);
+    TEST_ASSERT_NOT_NULL(first_pixels);
+    memcpy(first_pixels, first->pages[0].rgba, first_page_bytes);
+    char first_atlas_name[128];
+    (void)snprintf(first_atlas_name, sizeof first_atlas_name, "%s",
+                   first->atlas_name);
+    const int first_sprites = first->sprite_count;
+
+    tp_pack_result_cache_stats stats;
+    gui_pack__test_result_cache_stats(&stats);
+    TEST_ASSERT_EQUAL_INT(1, stats.entry_count);
+    TEST_ASSERT_TRUE(stats.has_active);
+    TEST_ASSERT_EQUAL_UINT64_MESSAGE(
+        0U, stats.inactive_bytes,
+        "the atlas on screen is the pinned active result, exempt from the budget");
+    const tp_id128 first_key = stats.active_hash;
+
+    TEST_ASSERT_EQUAL_INT(1, gui_project_add_atlas().visible_index);
+    const tp_id128 second_atlas_id = add_coin_source_to_atlas(1);
+    gui_view_select_atlas(second_atlas_id);
+    do_pack_blocking();
+    TEST_ASSERT_NOT_NULL(gui_pack_result(1));
+
+    gui_pack__test_result_cache_stats(&stats);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        2, stats.entry_count, "the atlas switched away from is still resident");
+    TEST_ASSERT_FALSE(tp_id128_eq(stats.active_hash, first_key));
+    TEST_ASSERT_TRUE_MESSAGE(stats.inactive_bytes > 0U,
+                             "the demoted result is charged to the byte budget");
+    TEST_ASSERT_EQUAL_UINT64(0U, stats.evicted);
+
+    /* Settle: residency is only deterministic once the background encoder is
+     * quiescent, and this is the state a real session spends its time in. */
+    gui_pack__test_result_cache_settle();
+    gui_pack__test_result_cache_stats(&stats);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        1, stats.cold_entries,
+        "the demoted atlas is held compressed, not raw and not dropped");
+    TEST_ASSERT_EQUAL_INT(2, stats.entry_count);
+    TEST_ASSERT_EQUAL_UINT64(0U, stats.evicted);
+    TEST_ASSERT_TRUE_MESSAGE(
+        stats.cold_coded_bytes < first_raw,
+        "and its pages are now held compressed, not raw");
+    /* What the budget charges is everything the cold entry holds -- the blobs AND
+     * the geometry copy that replaces the caller's pinned arena. On THIS fixture
+     * the pages are 8x8, so the geometry outweighs the pixels and the cold total
+     * can exceed the raw one; on a real atlas the same geometry is ~0.5% of the
+     * raw pages. Either way the number is what the store is holding. */
+    TEST_ASSERT_EQUAL_UINT64_MESSAGE(
+        stats.cold_coded_bytes + stats.cold_meta_bytes, stats.inactive_bytes,
+        "a cold entry is budgeted for its blobs plus its geometry copy");
+
+    /* A demoted-and-compressed atlas is still PRESENT: a peek answers for it and
+     * its version is intact, so nothing downstream may read it as released. */
+    TEST_ASSERT_NOT_NULL_MESSAGE(
+        gui_pack_result_peek(0),
+        "a merely cold atlas must never read as a cache miss");
+    TEST_ASSERT_TRUE(gui_pack_result_version(0) != 0U);
+
+    /* Switching back restores from the store: same content, no new Pack job. */
+    TEST_ASSERT_FALSE(gui_project_job_busy());
+    const tp_result *restored = gui_pack_result(0);
+    TEST_ASSERT_NOT_NULL(restored);
+    TEST_ASSERT_FALSE_MESSAGE(gui_project_job_busy(),
+                              "a store hit must never start a Pack");
+    TEST_ASSERT_EQUAL_STRING(first_atlas_name, restored->atlas_name);
+    TEST_ASSERT_EQUAL_INT(first_sprites, restored->sprite_count);
+    TEST_ASSERT_EQUAL_MEMORY_MESSAGE(
+        first_pixels, restored->pages[0].rgba, first_page_bytes,
+        "a cold round trip must reproduce the page byte for byte");
+    free(first_pixels);
+    gui_pack__test_result_cache_stats(&stats);
+    TEST_ASSERT_TRUE(tp_id128_eq(stats.active_hash, first_key));
+    TEST_ASSERT_EQUAL_INT(2, stats.entry_count);
+    TEST_ASSERT_EQUAL_UINT64(0U, stats.evicted);
+}
+
+/* Budget pressure evicts the least recently used inactive result and releases
+ * its session receipt (the exactly-once release counting lives in the store's
+ * own suite, test_pack_result_cache.c). The presentation of an evicted result is
+ * the §10.4 cache miss: honestly not packed, and nothing auto-packs. */
+void test_evicted_pack_result_reads_as_unpacked_without_autopacking(void) {
+    /* One byte of budget: any demoted result is immediately over it. */
+    gui_pack__test_set_result_budget(1U);
+    (void)add_coin_source_to_atlas(0);
+    TEST_ASSERT_TRUE(gui_pack_init(TP_GUI_IDENTITY_TEST_DIR));
+    do_pack_blocking();
+    TEST_ASSERT_NOT_NULL(gui_pack_result(0));
+    const uint64_t packed_version = gui_pack_result_version(0);
+    TEST_ASSERT_TRUE(packed_version != 0U);
+
+    TEST_ASSERT_EQUAL_INT(1, gui_project_add_atlas().visible_index);
+    const tp_id128 second_atlas_id = add_coin_source_to_atlas(1);
+    gui_view_select_atlas(second_atlas_id);
+    do_pack_blocking();
+    TEST_ASSERT_NOT_NULL(gui_pack_result(1));
+
+    tp_pack_result_cache_stats stats;
+    gui_pack__test_result_cache_stats(&stats);
+    TEST_ASSERT_EQUAL_UINT64_MESSAGE(1U, stats.evicted,
+                                     "the demoted result exceeded the budget");
+    TEST_ASSERT_EQUAL_INT(1, stats.entry_count);
+
+    TEST_ASSERT_EQUAL_UINT64_MESSAGE(
+        0U, gui_pack_result_version(0),
+        "an evicted entry's version must read 0 even before a result read "
+        "retires its slot");
+    TEST_ASSERT_NULL_MESSAGE(gui_pack_result(0),
+                             "an evicted result reads as not packed");
+    TEST_ASSERT_EQUAL_UINT64(0U, gui_pack_result_version(0));
+    TEST_ASSERT_FALSE_MESSAGE(gui_project_job_busy(),
+                              "a store miss must never start a Pack");
+    /* The atlas still on screen is untouched by the neighbour's eviction. */
+    TEST_ASSERT_NOT_NULL(gui_pack_result(1));
+}
+
+/* A resident switch whose eviction already ran but whose sprite-index build
+ * failed must leave NO resident: selecting another atlas' entry can evict --
+ * and thereby FREE -- exactly the result the resident pointers still describe,
+ * so a stale resident is a freed result the reside fast path would then hand
+ * straight back (ASan-visible before the fix). */
+void test_failed_resident_switch_never_serves_the_evicted_resident(void) {
+    /* Since S28 the quantity that decides eviction is the RAW transient. A
+     * demoted entry is charged its full pages until the background encoder
+     * catches up; once it is compressed it costs so little that no realistic
+     * budget can be pushed over by it. So the switch that evicts the outgoing
+     * resident is one where that resident is still HOT -- which is exactly the
+     * case an interactive session hits, because an atlas is HOT for as long as it
+     * is the one on screen.
+     *
+     * The script below is written so the store's residency is decided, not
+     * raced. A just-packed atlas is ACTIVE, and an active entry never carries a
+     * compression job, so A is guaranteed HOT when the failing switch demotes it;
+     * nothing between the pack of C and that switch pumps the store, so nothing
+     * can turn A cold underneath the assertions.
+     *
+     * Atlases: A(0) and C(2) carry two sprites, B(1) one, so raw(B) < raw(C) ==
+     * raw(A). The budget is raw(A) + raw(C) - 1: exactly one raw atlas short of
+     * holding both, so every step up to the failing switch fits and the switch
+     * itself -- raw(C) beside raw(A) -- does not, leaving the LRU exactly one
+     * legal victim: A (B is the active pin, C the highest sequence).
+     *
+     * It is derived from the RAW sizes, not from raw(A) + raw(B), because a cold
+     * entry is charged its blobs PLUS its geometry copy and the geometry is not
+     * predictable from the raw pages -- on this toy fixture (8x8 pages) it is in
+     * fact the larger half. The one premise that buys is asserted below rather
+     * than assumed: cold(B) beside one raw atlas must still fit. */
+    (void)add_sprite_source_to_atlas(0, "coin.png");
+    (void)add_sprite_source_to_atlas(0, "hero.png");
+    TEST_ASSERT_EQUAL_INT(1, gui_project_add_atlas().visible_index);
+    (void)add_sprite_source_to_atlas(1, "coin.png");
+    TEST_ASSERT_EQUAL_INT(2, gui_project_add_atlas().visible_index);
+    (void)add_sprite_source_to_atlas(2, "coin.png");
+    (void)add_sprite_source_to_atlas(2, "hero.png");
+    TEST_ASSERT_TRUE(gui_pack_init(TP_GUI_IDENTITY_TEST_DIR));
+
+    /* Measure under the default (never-evicting) budget; the budget below is
+     * derived, not guessed. */
+    char error[256] = {0};
+    TEST_ASSERT_TRUE_MESSAGE(
+        gui_pack_atlas(0, NULL, error, sizeof error, NULL, 0U), error);
+    const uint64_t raw_a = result_raw_page_bytes(gui_pack_result(0));
+    TEST_ASSERT_TRUE_MESSAGE(
+        gui_pack_atlas(1, NULL, error, sizeof error, NULL, 0U), error);
+    const uint64_t raw_b = result_raw_page_bytes(gui_pack_result(1));
+    TEST_ASSERT_TRUE_MESSAGE(
+        gui_pack_atlas(2, NULL, error, sizeof error, NULL, 0U), error);
+    const uint64_t raw_c = result_raw_page_bytes(gui_pack_result(2));
+    char fixture_note[160];
+    (void)snprintf(fixture_note, sizeof fixture_note,
+                   "fixture must order the three atlases by raw page size "
+                   "(B < C <= A); got raw_a=%llu raw_b=%llu raw_c=%llu",
+                   (unsigned long long)raw_a, (unsigned long long)raw_b,
+                   (unsigned long long)raw_c);
+    TEST_ASSERT_TRUE_MESSAGE(raw_b < raw_c && raw_c <= raw_a, fixture_note);
+
+    tp_pack_result_cache_stats stats;
+    const uint64_t budget = raw_a + raw_c - 1U;
+    gui_pack__test_set_result_budget(budget);
+    /* B first, and settled: it is the entry the failing switch PROMOTES, and a
+     * cold promote is the interesting one. */
+    TEST_ASSERT_TRUE_MESSAGE(
+        gui_pack_atlas(1, NULL, error, sizeof error, NULL, 0U), error);
+    TEST_ASSERT_TRUE_MESSAGE(
+        gui_pack_atlas(0, NULL, error, sizeof error, NULL, 0U), error);
+    gui_pack__test_result_cache_settle();
+    gui_pack__test_result_cache_stats(&stats);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, stats.cold_entries,
+                                  "B is held compressed");
+    TEST_ASSERT_EQUAL_UINT64(0U, stats.evicted);
+    TEST_ASSERT_TRUE_MESSAGE(
+        stats.inactive_bytes + raw_a <= budget,
+        "cold(B) -- blobs and geometry -- beside one raw atlas must fit, or the "
+        "pressure the failing switch applies below is not the one under test");
+
+    /* From here NOTHING pumps the store, so A stays HOT all the way to the
+     * failing switch. Packing C demotes the freshly packed A. */
+    TEST_ASSERT_TRUE_MESSAGE(
+        gui_pack_atlas(2, NULL, error, sizeof error, NULL, 0U), error);
+    gui_pack__test_result_cache_stats(&stats);
+    TEST_ASSERT_EQUAL_UINT64_MESSAGE(
+        0U, stats.evicted, "cold(B) + raw(A) still fits the budget");
+    TEST_ASSERT_NOT_NULL(gui_pack_result(0)); /* A is the resident result again */
+    gui_pack__test_result_cache_stats(&stats);
+    TEST_ASSERT_EQUAL_INT(3, stats.entry_count);
+    TEST_ASSERT_EQUAL_UINT64_MESSAGE(
+        0U, stats.evicted, "cold(B) + raw(C) still fits the budget");
+
+    gui_pack__test_fail_next_ref_index_build();
+    TEST_ASSERT_NULL(gui_pack_result(1));
+    gui_pack__test_result_cache_stats(&stats);
+    TEST_ASSERT_EQUAL_UINT64_MESSAGE(
+        1U, stats.evicted,
+        "selecting B must have evicted -- and freed -- the demoted A");
+    TEST_ASSERT_NULL_MESSAGE(
+        gui_pack_result(0),
+        "the failed switch must not leave the freed previous resident "
+        "reachable through the reside fast path");
+    TEST_ASSERT_EQUAL_UINT64(0U, gui_pack_result_version(0));
+
+    /* Only the lookup index failed, so B's entry stayed cached: retried. */
+    const tp_result *second = gui_pack_result(1);
+    TEST_ASSERT_NOT_NULL(second);
+    TEST_ASSERT_EQUAL_INT(1, second->sprite_count);
+}
+
+/* Arms the animation player on a one-frame animation of `atlas_index` (the frame
+ * matters: resolving it is what reads the pack result a second time). */
+static void arm_preview_on_atlas(int atlas_index) {
+    const tp_session_snapshot *snapshot = gui_project_snapshot();
+    const tp_snapshot_atlas *atlas =
+        tp_session_snapshot_atlas_at(snapshot, atlas_index);
+    TEST_ASSERT_NOT_NULL(atlas);
+    /* The create clone-swaps the project under `atlas`. */
+    const tp_id128 atlas_id = atlas->id;
+    const tp_snapshot_source *source =
+        tp_session_snapshot_source_at(snapshot, atlas_id, 0);
+    TEST_ASSERT_NOT_NULL(source);
+    const tp_op_sprite_ref frames[1] = {{source->id, "coin.png"}};
+    const gui_project_create_result created = gui_project_create_animation(
+        atlas_id, tp_session_snapshot_revision(snapshot), "preview-anim", frames,
+        1);
+    TEST_ASSERT_TRUE(created.committed);
+    const gui_animation_ref ref = {
+        atlas_id, created.created_id,
+        tp_session_snapshot_revision(gui_project_snapshot())};
+    open_preview_ref(&ref);
+    TEST_ASSERT_TRUE(s_preview_active);
+}
+
+/* S21: the animation player READS the pack store, it does not own residency. A
+ * player armed on one atlas while the canvas shows another used to call the
+ * residency-taking read every frame -- two residency flips, two canonical-index
+ * rebuilds and two LRU passes per frame, and under budget pressure an eviction of
+ * the result the canvas had just bound. The read is a peek, and the frame indices
+ * (which index the CANVAS' result) are not applied to a foreign atlas' result. */
+void test_preview_result_read_never_moves_the_active_pack_pin(void) {
+    (void)add_coin_source_to_atlas(0);
+    TEST_ASSERT_EQUAL_INT(1, gui_project_add_atlas().visible_index);
+    const tp_id128 second_atlas_id = add_coin_source_to_atlas(1);
+    TEST_ASSERT_TRUE(gui_pack_init(TP_GUI_IDENTITY_TEST_DIR));
+
+    const tp_session_snapshot *snapshot = gui_project_snapshot();
+    const tp_snapshot_atlas *first = tp_session_snapshot_atlas_at(snapshot, 0);
+    TEST_ASSERT_NOT_NULL(first);
+    gui_view_select_atlas(first->id);
+    do_pack_blocking();
+    TEST_ASSERT_NOT_NULL(gui_pack_result(0));
+    arm_preview_on_atlas(0);
+
+    /* POSITIVE CONTROL, before anything is switched: on its own atlas the armed
+     * animation DOES resolve its frame. Without this the -1 asserted further down
+     * is satisfied by any resolution failure at all -- a fixture whose key never
+     * matched would "pass" the guard it is supposed to be proving. */
+    update_preview();
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        1, s_preview_frame_count,
+        "the armed one-frame animation must resolve against its own packed atlas");
+    TEST_ASSERT_TRUE_MESSAGE(
+        s_canvas.anim_sprite >= 0,
+        "the resolved frame must reach the canvas while the view still shows "
+        "the player's atlas");
+
+    /* The view moves to the second atlas and packs it: that atlas now owns the
+     * active pin while the player is still armed on the first one. */
+    gui_view_select_atlas(second_atlas_id);
+    do_pack_blocking();
+    TEST_ASSERT_NOT_NULL(gui_pack_result(1));
+
+    tp_pack_result_cache_stats before;
+    gui_pack__test_result_cache_stats(&before);
+    TEST_ASSERT_EQUAL_INT(2, before.entry_count);
+    TEST_ASSERT_TRUE(before.has_active);
+
+    for (int frame = 0; frame < 3; ++frame) {
+        update_preview();
+    }
+
+    tp_pack_result_cache_stats after;
+    gui_pack__test_result_cache_stats(&after);
+    TEST_ASSERT_TRUE_MESSAGE(
+        tp_id128_eq(before.active_hash, after.active_hash),
+        "the preview read must not take the active pin from the atlas on screen");
+    TEST_ASSERT_EQUAL_UINT64(before.inactive_bytes, after.inactive_bytes);
+    TEST_ASSERT_EQUAL_INT(before.entry_count, after.entry_count);
+    TEST_ASSERT_EQUAL_UINT64(before.evicted, after.evicted);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        -1, s_canvas.anim_sprite,
+        "frame indices index the canvas' result, so none may be applied while "
+        "the canvas is bound to another atlas");
+
+    /* The peek still SEES the demoted entry -- it is a non-mutating hit, not the
+     * cache miss an evicted entry would report. */
+    TEST_ASSERT_NOT_NULL(gui_pack_result_peek(0));
+    gui_pack__test_result_cache_stats(&after);
+    TEST_ASSERT_TRUE(tp_id128_eq(before.active_hash, after.active_hash));
+    TEST_ASSERT_EQUAL_UINT64(before.evicted, after.evicted);
+
+    /* S28: and it still sees it once the store has COMPRESSED it. A cold entry is
+     * present, not gone, so neither the peek nor the version may report the §10.4
+     * cache miss -- otherwise update_preview's had-result latch would stop a
+     * perfectly available animation with "the packed result was released" the
+     * moment the background encoder caught up with the atlas it is armed on. */
+    gui_pack__test_result_cache_settle();
+    gui_pack__test_result_cache_stats(&after);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, after.cold_entries,
+                                  "the player's atlas is held compressed");
+    TEST_ASSERT_NOT_NULL_MESSAGE(
+        gui_pack_result_peek(0),
+        "a cold atlas must not read as a released result");
+    TEST_ASSERT_TRUE_MESSAGE(gui_pack_result_version(0) != 0U,
+                             "nor may its publication version drop to zero");
+    for (int frame = 0; frame < 3; ++frame) {
+        update_preview();
+    }
+    TEST_ASSERT_TRUE_MESSAGE(
+        s_preview_active,
+        "the armed player must survive its atlas going cold");
+    gui_pack__test_result_cache_stats(&after);
+    TEST_ASSERT_TRUE_MESSAGE(
+        tp_id128_eq(before.active_hash, after.active_hash),
+        "and reading a cold entry must still not move the active pin");
+    TEST_ASSERT_EQUAL_UINT64(before.evicted, after.evicted);
+}
+
+/* S22: an index-build OOM leaves the cached entry in place precisely so the
+ * canonical index is RETRIED (gui_pack.c: "the entry stays cached; the lookup
+ * index is retried"). The player's frame map used to cache the empty resolution
+ * that OOM produced as VALID -- every frame lookup had returned -1 -- so the
+ * retry became unreachable and the animation stayed frameless until a pack
+ * version or model generation change. */
+void test_preview_frame_map_is_not_cached_when_the_canonical_index_is_missing(
+    void) {
+    (void)add_coin_source_to_atlas(0);
+    TEST_ASSERT_EQUAL_INT(1, gui_project_add_atlas().visible_index);
+    const tp_id128 second_atlas_id = add_coin_source_to_atlas(1);
+    TEST_ASSERT_TRUE(gui_pack_init(TP_GUI_IDENTITY_TEST_DIR));
+
+    const tp_session_snapshot *snapshot = gui_project_snapshot();
+    const tp_snapshot_atlas *first = tp_session_snapshot_atlas_at(snapshot, 0);
+    TEST_ASSERT_NOT_NULL(first);
+    const tp_id128 first_id = first->id;
+    gui_view_select_atlas(first_id);
+    do_pack_blocking();
+    TEST_ASSERT_NOT_NULL(gui_pack_result(0));
+    arm_preview_on_atlas(0);
+
+    /* The second atlas takes the pin WITHOUT moving the view, so the player is
+     * still on the atlas the canvas shows but that atlas is no longer resident:
+     * the next rebuild is what has to reside it -- and build its index. */
+    gui_view_select_atlas(second_atlas_id);
+    do_pack_blocking();
+    TEST_ASSERT_NOT_NULL(gui_pack_result(1));
+    gui_view_select_atlas(first_id);
+    TEST_ASSERT_TRUE(s_preview_active);
+
+    gui_pack__test_fail_next_ref_index_build();
+    update_preview();
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        0, s_preview_frame_count,
+        "no canonical index means nothing resolves this frame");
+    TEST_ASSERT_EQUAL_INT(-1, s_canvas.anim_sprite);
+    TEST_ASSERT_NOT_NULL_MESSAGE(
+        gui_pack_result_peek(0),
+        "the failed index build must leave the packed entry cached");
+
+    /* THE POINT: nothing about the model or the pack changed, so the only way the
+     * frame can come back is a retried rebuild -- which an empty map cached as
+     * valid would have made impossible. */
+    update_preview();
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        1, s_preview_frame_count,
+        "the rebuild must be retried after an index-build failure, not cached "
+        "away as a valid empty frame map");
+    TEST_ASSERT_TRUE(s_canvas.anim_sprite >= 0);
+}
+
+/* S21: adding an atlas selects it, so it is an atlas SWITCH and stops the player
+ * exactly like every other switch path (gui_view_lists' reset_selection). It was
+ * the one path that moved the selection while leaving the player armed on the
+ * atlas the canvas no longer shows. */
+void test_adding_an_atlas_stops_the_armed_animation_preview(void) {
+    (void)add_coin_source_to_atlas(0);
+    TEST_ASSERT_TRUE(gui_pack_init(TP_GUI_IDENTITY_TEST_DIR));
+    const tp_session_snapshot *snapshot = gui_project_snapshot();
+    const tp_snapshot_atlas *first = tp_session_snapshot_atlas_at(snapshot, 0);
+    TEST_ASSERT_NOT_NULL(first);
+    const tp_id128 first_id = first->id;
+    gui_view_select_atlas(first_id);
+    do_pack_blocking();
+    TEST_ASSERT_NOT_NULL(gui_pack_result(0));
+    arm_preview_on_atlas(0);
+
+    gui_request_add_atlas();
+    apply_pending();
+
+    TEST_ASSERT_FALSE_MESSAGE(tp_id128_eq(gui_view_atlas_id(), first_id),
+                              "adding an atlas selects the new atlas");
+    TEST_ASSERT_FALSE_MESSAGE(
+        s_preview_active,
+        "the player must not stay armed on the atlas the view left");
+    TEST_ASSERT_EQUAL_INT(-1, s_canvas.anim_sprite);
+}
+
+/* S21: a publication that fails on the canonical-index allocation is an OOM, and
+ * the typed completion must SAY so -- it used to report PACK_FAIL carrying
+ * TP_STATUS_OK, which is the status of the successful job it just lost. */
+void test_publish_index_oom_reports_the_typed_oom_status(void) {
+    (void)add_coin_source_to_atlas(0);
+    TEST_ASSERT_TRUE(gui_pack_init(TP_GUI_IDENTITY_TEST_DIR));
+    char error[256] = {0};
+    TEST_ASSERT_TRUE(gui_pack_async_start(0, error, sizeof error));
+
+    gui_pack_result_info info = {0};
+    gui_pack_done done = GUI_PACK_DONE_NONE;
+    for (int attempt = 0; attempt < 5000 && done == GUI_PACK_DONE_NONE;
+         ++attempt) {
+        /* Re-armed every iteration because only the publishing frame consumes
+         * the one-shot, and which frame that is is a host-timing detail. */
+        gui_pack__test_fail_next_ref_index_build();
+        done = pump_pack_frame(&info);
+        if (done == GUI_PACK_DONE_NONE) {
+            nt_time_sleep(0.001);
+        }
+    }
+    TEST_ASSERT_EQUAL_INT(GUI_PACK_DONE_PACK_FAIL, done);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OOM, info.status,
+        "a failed publication must not report the completed job's OK status");
+    TEST_ASSERT_NOT_NULL(strstr(info.err, "out of memory"));
+    TEST_ASSERT_NULL_MESSAGE(gui_pack_result(0),
+                             "a failed publication publishes nothing");
+}
+
+/* Freshness is not residency: restoring a demoted result touches nothing on the
+ * freshness path, so a preview that was out of date before the atlas switch is
+ * still out of date after it. (Freshness itself is still the project-wide
+ * preview_stale bit, so this pins the S18 property -- restore is
+ * freshness-NEUTRAL -- not a per-atlas verdict that does not exist yet.) */
+void test_restored_pack_result_keeps_its_freshness_verdict(void) {
+    const tp_id128 atlas_id = add_coin_source_to_atlas(0);
+    TEST_ASSERT_TRUE(gui_pack_init(TP_GUI_IDENTITY_TEST_DIR));
+    do_pack_blocking();
+    TEST_ASSERT_NOT_NULL(gui_pack_result(0));
+    TEST_ASSERT_FALSE(gui_project_is_stale());
+
+    TEST_ASSERT_EQUAL_INT(1, gui_project_add_atlas().visible_index);
+    const tp_id128 second_atlas_id = add_coin_source_to_atlas(1);
+    gui_view_select_atlas(second_atlas_id);
+    do_pack_blocking();
+    TEST_ASSERT_NOT_NULL(gui_pack_result(1));
+    TEST_ASSERT_FALSE(gui_project_is_stale());
+
+    /* Edit while the first atlas is demoted: the preview is now out of date. */
+    const tp_session_snapshot *snapshot = gui_project_snapshot();
+    TEST_ASSERT_TRUE(test_submit_atlas_name(
+        atlas_id, tp_session_snapshot_revision(snapshot),
+        "edited-while-demoted"));
+    TEST_ASSERT_TRUE(gui_project_is_stale());
+
+    gui_view_select_atlas(atlas_id);
+    TEST_ASSERT_NOT_NULL(gui_pack_result(0));
+    TEST_ASSERT_TRUE_MESSAGE(
+        gui_project_is_stale(),
+        "restoring a demoted result must not present it as current");
+    TEST_ASSERT_FALSE(gui_project_job_busy());
+}
+
 void test_pack_result_follows_stable_atlas_across_index_shift(void) {
     const tp_session_snapshot *snapshot = gui_project_snapshot();
     const tp_snapshot_atlas *first = tp_session_snapshot_atlas_at(snapshot, 0);
     TEST_ASSERT_NOT_NULL(first);
     const tp_id128 first_id = first->id;
-    TEST_ASSERT_EQUAL_INT(1, gui_project_add_atlas());
+    TEST_ASSERT_EQUAL_INT(
+        1, gui_project_add_atlas().visible_index);
     const tp_id128 packed_atlas_id = add_coin_source_to_atlas(1);
 
-    s_sel_atlas = 1;
+    gui_view_select_atlas(packed_atlas_id);
     TEST_ASSERT_TRUE(gui_pack_init(TP_GUI_IDENTITY_TEST_DIR));
     do_pack_blocking();
     const tp_result *packed = gui_pack_result(1);
@@ -651,18 +1851,20 @@ void test_pack_result_follows_stable_atlas_across_index_shift(void) {
     TEST_ASSERT_EQUAL_INT(sprite_count, packed->sprite_count);
 
     snapshot = gui_project_snapshot();
-    TEST_ASSERT_TRUE(gui_project_set_atlas_setting(
+    TEST_ASSERT_TRUE(test_offer_atlas_draft(
         packed_atlas_id, tp_session_snapshot_revision(snapshot),
         GUI_ATLAS_PIXELS_PER_UNIT, 0, 2.0F));
-    s_sel_atlas = 0;
+    gui_view_select_atlas(packed_atlas_id);
     do_pack_blocking();
     packed = gui_pack_result(0);
     TEST_ASSERT_NOT_NULL(packed);
     TEST_ASSERT_TRUE(packed->pixels_per_unit == 2.0F);
 
-    TEST_ASSERT_EQUAL_INT(1, gui_project_add_atlas());
-    (void)add_coin_source_to_atlas(1);
-    s_sel_atlas = 1;
+    TEST_ASSERT_EQUAL_INT(
+        1, gui_project_add_atlas().visible_index);
+    const tp_id128 other_atlas_id =
+        add_coin_source_to_atlas(1);
+    gui_view_select_atlas(other_atlas_id);
     do_pack_blocking();
     TEST_ASSERT_NOT_NULL(gui_pack_result(1));
     packed = gui_pack_result(0);
@@ -701,9 +1903,9 @@ void test_create_animation_preserves_both_canonical_selected_sprites(void) {
     multi_sel_add_ref(right->source_id, right->source_key);
     gui_request_create_animation_from_selection();
     multi_sel_clear();
-    s_sel_atlas = -1;
+    gui_view_select_atlas(tp_id128_nil());
     apply_pending();
-    s_sel_atlas = 0;
+    gui_view_select_atlas(atlas_id);
 
     const tp_session_snapshot *snapshot = gui_project_snapshot();
     const tp_snapshot_animation *animation =
@@ -726,12 +1928,26 @@ void test_add_frames_preserves_both_canonical_selected_sprites(void) {
     TEST_ASSERT_NOT_NULL(right);
 
     const tp_session_snapshot *snapshot = gui_project_snapshot();
-    const int animation_index = gui_project_create_animation(
-        atlas_id, tp_session_snapshot_revision(snapshot), "picked", NULL, 0);
+    const int animation_index =
+        gui_project_create_animation(
+            atlas_id,
+            tp_session_snapshot_revision(snapshot),
+            "picked", NULL, 0)
+            .visible_index;
     TEST_ASSERT_GREATER_OR_EQUAL_INT(0, animation_index);
+    const tp_snapshot_animation *created =
+        tp_session_snapshot_animation_at(
+            gui_project_snapshot(), atlas_id,
+            animation_index);
+    TEST_ASSERT_NOT_NULL(created);
+    const gui_animation_ref animation_ref = {
+        atlas_id, created->id,
+        tp_session_snapshot_revision(
+            gui_project_snapshot())};
     multi_sel_add_ref(left->source_id, left->source_key);
     multi_sel_add_ref(right->source_id, right->source_key);
-    add_selection_frames_to_anim(animation_index);
+    add_selection_frames_to_animation(
+        &animation_ref);
     apply_pending();
 
     snapshot = gui_project_snapshot();
@@ -757,8 +1973,10 @@ void test_sprite_edit_state_uses_canonical_duplicate_identity(void) {
 
     start_sprite_edit_ref(&ref, right->sprite_name);
 
-    TEST_ASSERT_EQUAL_INT(EDIT_SPRITE, s_edit_kind);
-    TEST_ASSERT_EQUAL_STRING("right-name", s_edit_buf);
+    TEST_ASSERT_EQUAL_INT(
+        GUI_EDIT_EDITING, gui_draft_phase());
+    TEST_ASSERT_EQUAL_STRING(
+        "right-name", gui_text_edit_value());
     TEST_ASSERT_TRUE(gui_sprite_edit_matches(right));
     TEST_ASSERT_FALSE(gui_sprite_edit_matches(row_for_source(left_id)));
 }
@@ -775,21 +1993,52 @@ void test_sprite_edit_rejects_genuinely_stale_captured_revision(void) {
     const gui_sprite_ref ref = {atlas_id, right_id, right->source_key,
                                 tp_session_snapshot_revision(snapshot)};
     start_sprite_edit_ref(&ref, right->sprite_name);
-    TEST_ASSERT_TRUE(gui_project_set_atlas_name(
-        atlas_id, tp_session_snapshot_revision(snapshot), "changed-atlas"));
-    (void)snprintf(s_edit_buf, sizeof s_edit_buf, "%s", "must-not-land");
-
-    commit_sprite_rename();
+    char changed_atlas[] = "changed-atlas";
+    tp_operation operation = {
+        .kind = TP_OP_ATLAS_RENAME,
+        .atlas_id = {{0}},
+        .u.atlas_rename.name = changed_atlas,
+    };
+    operation.atlas_id = atlas_id;
+    tp_txn_request request = {
+        .schema = TP_TXN_SCHEMA,
+        .expected_revision =
+            tp_session_snapshot_revision(snapshot),
+        .label = "atlas.rename",
+        .author = "test",
+        .ops = &operation,
+        .op_count = 1,
+    };
+    (void)snprintf(
+        request.id_hex, sizeof request.id_hex,
+        "%s", "abababababababababababababababab");
+    tp_txn_result result = {0};
+    tp_error apply_error = {{0}};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_session_apply(
+            gui_project__test_session(), &request,
+            &result, &apply_error));
+    tp_txn_result_free(&result);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_project_frame_begin(&apply_error));
+    gui_project_frame_end();
+    TEST_ASSERT_TRUE(
+        gui_text_edit_update("must-not-land"));
+    gui_request_gesture_commit();
+    apply_pending();
 
     snapshot = gui_project_snapshot();
     const tp_snapshot_sprite *sprite = tp_session_snapshot_sprite_by_key(
         snapshot, atlas_id, right_id, "shared.png");
     TEST_ASSERT_NOT_NULL(sprite);
     TEST_ASSERT_EQUAL_STRING("right-name", sprite->rename);
-    char error[256];
-    error[0] = '\0';
-    TEST_ASSERT_TRUE(gui_project_take_op_error(error, sizeof error));
-    TEST_ASSERT_NOT_NULL(strstr(error, "revision"));
+    TEST_ASSERT_EQUAL_INT(
+        GUI_EDIT_CONFLICTED, gui_draft_phase());
+    TEST_ASSERT_EQUAL_STRING(
+        "must-not-land", gui_text_edit_value());
+    gui_draft_discard();
 }
 
 void test_delayed_animation_context_ref_never_retargets_after_index_shift(void) {
@@ -800,24 +2049,24 @@ void test_delayed_animation_context_ref_never_retargets_after_index_shift(void) 
     TEST_ASSERT_NOT_NULL(atlas);
     const tp_id128 atlas_id = atlas->id;
     TEST_ASSERT_GREATER_OR_EQUAL_INT(
-        0, gui_project_create_animation(
+        0, (gui_project_create_animation(
                atlas_id, tp_session_snapshot_revision(snapshot), "a", NULL,
-               0));
+               0)).visible_index);
     snapshot = gui_project_snapshot();
     TEST_ASSERT_GREATER_OR_EQUAL_INT(
-        0, gui_project_create_animation(
+        0, (gui_project_create_animation(
                atlas_id, tp_session_snapshot_revision(snapshot), "b", NULL,
-               0));
+               0)).visible_index);
     snapshot = gui_project_snapshot();
     TEST_ASSERT_GREATER_OR_EQUAL_INT(
-        0, gui_project_create_animation(
+        0, (gui_project_create_animation(
                atlas_id, tp_session_snapshot_revision(snapshot), "c", NULL,
-               0));
+               0)).visible_index);
 
     gui_animation_ref first;
     gui_animation_ref captured_second;
-    TEST_ASSERT_TRUE(gui_project_animation_ref_at(0, 0, &first));
-    TEST_ASSERT_TRUE(gui_project_animation_ref_at(0, 1, &captured_second));
+    TEST_ASSERT_TRUE(test_animation_ref_at(0, 0, &first));
+    TEST_ASSERT_TRUE(test_animation_ref_at(0, 1, &captured_second));
     const tp_snapshot_animation *third_before =
         tp_session_snapshot_animation_at(gui_project_snapshot(), atlas_id, 2);
     TEST_ASSERT_NOT_NULL(third_before);
@@ -842,10 +2091,70 @@ void test_delayed_animation_context_ref_never_retargets_after_index_shift(void) 
     TEST_ASSERT_NOT_NULL(strstr(error, "revision"));
 }
 
+void test_delayed_target_context_ref_never_retargets_after_index_shift(void) {
+    const tp_session_snapshot *snapshot =
+        gui_project_snapshot();
+    const tp_snapshot_atlas *atlas =
+        snapshot
+            ? tp_session_snapshot_atlas_at(snapshot, 0)
+            : NULL;
+    TEST_ASSERT_NOT_NULL(atlas);
+    TEST_ASSERT_EQUAL_INT(1, atlas->target_count);
+    const tp_id128 atlas_id = atlas->id;
+
+    const gui_project_create_result second =
+        gui_project_add_target(
+            atlas_id,
+            tp_session_snapshot_revision(snapshot));
+    TEST_ASSERT_TRUE(second.committed);
+    snapshot = gui_project_snapshot();
+    const gui_project_create_result third =
+        gui_project_add_target(
+            atlas_id,
+            tp_session_snapshot_revision(snapshot));
+    TEST_ASSERT_TRUE(third.committed);
+
+    gui_target_ref first;
+    gui_target_ref captured_second;
+    TEST_ASSERT_TRUE(test_target_ref_at(0, 0, &first));
+    TEST_ASSERT_TRUE(test_target_ref_at(0, 1, &captured_second));
+    TEST_ASSERT_TRUE(tp_id128_eq(
+        second.created_id, captured_second.target_id));
+    TEST_ASSERT_TRUE(gui_project_remove_target(&first));
+
+    gui_request_remove_target_ref(&captured_second);
+    apply_pending();
+
+    snapshot = gui_project_snapshot();
+    TEST_ASSERT_NOT_NULL(tp_session_snapshot_target_by_id(
+        snapshot, atlas_id, second.created_id));
+    TEST_ASSERT_NOT_NULL(tp_session_snapshot_target_by_id(
+        snapshot, atlas_id, third.created_id));
+    atlas = tp_session_snapshot_atlas_by_id(snapshot, atlas_id);
+    TEST_ASSERT_NOT_NULL(atlas);
+    TEST_ASSERT_EQUAL_INT(2, atlas->target_count);
+    char error[256] = {0};
+    TEST_ASSERT_TRUE(
+        gui_project_take_op_error(error, sizeof error));
+    TEST_ASSERT_NOT_NULL(strstr(error, "revision"));
+}
+
 void test_required_recovery_without_root_warns_but_allows_edit_undo_redo(void) {
     gui_project_require_recovery();
-    gui_project_shutdown();
-    gui_project_init();
+    tp_error lifecycle_error = {{0}};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_project_lifecycle_begin_new(
+            &lifecycle_error));
+    char warning[256] = {0};
+    TEST_ASSERT_FALSE(
+        gui_project_take_recovery_setup_notice(
+            warning, sizeof warning));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_project_test_finish(
+            GUI_PROJECT_LIFECYCLE_NEW,
+            &lifecycle_error));
 
     const tp_session_snapshot *snapshot = gui_project_snapshot();
     const tp_snapshot_atlas *atlas = snapshot
@@ -853,14 +2162,15 @@ void test_required_recovery_without_root_warns_but_allows_edit_undo_redo(void) {
                                           : NULL;
     TEST_ASSERT_NOT_NULL(atlas);
     TEST_ASSERT_FALSE(
-        tp_session_recovery_available(gui_project_session_for_jobs()));
+        tp_session_recovery_available(gui_project__test_session()));
     const tp_id128 atlas_id = atlas->id;
     const int padding_before = atlas->padding;
-    TEST_ASSERT_TRUE(gui_project_set_atlas_setting(
+    TEST_ASSERT_TRUE(test_offer_atlas_draft(
         atlas_id, tp_session_snapshot_revision(snapshot), GUI_ATLAS_PADDING,
         padding_before + 1, 0.0F));
-    TEST_ASSERT_TRUE(gui_project_can_undo());
-    TEST_ASSERT_TRUE(gui_project_flush_pending());
+    TEST_ASSERT_FALSE(gui_project_can_undo());
+    gui_request_gesture_commit();
+    apply_pending();
     snapshot = gui_project_snapshot();
     atlas = snapshot ? tp_session_snapshot_atlas_by_id(snapshot, atlas_id) : NULL;
     TEST_ASSERT_NOT_NULL(atlas);
@@ -876,13 +2186,11 @@ void test_required_recovery_without_root_warns_but_allows_edit_undo_redo(void) {
     TEST_ASSERT_NOT_NULL(atlas);
     TEST_ASSERT_EQUAL_INT(padding_before + 1, atlas->padding);
     TEST_ASSERT_FALSE(
-        tp_session_recovery_available(gui_project_session_for_jobs()));
+        tp_session_recovery_available(gui_project__test_session()));
 
-    char warning[256] = {0};
     TEST_ASSERT_TRUE(
         gui_project_take_recovery_setup_notice(warning, sizeof warning));
     TEST_ASSERT_NOT_NULL(strstr(warning, "Crash recovery is unavailable"));
-    gui_project_discard_recovery_on_shutdown();
 }
 
 void test_recovery_notice_is_sticky_exact_and_clears_after_save_heals(void) {
@@ -894,7 +2202,7 @@ void test_recovery_notice_is_sticky_exact_and_clears_after_save_heals(void) {
     TEST_ASSERT_NOT_NULL(atlas);
     const tp_id128 atlas_id = atlas->id;
     tp_journal__test_set_record_limit(1U);
-    TEST_ASSERT_TRUE(gui_project_set_atlas_name(
+    TEST_ASSERT_TRUE(test_submit_atlas_name(
         atlas_id, tp_session_snapshot_revision(snapshot), "recovery-notice"));
 
     char save_path[512];
@@ -907,7 +2215,7 @@ void test_recovery_notice_is_sticky_exact_and_clears_after_save_heals(void) {
                           gui_project_save_as(save_path, error, sizeof error));
 
     const tp_session_recovery_health health =
-        tp_session_recovery_health_query(gui_project_session_for_jobs());
+        tp_session_recovery_health_query(gui_project__test_session());
     TEST_ASSERT_TRUE(health.degraded);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OUT_OF_BOUNDS, health.first_cause);
     gui_recovery_notice notice = {0};
@@ -929,11 +2237,15 @@ void test_recovery_notice_is_sticky_exact_and_clears_after_save_heals(void) {
     snapshot = gui_project_snapshot();
     atlas = snapshot ? tp_session_snapshot_atlas_by_id(snapshot, atlas_id) : NULL;
     TEST_ASSERT_NOT_NULL(atlas);
-    TEST_ASSERT_TRUE(gui_project_set_atlas_setting(
-        atlas_id, tp_session_snapshot_revision(snapshot) + 1,
+    TEST_ASSERT_TRUE(test_offer_atlas_draft(
+        atlas_id, tp_session_snapshot_revision(snapshot) - 1,
         GUI_ATLAS_PADDING, atlas->padding + 1, 0.0F));
-    TEST_ASSERT_FALSE(gui_project_flush_pending());
-    TEST_ASSERT_TRUE(gui_project_take_op_error(error, sizeof error));
+    gui_request_gesture_commit();
+    apply_pending();
+    TEST_ASSERT_EQUAL_INT(
+        GUI_EDIT_CONFLICTED,
+        gui_draft_phase());
+    gui_draft_discard();
     gui_recovery_notice after_drain = {0};
     TEST_ASSERT_TRUE(gui_project_recovery_notice_query(&after_drain));
     TEST_ASSERT_EQUAL_STRING(notice.notice_id, after_drain.notice_id);
@@ -946,35 +2258,476 @@ void test_recovery_notice_is_sticky_exact_and_clears_after_save_heals(void) {
                           gui_project_save(error, sizeof error));
     TEST_ASSERT_FALSE(gui_project_recovery_notice_query(&after_drain));
     TEST_ASSERT_FALSE(
-        tp_session_recovery_health_query(gui_project_session_for_jobs()).degraded);
+        tp_session_recovery_health_query(gui_project__test_session()).degraded);
     (void)remove(save_path);
 }
 
+void test_save_as_recovery_rebind_uses_post_save_identity(void) {
+    char recovery_root[512];
+    char save_path[512];
+    char canonical_path[TP_IDENTITY_PATH_MAX];
+    (void)snprintf(
+        recovery_root, sizeof recovery_root,
+        "%s/rebind-recovery",
+        TP_GUI_IDENTITY_TEST_DIR);
+    (void)snprintf(
+        save_path, sizeof save_path,
+        "%s/rebind.ntpacker_project",
+        TP_GUI_IDENTITY_TEST_DIR);
+    (void)remove(save_path);
+    (void)remove_flat_test_dir(recovery_root);
+    tp_mkdirs(recovery_root);
+
+    gui_project_test_shutdown(true);
+    gui_project_enable_recovery(recovery_root);
+    gui_project_init();
+
+    char error[256] = {0};
+    const tp_session_snapshot *before_save =
+        gui_project_snapshot();
+    const tp_snapshot_atlas *before_save_atlas =
+        tp_session_snapshot_atlas_at(
+            before_save, 0);
+    TEST_ASSERT_NOT_NULL(before_save_atlas);
+    const char *attached_journal =
+        tp_session__recovery_journal_path(
+            gui_project__test_session());
+    TEST_ASSERT_NOT_NULL(attached_journal);
+    char pre_save_journal[TP_IDENTITY_PATH_MAX];
+    (void)snprintf(
+        pre_save_journal, sizeof pre_save_journal,
+        "%s", attached_journal);
+    tp_journal__test_set_record_limit(1U);
+    TEST_ASSERT_TRUE(
+        test_submit_atlas_name(
+            before_save_atlas->id,
+            tp_session_snapshot_revision(before_save),
+            "rebind-before-save"));
+    TEST_ASSERT_TRUE(
+        tp_session_recovery_health_query(
+            gui_project__test_session()).degraded);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OUT_OF_BOUNDS,
+        tp_session_recovery_health_query(
+            gui_project__test_session()).first_cause);
+    tp_journal__test_set_record_limit(0U);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_project_save_as(
+            save_path, error, sizeof error));
+    const char *rebound_journal =
+        tp_session__recovery_journal_path(
+            gui_project__test_session());
+    TEST_ASSERT_NOT_NULL(rebound_journal);
+    TEST_ASSERT_NOT_EQUAL(
+        0, strcmp(pre_save_journal, rebound_journal));
+    char post_save_journal[TP_IDENTITY_PATH_MAX];
+    (void)snprintf(
+        post_save_journal, sizeof post_save_journal,
+        "%s", rebound_journal);
+    TEST_ASSERT_FALSE(
+        tp_session_recovery_health_query(
+            gui_project__test_session()).degraded);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_identity_project_path_canonical(
+            save_path, canonical_path,
+            sizeof canonical_path, NULL));
+    tp_id128 fingerprint = tp_id128_nil();
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_identity_file_fingerprint(
+            canonical_path, &fingerprint, NULL));
+
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_project_frame_begin(NULL));
+    gui_project_frame_end();
+    const tp_session_snapshot *snapshot =
+        gui_project_snapshot();
+    const tp_snapshot_atlas *atlas =
+        tp_session_snapshot_atlas_at(
+            snapshot, 0);
+    TEST_ASSERT_NOT_NULL(atlas);
+    TEST_ASSERT_TRUE(
+        test_submit_atlas_name(
+            atlas->id,
+            tp_session_snapshot_revision(snapshot),
+            "dirty-after-save"));
+    gui_project_test_shutdown(false);
+
+    gui_project_enable_recovery(recovery_root);
+    gui_project_init();
+    gui_recovery_list candidates = {0};
+    TEST_ASSERT_EQUAL_INT(
+        1, gui_recovery_collect(&candidates));
+    const gui_recovery_entry *entry =
+        &candidates.items[0];
+    TEST_ASSERT_EQUAL_STRING(
+        canonical_path, entry->original_path);
+    TEST_ASSERT_EQUAL_STRING(
+        "rebind.ntpacker_project",
+        entry->name);
+    TEST_ASSERT_EQUAL_STRING(
+        post_save_journal,
+        entry->journal_path);
+    TEST_ASSERT_NOT_EQUAL(
+        0, strcmp(pre_save_journal,
+                  entry->journal_path));
+    TEST_ASSERT_TRUE(
+        entry->has_file_fingerprint);
+    TEST_ASSERT_TRUE(
+        tp_id128_eq(
+            fingerprint,
+            entry->file_fingerprint));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_recovery_resolve_entry(
+            entry, GUI_RECOVERY_DISCARD,
+            NULL, error, sizeof error));
+
+    gui_project_test_shutdown(true);
+    gui_project_enable_recovery(NULL);
+    TEST_ASSERT_TRUE(
+        remove_flat_test_dir(recovery_root));
+    TEST_ASSERT_EQUAL_INT(0, remove(save_path));
+    gui_project_init();
+}
+
+void test_save_as_projects_clean_identity_only_at_common_frame_observation(void) {
+    const tp_session_snapshot *snapshot =
+        gui_project_snapshot();
+    const tp_snapshot_atlas *atlas =
+        tp_session_snapshot_atlas_at(snapshot, 0);
+    TEST_ASSERT_NOT_NULL(atlas);
+    TEST_ASSERT_TRUE(
+        test_submit_atlas_name(
+            atlas->id,
+            tp_session_snapshot_revision(snapshot),
+            "save-observation-boundary"));
+    TEST_ASSERT_TRUE(gui_project_is_dirty());
+    TEST_ASSERT_FALSE(gui_project_has_path());
+
+    char save_path[512];
+    char lock_path[544];
+    (void)snprintf(
+        save_path, sizeof save_path,
+        "%s/save-observation.ntpacker_project",
+        TP_GUI_IDENTITY_TEST_DIR);
+    (void)snprintf(
+        lock_path, sizeof lock_path,
+        "%s.ntpacker.lock", save_path);
+    (void)remove(save_path);
+    (void)remove(lock_path);
+    char error[256] = {0};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_project_save_as(
+            save_path, error, sizeof error));
+
+    /* The Save receipt is exact and synchronous, while presentation state
+     * remains the prior immutable observation until the next frame cut. */
+    TEST_ASSERT_TRUE(gui_project_is_dirty());
+    TEST_ASSERT_FALSE(gui_project_has_path());
+    tp_error frame_error = {{0}};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_project_frame_begin(
+            &frame_error));
+    gui_project_frame_end();
+    TEST_ASSERT_FALSE(gui_project_is_dirty());
+    TEST_ASSERT_TRUE(gui_project_has_path());
+
+    TEST_ASSERT_TRUE(gui_project_test_new());
+    TEST_ASSERT_EQUAL_INT(0, remove(save_path));
+    TEST_ASSERT_EQUAL_INT(0, remove(lock_path));
+}
+
+void test_save_as_roundtrip_releases_writer_before_open_and_keeps_external_guard(void) {
+    char save_path[512];
+    char rebound_path[512];
+    char save_lock_path[544];
+    char rebound_lock_path[544];
+    (void)snprintf(
+        save_path, sizeof save_path,
+        "%s/roundtrip.ntpacker_project",
+        TP_GUI_IDENTITY_TEST_DIR);
+    (void)snprintf(
+        rebound_path, sizeof rebound_path,
+        "%s/roundtrip-rebound.ntpacker_project",
+        TP_GUI_IDENTITY_TEST_DIR);
+    (void)snprintf(
+        save_lock_path, sizeof save_lock_path,
+        "%s.ntpacker.lock", save_path);
+    (void)snprintf(
+        rebound_lock_path, sizeof rebound_lock_path,
+        "%s.ntpacker.lock", rebound_path);
+    (void)remove(save_path);
+    (void)remove(rebound_path);
+    (void)remove(save_lock_path);
+    (void)remove(rebound_lock_path);
+
+    const tp_session_snapshot *snapshot =
+        gui_project_snapshot();
+    const tp_snapshot_atlas *atlas =
+        tp_session_snapshot_atlas_at(snapshot, 0);
+    TEST_ASSERT_NOT_NULL(atlas);
+    TEST_ASSERT_EQUAL_INT(
+        GUI_ADD_ADDED,
+        gui_project_add_source_kind(
+            atlas->id,
+            tp_session_snapshot_revision(snapshot),
+            s_left_file, TP_SOURCE_KIND_FILE));
+
+    char error[256] = {0};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_project_save_as(
+            save_path, error, sizeof error));
+
+    /* Opening the current canonical identity would contend with this
+     * session's own writer lease. A real round-trip releases that owner
+     * before Open; in-place reload remains an explicit R2d concern. */
+    TEST_ASSERT_TRUE(gui_project_test_new());
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_project_test_open(
+            save_path, error, sizeof error));
+    snapshot = gui_project_snapshot();
+    atlas = tp_session_snapshot_atlas_at(snapshot, 0);
+    TEST_ASSERT_NOT_NULL(atlas);
+    TEST_ASSERT_EQUAL_INT(1, atlas->source_count);
+    TEST_ASSERT_FALSE(gui_project_is_dirty());
+
+    static const char external_sentinel[] =
+        "external-edit-sentinel";
+    FILE *file = fopen(save_path, "wb");
+    TEST_ASSERT_NOT_NULL(file);
+    TEST_ASSERT_EQUAL_size_t(
+        sizeof external_sentinel,
+        fwrite(
+            external_sentinel, 1U,
+            sizeof external_sentinel, file));
+    TEST_ASSERT_EQUAL_INT(0, fclose(file));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_FILE_CHANGED_EXTERNALLY,
+        gui_project_save(error, sizeof error));
+
+    char readback[sizeof external_sentinel] = {0};
+    file = fopen(save_path, "rb");
+    TEST_ASSERT_NOT_NULL(file);
+    TEST_ASSERT_EQUAL_size_t(
+        sizeof readback,
+        fread(readback, 1U, sizeof readback, file));
+    TEST_ASSERT_EQUAL_INT(0, fclose(file));
+    TEST_ASSERT_EQUAL_MEMORY(
+        external_sentinel, readback,
+        sizeof external_sentinel);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_project_save_as(
+            rebound_path, error, sizeof error));
+
+    TEST_ASSERT_TRUE(gui_project_test_new());
+    TEST_ASSERT_EQUAL_INT(0, remove(save_path));
+    TEST_ASSERT_EQUAL_INT(0, remove(rebound_path));
+    TEST_ASSERT_EQUAL_INT(0, remove(save_lock_path));
+    TEST_ASSERT_EQUAL_INT(0, remove(rebound_lock_path));
+}
+
+static void exhaust_two_observation_failures(void) {
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OOM,
+        gui_project_frame_begin(&error));
+    gui_project_frame_end();
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OOM,
+        gui_project_frame_begin(&error));
+    gui_project_frame_end();
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_project_frame_begin(&error));
+    gui_project_frame_end();
+}
+
+void test_committed_atlas_create_stays_successful_until_echo_reconciles(void) {
+    gui_project__test_fail_observes(3);
+    const gui_project_create_result created =
+        gui_project_add_atlas();
+    TEST_ASSERT_TRUE(created.committed);
+    TEST_ASSERT_TRUE(created.observation_pending);
+    TEST_ASSERT_EQUAL_INT(-1, created.visible_index);
+    TEST_ASSERT_FALSE(tp_id128_is_nil(created.created_id));
+    TEST_ASSERT_EQUAL_INT64(
+        1, tp_session_revision(
+               gui_project__test_session()));
+    TEST_ASSERT_EQUAL_INT(
+        1, tp_session_snapshot_atlas_count(
+               gui_project_snapshot()));
+
+    exhaust_two_observation_failures();
+    const tp_session_snapshot *snapshot =
+        gui_project_snapshot();
+    TEST_ASSERT_NOT_NULL(
+        tp_session_snapshot_atlas_by_id(
+            snapshot, created.created_id));
+}
+
+void test_committed_target_create_stays_successful_until_echo_reconciles(void) {
+    const tp_session_snapshot *before =
+        gui_project_snapshot();
+    const tp_snapshot_atlas *atlas =
+        tp_session_snapshot_atlas_at(before, 0);
+    TEST_ASSERT_NOT_NULL(atlas);
+    const tp_id128 atlas_id = atlas->id;
+    gui_project__test_fail_observes(3);
+    const gui_project_create_result created =
+        gui_project_add_target(
+            atlas_id,
+            tp_session_snapshot_revision(before));
+    TEST_ASSERT_TRUE(created.committed);
+    TEST_ASSERT_TRUE(created.observation_pending);
+    TEST_ASSERT_EQUAL_INT(-1, created.visible_index);
+    TEST_ASSERT_FALSE(tp_id128_is_nil(created.created_id));
+    TEST_ASSERT_EQUAL_INT64(
+        1, tp_session_revision(
+               gui_project__test_session()));
+    TEST_ASSERT_EQUAL_INT(
+        1, atlas->target_count);
+
+    exhaust_two_observation_failures();
+    const tp_session_snapshot *snapshot =
+        gui_project_snapshot();
+    const tp_snapshot_atlas *observed =
+        tp_session_snapshot_atlas_by_id(
+            snapshot, atlas_id);
+    bool found = false;
+    for (int index = 0;
+         observed && index < observed->target_count;
+         ++index) {
+        const tp_snapshot_target *target =
+            tp_session_snapshot_target_at(
+                snapshot, observed->id, index);
+        found = found ||
+                (target &&
+                 tp_id128_eq(
+                     target->id,
+                     created.created_id));
+    }
+    TEST_ASSERT_TRUE(found);
+}
+
+void test_committed_animation_create_stays_successful_until_echo_reconciles(void) {
+    const tp_session_snapshot *before =
+        gui_project_snapshot();
+    const tp_snapshot_atlas *atlas =
+        tp_session_snapshot_atlas_at(before, 0);
+    TEST_ASSERT_NOT_NULL(atlas);
+    const tp_id128 atlas_id = atlas->id;
+    gui_project__test_fail_observes(3);
+    const gui_project_create_result created =
+        gui_project_create_animation(
+            atlas_id,
+            tp_session_snapshot_revision(before),
+            "pending-echo", NULL, 0);
+    TEST_ASSERT_TRUE(created.committed);
+    TEST_ASSERT_TRUE(created.observation_pending);
+    TEST_ASSERT_EQUAL_INT(-1, created.visible_index);
+    TEST_ASSERT_FALSE(tp_id128_is_nil(created.created_id));
+    TEST_ASSERT_EQUAL_INT64(
+        1, tp_session_revision(
+               gui_project__test_session()));
+    TEST_ASSERT_EQUAL_INT(
+        0, atlas->animation_count);
+
+    exhaust_two_observation_failures();
+    const tp_session_snapshot *snapshot =
+        gui_project_snapshot();
+    const tp_snapshot_atlas *observed =
+        tp_session_snapshot_atlas_by_id(
+            snapshot, atlas_id);
+    bool found = false;
+    for (int index = 0;
+         observed && index < observed->animation_count;
+         ++index) {
+        const tp_snapshot_animation *animation =
+            tp_session_snapshot_animation_at(
+                snapshot, observed->id, index);
+        found = found ||
+                (animation &&
+                 tp_id128_eq(
+                     animation->id,
+                     created.created_id));
+    }
+    TEST_ASSERT_TRUE(found);
+}
+
 int main(int argc, char **argv) {
+    (void)setvbuf(stdout, NULL, _IONBF, 0);
     if (tp_build_is_worker_invocation(argc, argv)) {
         return tp_build_worker_main();
     }
     UNITY_BEGIN();
     RUN_TEST(test_arbitrary_result_lookup_follows_displayed_sprite_order);
     RUN_TEST(test_canvas_result_rebind_resets_double_click_identity);
+    RUN_TEST(
+        test_selected_atlas_id_survives_preceding_atlas_removal);
+    RUN_TEST(
+        test_selected_animation_id_survives_preceding_animation_removal);
     RUN_TEST(test_rows_apply_renames_by_canonical_source_and_key);
     RUN_TEST(test_create_animation_preserves_both_canonical_selected_sprites);
     RUN_TEST(test_add_frames_preserves_both_canonical_selected_sprites);
     RUN_TEST(test_sprite_edit_state_uses_canonical_duplicate_identity);
     RUN_TEST(test_sprite_edit_rejects_genuinely_stale_captured_revision);
     RUN_TEST(test_delayed_animation_context_ref_never_retargets_after_index_shift);
+    RUN_TEST(test_delayed_target_context_ref_never_retargets_after_index_shift);
     RUN_TEST(test_preview_result_rejects_source_refresh_after_job_capture);
-    RUN_TEST(test_native_pack_ignores_unrelated_atlas_edit_during_job);
+    RUN_TEST(
+        test_preview_after_native_pack_uses_observed_runtime_generation);
+    RUN_TEST(
+        test_native_pack_marks_token_change_stale_without_host_side_probe);
     RUN_TEST(test_nil_completed_pack_input_hash_is_stale);
     RUN_TEST(test_failed_current_hash_probe_is_stale);
     RUN_TEST(test_gui_poll_does_not_decode_sources_on_gui_thread);
-    RUN_TEST(test_long_sprite_keys_with_shared_prefix_never_coalesce);
+    RUN_TEST(
+        test_deleted_pack_target_is_typed_failure_not_cancelled);
+    RUN_TEST(test_long_sprite_keys_with_shared_prefix_keep_distinct_draft_identity);
     RUN_TEST(test_oversized_names_cannot_enter_a_truncating_editor);
     RUN_TEST(test_recovery_entry_keeps_core_path_capacity);
     RUN_TEST(test_canvas_cache_key_keeps_core_path_capacity);
     RUN_TEST(test_undo_redo_keep_last_successful_pack_result);
+    RUN_TEST(test_switching_atlas_demotes_the_inactive_result_into_the_store);
+    RUN_TEST(test_evicted_pack_result_reads_as_unpacked_without_autopacking);
+    RUN_TEST(test_failed_resident_switch_never_serves_the_evicted_resident);
+    RUN_TEST(test_preview_result_read_never_moves_the_active_pack_pin);
+    RUN_TEST(
+        test_preview_frame_map_is_not_cached_when_the_canonical_index_is_missing);
+    RUN_TEST(test_adding_an_atlas_stops_the_armed_animation_preview);
+    RUN_TEST(test_publish_index_oom_reports_the_typed_oom_status);
+    RUN_TEST(test_restored_pack_result_keeps_its_freshness_verdict);
     RUN_TEST(test_pack_result_follows_stable_atlas_across_index_shift);
     RUN_TEST(test_recovery_notice_is_sticky_exact_and_clears_after_save_heals);
+    RUN_TEST(
+        test_save_as_recovery_rebind_uses_post_save_identity);
+    RUN_TEST(
+        test_save_as_roundtrip_releases_writer_before_open_and_keeps_external_guard);
+    RUN_TEST(
+        test_save_as_projects_clean_identity_only_at_common_frame_observation);
+    RUN_TEST(
+        test_controller_guard_rejects_identity_change_before_flush_or_write);
+    RUN_TEST(
+        test_save_as_preflight_success_does_not_submit_or_write);
+    RUN_TEST(
+        test_save_as_preflight_observe_failure_preserves_draft_and_model);
+    RUN_TEST(
+        test_open_current_canonical_identity_rejects_before_replacement);
     RUN_TEST(test_required_recovery_without_root_warns_but_allows_edit_undo_redo);
+    RUN_TEST(
+        test_committed_atlas_create_stays_successful_until_echo_reconciles);
+    RUN_TEST(
+        test_committed_target_create_stays_successful_until_echo_reconciles);
+    RUN_TEST(
+        test_committed_animation_create_stays_successful_until_echo_reconciles);
     return UNITY_END();
 }

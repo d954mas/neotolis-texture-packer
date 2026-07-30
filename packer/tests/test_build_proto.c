@@ -6,6 +6,8 @@
  * Then the fail-closed matrix -- truncated frame, oversized declared length,
  * wrong magic, unsupported version, and a corrupt payload -- each returns a
  * structured status and never asserts/crashes (runs under the sanitizer config).
+ * Finally the text-field admission (UTF-8 / embedded NUL / length cap) that
+ * keeps a malformed builder string out of the host's outer terminal frame.
  */
 
 #define _CRT_SECURE_NO_WARNINGS
@@ -16,6 +18,7 @@
 
 #include "tp_build_proto_internal.h"
 #include "tp_core/tp_error.h"
+#include "tp_job_worker_internal.h"
 #include "unity.h"
 
 void setUp(void) {}
@@ -29,13 +32,25 @@ enum {
     PROTO_FRAME_HDR = 12,
     PROTO_REQ_HEAD = 48,
     PROTO_SPRITE_HEAD = 40,
+    PROTO_RESP_HEAD = 16,
     SAMPLE_ATLAS_LEN = 1,
     SAMPLE_OUT_LEN = 8,
-    SAMPLE_SPRITE_HEAD_OFF = PROTO_FRAME_HDR + PROTO_REQ_HEAD + SAMPLE_ATLAS_LEN + SAMPLE_OUT_LEN,
+    SAMPLE_ATLAS_NAME_OFF = PROTO_FRAME_HDR + PROTO_REQ_HEAD,
+    SAMPLE_OUT_NAME_OFF = SAMPLE_ATLAS_NAME_OFF + SAMPLE_ATLAS_LEN,
+    SAMPLE_SPRITE_HEAD_OFF = SAMPLE_OUT_NAME_OFF + SAMPLE_OUT_LEN,
+    SAMPLE_SPRITE_NAME_OFF = SAMPLE_SPRITE_HEAD_OFF + PROTO_SPRITE_HEAD,
     SAMPLE_RGBA_LEN_OFF = SAMPLE_SPRITE_HEAD_OFF + (PROTO_SPRITE_HEAD - 4),
     REQ_ATLAS_NAME_LEN_OFF = PROTO_FRAME_HDR + 36, /* atlas_name_len field in request head */
-    REQ_SPRITE_COUNT_OFF = PROTO_FRAME_HDR + PROTO_REQ_HEAD - 4
+    REQ_OUT_NAME_LEN_OFF = PROTO_FRAME_HDR + 40,
+    REQ_SPRITE_COUNT_OFF = PROTO_FRAME_HDR + PROTO_REQ_HEAD - 4,
+    RESP_ARTIFACT_LEN_OFF = PROTO_FRAME_HDR + 8, /* artifact_len field in response head */
+    RESP_MESSAGE_LEN_OFF = PROTO_FRAME_HDR + 12
 };
+
+/* Malformed UTF-8 lead bytes used by the admission cases: 0xC0 is never a legal
+ * lead byte (it can only start an overlong sequence) and 0x80 is a continuation
+ * byte with no lead. */
+enum { BAD_UTF8_LEAD = 0xC0, BAD_UTF8_CONTINUATION = 0x80 };
 
 static uint8_t *make_pixels(uint32_t w, uint32_t h, uint8_t seed) {
     size_t n = (size_t)w * h * 4U;
@@ -384,6 +399,192 @@ void test_fail_closed_decode_sprite_count_over_cap(void) {
     free(bytes);
 }
 
+/* ---- text-field admission: UTF-8 well-formedness, embedded NUL, length cap ----
+ *
+ * Every text field the codec hands out is admitted at THIS boundary, so a
+ * malformed builder string is a structured inner fault instead of prose the host
+ * copies into its tp_error -- where it would make the OUTER codec refuse the
+ * whole terminal frame. */
+
+/* Builds a response frame field-by-field, so a text field can carry bytes the
+ * encoder's C-string API cannot express (an embedded NUL) or a declared length
+ * the encoder would never emit. */
+static uint8_t *build_response_frame(const void *artifact, uint32_t artifact_len, const void *message,
+                                     uint32_t message_len, size_t *out_len) {
+    size_t payload = (size_t)PROTO_RESP_HEAD + artifact_len + message_len;
+    size_t total = (size_t)PROTO_FRAME_HDR + payload;
+    uint8_t *bytes = (uint8_t *)calloc(1U, total);
+    TEST_ASSERT_NOT_NULL(bytes);
+    put_u32_le(bytes, TP_BUILD_PROTO_RESPONSE_MAGIC);
+    bytes[4] = (uint8_t)TP_BUILD_PROTO_VERSION; /* version is a u16 LE at offset 4 */
+    put_u32_le(bytes + 8, (uint32_t)payload);
+    put_u32_le(bytes + PROTO_FRAME_HDR, (uint32_t)TP_STATUS_BUILDER_FAILED);
+    put_u32_le(bytes + RESP_ARTIFACT_LEN_OFF, artifact_len);
+    put_u32_le(bytes + RESP_MESSAGE_LEN_OFF, message_len);
+    if (artifact_len) {
+        memcpy(bytes + PROTO_FRAME_HDR + PROTO_RESP_HEAD, artifact, artifact_len);
+    }
+    if (message_len) {
+        memcpy(bytes + PROTO_FRAME_HDR + PROTO_RESP_HEAD + artifact_len, message, message_len);
+    }
+    *out_len = total;
+    return bytes;
+}
+
+/* Every request text field: a single malformed byte fails the whole decode. */
+void test_decode_rejects_invalid_utf8_text_fields(void) {
+    const struct {
+        size_t offset;
+        uint8_t byte;
+    } cases[] = {
+        {SAMPLE_ATLAS_NAME_OFF, (uint8_t)BAD_UTF8_LEAD},
+        {SAMPLE_OUT_NAME_OFF, (uint8_t)BAD_UTF8_CONTINUATION},
+        {SAMPLE_SPRITE_NAME_OFF, (uint8_t)BAD_UTF8_LEAD},
+    };
+    for (size_t c = 0; c < sizeof cases / sizeof cases[0]; c++) {
+        size_t len = 0;
+        uint8_t *bytes = encode_sample(&len);
+        bytes[cases[c].offset] = cases[c].byte;
+        tp_build_proto_request out;
+        tp_error err = {{0}};
+        TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_UTF8, tp_build_proto_decode_request(bytes, len, &out, &err));
+        free(bytes);
+    }
+
+    /* Both response text fields, one at a time. */
+    static const uint8_t bad[] = {'x', (uint8_t)BAD_UTF8_LEAD, 'y'};
+    for (int field = 0; field < 2; field++) {
+        size_t len = 0;
+        uint8_t *bytes = field == 0 ? build_response_frame(bad, (uint32_t)sizeof bad, "", 0U, &len)
+                                    : build_response_frame("a.ntpack", 8U, bad, (uint32_t)sizeof bad, &len);
+        tp_build_proto_response out;
+        tp_error err = {{0}};
+        TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_UTF8, tp_build_proto_decode_response(bytes, len, &out, &err));
+        free(bytes);
+    }
+}
+
+/* A text field's length travels in the head, so an embedded NUL is a framing
+ * fault: the C string the decoder would hand out ends before the field does. */
+void test_decode_rejects_embedded_nul_text_fields(void) {
+    const size_t offsets[] = {SAMPLE_ATLAS_NAME_OFF, SAMPLE_OUT_NAME_OFF, SAMPLE_SPRITE_NAME_OFF};
+    for (size_t c = 0; c < sizeof offsets / sizeof offsets[0]; c++) {
+        size_t len = 0;
+        uint8_t *bytes = encode_sample(&len);
+        bytes[offsets[c]] = 0U;
+        tp_build_proto_request out;
+        tp_error err = {{0}};
+        TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_ARGUMENT, tp_build_proto_decode_request(bytes, len, &out, &err));
+        free(bytes);
+    }
+
+    static const uint8_t embedded[] = {'a', 0U, 'b'};
+    for (int field = 0; field < 2; field++) {
+        size_t len = 0;
+        uint8_t *bytes = field == 0 ? build_response_frame(embedded, (uint32_t)sizeof embedded, "", 0U, &len)
+                                    : build_response_frame("a.ntpack", 8U, embedded, (uint32_t)sizeof embedded, &len);
+        tp_build_proto_response out;
+        tp_error err = {{0}};
+        TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_ARGUMENT, tp_build_proto_decode_response(bytes, len, &out, &err));
+        free(bytes);
+    }
+}
+
+/* The cap is checked before the field is read, so an over-cap declared length
+ * never reaches the payload cursor. Atlas and sprite names are covered by
+ * test_fail_closed_decode_name_len_over_cap; this pins the remaining three. */
+void test_decode_rejects_over_cap_text_fields(void) {
+    size_t len = 0;
+    uint8_t *bytes = encode_sample(&len);
+    put_u32_le(bytes + REQ_OUT_NAME_LEN_OFF, TP_BUILD_PROTO_MAX_NAME_BYTES + 1U);
+    tp_build_proto_request req_out;
+    tp_error err = {{0}};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_ARGUMENT, tp_build_proto_decode_request(bytes, len, &req_out, &err));
+    free(bytes);
+
+    for (int field = 0; field < 2; field++) {
+        size_t rlen = 0;
+        uint8_t *rbytes = build_response_frame("a.ntpack", 8U, "", 0U, &rlen);
+        put_u32_le(rbytes + (field == 0 ? RESP_ARTIFACT_LEN_OFF : RESP_MESSAGE_LEN_OFF),
+                   TP_BUILD_PROTO_MAX_NAME_BYTES + 1U);
+        tp_build_proto_response resp_out;
+        TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_ARGUMENT,
+                              tp_build_proto_decode_response(rbytes, rlen, &resp_out, &err));
+        free(rbytes);
+    }
+}
+
+/* The request encoder runs in the host, where a malformed name is actionable, so
+ * it applies the same admission rather than shipping the field to the child. */
+void test_encode_rejects_invalid_utf8_request_text(void) {
+    static const char bad_name[] = {'b', (char)BAD_UTF8_LEAD, (char)BAD_UTF8_CONTINUATION, '\0'};
+    static uint8_t px[2 * 2 * 4];
+    for (int which = 0; which < 3; which++) {
+        tp_build_proto_sprite sprite = {.name = which == 2 ? bad_name : "s", .width = 2, .height = 2,
+                                        .origin_x = 0.5F, .origin_y = 0.5F, .rgba = px};
+        tp_build_proto_request req = {
+            .max_size = 256,
+            .pixels_per_unit = 1.0F,
+            .atlas_name = which == 0 ? bad_name : "a",
+            .out_name = which == 1 ? bad_name : "a.ntpack",
+            .sprites = &sprite,
+            .sprite_count = 1,
+        };
+        uint8_t *bytes = NULL;
+        size_t len = 0;
+        tp_error err = {{0}};
+        TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_UTF8, tp_build_proto_encode_request(&req, &bytes, &len, &err));
+        TEST_ASSERT_NULL(bytes);
+    }
+}
+
+/* The property this admission exists for. The worker child still emits its reply
+ * (that is its only channel home), the host refuses the malformed field at the
+ * INNER boundary and hands out nothing, and the terminal frame the host must
+ * still send therefore always encodes. */
+void test_bad_inner_string_never_refuses_outer_terminal(void) {
+    static const char bad_message[] = {'b', 'u', 'i', 'l', 'd', ' ', (char)BAD_UTF8_LEAD,
+                                       (char)0xAF, ' ', 'f', 'a', 'i', 'l', '\0'};
+    tp_build_proto_response resp = {
+        .status = TP_STATUS_BUILDER_FAILED, .builder_code = 3, .artifact_name = "", .message = bad_message};
+    uint8_t *bytes = NULL;
+    size_t len = 0;
+    tp_error err = {{0}};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_build_proto_encode_response(&resp, &bytes, &len, &err));
+
+    tp_build_proto_response decoded;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_UTF8, tp_build_proto_decode_response(bytes, len, &decoded, &err));
+    TEST_ASSERT_NULL(decoded.artifact_name);
+    TEST_ASSERT_NULL(decoded.message);
+    free(bytes);
+
+    /* The host now carries the decoder's own diagnostic, and the outer codec --
+     * which admits text by the same rules -- accepts the terminal frame. */
+    tp_job_worker_proto_response terminal;
+    memset(&terminal, 0, sizeof terminal);
+    terminal.kind = TP_SESSION_JOB_PACK;
+    terminal.request_id = 1U;
+    terminal.state = TP_SESSION_JOB_FAILED;
+    terminal.status = TP_STATUS_BUILDER_FAILED;
+    terminal.elapsed_ms = 1.0;
+    terminal.error = err;
+    uint8_t *frame = NULL;
+    size_t frame_len = 0;
+    tp_error outer_err = {{0}};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_OK,
+                                  tp_job_worker_proto_encode_response(&terminal, &frame, &frame_len, &outer_err),
+                                  outer_err.msg);
+    TEST_ASSERT_NOT_NULL(frame);
+    free(frame);
+
+    /* Contrast: let the malformed string through and the outer codec refuses the
+     * WHOLE terminal frame -- exactly the poisoning the inner boundary stops. */
+    (void)tp_error_set(&terminal.error, TP_STATUS_BUILDER_FAILED, "%s", bad_message);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_UTF8,
+                          tp_job_worker_proto_encode_response(&terminal, &frame, &frame_len, &outer_err));
+    TEST_ASSERT_NULL(frame);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_request_roundtrip_multi_sprite);
@@ -399,5 +600,10 @@ int main(void) {
     RUN_TEST(test_fail_closed_trailing_payload_bytes);
     RUN_TEST(test_fail_closed_decode_name_len_over_cap);
     RUN_TEST(test_fail_closed_decode_sprite_count_over_cap);
+    RUN_TEST(test_decode_rejects_invalid_utf8_text_fields);
+    RUN_TEST(test_decode_rejects_embedded_nul_text_fields);
+    RUN_TEST(test_decode_rejects_over_cap_text_fields);
+    RUN_TEST(test_encode_rejects_invalid_utf8_request_text);
+    RUN_TEST(test_bad_inner_string_never_refuses_outer_terminal);
     return UNITY_END();
 }

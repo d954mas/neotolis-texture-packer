@@ -10,8 +10,8 @@
 #include "tp_core/tp_arena.h"
 #include "tp_core/tp_image.h"
 #include "tp_core/tp_model.h"
-#include "tp_core/tp_name_map.h"
-#include "tp_core/tp_pack_read.h"
+#include "tp_name_map.h"
+#include "tp_pack_read.h"
 #include "tp_core/tp_scan.h"
 #include "tp_image_priv.h"
 #include "tp_pack_constraints_internal.h"
@@ -453,6 +453,7 @@ static tp_status preflight_sprite_pixels(const tp_pack_settings *settings,
 }
 
 static tp_status load_path_images(const tp_pack_settings *settings,
+                                  const tp_cancel_token *cancel,
                                   tp_pack_image_observer observer,
                                   void *observer_ctx,
                                   tp_image_rgba8 **out_images,
@@ -489,6 +490,15 @@ static tp_status load_path_images(const tp_pack_settings *settings,
         }
     }
     for (int i = 0; i < settings->sprite_count; i++) {
+        /* Decoding a large atlas is the longest uninterruptible stretch of a
+         * pack, so honour cancellation BETWEEN images: without this the caller's
+         * cancel could only take effect once every source had been decoded. */
+        if (tp_cancel_requested(cancel)) {
+            free(area_entries);
+            free_loaded_images(images, settings->sprite_count);
+            return tp_error_set(err, TP_STATUS_CANCELLED,
+                                "tp_pack: cancelled while decoding sources");
+        }
         const tp_pack_sprite_desc *sprite = &settings->sprites[i];
         const uint8_t *pixels = sprite->rgba;
         int width = sprite->w;
@@ -554,21 +564,68 @@ static tp_status load_path_images(const tp_pack_settings *settings,
 
 tp_status tp_pack(const tp_pack_settings *settings, struct tp_arena *arena, struct tp_result **out_result,
                   tp_error *err) {
-    return tp_pack_cancellable(settings, arena, out_result, NULL, NULL, err);
+    return tp_pack_cancellable(settings, arena, out_result, NULL, err);
 }
 
 tp_status tp_pack_cancellable(const tp_pack_settings *settings, struct tp_arena *arena,
-                              struct tp_result **out_result, tp_pack_cancel_poll cancel_poll,
-                              void *cancel_ctx, tp_error *err) {
-    return tp_pack_cancellable_observed(settings, arena, out_result, cancel_poll,
-                                        cancel_ctx, NULL, NULL, err);
+                              struct tp_result **out_result,
+                              const tp_cancel_token *cancel, tp_error *err) {
+    return tp_pack_cancellable_observed(settings, arena, out_result, cancel,
+                                        NULL, NULL, err);
+}
+
+tp_status tp_pack_produce_observed(const tp_pack_settings *settings,
+                                   char *out_path, size_t out_path_cap,
+                                   const tp_cancel_token *cancel,
+                                   tp_pack_image_observer observer,
+                                   void *observer_ctx, tp_error *err) {
+    if (out_path && out_path_cap > 0U) {
+        out_path[0] = '\0';
+    }
+    /* 512 mirrors NtBuilderContext.output_path; a smaller buffer could silently
+     * truncate a destination the builder would then fail to open. */
+    if (!out_path || out_path_cap < 512U) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "tp_pack: produce requires a 512-byte path buffer");
+    }
+
+    tp_status st = validate_settings(settings, err);
+    if (st != TP_STATUS_OK) {
+        return st;
+    }
+
+    int n = snprintf(out_path, out_path_cap, "%s/%s.ntpack", settings->work_dir, settings->atlas_name);
+    if (n < 0 || (size_t)n >= out_path_cap) {
+        out_path[0] = '\0';
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "tp_pack: work_dir + atlas_name path too long");
+    }
+
+    /* Decode path sources to canonical RGBA8 and run the page-area preflight in
+     * the parent (the worker boundary owns UTF-8 reads + validation, decision
+     * 0018); the driver then packs from raw pixels only. */
+    tp_image_rgba8 *path_images = NULL;
+    st = load_path_images(settings, cancel, observer, observer_ctx,
+                          &path_images, err);
+    if (st != TP_STATUS_OK) {
+        out_path[0] = '\0';
+        return st;
+    }
+
+    /* The worker consumes `path_images` (frees them on every path). It packs in a
+     * private child process, stages an ASCII artifact, and atomically publishes to
+     * `out_path` (Unicode / long paths included). Cancellation kills the worker,
+     * cleans staging, publishes nothing, and returns TP_STATUS_CANCELLED. */
+    st = tp_build_worker_run_cancellable(settings, path_images, out_path, cancel, err);
+    if (st != TP_STATUS_OK) {
+        out_path[0] = '\0';
+    }
+    return st;
 }
 
 tp_status tp_pack_cancellable_observed(const tp_pack_settings *settings,
                                        struct tp_arena *arena,
                                        struct tp_result **out_result,
-                                       tp_pack_cancel_poll cancel_poll,
-                                       void *cancel_ctx,
+                                       const tp_cancel_token *cancel,
                                        tp_pack_image_observer observer,
                                        void *observer_ctx, tp_error *err) {
     if (out_result) {
@@ -578,48 +635,21 @@ tp_status tp_pack_cancellable_observed(const tp_pack_settings *settings,
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "tp_pack: arena and out_result are required");
     }
 
-    tp_status st = validate_settings(settings, err);
-    if (st != TP_STATUS_OK) {
-        return st;
-    }
-
-    char path[512]; /* NtBuilderContext.output_path is char[512]; avoid silent truncation */
-    int n = snprintf(path, sizeof path, "%s/%s.ntpack", settings->work_dir, settings->atlas_name);
-    if (n < 0 || (size_t)n >= sizeof path) {
-        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "tp_pack: work_dir + atlas_name path too long");
-    }
-
+    /* Build the reverse name map BEFORE packing. It depends only on the settings,
+     * so a duplicate/invalid name is a cheap up-front rejection -- discovering it
+     * after tp_pack_produce_observed threw away a full pack of work. */
     tp_name_map *names = NULL;
-    st = build_name_map(settings, &names, err);
+    tp_status st = build_name_map(settings, &names, err);
     if (st != TP_STATUS_OK) {
         return st;
     }
 
-    /* Decode path sources to canonical RGBA8 and run the page-area preflight in
-     * the parent (the worker boundary owns UTF-8 reads + validation, decision
-     * 0018); the driver then packs from raw pixels only. */
-    tp_image_rgba8 *path_images = NULL;
-    st = load_path_images(settings, observer, observer_ctx, &path_images, err);
+    char path[512];
+    st = tp_pack_produce_observed(settings, path, sizeof path, cancel, observer,
+                                  observer_ctx, err);
     if (st != TP_STATUS_OK) {
         tp_name_map_destroy(names);
-        return st;
-    }
-
-    /* The worker consumes `path_images` (frees them on every path). It packs in a
-     * private child process, stages an ASCII artifact, and atomically publishes to
-     * `path` (Unicode / long paths included). Cancellation kills the worker, cleans
-     * staging, publishes nothing, and returns OK with no artifact -- there is
-     * nothing to read back, so short-circuit to a benign cancelled result. */
-    tp_build_worker_opts wopts;
-    memset(&wopts, 0, sizeof wopts);
-    bool cancelled = false;
-    wopts.cancel_poll = cancel_poll;
-    wopts.cancel_ctx = cancel_ctx;
-    wopts.out_cancelled = &cancelled;
-    st = tp_build_worker_run_opts(settings, path_images, path, &wopts, err);
-    if (st != TP_STATUS_OK || cancelled) {
-        tp_name_map_destroy(names);
-        return st; /* on cancel st is TP_STATUS_OK and *out_result stays NULL */
+        return st; /* cancellation is TP_STATUS_CANCELLED; *out_result stays NULL */
     }
 
     tp_result **results = NULL;

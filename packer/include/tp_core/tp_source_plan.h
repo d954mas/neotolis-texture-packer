@@ -1,7 +1,7 @@
 #ifndef TP_CORE_TP_SOURCE_PLAN_H
 #define TP_CORE_TP_SOURCE_PLAN_H
 
-#include "tp_core/tp_session.h"
+#include "tp_core/tp_session_snapshot_query.h"
 
 #ifdef __cplusplus
 extern "C" {

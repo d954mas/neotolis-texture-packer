@@ -64,6 +64,7 @@ tp_status tp_project_validate_sprite_pack_overrides(
     return TP_STATUS_OK;
 }
 
+#ifdef TP_ENABLE_TEST_SEAMS
 static _Thread_local bool s_measure_id_validation;
 static _Thread_local size_t s_id_validation_probes;
 
@@ -76,6 +77,7 @@ size_t tp_project__test_id_validation_work_take(void) {
     s_measure_id_validation = false;
     return s_id_validation_probes;
 }
+#endif
 
 typedef struct tp_identity_slot {
     tp_id128 *model;
@@ -160,8 +162,10 @@ static tp_status ids_are_unique(const tp_identity_slot *ids, size_t count,
         return tp_error_set(error, TP_STATUS_OOM,
                             "assigning project ids: out of memory");
     }
+#ifdef TP_ENABLE_TEST_SEAMS
     tp_project__test_note_id_resources(count * sizeof *ids,
                                        capacity * sizeof *table);
+#endif
     tp_status status = TP_STATUS_OK;
     for (size_t i = 0U; i < count && status == TP_STATUS_OK; i++) {
         if (tp_id128_is_nil(ids[i].value)) {
@@ -172,9 +176,11 @@ static tp_status ids_are_unique(const tp_identity_slot *ids, size_t count,
         size_t bucket = (size_t)tp_id128_bucket(ids[i].value) & (capacity - 1U);
         bool inserted = false;
         for (size_t probe = 0U; probe < capacity; probe++) {
+#ifdef TP_ENABLE_TEST_SEAMS
             if (s_measure_id_validation) {
                 s_id_validation_probes++;
             }
+#endif
             if (table[bucket] == 0U) {
                 table[bucket] = i + 1U;
                 inserted = true;
@@ -483,12 +489,20 @@ static bool source_index_contains(const tp_source_id_index *index,
     return false;
 }
 
+/* FNV-1a/64 over (source ref, src key). The 0xFF separator makes the field
+ * boundary unforgeable -- it is not a legal UTF-8 byte, so no src key can
+ * contain one and no two distinct (ref, key) pairs can fold to the same byte
+ * stream. Process-local bucket index only: validate_unique_sprites confirms
+ * every hit with a full ref + key comparison, so the value is never an
+ * identity and never leaves this process. */
 static uint64_t reference_hash(tp_id128 source_ref, const char *src_key) {
-    uint64_t hash = 1469598103934665603ULL;
+    uint64_t hash = 14695981039346656037ULL;
     for (size_t i = 0U; i < sizeof source_ref.bytes; i++) {
         hash ^= (uint64_t)source_ref.bytes[i];
         hash *= 1099511628211ULL;
     }
+    hash ^= 0xFFULL;
+    hash *= 1099511628211ULL;
     for (const unsigned char *p = (const unsigned char *)src_key; *p; p++) {
         hash ^= (uint64_t)*p;
         hash *= 1099511628211ULL;

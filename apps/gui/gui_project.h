@@ -3,20 +3,21 @@
 
 /* GUI projection over one core-owned tp_session. The session is the sole mutable
  * project/history/idempotency/recovery owner; GUI code keeps only immutable snapshots,
- * the display path/name, pending gesture intent, and derived presentation state.
+ * the display path/name, feature-local draft/gesture state, and derived presentation state.
  * The two independently observed state axes are:
  *   - dirty        : session-owned semantic identity vs the last saved baseline, so
  *                    undoing back to the saved state clears it. Save/Open/New rebaseline it.
- *                    Menu-bar dot. (A buffered-but-uncommitted gesture is NOT yet in the identity;
- *                    the destructive gates flush the pending buffer BEFORE checking dirty.)
+ *                    Menu-bar dot. (An active draft is NOT yet in the identity; destructive
+ *                    gates first ask the feature owner to submit or reject it.)
  *   - preview_stale : model changed since the last successful pack. Since in-process packing is
  *                    blocked (engine #282), nothing clears it this round.
  *
  * Every mutation becomes typed operation intent and commits atomically through tp_session;
  * one accepted transaction captures one semantic diff and one undo step. Undo/Redo also
- * run through tp_session, and cached snapshots are invalidated after each transition.
- * Value edits (slider/field/etc.) coalesce through gui_project's ONE pending transaction and commit
- * per GESTURE (gui_project_flush_pending), so one interaction == one undo step (decision 0015).
+ * run through tp_session. One gui_session_client atomically observes and frame-pins the
+ * immutable state consumed by presentation.
+ * Value edits use one view-local draft reducer and build a narrow typed
+ * operation only at submit.
  *
  * Refresh (F4) is deliberately NOT a model mutation: rescanning disk sources changes what is
  * DISPLAYED/packed, not the PROJECT MODEL (sources are paths). So Refresh calls
@@ -30,7 +31,11 @@
 #include "tp_core/tp_project.h"
 #include "tp_core/tp_operation.h"
 #include "tp_core/tp_recovery.h"
-#include "tp_core/tp_session.h"
+#include "tp_core/tp_job.h"
+#include "tp_core/tp_session_snapshot_query.h"
+#include "gui_project_view.h"
+#include "gui_session_client.h"
+#include "gui_host_queue.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -39,38 +44,26 @@ extern "C" {
 /* Result of an add-source attempt (the GUI surfaces "already added" distinctly). */
 typedef enum { GUI_ADD_FAILED = 0, GUI_ADD_ADDED, GUI_ADD_DUPLICATE } gui_add_status;
 
-/* Per-sprite packing-override field selector (region-panel "Packing overrides"). */
-typedef enum {
-    GUI_SPRITE_OV_SHAPE = 0,
-    GUI_SPRITE_OV_ROTATE,
-    GUI_SPRITE_OV_MAXVERT,
-    GUI_SPRITE_OV_MARGIN,
-    GUI_SPRITE_OV_EXTRUDE
-} gui_sprite_ov;
+typedef enum gui_project_lifecycle_kind {
+    GUI_PROJECT_LIFECYCLE_NONE = 0,
+    GUI_PROJECT_LIFECYCLE_NEW,
+    GUI_PROJECT_LIFECYCLE_OPEN,
+    GUI_PROJECT_LIFECYCLE_SHUTDOWN
+} gui_project_lifecycle_kind;
 
-typedef struct gui_sprite_ref {
-    tp_id128 atlas_id;
-    tp_id128 source_id;
-    const char *source_key;
-    int64_t expected_revision;
-} gui_sprite_ref;
+typedef enum gui_project_lifecycle_state {
+    GUI_PROJECT_LIFECYCLE_CLOSED = 0,
+    GUI_PROJECT_LIFECYCLE_OPEN_IDLE,
+    GUI_PROJECT_LIFECYCLE_DRAINING
+} gui_project_lifecycle_state;
 
-typedef struct gui_animation_ref {
-    tp_id128 atlas_id;
-    tp_id128 animation_id;
-    int64_t expected_revision;
-} gui_animation_ref;
+typedef bool (*gui_project_controller_attached_fn)(
+    void *context);
 
-typedef struct gui_target_ref {
-    tp_id128 atlas_id;
-    tp_id128 target_id;
-    int64_t expected_revision;
-} gui_target_ref;
-
-bool gui_project_animation_ref_at(int atlas_index, int animation_index,
-                                  gui_animation_ref *out);
-bool gui_project_target_ref_at(int atlas_index, int target_index,
-                               gui_target_ref *out);
+typedef struct gui_project_controller_status_port {
+    gui_project_controller_attached_fn attached;
+    void *context;
+} gui_project_controller_status_port;
 
 /* Creates the initial fresh in-memory project (one default atlas, no path, clean). Crash recovery is
  * collected and resolved separately through the R6 APIs below; startup never adopts an orphan live. */
@@ -78,9 +71,6 @@ void gui_project_init(void);
 /* Tears the model down and, when recovery is enabled, deletes the recovery slot (clean-exit reset:
  * a cleanly-exited session leaves NO journal to recover). */
 void gui_project_shutdown(void);
-/* Called only after the user explicitly confirms Exit -> Discard. Without it, shutdown preserves a
- * dirty recovery journal so a raw window close remains recoverable. */
-void gui_project_discard_recovery_on_shutdown(void);
 
 /* Require recovery admission for every subsequently created GUI session. The
  * interactive host calls this once before gui_project_init; tests may leave
@@ -95,9 +85,6 @@ void gui_project_enable_recovery(const char *root);
  * one-shot warning through gui_project_take_recovery_setup_notice(). */
 void gui_project_note_recovery_setup_failure(const char *reason);
 
-/* UI buffers and loops follow the recovery core's bounded value contract. */
-#define GUI_RECOVERY_MAX_CANDIDATES TP_RECOVERY_MAX_CANDIDATES
-#define GUI_RECOVERY_PATH_CAP TP_IDENTITY_PATH_MAX
 /* Drains the one-shot "crash recovery is unavailable" notice. The text distinguishes another live
  * owner from path/directory/lock setup failures. */
 bool gui_project_take_recovery_setup_notice(char *out, size_t cap);
@@ -105,28 +92,6 @@ bool gui_project_take_recovery_setup_notice(char *out, size_t cap);
 /* Drains the one-shot warning raised when Save published the file but could
  * not confirm the containing-directory durability barrier. */
 bool gui_project_take_save_notice(char *out, size_t cap);
-
-/* Startup-modal choices mapped onto the core recovery action vocabulary. */
-typedef enum {
-    GUI_RECOVERY_DISCARD = 0,   /* delete the journal; the permanent lock file remains */
-    GUI_RECOVERY_SAVE_ORIGINAL, /* atomically save the recovered state over its ORIGINAL file (no backup; atomic replace) */
-    GUI_RECOVERY_SAVE_AS        /* save the recovered state to a NEW target file (the original is untouched) */
-} gui_recovery_action;
-
-/* The modal consumes the core-owned recovery value contract directly. */
-typedef tp_recovery_candidate gui_recovery_entry;
-typedef tp_recovery_candidates gui_recovery_list;
-
-/* Persistent projection of the core recovery-health state. Unlike the
- * operation-rejection channel, querying this notice never drains it. */
-typedef struct gui_recovery_notice {
-    const char *notice_id;
-    uint64_t generation;
-    tp_status status;
-    bool has_last_durable_revision;
-    int64_t last_durable_revision;
-    char message[256];
-} gui_recovery_notice;
 
 /* Returns true while crash recovery is degraded. A successful healing/rebind
  * publishes the cleared state by returning false on subsequent queries. */
@@ -141,15 +106,64 @@ tp_status gui_recovery_resolve_entry(const gui_recovery_entry *entry, gui_recove
                                      const char *target_path, char *err_out, size_t err_cap);
 
 /* --- accessors --- */
-/* Cached immutable read view. Invalidated only at model-change chokepoints. */
+/* Immutable read view owned and frame-pinned by gui_session_client. */
 const tp_session_snapshot *gui_project_snapshot(void);
-/* Changes whenever the cached snapshot object is destroyed, including Save
- * paths whose model/source generations remain unchanged. Borrowing GUI caches
- * include this token in their lifetime key. */
+/* Changes whenever the client publishes or releases a model snapshot.
+ * Borrowing GUI caches include this token in their lifetime key. */
 uint64_t gui_project_snapshot_lifetime_generation(void);
-/* Narrow orchestration seam for the derived Pack / side-effect Export job
- * adapter. The session remains opaque and owns the one active typed handle. */
-tp_session *gui_project_session_for_jobs(void);
+/* Coalesced source-runtime observation component. Runtime-only changes do not
+ * replace or synthesize a model snapshot. */
+uint64_t gui_project_source_runtime_generation(void);
+/* Current composite input identity from the same client observation cut:
+ * model state is read from the immutable snapshot and runtime state from the
+ * typed source-runtime token. */
+bool gui_project_observed_input_token(
+    tp_session_input_token *out);
+/* Host-frame observation seam. begin atomically observes/reduces and pins the
+ * immutable snapshot; end releases the pin after render/present. */
+tp_status gui_project_frame_begin(tp_error *err);
+void gui_project_frame_end(void);
+bool gui_project_frame_is_pinned(void);
+tp_status gui_project_register_observation_reducer(
+    gui_session_client_reducer_fn reduce, void *context, tp_error *err);
+bool gui_project_submit_receipt_query(
+    const char transaction_id[33],
+    gui_session_submit_identity identity,
+    gui_session_submit_terminal *out);
+/* Host-thread admission facade. Request payloads are copied on enqueue; the
+ * queue never exposes or retains the mutable session. */
+tp_status gui_project_job_enqueue_pack(
+    tp_id128 atlas_id, const char *work_dir,
+    const char *preview_exporter_id, tp_error *err);
+tp_status gui_project_job_enqueue_export(
+    tp_id128 atlas_id, const char *work_dir, tp_error *err);
+tp_status gui_project_job_enqueue_cancel(tp_error *err);
+tp_status gui_project_lifecycle_begin_new(tp_error *err);
+tp_status gui_project_lifecycle_begin_open(
+    const char *path, tp_error *err);
+tp_status gui_project_lifecycle_begin_shutdown(
+    bool discard_recovery, tp_error *err);
+tp_status gui_project_lifecycle_pump(
+    gui_project_lifecycle_kind *completed,
+    tp_error *err);
+/* Non-fallible forced teardown for the host's exhausted shutdown budget: the
+ * negotiated shutdown is bounded, so the exit path needs a terminal answer that
+ * cannot itself fail. It discards the host owner's leases and staged work, kills
+ * the worker through the ordinary session teardown, and ESTABLISHES the CLOSED
+ * lifecycle that gui_project_shutdown asserts. Nothing else may call it: an
+ * interactive New/Open/Close always negotiates. */
+void gui_project_lifecycle_force_close(void);
+gui_project_lifecycle_state
+gui_project_lifecycle_state_query(void);
+/* Host-owner ingress for the one staged job completion. The queue's typed
+ * completion IS the contract; the caller destroys it with
+ * gui_host_completion_destroy. */
+bool gui_project_host_take_completion(
+    gui_host_completion *out);
+bool gui_project_job_busy(void);
+tp_session_job_kind gui_project_job_active_kind(void);
+tp_session_job_observed_state gui_project_job_observed_state(void);
+uint64_t gui_project_session_instance_generation(void);
 uint64_t gui_project_snapshot_model_generation(void);
 tp_status gui_project_snapshot_serialize(char **out, size_t *out_len,
                                          tp_error *err);
@@ -168,41 +182,28 @@ void gui_project_mark_packed(void);
 /* Marks the preview stale WITHOUT dirtying the project (Refresh: disk changed, model
  * did not). */
 void gui_project_mark_stale(void);
-/* Advances the coalescing clock (seconds) each frame -- feeds the gated fallback flush only. */
-void gui_project_tick(double now_seconds);
-
-/* Commit the ONE buffered coalescable gesture NOW (no-op when nothing is buffered): the gesture-end
- * flush called at every commit boundary (save/save-as/new/open/exit/undo/redo/pack/export and before
- * each dirty gate) and by the view layer at a widget's gesture boundary. Committing folds the whole
- * gesture into ONE undo step. Returns FALSE iff a buffered gesture existed and its transaction was
- * rejected; callers that then persist, discard, or change history MUST stop rather than act on an
- * older committed state. Recovery degradation does not make a committed edit fail. Returns true
- * when nothing was pending, it was a no-op, or it committed successfully. */
-bool gui_project_flush_pending(void);
-/* FALLBACK ONLY: commit a buffered gesture that never got a release/blur/discrete boundary, once the
- * 0.30 s window has elapsed. The caller MUST gate this on no active gesture so it can never split a
- * live drag or a mid-typing field. */
-void gui_project_flush_elapsed(void);
-
-/* EFFECTIVE slice9 peek for the on-canvas guides (#5): true + fills out_lrtb[4] with the buffered
- * slice9 when a slice9 gesture is buffered for this atlas+sprite (else false -> read the committed
- * record). Lets the guides track typing this frame instead of freezing at the committed value while
- * the gesture buffers. Read-only (no commit). */
-bool gui_project_peek_pending_slice9(const gui_sprite_ref *sprite, int out_lrtb[4]);
-
 /* Monotonic model-edit counter: bumped once per REAL model mutation (the touch choke point, after the
  * memcmp dedup). Lets a view cheaply detect "the project changed since I snapshotted it" without
  * re-serializing every frame -- the export-target preview uses it to drop a stale preview on an edit. */
 
 /* --- mutation wrappers (all admit typed operations through tp_session) --- */
-/* The remove wrappers return TRUE iff the removal actually committed (fix3 [0]): false on a
+typedef struct gui_project_create_result {
+    bool committed;
+    bool observation_pending;
+    tp_id128 created_id;
+    /* Resolved only from the common observed snapshot; -1 while its exact
+     * committed echo is pending. */
+    int visible_index;
+} gui_project_create_result;
+/* Create wrappers return a stable created identity plus an observed index when
+ * the exact common echo is already available. The remove wrappers return TRUE
+ * iff the removal actually committed (fix3 [0]): false on a
  * failed pending flush, an invalid index, or a commit reject -- so a deferred handler shows
  * "Removed X (Ctrl+Z)" + resets selection ONLY on a real removal, never a false success. */
-int gui_project_add_atlas(void);                          /* returns new atlas index, or -1 */
+gui_project_create_result gui_project_add_atlas(void);
 bool gui_project_remove_atlas(tp_id128 atlas_id, int64_t expected_revision); /* true iff removed */
-gui_add_status gui_project_add_source(tp_id128 atlas_id, int64_t expected_revision,
-                                      const char *path); /* kind=folder */
-/* Kind-aware variant (schema v3): the "Add Files" dialog records TP_SOURCE_KIND_FILE. */
+/* Adds ONE source with an explicit kind (schema v3): the "Add Files" dialog
+ * records TP_SOURCE_KIND_FILE, the folder picker TP_SOURCE_KIND_FOLDER. */
 gui_add_status gui_project_add_source_kind(tp_id128 atlas_id, int64_t expected_revision,
                                            const char *path, tp_source_kind kind);
 /* Batch-add a multi-select as ONE atomic transaction (one undo step). Skips empties + duplicates (in the
@@ -216,61 +217,79 @@ bool gui_project_add_sources(tp_id128 atlas_id, int64_t expected_revision,
 bool gui_project_remove_source(tp_id128 atlas_id, tp_id128 source_id,
                                int64_t expected_revision); /* true iff removed */
 
-/* Atlas-family intents carry structural identity + the revision captured with the
+/* Every intent carries structural identity + the revision captured with the
  * immutable read view. The session is the sole admission/validation owner. */
-bool gui_project_set_atlas_name(tp_id128 atlas_id, int64_t expected_revision, const char *name);
-tp_status gui_project_copy_atlas_name(tp_id128 atlas_id, char *out, size_t capacity,
-                                      tp_error *err);
-/* Sets/clears a sprite's rename export-name override (empty/NULL clears it). */
-bool gui_project_set_sprite_rename(const gui_sprite_ref *sprite, const char *rename);
 
-/* The 10 atlas packing knobs, as a closed selector for gui_project_set_atlas_setting.
- * Each maps to one tp_atlas_field_mask bit; the panel edits ONE knob per
- * gesture, so the op carries a single-bit mask (byte-identical to the old in-place write). */
-typedef enum {
-    GUI_ATLAS_MAX_SIZE = 0,
-    GUI_ATLAS_PADDING,
-    GUI_ATLAS_MARGIN,
-    GUI_ATLAS_EXTRUDE,
-    GUI_ATLAS_ALPHA_THRESHOLD,
-    GUI_ATLAS_MAX_VERTICES,
-    GUI_ATLAS_SHAPE,
-    GUI_ATLAS_ALLOW_TRANSFORM,
-    GUI_ATLAS_POWER_OF_TWO,
-    GUI_ATLAS_PIXELS_PER_UNIT
-} gui_atlas_field;
+/* Address of an identified TEXT submit. `atlas_id` is always the owning atlas;
+ * `entity_id` names the animation or export target; `source_id`/`source_key`
+ * name the sprite. Unused members are nil/NULL. */
+typedef struct gui_text_ref {
+    tp_id128 atlas_id;
+    tp_id128 entity_id;
+    tp_id128 source_id;
+    const char *source_key;
+    int64_t expected_revision;
+} gui_text_ref;
 
-/* Sets ONE atlas knob via an atlas.settings.set transaction. The int/bool knobs read
- * `ivalue` (bool as 0/1); pixels_per_unit reads `fvalue`. Value RANGES are core's now
- * (the op validates); the widget still parse-clamps. Returns true on commit. */
-bool gui_project_set_atlas_setting(tp_id128 atlas_id, int64_t expected_revision,
-                                   gui_atlas_field field, int ivalue, float fvalue);
+/* The one identified text submit: atlas.rename, animation.rename,
+ * sprite.name.set (an EMPTY value clears the rename), or target.set out-path.
+ * `value` is required: a NULL value is a structured INVALID_ARGUMENT, never a
+ * clear -- callers that mean "clear" pass "". */
+tp_status gui_project_submit_text(
+    tp_op_kind kind, const gui_text_ref *ref,
+    const char *value, gui_session_submit_identity identity,
+    const char transaction_id[33],
+    gui_session_submit_terminal *terminal, tp_error *err);
+
+/* Sets atlas knobs via an atlas.settings.set transaction. The caller supplies the
+ * built payload + presence mask; value RANGES are core's (the op validates) and the
+ * widget still parse-clamps. */
+tp_status gui_project_submit_atlas_settings(
+    tp_id128 atlas_id, int64_t expected_revision,
+    const tp_op_atlas_settings *settings,
+    gui_session_submit_identity identity,
+    const char transaction_id[33],
+    gui_session_submit_terminal *out_terminal,
+    tp_error *err);
 
 /* --- region-panel per-sprite overrides (sparse: a clear that leaves only defaults
  * drops the override entry, keeping byte-identical saves) --- */
-/* Sets ONE origin/pivot component (axis 0 = Pivot X, 1 = Pivot Y) via a coalescable
- * sprite.override.set. Component-keyed + read-modify-write INSIDE the setter (mirrors slice9): the
- * non-edited component is seeded from the current record AFTER the other axis's buffered edit flushes,
- * so editing X then Y never merges against a stale model (no lost edit). */
-bool gui_project_set_sprite_origin(const gui_sprite_ref *sprite, int axis, float value);
-bool gui_project_set_sprite_slice9(const gui_sprite_ref *sprite, int lrtb_index, int value);
-/* Per-sprite packing override; `value` == TP_PROJECT_OV_INHERIT clears it. */
-bool gui_project_set_sprite_override(const gui_sprite_ref *sprite, gui_sprite_ov which, int value);
+tp_status gui_project_submit_sprite_origin(
+    const gui_sprite_ref *sprite, int axis, float value,
+    gui_session_submit_identity identity,
+    const char transaction_id[33],
+    gui_session_submit_terminal *terminal, tp_error *err);
+tp_status gui_project_submit_sprite_slice9(
+    const gui_sprite_ref *sprite, int component, int value,
+    gui_session_submit_identity identity,
+    const char transaction_id[33],
+    gui_session_submit_terminal *terminal, tp_error *err);
+/* Sprite payload submit: the caller supplies the built sprite.settings.set
+ * payload + presence mask. Origin/slice9 keep their own entry points because the
+ * untouched sibling components are read from the LIVE snapshot here. */
+tp_status gui_project_submit_sprite_settings(
+    const gui_sprite_ref *sprite,
+    const tp_op_sprite_set *settings,
+    gui_session_submit_identity identity,
+    const char transaction_id[33],
+    gui_session_submit_terminal *terminal, tp_error *err);
 
 /* --- animations (ux.md §3.7b: explicit manual assembly only) --- */
 /* Appends an animation and fills it with `frames` (in the given order) as ONE undo entry. The id is
  * the first free of {base, base"2", base"3", ...}; a NULL/empty base auto-names "anim1"/"anim2"/...
- * `frames` may be NULL/0 for an empty animation. Returns the new animation index, or -1. */
-int gui_project_create_animation(tp_id128 atlas_id, int64_t expected_revision,
-                                 const char *base, const tp_op_sprite_ref *frames,
-                                 int frame_count);
+ * `frames` may be NULL/0 for an empty animation. */
+gui_project_create_result gui_project_create_animation(
+    tp_id128 atlas_id, int64_t expected_revision,
+    const char *base, const tp_op_sprite_ref *frames,
+    int frame_count);
 /* Removes the animation with `id`. Returns true iff removed (false on flush-abort/not-found). */
 bool gui_project_remove_animation(const gui_animation_ref *animation);
-/* Renames animation `anim_index`; fails on empty or a name already used by another animation. */
-bool gui_project_set_anim_id(const gui_animation_ref *animation, const char *new_id);
-bool gui_project_set_anim_fps(const gui_animation_ref *animation, float fps);
-bool gui_project_set_anim_playback(const gui_animation_ref *animation, int playback);
-bool gui_project_set_anim_flip(const gui_animation_ref *animation, bool flip_h, bool flip_v);
+tp_status gui_project_submit_animation_settings(
+    const gui_animation_ref *animation,
+    const tp_op_anim_settings *settings,
+    gui_session_submit_identity identity,
+    const char transaction_id[33],
+    gui_session_submit_terminal *terminal, tp_error *err);
 /* Appends `frames` (in order) to animation `anim_index` as ONE undo entry. */
 bool gui_project_anim_add_frames(const gui_animation_ref *animation,
                                  const tp_op_sprite_ref *frames, int count);
@@ -279,64 +298,57 @@ bool gui_project_anim_move_frame(const gui_animation_ref *animation, int frame_i
                                  int delta);
 
 /* --- export targets (region G, audit I1) --- */
-/* Appends a default json-neotolis target "out/<atlas>.<ext>"; returns its index or -1. */
-int gui_project_add_target(tp_id128 atlas_id, int64_t expected_revision);
+/* Appends a default json-neotolis target "out/<atlas>.<ext>". */
+gui_project_create_result gui_project_add_target(
+    tp_id128 atlas_id, int64_t expected_revision);
 bool gui_project_remove_target(const gui_target_ref *target);
-bool gui_project_set_target(const gui_target_ref *target, const char *exporter_id,
-                            const char *out_path, bool enabled);
-/* H/G3: COALESCABLE out-path-only setter (the path text field). Buffers under a per-target key so the
- * field's Enter/blur gesture-commit flushes the whole edit as ONE undo step; RMW-seeds exporter_id +
- * enabled from the committed record. Discrete target edits keep using gui_project_set_target (immediate). */
-bool gui_project_set_target_out_path(const gui_target_ref *target,
-                                     const char *out_path);
-/* H/G3: discrete target-field setters (IMMEDIATE, one undo step each). They flush any buffered out-path
- * gesture FIRST, then RMW-seed the un-edited fields from the NOW-committed record -- so a discrete
- * enabled/exporter edit made mid-typing never reverts the just-typed out_path (the hazard of re-sending a
- * stale committed out_path). Use these from the checkbox / exporter dropdown instead of gui_project_set_target. */
-bool gui_project_set_target_enabled(const gui_target_ref *target, bool enabled);
-bool gui_project_set_target_exporter(const gui_target_ref *target,
-                                     const char *exporter_id);
+bool gui_project_set_target_enabled(
+    const gui_target_ref *target, bool enabled);
+bool gui_project_set_target_exporter(
+    const gui_target_ref *target, const char *exporter_id);
 
 /* --- undo / redo (diff history) --- */
-bool gui_project_can_undo(void); /* true if a committed step OR a buffered gesture can be reverted */
+bool gui_project_can_undo(void); /* true when the session has a committed step */
 bool gui_project_can_redo(void);
 int gui_project_undo_depth(void); /* committed undoable steps from the session snapshot */
 int gui_project_redo_depth(void);
-/* Reverse/replay the most recent committed transaction through tp_session. A buffered gesture is
- * flushed to its own step first, so
- * Ctrl+Z reverts an in-flight edit. Sets stale, drops the display caches; selection re-clamp is the
- * caller's job. Returns false when there is nothing to undo/redo (or on a structured restore error). */
+/* Reverse/replay the most recent committed transaction through tp_session.
+ * Sets stale, drops display caches; selection re-clamp is the caller's job.
+ * Returns false when there is nothing to undo/redo or on structured error. */
 bool gui_project_undo(void);
 bool gui_project_redo(void);
 
 /* --- file operations (paths explicit; dialogs live in the UI layer) --- */
-/* Fresh empty project: replaces the current one, clears path + both bits. Returns false
- * (KEEPING the current project intact) only when creating/wrapping the fresh project OOMs
- * (never lose the open project on an allocation failure). */
-bool gui_project_new(void);
-/* Loads `path`; on failure fills err_out (from tp_error) and leaves the current project
- * intact. On success replaces it, sets path, clears dirty, marks preview stale. */
-tp_status gui_project_open(const char *path, char *err_out, size_t err_cap);
 /* Saves to the current path (must exist). Clears project_dirty. */
 tp_status gui_project_save(char *err_out, size_t err_cap);
+/* Read-only Save As feasibility check. Canonicalizes the destination, refreshes
+ * the observed session identity, and rejects an identity change while the
+ * host-owned controller status port reports an attached controller. It never
+ * submits or flushes a draft and performs no file write. */
+tp_status gui_project_save_as_preflight(
+    const char *path, char *err_out, size_t err_cap);
 /* Saves to `path`, remembers it, clears project_dirty. Promotes structural ids FIRST
  * and, on RNG failure, returns the error WITHOUT writing (never persists a nil-id file). */
 tp_status gui_project_save_as(const char *path, char *err_out, size_t err_cap);
 
-/* Drains a pending transaction REJECT recorded by a mutator whose op(s) core rejected
+void gui_project_set_controller_status_port(
+    gui_project_controller_status_port port);
+
+/* Drains a typed-submit REJECT recorded by a mutator whose op(s) core rejected
  * (out-of-range value / bad reference / OOM). The model is left byte-unchanged on a
  * reject; this surfaces the structured status to the status-bar soft-error channel.
  * Returns true once and copies the message into `out` (then clears it). */
 bool gui_project_take_op_error(char *out, size_t cap);
 
-/* Fills `out` with the reason the last flush's commit failed (fix3 [2]): the drained op-error, else a
- * NEUTRAL fallback that fits save + pack + the dirty gate. Consumes the op-error. NULL-safe. Shared by
- * every flush-failure abort path so they use one wording. */
-void gui_project_flush_error(char *out, size_t cap);
-
-#ifdef NTPACKER_GUI_SELFTEST
-/* Borrowed dev-seam access for gui_selftest.c only. */
+#if defined(NTPACKER_GUI_SELFTEST) || defined(TP_ENABLE_TEST_SEAMS)
+/* Borrowed test-only access for recovery and external-observer proofs. */
 tp_session *gui_project__test_session(void);
+#endif
+#ifdef TP_ENABLE_TEST_SEAMS
+void gui_project__test_fail_next_observe(void);
+void gui_project__test_fail_observes(unsigned int count);
+bool gui_project__test_host_has_staged_completion(void);
+uint64_t gui_project__test_open_call_count(void);
 #endif
 
 #ifdef __cplusplus

@@ -1,9 +1,10 @@
-#ifndef TP_CORE_SRC_TP_SB_H
-#define TP_CORE_SRC_TP_SB_H
+#ifndef TP_CORE_TP_SB_H
+#define TP_CORE_TP_SB_H
 
-/* Deterministic JSON string builder (2-space indent, LF, %.9g floats, sorted
- * keys). Header-only static inline so the exporter reuses these without a
- * separate TU. */
+/* The one deterministic JSON/text string builder for tp_core and its clients
+ * (2-space indent, LF, %.9g floats, sorted keys). Header-only static inline so
+ * every writer -- project file, exporters, operation/transaction encoders, CLI
+ * payloads -- reuses these without a separate TU. */
 
 #include <inttypes.h>
 #include <stdint.h>
@@ -11,6 +12,25 @@
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
+
+#include "tp_core/tp_utf8.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* Test-only allocation-failure seam, deliberately narrower than
+ * TP_ENABLE_TEST_SEAMS (same per-binary shape as the CLI's inspect/arena fault
+ * seams): only a TU compiled with TP_SB_ALLOC_FAULT_SEAM gains the check, and
+ * that TU's own binary supplies the predicate. tp_core and every shipping
+ * target are built without the macro, so a shipped build contains neither the
+ * branch nor an undefined symbol. It exists because tp_sb is header-only static
+ * inline: without it, a fault binary can only pre-poison the individual
+ * builders it can name, which silently narrows an "every allocation fails"
+ * fault to a handful of call sites. */
+#if defined(TP_SB_ALLOC_FAULT_SEAM)
+bool tp_sb_alloc_fault_active(void);
+#endif
 
 typedef struct tp_sb {
     char *buf;
@@ -22,6 +42,17 @@ typedef struct tp_sb {
     bool oom;
     bool limit_exceeded;
 } tp_sb;
+
+/* Releases the buffer; the sticky oom/limit_exceeded verdict is preserved so a
+ * caller can free first and report afterwards. */
+static inline void tp_sb_free(tp_sb *sb) {
+    if (sb) {
+        free(sb->buf);
+        sb->buf = NULL;
+        sb->len = 0U;
+        sb->cap = 0U;
+    }
+}
 
 static inline void tp_sb_write(tp_sb *sb, const char *s, size_t n) {
     if (sb->oom || sb->limit_exceeded) {
@@ -53,6 +84,12 @@ static inline void tp_sb_write(tp_sb *sb, const char *s, size_t n) {
             new_cap > sb->limit + 1U) {
             new_cap = sb->limit + 1U;
         }
+#if defined(TP_SB_ALLOC_FAULT_SEAM)
+        if (tp_sb_alloc_fault_active()) {
+            sb->oom = true;
+            return;
+        }
+#endif
         char *nb = (char *)realloc(sb->buf, new_cap);
         if (!nb) {
             sb->oom = true;
@@ -91,6 +128,13 @@ static inline void tp_sb_uint(tp_sb *sb, unsigned long v) {
     tp_sb_str(sb, tmp);
 }
 
+/* "%zu": a size_t above ULONG_MAX must not truncate on 32-bit-long Windows. */
+static inline void tp_sb_size(tp_sb *sb, size_t v) {
+    char tmp[32];
+    (void)snprintf(tmp, sizeof tmp, "%zu", v);
+    tp_sb_str(sb, tmp);
+}
+
 /* 64-bit integral emit via PRId64 (not "%ld") so a value like 5000000000 is
  * byte-identical on 32-bit-long Windows and 64-bit-long Linux/macOS -- the
  * cross-OS determinism pin the transaction JSON contract needs
@@ -108,11 +152,34 @@ static inline void tp_sb_num(tp_sb *sb, double v) {
     tp_sb_str(sb, tmp);
 }
 
+/* Sanitization is a property of machine OUTPUT: a malformed byte becomes U+FFFD
+ * so an emitted document is always decodable rather than one a parser rejects
+ * wholesale. Well-formed input passes through byte-identical, so this never
+ * fires on validated data. The persisted .ntpacker_project writer is the
+ * deliberate exception -- its names are validated upstream and NT_ASSERTed at
+ * its own emit wrapper, so corruption is never laundered into the user's file. */
 static inline void tp_sb_json_string(tp_sb *sb, const char *s) {
+    if (!s) {
+        s = "";
+    }
+    const size_t length = strlen(s);
     tp_sb_char(sb, '"');
-    for (const unsigned char *c = (const unsigned char *)s;
-         *c && !sb->oom && !sb->limit_exceeded; c++) {
-        switch (*c) {
+    for (size_t offset = 0U;
+         offset < length && !sb->oom && !sb->limit_exceeded;) {
+        const unsigned char c = (unsigned char)s[offset];
+        if (c >= 0x80U) {
+            const size_t width =
+                tp_utf8_codepoint_width(s + offset, length - offset);
+            if (width == 0U) {
+                tp_sb_str(sb, "\\ufffd");
+                offset++;
+            } else {
+                tp_sb_write(sb, s + offset, width);
+                offset += width;
+            }
+            continue;
+        }
+        switch (c) {
             case '"': tp_sb_str(sb, "\\\""); break;
             case '\\': tp_sb_str(sb, "\\\\"); break;
             case '\b': tp_sb_str(sb, "\\b"); break;
@@ -121,15 +188,16 @@ static inline void tp_sb_json_string(tp_sb *sb, const char *s) {
             case '\r': tp_sb_str(sb, "\\r"); break;
             case '\t': tp_sb_str(sb, "\\t"); break;
             default:
-                if (*c < 0x20U) {
+                if (c < 0x20U) {
                     char esc[8];
-                    (void)snprintf(esc, sizeof esc, "\\u%04x", (unsigned)*c);
+                    (void)snprintf(esc, sizeof esc, "\\u%04x", (unsigned)c);
                     tp_sb_str(sb, esc);
                 } else {
-                    tp_sb_char(sb, (char)*c);
+                    tp_sb_char(sb, (char)c);
                 }
                 break;
         }
+        offset++;
     }
     tp_sb_char(sb, '"');
 }
@@ -143,4 +211,8 @@ static inline void tp_obj_key(tp_sb *sb, int keydepth, bool *first, const char *
     tp_sb_str(sb, ": ");
 }
 
-#endif /* TP_CORE_SRC_TP_SB_H */
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* TP_CORE_TP_SB_H */

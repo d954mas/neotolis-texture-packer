@@ -4,7 +4,7 @@
 /* Row model + selection-set helpers for the ntpacker GUI: the flattened per-atlas sprite rows
  * (rebuilt each frame), the canonical leaf-sprite multi-select, natural-order sorting +
  * the sort scratch, the common-name-prefix helper, the canvas region -> row selection sync, and
- * the shared path/name string helpers. Include discipline: rows -> gui_state + model headers only;
+ * the shared path/name string helpers. Include discipline: rows -> model headers only;
  * it must never include a sibling view/actions/widgets header. */
 
 #include <stdbool.h>
@@ -12,11 +12,10 @@
 #include <stdint.h>
 
 #include "tp_core/tp_id.h"
+#include "tp_core/tp_model.h"
 #include "tp_core/tp_operation.h"
 #include "tp_core/tp_scan.h"
-#include "tp_core/tp_session.h"
-
-#include "gui_state.h" /* shared editor state the row/selection helpers read + grow */
+#include "tp_core/tp_session_snapshot_query.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -29,6 +28,16 @@ void normalize_slashes(char *s);
 const char *path_last(const char *p);
 
 /* --- canonical multi-select set (ux.md §3.7b selection gesture) --- */
+typedef struct gui_selected_sprite {
+    tp_id128 source_id;
+    char *source_key;
+} gui_selected_sprite;
+extern gui_selected_sprite *s_multi_sel;
+extern int s_multi_sel_count;
+extern int s_multi_sel_cap;
+extern bool s_focus_follow;
+extern bool s_filter_active;
+
 bool multi_sel_contains_ref(tp_id128 source_id, const char *source_key);
 void multi_sel_clear(void);
 void multi_sel_add_ref(tp_id128 source_id, const char *source_key);
@@ -173,6 +182,46 @@ bool gui_rows_is_collapsed(tp_id128 source_id);
  * {row-cache generation, filter, sort, collapse epoch}; call once per frame after build_rows(). */
 void build_view(void);
 
+/* Sole stable selection owner. Indices are resolved only against the current
+ * pinned snapshot or row projection. */
+void gui_view_reset(void);
+tp_id128 gui_view_atlas_id(void);
+void gui_view_select_atlas(tp_id128 atlas_id);
+int gui_view_atlas_index(const tp_session_snapshot *snapshot);
+tp_id128 gui_view_animation_id(void);
+void gui_view_select_animation(tp_id128 animation_id);
+int gui_view_animation_index(const tp_session_snapshot *snapshot);
+void gui_view_select_animation_frame(
+    const tp_session_snapshot *snapshot, int frame_index);
+int gui_view_animation_frame(const tp_session_snapshot *snapshot);
+uint64_t gui_view_animation_frame_generation(void);
+/* Revalidates the stable selection against a new observation: a selection whose
+ * entity is gone is CLEARED, never retargeted (USA-24). */
+void gui_view_reconcile_observation(
+    const tp_session_snapshot *snapshot);
+/* Selects the first atlas when nothing is selected. Explicit initial selection
+ * for "a project just became current" (startup, Open, New); never part of
+ * reconciliation, so a deleted selection stays cleared. */
+void gui_view_adopt_default_atlas(
+    const tp_session_snapshot *snapshot);
+
+const sprite_row *gui_rows_primary(void);
+bool gui_rows_primary_is_set(void);
+bool gui_rows_focus_is_set(void);
+bool gui_rows_anchor_is_set(void);
+bool gui_rows_primary_matches(tp_id128 source_id, const char *source_key,
+                              bool source_row);
+bool gui_rows_focus_matches(tp_id128 source_id, const char *source_key,
+                            bool source_row);
+int gui_rows_focus_view_index(void);
+int gui_rows_anchor_view_index(void);
+void gui_rows_select_primary(const sprite_row *row);
+void gui_rows_select_primary_ref(tp_id128 source_id, const char *source_key,
+                                 bool source_row);
+void gui_rows_set_focus_view_index(int view_index);
+void gui_rows_set_anchor_view_index(int view_index);
+void gui_rows_reconcile_view_state(void);
+
 #if defined(TP_GUI_VIEW_TEST_DIR)
 /* Makes the next view-owned allocation fail so fallback behavior is
  * deterministic in the headless projection tests. */
@@ -225,14 +274,6 @@ void gui_rows_bench_shutdown(void);
  * selected atlas's native pack result. */
 void select_row_for_result_region(const tp_result *result, int region_idx);
 void select_row_for_region(int region_idx);
-
-/* --- selection preservation across Undo/Redo ---
- * capture: record the current primary leaf's canonical ref (call BEFORE the undo/redo mutates the
- * model). revalidate: after the rows rebuild, re-resolve the primary selection to the row carrying
- * that ref (clears it if the sprite is gone) and drop multi-select refs no longer present. Both are
- * no-ops unless s_reselect_pending is set. */
-void gui_selection_capture_reselect(void);
-void gui_selection_revalidate(void);
 
 #ifdef __cplusplus
 }

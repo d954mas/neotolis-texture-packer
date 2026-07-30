@@ -53,7 +53,8 @@ size_t tp_utf8_codepoint_width(const char *text, size_t available) {
     return 0U;
 }
 
-bool tp_utf8_is_valid_bytes(const char *text, size_t length) {
+/* Every code point in [text, text+length) is a strict Unicode scalar. */
+static bool tp_utf8_is_valid_bytes(const char *text, size_t length) {
     if (!text) {
         return false;
     }
@@ -100,4 +101,15 @@ tp_status tp_utf8_validate_c_string(const char *text,
     }
     return tp_utf8_validate_bytes(text, strlen(text), rejection_status,
                                   context, error);
+}
+
+tp_status tp_utf8_validate_text_field(const void *bytes, size_t length,
+                                      const char *context, tp_error *error) {
+    const char *label = context ? context : "text";
+    if (length > 0U && memchr(bytes, '\0', length)) {
+        return tp_error_set(error, TP_STATUS_INVALID_ARGUMENT,
+                            "%s contains NUL", label);
+    }
+    return tp_utf8_validate_bytes((const char *)bytes, length,
+                                  TP_STATUS_INVALID_UTF8, label, error);
 }

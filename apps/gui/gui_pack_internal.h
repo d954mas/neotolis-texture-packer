@@ -4,19 +4,46 @@
 #include "gui_pack.h"
 
 #include "tp_core/tp_job.h"
+#include "tp_core/tp_pack_result_cache.h"
 
 /* Direct handoff from the session-job adapter to the preview result owner. */
-bool gui_pack_publish_native(tp_session_pack_job_result *pack,
+bool gui_pack_publish_native(tp_session_job_result *job_result,
                              int atlas_index, double elapsed_ms,
                              gui_pack_result_info *out);
-void gui_pack_preview_publish(tp_session_pack_job_result *pack,
-                              int atlas_index, double elapsed_ms);
+bool gui_pack_preview_publish(tp_session_job_result *job_result,
+                              int atlas_index, double elapsed_ms,
+                              gui_pack_result_info *out);
 bool gui_pack_preview_belongs_to(int atlas_index);
+
+/* Frame tick for the result store's background page compression (packet S28),
+ * called once per frame from the pack-job poll. Not a test seam: it is how the
+ * cold tier lands at all. */
+void gui_pack__cold_pump(void);
 
 #ifdef TP_ENABLE_TEST_SEAMS
 /* Test-only observation of the native completion freshness decision. */
 bool gui_pack__test_native_pack_input_changed_since(
     const tp_session_pack_job_result *pack);
+/* Test-only observation of the pack-result store behind this boundary (S18):
+ * residency and LRU accounting are not presentation state, so nothing outside a
+ * test may read them. Zeroed when no store exists yet. */
+void gui_pack__test_result_cache_stats(tp_pack_result_cache_stats *out);
+/* Test-only: block until the store's background compression is quiescent, then
+ * apply it. Residency numbers are only deterministic once the encoder has been
+ * settled -- otherwise an inactive entry reads RAW or COMPRESSED depending on how
+ * fast a background thread happened to be. */
+void gui_pack__test_result_cache_settle(void);
+/* Test-only: shrink the store's byte budget so an eviction is reachable without
+ * packing hundreds of megabytes. Rebuilds an EMPTY store, so every previously
+ * published result is released first; callers treat it as gui_pack_clear(-1).
+ * 0 restores the shipped budget, which gui_pack_shutdown does on every teardown
+ * so an override can never outlive the case that asked for it. */
+void gui_pack__test_set_result_budget(uint64_t byte_budget);
+/* Test-only, one-shot: the next canonical sprite-index build reports OOM. This
+ * is the only way to reach a resident switch whose eviction already ran but
+ * whose index build failed -- the exit that must leave NO resident behind.
+ * Disarmed by gui_pack__test_set_result_budget, i.e. on every shutdown. */
+void gui_pack__test_fail_next_ref_index_build(void);
 #endif
 
 #endif /* NTPACKER_GUI_PACK_INTERNAL_H */

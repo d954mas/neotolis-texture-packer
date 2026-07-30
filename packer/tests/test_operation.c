@@ -2,6 +2,9 @@
  * encoder goldens + payload/reference validation (invalid id / type / range /
  * reference each rejected with the right structured status). */
 
+#include <limits.h>
+#include <math.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -1124,6 +1127,351 @@ void test_target_set_mask_skips_unset_field_checks(void) {
     tp_project_destroy(p);
 }
 
+/* ---- machine-readable operation schema (spec §6) ------------------------- *
+ * §6 requires a palette-ready registry: a label template per operation and an
+ * argument schema (name, type, range/enum) per field, so an MCP/palette client
+ * renders and pre-validates without a client-side switch table. These tests walk
+ * EVERY registry row and pin the schema against what validation actually does --
+ * a registry bound that drifts from tp_operation_validate is the failure mode
+ * that makes the whole schema untrustworthy. */
+
+static const tp_field_family k_all_families[] = {
+    TP_FIELD_FAMILY_ATLAS, TP_FIELD_FAMILY_SPRITE, TP_FIELD_FAMILY_ANIM,
+    TP_FIELD_FAMILY_TARGET};
+
+void test_schema_op_labels_and_templates(void) {
+    for (int k = TP_OP_INVALID + 1; k < TP_OP_KIND_COUNT; k++) {
+        const tp_op_info *info = tp_op_info_by_kind((tp_op_kind)k);
+        TEST_ASSERT_NOT_NULL(info);
+        TEST_ASSERT_TRUE(info->label && info->label[0] != '\0');
+        TEST_ASSERT_TRUE(info->label_template && info->label_template[0] != '\0');
+        /* Labels are the palette's index keys: no two operations may share one. */
+        for (int other = TP_OP_INVALID + 1; other < k; other++) {
+            TEST_ASSERT_TRUE(strcmp(tp_op_info_by_kind((tp_op_kind)other)->label,
+                                    info->label) != 0);
+        }
+        /* Every {placeholder} resolves: a field key of THIS op, or the reserved
+         * {field}/{value} pair -- which only a field-presence SET op may use. */
+        const bool has_family = tp_op_field_family_of((tp_op_kind)k, NULL);
+        for (const char *c = info->label_template; (c = strchr(c, '{')) != NULL;) {
+            const char *end = strchr(c, '}');
+            TEST_ASSERT_NOT_NULL(end);
+            char token[64];
+            const size_t len = (size_t)(end - c) + 1U;
+            TEST_ASSERT_TRUE(len < sizeof token);
+            memcpy(token, c, len);
+            token[len] = '\0';
+            if (strcmp(token, TP_OP_LABEL_FIELD) == 0 ||
+                strcmp(token, TP_OP_LABEL_VALUE) == 0) {
+                TEST_ASSERT_TRUE_MESSAGE(has_family, info->wire);
+            } else {
+                token[len - 1U] = '\0'; /* drop the closing brace */
+                TEST_ASSERT_TRUE_MESSAGE(
+                    tp_op_field_allowed((tp_op_kind)k, token + 1), info->wire);
+            }
+            c = end + 1;
+        }
+    }
+    /* A non-mask op exposes no schema fields; a mask op exposes its family's. */
+    size_t count = 12345U;
+    TEST_ASSERT_NULL(tp_op_fields(TP_OP_ATLAS_CREATE, &count));
+    TEST_ASSERT_EQUAL_UINT(0U, (unsigned)count);
+    TEST_ASSERT_EQUAL_PTR(tp_op_field_rows(TP_FIELD_FAMILY_ATLAS, &count),
+                          tp_op_fields(TP_OP_ATLAS_SETTINGS_SET, &count));
+    TEST_ASSERT_EQUAL_PTR(tp_op_field_rows(TP_FIELD_FAMILY_SPRITE, &count),
+                          tp_op_fields(TP_OP_SPRITE_OVERRIDE_SET, &count));
+    TEST_ASSERT_EQUAL_PTR(tp_op_field_rows(TP_FIELD_FAMILY_ANIM, &count),
+                          tp_op_fields(TP_OP_ANIMATION_SETTINGS_SET, &count));
+    TEST_ASSERT_EQUAL_PTR(tp_op_field_rows(TP_FIELD_FAMILY_TARGET, &count),
+                          tp_op_fields(TP_OP_TARGET_SET, &count));
+}
+
+void test_schema_every_row_is_renderable(void) {
+    for (size_t f = 0U; f < sizeof k_all_families / sizeof k_all_families[0]; f++) {
+        size_t count = 0U;
+        const tp_field_row *rows = tp_op_field_rows(k_all_families[f], &count);
+        TEST_ASSERT_NOT_NULL(rows);
+        for (size_t i = 0U; i < count; i++) {
+            const tp_field_row *row = &rows[i];
+            TEST_ASSERT_TRUE_MESSAGE(row->label && row->label[0] != '\0', row->key);
+            for (size_t j = 0U; j < i; j++) { /* unique within the family */
+                TEST_ASSERT_TRUE_MESSAGE(strcmp(rows[j].label, row->label) != 0,
+                                         row->key);
+            }
+            TEST_ASSERT_EQUAL_PTR(row, tp_op_field_row_by_key(k_all_families[f],
+                                                              row->key));
+            switch (row->domain) {
+                case TP_FIELD_DOMAIN_RANGE:
+                    TEST_ASSERT_TRUE_MESSAGE(row->range_min <= row->range_max,
+                                             row->key);
+                    TEST_ASSERT_NULL(row->values);
+                    break;
+                case TP_FIELD_DOMAIN_ENUM:
+                    TEST_ASSERT_NOT_NULL(row->values);
+                    TEST_ASSERT_TRUE_MESSAGE(row->value_count > 0U, row->key);
+                    break;
+                case TP_FIELD_DOMAIN_EXPORTER_ID:
+                case TP_FIELD_DOMAIN_ANY:
+                    TEST_ASSERT_NULL(row->values);
+                    TEST_ASSERT_EQUAL_UINT(0U, (unsigned)row->value_count);
+                    break;
+            }
+            /* A numeric field always carries a domain: an INT/FLOAT row left at
+             * DOMAIN_ANY would be exactly the "client must know the bounds"
+             * hole this packet closes. */
+            if (row->type != TP_FIELD_STR && row->type != TP_FIELD_BOOL) {
+                TEST_ASSERT_TRUE_MESSAGE(row->domain == TP_FIELD_DOMAIN_RANGE ||
+                                             row->domain == TP_FIELD_DOMAIN_ENUM,
+                                         row->key);
+            }
+            /* The unset/inherit sentinel is `reset` (what a clear writes back). */
+            if (row->has_unset) {
+                TEST_ASSERT_TRUE(row->reset == (double)TP_PROJECT_OV_INHERIT);
+                TEST_ASSERT_TRUE(tp_field_value_admissible(row, row->reset));
+            }
+            /* A cap_key names the atlas setting that further caps the effective
+             * maximum (the atlas being set, or a sprite's parent atlas). */
+            if (row->cap_key) {
+                TEST_ASSERT_EQUAL_INT(TP_FIELD_DOMAIN_RANGE, (int)row->domain);
+                TEST_ASSERT_NOT_NULL(tp_op_field_row_by_key(TP_FIELD_FAMILY_ATLAS,
+                                                            row->cap_key));
+            }
+            /* `nonempty` is a string rule only. */
+            if (row->nonempty) {
+                TEST_ASSERT_EQUAL_INT(TP_FIELD_STR, (int)row->type);
+            }
+        }
+    }
+}
+
+void test_schema_enum_tokens_roundtrip(void) {
+    for (size_t f = 0U; f < sizeof k_all_families / sizeof k_all_families[0]; f++) {
+        size_t count = 0U;
+        const tp_field_row *rows = tp_op_field_rows(k_all_families[f], &count);
+        for (size_t i = 0U; i < count; i++) {
+            const tp_field_row *row = &rows[i];
+            if (row->domain != TP_FIELD_DOMAIN_ENUM) {
+                TEST_ASSERT_NULL(tp_field_enum_token(row, 0));
+                TEST_ASSERT_FALSE(tp_field_enum_lookup(row, "rect", NULL));
+                continue;
+            }
+            for (uint8_t v = 0U; v < row->value_count; v++) {
+                const tp_field_enum_value *member = &row->values[v];
+                TEST_ASSERT_TRUE(member->token && member->token[0] != '\0');
+                TEST_ASSERT_TRUE(member->label && member->label[0] != '\0');
+                TEST_ASSERT_EQUAL_STRING(member->token,
+                                         tp_field_enum_token(row, member->value));
+                int back = INT_MIN;
+                TEST_ASSERT_TRUE(tp_field_enum_lookup(row, member->token, &back));
+                TEST_ASSERT_EQUAL_INT(member->value, back);
+                for (uint8_t w = 0U; w < v; w++) { /* tokens and ids are unique */
+                    TEST_ASSERT_TRUE(strcmp(row->values[w].token, member->token) != 0);
+                    TEST_ASSERT_TRUE(row->values[w].value != member->value);
+                }
+            }
+            TEST_ASSERT_FALSE(tp_field_enum_lookup(row, "no_such_token", NULL));
+            TEST_ASSERT_NULL(tp_field_enum_token(row, INT_MAX));
+        }
+    }
+    /* The declared value sets cover their whole admitted id range -- so a client
+     * that renders only the tokens can still express every legal value. */
+    const tp_field_row *shape =
+        tp_op_field_row_by_key(TP_FIELD_FAMILY_ATLAS, "shape");
+    TEST_ASSERT_EQUAL_UINT((unsigned)(TP_PACK_SHAPE_MAX - TP_PACK_SHAPE_MIN + 1),
+                           (unsigned)shape->value_count);
+    const tp_field_row *playback =
+        tp_op_field_row_by_key(TP_FIELD_FAMILY_ANIM, "playback");
+    TEST_ASSERT_EQUAL_UINT((unsigned)(TP_PROJECT_ANIM_PLAYBACK_MAX -
+                                      TP_PROJECT_ANIM_PLAYBACK_MIN + 1),
+                           (unsigned)playback->value_count);
+    /* The sprite override reuses the atlas shape vocabulary (same ids), plus the
+     * inherit sentinel the atlas field does not have. */
+    const tp_field_row *ov_shape =
+        tp_op_field_row_by_key(TP_FIELD_FAMILY_SPRITE, "ov_shape");
+    TEST_ASSERT_EQUAL_PTR(shape->values, ov_shape->values);
+    TEST_ASSERT_TRUE(ov_shape->has_unset);
+    TEST_ASSERT_FALSE(shape->has_unset);
+}
+
+/* ---- registry <-> validation coherence probe ----------------------------- */
+
+typedef struct schema_probe {
+    tp_project *project;
+    tp_operation op;
+    tp_operation pristine; /* restored before every probe (grouped bits share rows) */
+    void *payload;
+    uint32_t *mask;
+} schema_probe;
+
+/* Opens a field-presence SET op for `family` over the WIDEST admissible context
+ * (max page size, RECT shape, no spacing, no sprite overrides) so that only the
+ * probed row's own static domain can produce a rejection. */
+static void schema_probe_open(schema_probe *pr, tp_field_family family) {
+    tp_project *p = tp_test_base_project();
+    tp_project_atlas *a = &p->atlases[0];
+    a->max_size = TP_PACK_MAX_PAGE_DIM;
+    a->shape = TP_PACK_SHAPE_RECT;
+    a->padding = 0;
+    a->margin = 0;
+    a->extrude = 0;
+    memset(&pr->op, 0, sizeof pr->op);
+    pr->project = p;
+    pr->op.atlas_id = a->id;
+    switch (family) {
+        case TP_FIELD_FAMILY_ATLAS:
+            pr->op.kind = TP_OP_ATLAS_SETTINGS_SET;
+            pr->payload = &pr->op.u.atlas_settings;
+            pr->mask = &pr->op.u.atlas_settings.mask;
+            break;
+        case TP_FIELD_FAMILY_SPRITE:
+            pr->op.kind = TP_OP_SPRITE_OVERRIDE_SET;
+            pr->op.u.sprite_set.source_id = a->sources[0].id;
+            pr->op.u.sprite_set.src_key = (char *)"hero.png";
+            pr->payload = &pr->op.u.sprite_set;
+            pr->mask = &pr->op.u.sprite_set.mask;
+            break;
+        case TP_FIELD_FAMILY_ANIM: {
+            tp_project_anim *an = NULL;
+            TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                                  tp_project_atlas_add_animation(a, "walk", &an));
+            uint8_t ctr = 31;
+            tp_rng rng = {tp_test_det_fill, &ctr};
+            tp_error err;
+            TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                                  tp_project_assign_missing_ids(p, &rng, &err));
+            pr->op.kind = TP_OP_ANIMATION_SETTINGS_SET;
+            pr->op.u.anim_settings.anim_id = a->animations[0].id;
+            pr->op.u.anim_settings.fps = TP_PROJECT_ANIM_FPS_DEFAULT;
+            pr->payload = &pr->op.u.anim_settings;
+            pr->mask = &pr->op.u.anim_settings.mask;
+            break;
+        }
+        case TP_FIELD_FAMILY_TARGET:
+            pr->op.kind = TP_OP_TARGET_SET;
+            pr->op.u.target_set.target_id = a->targets[0].id;
+            pr->payload = &pr->op.u.target_set;
+            pr->mask = &pr->op.u.target_set.mask;
+            break;
+    }
+    pr->pristine = pr->op;
+}
+
+static void schema_probe_close(schema_probe *pr) {
+    tp_project_destroy(pr->project);
+    pr->project = NULL;
+}
+
+/* Sets ONE row's payload slot to `value` and runs the production validator. */
+static bool schema_probe_admits(schema_probe *pr, const tp_field_row *row,
+                                double value, tp_op_reject *rej) {
+    pr->op = pr->pristine;
+    *pr->mask = row->bit;
+    void *slot = (char *)pr->payload + row->op_off;
+    switch (row->type) {
+        case TP_FIELD_INT:
+        case TP_FIELD_INT_I16:
+        case TP_FIELD_INT_U16: *(int *)slot = (int)value; break;
+        case TP_FIELD_FLOAT: *(float *)slot = (float)value; break;
+        case TP_FIELD_BOOL: *(bool *)slot = value != 0.0; break;
+        case TP_FIELD_STR: return true; /* not value-probed */
+    }
+    return tp_operation_validate(pr->project, &pr->op, rej) == TP_STATUS_OK;
+}
+
+/* The rejection must name the probed field -- or, for a grouped bit whose rows
+ * share one validation site, another row of the same group. */
+static void schema_assert_rejected_field(tp_field_family family,
+                                         const tp_field_row *row,
+                                         const tp_op_reject *rej) {
+    TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_OUT_OF_RANGE, rej->status, row->key);
+    if (strcmp(rej->field, row->key) == 0) {
+        return;
+    }
+    const tp_field_row *reported = tp_op_field_row_by_key(family, rej->field);
+    TEST_ASSERT_NOT_NULL_MESSAGE(reported, rej->field);
+    TEST_ASSERT_NOT_NULL_MESSAGE(row->group, row->key);
+    TEST_ASSERT_EQUAL_STRING(row->group, reported->group);
+}
+
+/* Probes `value` through BOTH paths and asserts they agree: the production
+ * validator and the schema's own tp_field_value_admissible. */
+static void schema_probe_expect(schema_probe *pr, tp_field_family family,
+                                const tp_field_row *row, double value,
+                                bool want_ok) {
+    tp_op_reject rej;
+    const bool got = schema_probe_admits(pr, row, value, &rej);
+    char msg[160];
+    (void)snprintf(msg, sizeof msg, "%s = %.9g: validate %s, schema says %s",
+                   row->key, value, got ? "accepts" : "rejects",
+                   tp_field_value_admissible(row, value) ? "admissible"
+                                                         : "inadmissible");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(want_ok ? 1 : 0, got ? 1 : 0, msg);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(want_ok ? 1 : 0,
+                                  tp_field_value_admissible(row, value) ? 1 : 0,
+                                  msg);
+    if (!want_ok) {
+        schema_assert_rejected_field(family, row, &rej);
+    }
+}
+
+/* (a) Every numeric row's declared endpoints ARE the endpoints validation
+ * enforces: min-1 / min / max / max+1 (and the enum's members / neighbours) are
+ * probed against the live validator. A registry bound that drifts from
+ * tp_operation_validate fails here. */
+void test_schema_ranges_match_validation(void) {
+    for (size_t f = 0U; f < sizeof k_all_families / sizeof k_all_families[0]; f++) {
+        const tp_field_family family = k_all_families[f];
+        size_t count = 0U;
+        const tp_field_row *rows = tp_op_field_rows(family, &count);
+        schema_probe pr;
+        schema_probe_open(&pr, family);
+        for (size_t i = 0U; i < count; i++) {
+            const tp_field_row *row = &rows[i];
+            if (row->type == TP_FIELD_STR || row->type == TP_FIELD_BOOL) {
+                continue;
+            }
+            if (row->has_unset) { /* the sentinel is admitted by both paths */
+                schema_probe_expect(&pr, family, row, row->reset, true);
+            }
+            if (row->domain == TP_FIELD_DOMAIN_ENUM) {
+                double lo = row->values[0].value;
+                double hi = lo;
+                for (uint8_t v = 0U; v < row->value_count; v++) {
+                    const double member = row->values[v].value;
+                    schema_probe_expect(&pr, family, row, member, true);
+                    lo = member < lo ? member : lo;
+                    hi = member > hi ? member : hi;
+                }
+                if (!row->has_unset || lo - 1.0 != row->reset) {
+                    schema_probe_expect(&pr, family, row, lo - 1.0, false);
+                }
+                schema_probe_expect(&pr, family, row, hi + 1.0, false);
+                continue;
+            }
+            TEST_ASSERT_EQUAL_INT_MESSAGE(TP_FIELD_DOMAIN_RANGE, (int)row->domain,
+                                          row->key);
+            if (row->type == TP_FIELD_FLOAT) {
+                /* A float endpoint has no representable +-1 neighbour; probe the
+                 * endpoints themselves plus the infinities they exclude. */
+                schema_probe_expect(&pr, family, row, row->range_min,
+                                    !row->min_exclusive);
+                schema_probe_expect(&pr, family, row, row->range_max, true);
+                schema_probe_expect(&pr, family, row, (double)INFINITY, false);
+                if (row->range_min > -(double)FLT_MAX) {
+                    schema_probe_expect(&pr, family, row, -(double)INFINITY, false);
+                }
+                continue;
+            }
+            TEST_ASSERT_FALSE(row->min_exclusive); /* integers use inclusive bounds */
+            schema_probe_expect(&pr, family, row, row->range_min - 1.0, false);
+            schema_probe_expect(&pr, family, row, row->range_min, true);
+            schema_probe_expect(&pr, family, row, row->range_max, true);
+            schema_probe_expect(&pr, family, row, row->range_max + 1.0, false);
+        }
+        schema_probe_close(&pr);
+    }
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_catalog_selfcheck);
@@ -1162,5 +1510,9 @@ int main(void) {
     RUN_TEST(test_target_set_mask_enabled_only);
     RUN_TEST(test_target_set_mask_out_path_only);
     RUN_TEST(test_target_set_mask_skips_unset_field_checks);
+    RUN_TEST(test_schema_op_labels_and_templates);
+    RUN_TEST(test_schema_every_row_is_renderable);
+    RUN_TEST(test_schema_enum_tokens_roundtrip);
+    RUN_TEST(test_schema_ranges_match_validation);
     return UNITY_END();
 }

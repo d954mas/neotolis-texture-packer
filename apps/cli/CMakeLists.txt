@@ -7,7 +7,11 @@ set(CLI_OUTPUT_DIR "${CMAKE_SOURCE_DIR}/build/apps/cli/${NT_PRESET_NAME}")
 
 set(_ntpacker_sources main.c cli_exit.c cli_out.c cli_project.c cli_inspect.c cli_validate.c cli_pack.c
     cli_mutate.c cli_mutate_source.c cli_mutate_atlas.c cli_mutate_sprite.c
-    cli_mutate_anim.c cli_mutate_target.c)
+    cli_mutate_anim.c cli_mutate_target.c
+    # Shared app scratch root (<user cache dir>/ntpacker/work) + the CRT-local
+    # UTF-8 FS adapters its request-directory release uses.
+    "${CMAKE_SOURCE_DIR}/apps/common/app_scratch.c"
+    "${CMAKE_SOURCE_DIR}/apps/common/nt_utf8_fs.c")
 if(WIN32)
     list(APPEND _ntpacker_sources "${CMAKE_SOURCE_DIR}/apps/common/nt_utf8_argv.c")
 endif()
@@ -35,13 +39,17 @@ ntpacker_configure_target(ntpacker_inspect_fault)
 target_compile_definitions(ntpacker_inspect_fault PRIVATE NTPACKER_CLI_INSPECT_FAULT_SEAM=1)
 set_target_properties(ntpacker_inspect_fault PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CLI_OUTPUT_DIR}")
 
-# Test-only binary whose CLI output builder deterministically rejects every
-# allocation. This exercises the process-level exit/payload contract after a
-# mutation has otherwise reached its normal result-rendering boundary.
+# Test-only binary whose CLI output builders deterministically reject every
+# allocation. TP_SB_ALLOC_FAULT_SEAM compiles the tp_sb failure hook into THESE
+# CLI TUs only (tp_core is a separate library built without it), so the fault
+# covers every CLI payload builder -- pack, inspect, validate, mutate, version,
+# help -- instead of the three instances cli_out.c can name; cli_out.c supplies
+# the predicate. Everything below the CLI (project save, transactions) allocates
+# normally, which is what lets the mutation contract assert "published, then the
+# output render failed".
 add_executable(ntpacker_output_fault ${_ntpacker_sources})
 ntpacker_configure_target(ntpacker_output_fault)
-target_compile_definitions(ntpacker_output_fault PRIVATE
-    NTPACKER_CLI_OUT_FAULT_SEAM=1)
+target_compile_definitions(ntpacker_output_fault PRIVATE TP_SB_ALLOC_FAULT_SEAM=1)
 set_target_properties(ntpacker_output_fault PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CLI_OUTPUT_DIR}")
 
@@ -130,6 +138,30 @@ if(WIN32)
 endif()
 
 set(_run "${CMAKE_CURRENT_SOURCE_DIR}/cli_run_expect.cmake")
+
+# The mutation contract above only reaches cli_out.c's own builders. These pin
+# the OTHER sb.oom -> CLI_EXIT_INTERNAL branches (query and process-manifest
+# payloads), which stayed uninjectable while the fault seam was a per-builder
+# poison. Every one of them must exit 1 with the allocation-free structured
+# fallback on stdout and nothing on stderr -- never a crash or a truncated
+# payload. The assertion is the exact golden (same mechanism as
+# cli_inspect_index_fault), not a prefix regex: a builder that emitted the
+# fallback and then appended partial payload bytes would satisfy a prefix.
+foreach(_oom_case
+        "inspect|inspect ${CMAKE_CURRENT_SOURCE_DIR}/testdata/clean.ntpacker_project --json"
+        "validate|validate ${CMAKE_CURRENT_SOURCE_DIR}/testdata/clean.ntpacker_project --json"
+        "version|version --json"
+        "help|help --json")
+    string(REPLACE "|" ";" _oom_parts "${_oom_case}")
+    list(GET _oom_parts 0 _oom_name)
+    list(GET _oom_parts 1 _oom_args)
+    add_test(NAME cli_${_oom_name}_output_oom_contract COMMAND ${CMAKE_COMMAND}
+        -DEXE=$<TARGET_FILE:ntpacker_output_fault> -DEXPECT=1
+        "-DARGS=${_oom_args}"
+        -DOUTFILE=${CMAKE_CURRENT_BINARY_DIR}/cli_${_oom_name}_output_oom.json
+        -DEXPECT_FILE=${CMAKE_CURRENT_SOURCE_DIR}/testdata/output-oom.expected.json
+        -DEXPECT_STDERR_EMPTY=ON -P "${_run}")
+endforeach()
 
 # (a) no args -> usage error, exit 2.
 add_test(NAME cli_no_args COMMAND ${CMAKE_COMMAND}

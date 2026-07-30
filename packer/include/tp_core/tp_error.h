@@ -7,6 +7,7 @@
 
 #include <stdarg.h>
 #include <stdio.h>
+#include <string.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -24,12 +25,20 @@ typedef enum tp_file_io_phase {
     TP_FILE_IO_PHASE_ATOMIC_CREATE
 } tp_file_io_phase;
 
+/* Diagnostic path capacity, including the NUL. Deliberately the same bound as
+ * `msg`: the path is operator/agent context, every producer already interpolates
+ * it into that equally bounded message, and a longer path is truncated here for
+ * exactly the reason it is truncated there. */
+#define TP_FILE_IO_PATH_MAX 256
+
 typedef struct tp_file_io_context {
     tp_file_io_phase phase;
-    /* Borrowed from the Save caller and valid for the same lifetime as that
-     * input path. Session boundaries remap private canonical buffers before
-     * returning the error to their caller. */
-    const char *path;
+    /* Owned BY VALUE. tp_error crosses process, job and session boundaries as a
+     * plain struct assignment, so this must never be a borrow: a pointer here
+     * outlived by its owner is a use-after-free the copy cannot see. Empty means
+     * "no path". Session boundaries overwrite private canonical buffers with the
+     * public path before returning the error to their caller. */
+    char path[TP_FILE_IO_PATH_MAX];
     /* errno-compatible cause captured before cleanup can overwrite it. */
     int native_code;
 } tp_file_io_context;
@@ -155,7 +164,8 @@ typedef enum tp_status {
     TP_STATUS_CANCELLED
 } tp_status;
 
-/* No heap, safe to embed by value on the stack. The single anonymous aggregate
+/* No heap and no borrowed pointers, so a plain struct copy of a tp_error stays
+ * valid for as long as the destination does. The single anonymous aggregate
  * preserves the long-standing `tp_error error = {{0}}` initializer under the
  * project's -Wmissing-field-initializers -Werror policy. */
 typedef union tp_error {
@@ -171,6 +181,48 @@ typedef union tp_error {
 #define TP_PRINTF_ATTR(fmt_idx, args_idx)
 #endif
 
+/* snprintf/vsnprintf truncate on a BYTE boundary, so a message or path that
+ * overflows its fixed buffer can end mid-codepoint. Downstream that one dangling
+ * byte is not a cosmetic defect: the worker wire validator rejects the whole
+ * payload as invalid UTF-8 and the host loses the entire diagnostic. Truncation
+ * is fixed HERE, at the only producer, by dropping a trailing incomplete
+ * sequence: walk back over the continuation bytes (0b10xxxxxx, at most three) to
+ * their lead byte and cut at the lead unless the sequence is complete. A no-op
+ * for ASCII and for any text that fit. */
+static inline void tp_error_trim_partial_utf8(char *text) {
+    const size_t length = strlen(text);
+    size_t trailing = 0U;
+    while (trailing < 3U && trailing < length &&
+           ((unsigned char)text[length - 1U - trailing] & 0xC0U) == 0x80U) {
+        trailing++;
+    }
+    if (trailing == length) {
+        /* Continuation bytes all the way down: there is no lead byte to keep. */
+        if (length > 0U) {
+            text[0] = '\0';
+        }
+        return;
+    }
+    const size_t lead_index = length - 1U - trailing;
+    const unsigned char lead = (unsigned char)text[lead_index];
+    if (lead < 0x80U) {
+        /* An ASCII byte is complete on its own; anything after it is stray. */
+        text[length - trailing] = '\0';
+        return;
+    }
+    size_t width = 0U;
+    if ((lead & 0xE0U) == 0xC0U) {
+        width = 2U;
+    } else if ((lead & 0xF0U) == 0xE0U) {
+        width = 3U;
+    } else if ((lead & 0xF8U) == 0xF0U) {
+        width = 4U;
+    }
+    if (width != trailing + 1U) {
+        text[lead_index] = '\0';
+    }
+}
+
 /* Formats into err->msg (if err != NULL) and returns status, so call sites can
  * write `return tp_error_set(err, TP_STATUS_X, "...", ...);` in one line. */
 static inline tp_status tp_error_set(tp_error *err, tp_status status, const char *fmt, ...) TP_PRINTF_ATTR(3, 4);
@@ -178,13 +230,14 @@ static inline tp_status tp_error_set(tp_error *err, tp_status status, const char
 static inline tp_status tp_error_set(tp_error *err, tp_status status, const char *fmt, ...) {
     if (err) {
         err->file_io.phase = TP_FILE_IO_PHASE_NONE;
-        err->file_io.path = NULL;
+        err->file_io.path[0] = '\0';
         err->file_io.native_code = 0;
         if (fmt) {
             va_list args;
             va_start(args, fmt);
             (void)vsnprintf(err->msg, sizeof(err->msg), fmt, args);
             va_end(args);
+            tp_error_trim_partial_utf8(err->msg);
         } else {
             err->msg[0] = '\0';
         }
@@ -201,13 +254,16 @@ static inline tp_status tp_error_set_file_io(
     const char *fmt, ...) {
     if (err) {
         err->file_io.phase = phase;
-        err->file_io.path = path;
+        (void)snprintf(err->file_io.path, sizeof err->file_io.path, "%s",
+                       path ? path : "");
+        tp_error_trim_partial_utf8(err->file_io.path);
         err->file_io.native_code = native_code;
         if (fmt) {
             va_list args;
             va_start(args, fmt);
             (void)vsnprintf(err->msg, sizeof(err->msg), fmt, args);
             va_end(args);
+            tp_error_trim_partial_utf8(err->msg);
         } else {
             err->msg[0] = '\0';
         }
@@ -228,105 +284,76 @@ static inline const char *tp_file_io_phase_id(tp_file_io_phase phase) {
     return "unknown";
 }
 
+/* One row per status: enum suffix, human prose, stable machine token. Both
+ * accessors below are generated from this list, so prose and token can never
+ * drift apart or cover different sets. The machine token (enum-name style, minus
+ * the TP_STATUS_ prefix) is a contract an agent matches on in --json payloads and
+ * is test-pinned; APPEND-ONLY, never rename one. Neither generated switch has a
+ * `default`, so a new enum value missing from this list trips -Wswitch. */
+#define TP_STATUS_LIST(X)                                                          \
+    X(OK, "ok", "ok")                                                              \
+    X(UNIMPLEMENTED, "unimplemented", "unimplemented")                             \
+    X(INVALID_ARGUMENT, "invalid argument", "invalid_argument")                    \
+    X(BAD_MAGIC, "bad magic", "bad_magic")                                         \
+    X(BAD_VERSION, "bad version", "bad_version")                                   \
+    X(OUT_OF_BOUNDS, "out of bounds", "out_of_bounds")                             \
+    X(HASH_COLLISION, "hash collision", "hash_collision")                          \
+    X(UNKNOWN_REGION, "unknown region", "unknown_region")                          \
+    X(PAGE_NOT_FOUND, "page not found", "page_not_found")                          \
+    X(UNSUPPORTED_TEXTURE, "unsupported texture", "unsupported_texture")           \
+    X(OOM, "out of memory", "oom")                                                 \
+    X(BUILDER_FAILED, "builder failed", "builder_failed")                          \
+    X(BAD_PROJECT, "bad project file", "bad_project")                              \
+    X(PATH_NOT_ABSOLUTE, "path is not absolute", "path_not_absolute")              \
+    X(PATH_DRIVE_RELATIVE, "path is drive-relative", "path_drive_relative")        \
+    X(PATH_BAD_UNC, "malformed UNC path", "path_bad_unc")                          \
+    X(PATH_DEVICE, "device path is not a project identity", "path_device")         \
+    X(PATH_RESOLVE_FAILED, "could not resolve path", "path_resolve_failed")        \
+    X(RNG_FAILED, "random generator failed", "rng_failed")                         \
+    X(IDENTITY_COLLISION, "identity collision", "identity_collision")              \
+    X(ID_MALFORMED, "malformed structural id", "id_malformed")                     \
+    X(DUPLICATE_ID, "duplicate structural id", "duplicate_id")                     \
+    X(INVALID_UTF8, "invalid UTF-8", "invalid_utf8")                               \
+    X(KEY_ABSOLUTE, "source key is not relative", "key_absolute")                  \
+    X(KEY_TRAVERSAL, "source key escapes its root", "key_traversal")               \
+    X(NOT_FOUND, "selector matched no entity", "not_found")                        \
+    X(AMBIGUOUS_SELECTOR, "selector is ambiguous", "ambiguous_selector")           \
+    X(UNKNOWN_OP, "unknown operation", "unknown_op")                               \
+    X(OUT_OF_RANGE, "value out of range", "out_of_range")                          \
+    X(REVISION_CONFLICT, "revision conflict", "revision_conflict")                 \
+    X(INVALID_REVISION, "invalid revision", "invalid_revision")                    \
+    X(JOURNAL_FAILED, "recovery journal append failed", "journal_failed")          \
+    X(FILE_CHANGED_EXTERNALLY, "project file changed externally",                  \
+      "file_changed_externally")                                                   \
+    X(RECOVERY_CLEANUP_FAILED, "recovery cleanup failed",                          \
+      "recovery_cleanup_failed")                                                   \
+    X(RECOVERY_BUSY, "recovery journal is busy", "recovery_busy")                  \
+    X(RECOVERY_CLAIM_FAILED, "recovery journal claim failed",                      \
+      "recovery_claim_failed")                                                     \
+    X(PROJECT_LIVE, "project is live in another writer", "project_live")           \
+    X(UNSUPPORTED_CAPABILITY, "unsupported client capability",                     \
+      "unsupported_capability")                                                    \
+    X(FILE_EXISTS, "file already exists", "file_exists")                           \
+    X(FILE_DURABILITY_UNCERTAIN, "project file durability is uncertain",           \
+      "file_durability_uncertain")                                                 \
+    X(FILE_IO_FAILED, "project file I/O failed", "file_io_failed")                 \
+    X(BUILDER_CRASHED, "builder crashed", "builder_crashed")                       \
+    X(CANCELLED, "cancelled", "cancelled")
+
 static inline const char *tp_status_str(tp_status status) {
     switch (status) {
-        case TP_STATUS_OK: return "ok";
-        case TP_STATUS_UNIMPLEMENTED: return "unimplemented";
-        case TP_STATUS_INVALID_ARGUMENT: return "invalid argument";
-        case TP_STATUS_BAD_MAGIC: return "bad magic";
-        case TP_STATUS_BAD_VERSION: return "bad version";
-        case TP_STATUS_OUT_OF_BOUNDS: return "out of bounds";
-        case TP_STATUS_HASH_COLLISION: return "hash collision";
-        case TP_STATUS_UNKNOWN_REGION: return "unknown region";
-        case TP_STATUS_PAGE_NOT_FOUND: return "page not found";
-        case TP_STATUS_UNSUPPORTED_TEXTURE: return "unsupported texture";
-        case TP_STATUS_OOM: return "out of memory";
-        case TP_STATUS_BUILDER_FAILED: return "builder failed";
-        case TP_STATUS_BAD_PROJECT: return "bad project file";
-        case TP_STATUS_PATH_NOT_ABSOLUTE: return "path is not absolute";
-        case TP_STATUS_PATH_DRIVE_RELATIVE: return "path is drive-relative";
-        case TP_STATUS_PATH_BAD_UNC: return "malformed UNC path";
-        case TP_STATUS_PATH_DEVICE: return "device path is not a project identity";
-        case TP_STATUS_PATH_RESOLVE_FAILED: return "could not resolve path";
-        case TP_STATUS_RNG_FAILED: return "random generator failed";
-        case TP_STATUS_IDENTITY_COLLISION: return "identity collision";
-        case TP_STATUS_ID_MALFORMED: return "malformed structural id";
-        case TP_STATUS_DUPLICATE_ID: return "duplicate structural id";
-        case TP_STATUS_INVALID_UTF8: return "invalid UTF-8";
-        case TP_STATUS_KEY_ABSOLUTE: return "source key is not relative";
-        case TP_STATUS_KEY_TRAVERSAL: return "source key escapes its root";
-        case TP_STATUS_NOT_FOUND: return "selector matched no entity";
-        case TP_STATUS_AMBIGUOUS_SELECTOR: return "selector is ambiguous";
-        case TP_STATUS_UNKNOWN_OP: return "unknown operation";
-        case TP_STATUS_OUT_OF_RANGE: return "value out of range";
-        case TP_STATUS_REVISION_CONFLICT: return "revision conflict";
-        case TP_STATUS_INVALID_REVISION: return "invalid revision";
-        case TP_STATUS_JOURNAL_FAILED: return "recovery journal append failed";
-        case TP_STATUS_FILE_CHANGED_EXTERNALLY: return "project file changed externally";
-        case TP_STATUS_RECOVERY_CLEANUP_FAILED: return "recovery cleanup failed";
-        case TP_STATUS_RECOVERY_BUSY: return "recovery journal is busy";
-        case TP_STATUS_RECOVERY_CLAIM_FAILED: return "recovery journal claim failed";
-        case TP_STATUS_PROJECT_LIVE: return "project is live in another writer";
-        case TP_STATUS_UNSUPPORTED_CAPABILITY: return "unsupported client capability";
-        case TP_STATUS_FILE_EXISTS: return "file already exists";
-        case TP_STATUS_FILE_DURABILITY_UNCERTAIN: return "project file durability is uncertain";
-        case TP_STATUS_FILE_IO_FAILED: return "project file I/O failed";
-        case TP_STATUS_BUILDER_CRASHED: return "builder crashed";
-        case TP_STATUS_CANCELLED: return "cancelled";
+#define TP_STATUS_X_STR(name, prose, id) case TP_STATUS_##name: return prose;
+        TP_STATUS_LIST(TP_STATUS_X_STR)
+#undef TP_STATUS_X_STR
     }
     return "unknown status";
 }
 
-/* Stable lowercase machine token per status (enum-name style, minus the
- * TP_STATUS_ prefix) for --json error payloads. Distinct from tp_status_str's
- * human prose: this token is a contract an agent matches on and is test-pinned.
- * No `default` inside the switch on purpose -- a new enum value then trips
- * -Wswitch here too, keeping token + prose in lockstep. */
 static inline const char *tp_status_id(tp_status status) {
     switch (status) {
-        case TP_STATUS_OK: return "ok";
-        case TP_STATUS_UNIMPLEMENTED: return "unimplemented";
-        case TP_STATUS_INVALID_ARGUMENT: return "invalid_argument";
-        case TP_STATUS_BAD_MAGIC: return "bad_magic";
-        case TP_STATUS_BAD_VERSION: return "bad_version";
-        case TP_STATUS_OUT_OF_BOUNDS: return "out_of_bounds";
-        case TP_STATUS_HASH_COLLISION: return "hash_collision";
-        case TP_STATUS_UNKNOWN_REGION: return "unknown_region";
-        case TP_STATUS_PAGE_NOT_FOUND: return "page_not_found";
-        case TP_STATUS_UNSUPPORTED_TEXTURE: return "unsupported_texture";
-        case TP_STATUS_OOM: return "oom";
-        case TP_STATUS_BUILDER_FAILED: return "builder_failed";
-        case TP_STATUS_BAD_PROJECT: return "bad_project";
-        case TP_STATUS_PATH_NOT_ABSOLUTE: return "path_not_absolute";
-        case TP_STATUS_PATH_DRIVE_RELATIVE: return "path_drive_relative";
-        case TP_STATUS_PATH_BAD_UNC: return "path_bad_unc";
-        case TP_STATUS_PATH_DEVICE: return "path_device";
-        case TP_STATUS_PATH_RESOLVE_FAILED: return "path_resolve_failed";
-        case TP_STATUS_RNG_FAILED: return "rng_failed";
-        case TP_STATUS_IDENTITY_COLLISION: return "identity_collision";
-        case TP_STATUS_ID_MALFORMED: return "id_malformed";
-        case TP_STATUS_DUPLICATE_ID: return "duplicate_id";
-        case TP_STATUS_INVALID_UTF8: return "invalid_utf8";
-        case TP_STATUS_KEY_ABSOLUTE: return "key_absolute";
-        case TP_STATUS_KEY_TRAVERSAL: return "key_traversal";
-        case TP_STATUS_NOT_FOUND: return "not_found";
-        case TP_STATUS_AMBIGUOUS_SELECTOR: return "ambiguous_selector";
-        case TP_STATUS_UNKNOWN_OP: return "unknown_op";
-        case TP_STATUS_OUT_OF_RANGE: return "out_of_range";
-        case TP_STATUS_REVISION_CONFLICT: return "revision_conflict";
-        case TP_STATUS_INVALID_REVISION: return "invalid_revision";
-        case TP_STATUS_JOURNAL_FAILED: return "journal_failed";
-        case TP_STATUS_FILE_CHANGED_EXTERNALLY: return "file_changed_externally";
-        case TP_STATUS_RECOVERY_CLEANUP_FAILED: return "recovery_cleanup_failed";
-        case TP_STATUS_RECOVERY_BUSY: return "recovery_busy";
-        case TP_STATUS_RECOVERY_CLAIM_FAILED: return "recovery_claim_failed";
-        case TP_STATUS_PROJECT_LIVE: return "project_live";
-        case TP_STATUS_UNSUPPORTED_CAPABILITY: return "unsupported_capability";
-        case TP_STATUS_FILE_EXISTS: return "file_exists";
-        case TP_STATUS_FILE_DURABILITY_UNCERTAIN: return "file_durability_uncertain";
-        case TP_STATUS_FILE_IO_FAILED: return "file_io_failed";
-        case TP_STATUS_BUILDER_CRASHED: return "builder_crashed";
-        case TP_STATUS_CANCELLED: return "cancelled";
+#define TP_STATUS_X_ID(name, prose, id) case TP_STATUS_##name: return id;
+        TP_STATUS_LIST(TP_STATUS_X_ID)
+#undef TP_STATUS_X_ID
     }
     return "unknown_status";
 }

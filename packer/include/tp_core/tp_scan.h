@@ -78,11 +78,6 @@ typedef enum tp_scan_kind {
 tp_status tp_scan_classify_checked(const char *abs, tp_scan_kind *out,
                                    tp_error *err);
 
-/* Compatibility value-only classification. Prefer the checked form whenever a
- * caller must distinguish absence from an unreadable/unstatable path. Errors map
- * to MISSING because this legacy API has no status channel. */
-tp_scan_kind tp_scan_classify(const char *abs);
-
 /* Stats one regular file through the same UTF-8 filesystem boundary used by
  * directory scanning. Size and platform mtime are opaque comparison values;
  * either output may be NULL. Directories/special/missing paths return false. */

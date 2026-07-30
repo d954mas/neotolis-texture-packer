@@ -10,91 +10,25 @@
 /* set (atlas knobs)                                                  */
 /* ------------------------------------------------------------------ */
 
-/* Parses one atlas knob key=value INTO an atlas.settings op payload (mask + value).
- * Returns 0 or CLI_EXIT_USAGE after emitting a structured error. Only PARSES (the
- * string->typed value + the fits-int marshalling); the numeric RANGE is core's now. */
+/* Parses one atlas knob key=value INTO an atlas.settings op payload. Returns 0 or
+ * CLI_EXIT_USAGE after emitting a structured error. */
 static int fill_knob(tp_op_atlas_settings *s, const char *key, const char *val, bool json, bool quiet) {
-    int iv = 0;
-    bool bv = false;
-    float fv = 0.0F;
-    char m[192];
-
-#define BADVAL(fmt, ...)                                                                                                \
-    do {                                                                                                               \
-        (void)snprintf(m, sizeof m, fmt, __VA_ARGS__);                                                                 \
-        cli_emit_error(json, quiet, "usage", "%s", m);                                                                 \
-        return CLI_EXIT_USAGE;                                                                                         \
-    } while (0)
-
-    if (strcmp(key, "max_size") == 0) {
-        if (!to_int(val, &iv)) {
-            BADVAL("max_size = '%s' must be an integer", val);
-        }
-        s->max_size = iv;
-        s->mask |= TP_AF_MAX_SIZE;
-    } else if (strcmp(key, "padding") == 0) {
-        if (!to_int(val, &iv)) {
-            BADVAL("padding = '%s' must be an integer", val);
-        }
-        s->padding = iv;
-        s->mask |= TP_AF_PADDING;
-    } else if (strcmp(key, "margin") == 0) {
-        if (!to_int(val, &iv)) {
-            BADVAL("margin = '%s' must be an integer", val);
-        }
-        s->margin = iv;
-        s->mask |= TP_AF_MARGIN;
-    } else if (strcmp(key, "extrude") == 0) {
-        if (!to_int(val, &iv)) {
-            BADVAL("extrude = '%s' must be an integer", val);
-        }
-        s->extrude = iv;
-        s->mask |= TP_AF_EXTRUDE;
-    } else if (strcmp(key, "alpha_threshold") == 0) {
-        if (!to_int(val, &iv)) {
-            BADVAL("alpha_threshold = '%s' must be an integer", val);
-        }
-        s->alpha_threshold = iv;
-        s->mask |= TP_AF_ALPHA_THRESHOLD;
-    } else if (strcmp(key, "max_vertices") == 0) {
-        if (!to_int(val, &iv)) {
-            BADVAL("max_vertices = '%s' must be an integer", val);
-        }
-        s->max_vertices = iv;
-        s->mask |= TP_AF_MAX_VERTICES;
-    } else if (strcmp(key, "shape") == 0) {
-        if (!to_int(val, &iv)) {
-            BADVAL("shape = '%s' must be an integer", val);
-        }
-        s->shape = iv;
-        s->mask |= TP_AF_SHAPE;
-    } else if (strcmp(key, "allow_transform") == 0) {
-        if (!to_bool(val, &bv)) {
-            BADVAL("allow_transform = '%s' must be 0/1/true/false", val);
-        }
-        s->allow_transform = bv;
-        s->mask |= TP_AF_ALLOW_TRANSFORM;
-    } else if (strcmp(key, "power_of_two") == 0) {
-        if (!to_bool(val, &bv)) {
-            BADVAL("power_of_two = '%s' must be 0/1/true/false", val);
-        }
-        s->power_of_two = bv;
-        s->mask |= TP_AF_POWER_OF_TWO;
-    } else if (strcmp(key, "pixels_per_unit") == 0) {
-        if (!to_float(val, &fv)) {
-            BADVAL("pixels_per_unit = '%s' must be a number", val);
-        }
-        s->pixels_per_unit = fv;
-        s->mask |= TP_AF_PIXELS_PER_UNIT;
-    } else if (strcmp(key, "name") == 0) {
-        BADVAL("%s", "use 'ntpacker atlas rename <project> <old> <new>' to rename an atlas");
-    } else {
-        (void)snprintf(m, sizeof m, "unknown atlas key '%s' (known: %s)", key, k_atlas_knobs);
-        cli_emit_error(json, quiet, "usage", "%s", m);
+    const int matched = cli_fill_registry_field(TP_FIELD_FAMILY_ATLAS, s, &s->mask,
+                                                key, val, json, quiet);
+    if (matched != 0) {
+        return matched > 0 ? 0 : CLI_EXIT_USAGE;
+    }
+    if (strcmp(key, "name") == 0) {
+        cli_emit_error(json, quiet, "usage", "%s",
+                       "use 'ntpacker atlas rename <project> <old> <new>' to rename an atlas");
         return CLI_EXIT_USAGE;
     }
-#undef BADVAL
-    return 0;
+    char known[256];
+    char m[192];
+    (void)snprintf(m, sizeof m, "unknown atlas key '%s' (known: %s)", key,
+                   cli_field_key_list(TP_FIELD_FAMILY_ATLAS, known, sizeof known));
+    cli_emit_error(json, quiet, "usage", "%s", m);
+    return CLI_EXIT_USAGE;
 }
 
 int do_set(const char *const *pos, int npos, bool dry_run, bool json, bool quiet) {
