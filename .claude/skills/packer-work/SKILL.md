@@ -1,6 +1,6 @@
 ---
 name: packer-work
-description: Run Texture Packer implementation, debugging, refactoring, or documentation work with an adaptive trivial/normal/large workflow. Use the full approval-gated local-state workflow for large, ambiguous, architecture-sensitive, or long autonomous tasks.
+description: Run Texture Packer implementation, debugging, refactoring, review, or documentation work with an adaptive read-only/trivial/normal/large workflow. Use the full approval-gated local-state workflow only for large, ambiguous, architecture-sensitive, or broad-risk tasks.
 ---
 
 # Packer work
@@ -9,16 +9,22 @@ Follow `AGENTS.md`. Scale ceremony to the task.
 
 ## Select the scale
 
+- **Read-only:** investigate, diagnose, or review and report directly. Skip the
+  change spec, implementation plan, and approval round. Use `.context/` only
+  when resumability materially helps.
 - **Trivial:** one obvious local change with low blast radius. Work directly,
   skip `.context/`, run a focused check, and report evidence.
 - **Normal:** clear bounded scope spanning a small surface. Orient, resolve
   material questions, state a short plan, implement, validate, and hand off.
   Use `.context/` only if resumability adds value.
 - **Large/ambiguous:** uncertain product or architecture choices, several
-  dependent packets, broad blast radius, or long autonomous execution. Use the
-  full workflow below and do not edit production code before explicit approval.
+  dependent packets, or broad blast radius. Use the full workflow below and do
+  not edit production code before explicit approval.
 
 Non-triviality alone does not require a subagent.
+Duration alone may justify resumable local state, but does not require the full
+workflow or renewed approval. Existing authorization remains valid until a
+material choice or scope expansion appears.
 
 ## Full workflow
 

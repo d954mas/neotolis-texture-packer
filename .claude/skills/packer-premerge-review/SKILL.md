@@ -31,7 +31,9 @@ all reviewer work independent and evidence-based.
    ```
 
    Include other repository-supported static or boundary checks not already
-   registered in ctest. Record exact results against the frozen SHA.
+   registered in ctest. Also cover candidate-applicable CI-only hard gates,
+   including the deterministic pack-hash and GUI bench probes, locally or via
+   their exact-candidate CI result. Record exact results against the frozen SHA.
 
 3. **Launch fresh Opus reviewers**
 
