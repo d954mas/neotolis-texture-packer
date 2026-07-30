@@ -256,11 +256,10 @@ static void bench_run_probes(void) {
     const tp_snapshot_atlas *first_atlas =
         tp_session_snapshot_atlas_at(snap, 0);
     gui_view_select_atlas(first_atlas->id);
-    int atlas_index = gui_view_atlas_index(snap);
     build_rows();
     do_pack_blocking();
     const tp_result *packed =
-        gui_pack_result(atlas_index);
+        gui_pack_result(first_atlas->id);
     build_rows(); /* row cache still keyed to atlas 0; ensure rows are present for the scan */
     build_view();
     const int regions = packed ? packed->sprite_count : 0;
@@ -382,14 +381,13 @@ static void bench_run_probes(void) {
         return;
     }
     gui_view_select_atlas(first_atlas->id);
-    atlas_index = gui_view_atlas_index(snap);
     const uint64_t pack_ver_before =
-        gui_pack_result_version(atlas_index);
+        gui_pack_result_version(first_atlas->id);
     char err[256] = {0};
     const double p0 = bench_now_ms();
     const bool started =
         gui_pack_async_start(
-            atlas_index, err, sizeof err);
+            first_atlas->id, err, sizeof err);
     const double p1 = bench_now_ms();
     const bool worker = gui_pack_worker_active() || gui_pack_async_busy();
     /* A genuinely async start hands off to the worker WITHOUT producing+publishing a result
@@ -397,7 +395,7 @@ static void bench_run_probes(void) {
      * A synchronous pack -- the UI-blocking regression this guards -- would have bumped it here.
      * (worker_active alone can't tell "still running" from "finished but not yet taken".) */
     const bool no_sync_publish =
-        gui_pack_result_version(atlas_index) ==
+        gui_pack_result_version(first_atlas->id) ==
         pack_ver_before;
     const bool pack_ok = started && worker && no_sync_publish;
     if (pack_ok) {

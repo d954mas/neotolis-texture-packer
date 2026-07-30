@@ -29,15 +29,19 @@ void do_pack_blocking(void) {
         set_status_ex(STATUS_WARNING, "No sources to pack -- add a smart folder or files first.");
         return;
     }
+    /* The blocking job advances the session and may replace the borrowed
+     * snapshot before it returns. Carry only the stable identity across that
+     * boundary. */
+    const tp_id128 atlas_id = a->id;
     char err[256] = {0};
     char note[128] = {0};
     double ms = 0.0;
-    if (gui_pack_atlas(atlas_index, &ms, err, sizeof err, note, sizeof note)) {
+    if (gui_pack_atlas(atlas_id, &ms, err, sizeof err, note, sizeof note)) {
         gui_project_mark_packed(); /* clears preview_stale for the current model */
         s_last_pack_ms = ms;
-        s_last_pack_atlas_id = a->id;
+        s_last_pack_atlas_id = atlas_id;
         /* the per-frame canvas<->atlas sync (frame()) picks up the new result pointer and uploads. */
-        const tp_result *r = gui_pack_result(atlas_index);
+        const tp_result *r = gui_pack_result(atlas_id);
         const double shown_ms = s_status_fixed_time ? 0.0 : ms;
         if (note[0] != '\0') {
             set_statusf_ex(STATUS_SUCCESS, "Packed %d sprites, %d page(s) in %.0f ms (%s)", r->sprite_count, r->page_count, shown_ms, note);
@@ -69,7 +73,7 @@ void do_pack(void) {
         return;
     }
     char err[256] = {0};
-    if (gui_pack_async_start(atlas_index, err, sizeof err)) {
+    if (gui_pack_async_start(a->id, err, sizeof err)) {
         set_status_ex(STATUS_INFO, "Packing\xE2\x80\xA6");   /* result lands via poll_async */
     } else {
         set_statusf_ex(STATUS_ERROR, "Pack failed: %s", err);
@@ -107,16 +111,15 @@ void preview_target_reset(void) {
  * player owns the canvas in its own mode, so it always falls back to native (its frame indices are into
  * the native result). Single source of truth -- used by main.c's canvas bind AND the canvas stats line. */
 const tp_result *preview_target_result(void) {
-    const int atlas_index =
-        gui_view_atlas_index(gui_project_snapshot());
-    const tp_result *native = gui_pack_result(atlas_index);
+    const tp_id128 atlas_id = gui_view_atlas_id();
+    const tp_result *native = gui_pack_result(atlas_id);
     if (s_preview_target == 0 || s_preview_active) {
         return native;
     }
     if (s_canvas_w < S(STRIP_PREVIEW_MIN_W)) {
         return native; /* the selector folded away (compact / narrow single-row) -> show the honest session pack */
     }
-    const tp_result *pv = gui_pack_preview_result(atlas_index);
+    const tp_result *pv = gui_pack_preview_result(atlas_id);
     return pv ? pv : native; /* preview not landed yet (async) -> native until it does */
 }
 
@@ -125,17 +128,14 @@ bool preview_target_result_is_export(void) {
         s_canvas_w < S(STRIP_PREVIEW_MIN_W)) {
         return false;
     }
-    const int atlas_index =
-        gui_view_atlas_index(gui_project_snapshot());
-    return gui_pack_preview_result(atlas_index) != NULL;
+    return gui_pack_preview_result(gui_view_atlas_id()) != NULL;
 }
 
 uint64_t preview_target_result_version(void) {
-    const int atlas_index =
-        gui_view_atlas_index(gui_project_snapshot());
+    const tp_id128 atlas_id = gui_view_atlas_id();
     return preview_target_result_is_export()
-               ? gui_pack_preview_result_version(atlas_index)
-               : gui_pack_result_version(atlas_index);
+               ? gui_pack_preview_result_version(atlas_id)
+               : gui_pack_result_version(atlas_id);
 }
 
 /* Starts the preview pack for a strip-selector pick. combo 0 (or a bad index) -> Native. */
@@ -165,7 +165,7 @@ void gui_actions__preview_target_start(int combo_index) {
         return;
     }
     char err[256] = {0};
-    if (gui_pack_preview_async_start(atlas_index, e->id, err, sizeof err)) {
+    if (gui_pack_preview_async_start(a->id, e->id, err, sizeof err)) {
         s_preview_target = combo_index;
         set_statusf_ex(STATUS_INFO, "Preview: %s\xE2\x80\xA6", e->display_name ? e->display_name : e->id);
     } else {
@@ -177,10 +177,8 @@ void gui_actions__preview_target_start(int combo_index) {
 /* Per-frame reconciliation: a model edit since the preview packed makes it stale -> drop to Native (never
  * show a silently-wrong preview). Atlas switch / undo / redo / open / new drop it via reset_selection. */
 static void preview_target_sync(void) {
-    const int atlas_index =
-        gui_view_atlas_index(gui_project_snapshot());
     if (s_preview_target != 0 && !gui_pack_async_busy() &&
-        !gui_pack_preview_result(atlas_index)) {
+        !gui_pack_preview_result(gui_view_atlas_id())) {
         preview_target_reset();
     }
 }
@@ -200,7 +198,7 @@ static void poll_async(void) {
             }
             s_last_pack_ms = info.ms;
             s_last_pack_atlas_id = info.atlas_id;
-            const tp_result *r = gui_pack_result(info.atlas_index);
+            const tp_result *r = gui_pack_result(info.atlas_id);
             const char *stale = info.input_changed ? " -- inputs changed, stale" : "";
             if (r && info.note[0] != '\0') {
                 set_statusf_ex(STATUS_SUCCESS, "Packed %d sprites, %d page(s) in %.0f ms (%s)%s", r->sprite_count, r->page_count, info.ms, info.note, stale);
@@ -265,8 +263,7 @@ static void poll_async(void) {
                     char chip[96] = {0};
                     char tip[256] = {0};
                     const int nd = gui_pack_preview_diff(
-                        gui_view_atlas_index(
-                            gui_project_snapshot()),
+                        gui_view_atlas_id(),
                         pe->id, chip, sizeof chip,
                         tip, sizeof tip);
                     if (nd > 0) {

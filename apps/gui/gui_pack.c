@@ -1,3 +1,4 @@
+#define NTPACKER_GUI_PACK_IMPLEMENTATION
 #include "gui_pack_internal.h"
 
 #include <stdio.h>
@@ -100,7 +101,7 @@ void gui_pack__test_fail_next_ref_index_build(void) {
 }
 
 void gui_pack__test_set_result_budget(uint64_t byte_budget) {
-    gui_pack_clear(-1);
+    gui_pack_clear(tp_id128_nil());
     s_budget_override = byte_budget;
     /* Shutdown funnels through here between cases, so an armed one-shot can
      * never leak into the next case. */
@@ -272,23 +273,6 @@ static pack_slot *pack_slot_for_atlas_id(tp_id128 atlas_id) {
     return NULL;
 }
 
-static pack_slot *pack_slot_for_atlas_index(int atlas_index) {
-    if (atlas_index < 0 || atlas_index >= GUI_PACK_MAX_ATLASES) {
-        return NULL;
-    }
-    const tp_session_snapshot *snapshot = gui_project_snapshot();
-    const tp_snapshot_atlas *atlas =
-        snapshot ? tp_session_snapshot_atlas_at(snapshot, atlas_index) : NULL;
-    if (!atlas) {
-        return NULL;
-    }
-    if (s_slots[atlas_index].valid &&
-        tp_id128_eq(s_slots[atlas_index].atlas_id, atlas->id)) {
-        return &s_slots[atlas_index];
-    }
-    return pack_slot_for_atlas_id(atlas->id);
-}
-
 static bool snapshot_has_atlas(const tp_session_snapshot *snapshot,
                                tp_id128 atlas_id) {
     const int count = snapshot ? tp_session_snapshot_atlas_count(snapshot) : 0;
@@ -302,7 +286,7 @@ static bool snapshot_has_atlas(const tp_session_snapshot *snapshot,
     return false;
 }
 
-static pack_slot *pack_slot_for_publish(int atlas_index, tp_id128 atlas_id) {
+static pack_slot *pack_slot_for_publish(tp_id128 atlas_id) {
     pack_slot *slot = pack_slot_for_atlas_id(atlas_id);
     if (slot) {
         return slot;
@@ -318,12 +302,11 @@ static pack_slot *pack_slot_for_publish(int atlas_index, tp_id128 atlas_id) {
             return &s_slots[i];
         }
     }
-    return &s_slots[atlas_index];
+    return NULL;
 }
 
 bool gui_pack_publish_native(tp_session_job_result *job_result,
-                             int atlas_index, double elapsed_ms,
-                             gui_pack_result_info *out) {
+                             double elapsed_ms, gui_pack_result_info *out) {
     if (!job_result || job_result->kind != TP_SESSION_JOB_PACK ||
         !job_result->_owner || !job_result->pack.result) {
         if (out) {
@@ -374,7 +357,16 @@ bool gui_pack_publish_native(tp_session_job_result *job_result,
      * residency this publication is about to install. A slot reused for the SAME
      * atlas keeps its previous entry on purpose -- an earlier hash of this atlas
      * is exactly what an Undo/Redo probe looks for, and the LRU bounds it. */
-    pack_slot *slot = pack_slot_for_publish(atlas_index, pack->atlas_id);
+    pack_slot *slot = pack_slot_for_publish(pack->atlas_id);
+    if (!slot) {
+        free(ref_index);
+        if (out) {
+            out->status = TP_STATUS_OUT_OF_BOUNDS;
+            (void)snprintf(out->err, sizeof out->err,
+                           "pack-result atlas slot capacity is exhausted");
+        }
+        return false;
+    }
     if (slot->valid && !tp_id128_eq(slot->atlas_id, pack->atlas_id)) {
         pack_slot_clear(slot);
     }
@@ -459,9 +451,9 @@ static const tp_result *pack_slot_reside(pack_slot *slot) {
     return result;
 }
 
-void gui_pack_clear(int atlas_index) {
-    if (atlas_index >= 0) {
-        pack_slot *slot = pack_slot_for_atlas_index(atlas_index);
+void gui_pack_clear(tp_id128 atlas_id) {
+    if (!tp_id128_is_nil(atlas_id)) {
+        pack_slot *slot = pack_slot_for_atlas_id(atlas_id);
         if (slot) {
             pack_slot_clear(slot);
         }
@@ -474,17 +466,18 @@ void gui_pack_clear(int atlas_index) {
         tp_pack_result_cache_destroy(s_cache);
         s_cache = NULL;
     }
-    if (atlas_index < 0 || gui_pack_preview_belongs_to(atlas_index)) {
+    if (tp_id128_is_nil(atlas_id) ||
+        gui_pack_preview_belongs_to(atlas_id)) {
         gui_pack_preview_clear();
     }
 }
 
-const tp_result *gui_pack_result(int atlas_index) {
-    return pack_slot_reside(pack_slot_for_atlas_index(atlas_index));
+const tp_result *gui_pack_result(tp_id128 atlas_id) {
+    return pack_slot_reside(pack_slot_for_atlas_id(atlas_id));
 }
 
-const tp_result *gui_pack_result_peek(int atlas_index) {
-    const pack_slot *slot = pack_slot_for_atlas_index(atlas_index);
+const tp_result *gui_pack_result_peek(tp_id128 atlas_id) {
+    const pack_slot *slot = pack_slot_for_atlas_id(atlas_id);
     if (!slot || !slot->valid) {
         return NULL;
     }
@@ -499,8 +492,8 @@ const tp_result *gui_pack_result_peek(int atlas_index) {
     return tp_pack_result_cache_peek(s_cache, slot->cache_key);
 }
 
-uint64_t gui_pack_result_version(int atlas_index) {
-    const pack_slot *slot = pack_slot_for_atlas_index(atlas_index);
+uint64_t gui_pack_result_version(tp_id128 atlas_id) {
+    const pack_slot *slot = pack_slot_for_atlas_id(atlas_id);
     /* A slot whose entry the LRU already evicted is only retired by the next
      * result read; its version must not outlive the entry it numbered. */
     if (!slot ||
@@ -510,10 +503,10 @@ uint64_t gui_pack_result_version(int atlas_index) {
     return slot->version;
 }
 
-bool gui_pack_sprite_matches_ref(int atlas_index, int sprite_index,
+bool gui_pack_sprite_matches_ref(tp_id128 atlas_id, int sprite_index,
                                  tp_id128 source_id,
                                  const char *source_key) {
-    const tp_result *result = gui_pack_result(atlas_index);
+    const tp_result *result = gui_pack_result(atlas_id);
     if (!result || sprite_index < 0 || sprite_index >= result->sprite_count ||
         tp_id128_is_nil(source_id) || !source_key) {
         return false;
@@ -549,14 +542,14 @@ int gui_pack_find_sprite_ref_in_result(const tp_result *result,
     return -1;
 }
 
-int gui_pack_find_sprite_ref(int atlas_index, tp_id128 source_id,
+int gui_pack_find_sprite_ref(tp_id128 atlas_id, tp_id128 source_id,
                              const char *source_key) {
-    if (atlas_index < 0 || atlas_index >= GUI_PACK_MAX_ATLASES) {
+    if (tp_id128_is_nil(atlas_id)) {
         return -1;
     }
     /* The canonical index follows the ONE resident result, so making the atlas
      * resident is what binds this lookup to the right result. */
-    if (!gui_pack_result(atlas_index)) {
+    if (!gui_pack_result(atlas_id)) {
         return -1;
     }
     char canonical_name[TP_PACK_INTERNAL_NAME_CAP];
@@ -589,3 +582,115 @@ int gui_pack_find_sprite_ref(int atlas_index, tp_id128 source_id,
     }
     return -1;
 }
+
+#ifdef TP_ENABLE_TEST_SEAMS
+static tp_id128 gui_pack_test_atlas_id(int atlas_index) {
+    if (atlas_index < 0) {
+        return tp_id128_nil();
+    }
+    const tp_session_snapshot *snapshot =
+        gui_project_snapshot();
+    const tp_snapshot_atlas *atlas =
+        snapshot
+            ? tp_session_snapshot_atlas_at(
+                  snapshot, atlas_index)
+            : NULL;
+    return atlas ? atlas->id : tp_id128_nil();
+}
+
+bool gui_pack_atlas_at_index(
+    int atlas_index, double *out_ms, char *err,
+    size_t err_cap, char *notice, size_t notice_cap) {
+    return gui_pack_atlas(
+        gui_pack_test_atlas_id(atlas_index), out_ms,
+        err, err_cap, notice, notice_cap);
+}
+
+const tp_result *gui_pack_result_at_index(int atlas_index) {
+    return gui_pack_result(
+        gui_pack_test_atlas_id(atlas_index));
+}
+
+const tp_result *gui_pack_result_peek_at_index(int atlas_index) {
+    return gui_pack_result_peek(
+        gui_pack_test_atlas_id(atlas_index));
+}
+
+uint64_t gui_pack_result_version_at_index(int atlas_index) {
+    return gui_pack_result_version(
+        gui_pack_test_atlas_id(atlas_index));
+}
+
+int gui_pack_find_sprite_ref_at_index(
+    int atlas_index, tp_id128 source_id,
+    const char *source_key) {
+    return gui_pack_find_sprite_ref(
+        gui_pack_test_atlas_id(atlas_index),
+        source_id, source_key);
+}
+
+bool gui_pack_sprite_matches_ref_at_index(
+    int atlas_index, int sprite_index,
+    tp_id128 source_id, const char *source_key) {
+    return gui_pack_sprite_matches_ref(
+        gui_pack_test_atlas_id(atlas_index),
+        sprite_index, source_id, source_key);
+}
+
+bool gui_pack_export_at_index(
+    int atlas_index, int *out_targets, int *out_notices,
+    char *err, size_t err_cap, char *notice,
+    size_t notice_cap) {
+    return gui_pack_export(
+        gui_pack_test_atlas_id(atlas_index), out_targets,
+        out_notices, err, err_cap, notice, notice_cap);
+}
+
+void gui_pack_clear_at_index(int atlas_index) {
+    gui_pack_clear(gui_pack_test_atlas_id(atlas_index));
+}
+
+bool gui_pack_preview_blocking_at_index(
+    int atlas_index, const char *exporter_id,
+    char *err, size_t err_cap) {
+    return gui_pack_preview_blocking(
+        gui_pack_test_atlas_id(atlas_index),
+        exporter_id, err, err_cap);
+}
+
+bool gui_pack_preview_async_start_at_index(
+    int atlas_index, const char *exporter_id,
+    char *err, size_t err_cap) {
+    return gui_pack_preview_async_start(
+        gui_pack_test_atlas_id(atlas_index),
+        exporter_id, err, err_cap);
+}
+
+const tp_result *gui_pack_preview_result_at_index(
+    int atlas_index) {
+    return gui_pack_preview_result(
+        gui_pack_test_atlas_id(atlas_index));
+}
+
+uint64_t gui_pack_preview_result_version_at_index(
+    int atlas_index) {
+    return gui_pack_preview_result_version(
+        gui_pack_test_atlas_id(atlas_index));
+}
+
+int gui_pack_preview_diff_at_index(
+    int atlas_index, const char *exporter_id,
+    char *chip, size_t chip_cap, char *tip,
+    size_t tip_cap) {
+    return gui_pack_preview_diff(
+        gui_pack_test_atlas_id(atlas_index),
+        exporter_id, chip, chip_cap, tip, tip_cap);
+}
+
+bool gui_pack_async_start_at_index(
+    int atlas_index, char *err, size_t err_cap) {
+    return gui_pack_async_start(
+        gui_pack_test_atlas_id(atlas_index),
+        err, err_cap);
+}
+#endif

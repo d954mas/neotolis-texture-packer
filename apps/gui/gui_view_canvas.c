@@ -214,7 +214,7 @@ static bool strip_preview_chip(nt_ui_context_t *ctx, float h) {
     char chip[96];
     char tip[224];
     const int nd = gui_pack_preview_diff(
-        gui_view_atlas_index(gui_project_snapshot()),
+        gui_view_atlas_id(),
         e->id, chip, sizeof chip, tip, sizeof tip);
     if (nd <= 0) {
         return false; /* format holds everything -> no degradation chip (canvas simply shows the preview) */
@@ -398,8 +398,7 @@ static void declare_canvas_preview(nt_ui_context_t *ctx) {
                 nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), "This animation has no frames yet.", &g_canvas_hint);
             } else if (
                 an &&
-                gui_pack_result(gui_view_atlas_index(
-                    gui_project_snapshot())) == NULL) {
+                gui_pack_result(gui_view_atlas_id()) == NULL) {
                 nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), "Pack to preview \xE2\x80\x94 press Pack (Ctrl+P).", &g_canvas_hint);
             } else {
                 nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), "No frames resolve to packed regions \xE2\x80\x94 repack (Ctrl+P).", &g_canvas_hint);

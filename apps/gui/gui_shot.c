@@ -171,7 +171,7 @@ void gui_shot_pre_pin_tick(void) {
          * and capture an unpacked canvas; retrying costs nothing. */
         if (atlas_index >= 0) {
             s_shot_packed = true;
-            if (!gui_pack_result(atlas_index)) {
+            if (!gui_pack_result(gui_view_atlas_id())) {
                 do_pack_blocking();
             }
         }
@@ -200,7 +200,7 @@ void gui_shot_tick(void) {
     if (!s_shot_selected) {
         const tp_result *r =
             atlas_index >= 0
-                ? gui_pack_result(atlas_index)
+                ? gui_pack_result(gui_view_atlas_id())
                 : NULL;
         /* SUCCESS latch. Consuming the latch on a frame whose pack result is
          * not published yet burned the one selection attempt and captured an
@@ -228,7 +228,7 @@ void gui_shot_tick(void) {
         char perr[256] = {0};
         if (atlas_index >= 0 &&
             gui_pack_preview_blocking(
-                atlas_index, s_shot_preview,
+                gui_view_atlas_id(), s_shot_preview,
                 perr, sizeof perr)) {
             int idx = -1;
             for (int i = 0; i < tp_exporter_count(); i++) {

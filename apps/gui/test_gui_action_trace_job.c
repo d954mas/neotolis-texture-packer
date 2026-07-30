@@ -174,14 +174,14 @@ void test_pack_result_slots_reject_ownerless_results(void) {
     gui_pack_result_info info = {0};
 
     TEST_ASSERT_FALSE(
-        gui_pack_publish_native(&result, 0, 0.0, &info));
+        gui_pack_publish_native(&result, 0.0, &info));
     TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_ARGUMENT, info.status);
     TEST_ASSERT_NOT_NULL(strstr(info.err, "retained owner"));
     TEST_ASSERT_NULL(gui_pack_result(0));
 
     memset(&info, 0, sizeof info);
     TEST_ASSERT_FALSE(
-        gui_pack_preview_publish(&result, 0, 0.0, &info));
+        gui_pack_preview_publish(&result, 0.0, &info));
     TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_ARGUMENT, info.status);
     TEST_ASSERT_NOT_NULL(strstr(info.err, "retained owner"));
     TEST_ASSERT_NULL(gui_pack_preview_result(0));

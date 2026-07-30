@@ -604,6 +604,7 @@ tp_build_proto_internal tp_build_proto|tp_build_worker|tp_build_worker_main
 tp_build_worker_internal tp_build_worker|tp_pack|tp_job_worker_main
 tp_job_worker_internal  tp_build_worker_main|tp_job_worker_main|tp_job_worker_process_internal|tp_job_worker_proto
 tp_job_worker_process_internal tp_job|tp_job_worker
+tp_export_job_internal tp_export_run|tp_job_worker_main
 tp_proc_internal        tp_proc_win32|tp_proc_posix|tp_build_worker|tp_job_worker|tp_job_worker_main
 EOF
 }

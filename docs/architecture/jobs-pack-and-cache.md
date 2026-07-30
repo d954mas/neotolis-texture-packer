@@ -24,9 +24,24 @@ then compares input tokens for freshness: a changed token keeps the receipt
 observable but marks it `STALE` with `TOKEN_CHANGED`, so it cannot be presented
 as a current preview.
 
-## Builder containment
+## Shared build workflow and containment
 
-Fallible engine builder work runs in a child worker process. The host:
+Saved-file CLI Export and the live session worker both construct the same
+immutable export snapshot job. That executor owns pack-input assembly,
+effective settings, normalization, target publication, and structured
+diagnostics. The clients differ only in admission and delivery: CLI drains the
+job synchronously, while a live session transfers one terminal result through
+its task slot.
+
+Two process boundaries remain intentional. The outer session-job worker
+isolates the complete cancellable Pack/Export command and its filesystem
+publication. The inner builder worker contains fallible engine builder code and
+also protects direct saved-file CLI execution, which has no outer session
+worker. The boundaries defend different failure domains and must not be
+collapsed without preserving both direct-CLI builder crash containment and
+whole-job cancellation.
+
+The host:
 
 - serializes a bounded request;
 - streams progress and one terminal response;
@@ -77,6 +92,8 @@ The reusable result-cache type is single-owner-thread, but current production
 cache ownership is in the native GUI adapter, not `tp_session`. The in-process
 live-headless shape has no built-in cache. In the GUI:
 
+- every result and preview edge is keyed by stable atlas ID; list position is
+  resolved only by test fixtures and presentation iteration;
 - the active result remains pinned and hot;
 - inactive hot entries retain raw RGBA pages while background compression runs;
 - cold entries retain copied geometry plus compressed page blobs;

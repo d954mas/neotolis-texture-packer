@@ -68,7 +68,9 @@ Ordinary CLI commands are one-shot saved-file workflows. Inspect and validate
 load immutable snapshots without taking the writer lease. Mutations open a
 short-lived writable session, submit the same typed operations, and save through
 the same persistence contract. Pack/export remain synchronous commands with
-versioned machine payloads.
+versioned machine payloads, but construct and drain the same immutable build
+job used behind live session execution; there is no second CLI pack/export
+orchestrator.
 
 The CLI is not a back door into an already-open GUI session. A conflicting live
 writer produces `project_live`.

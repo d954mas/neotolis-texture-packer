@@ -557,9 +557,8 @@ static void declare_region_settings(nt_ui_context_t *ctx,
     const gui_sprite_ref sprite_ref = {atlas->id, row->source_id, row->source_key,
                                        tp_session_snapshot_revision(snapshot)};
     const tp_snapshot_sprite *ov = gui_rows_selected_override();
-    const int atlas_index = gui_view_atlas_index(snapshot);
-    const tp_result *pr = gui_pack_result(atlas_index);
-    const int ri = pr ? gui_pack_find_sprite_ref(atlas_index, row->source_id,
+    const tp_result *pr = gui_pack_result(atlas->id);
+    const int ri = pr ? gui_pack_find_sprite_ref(atlas->id, row->source_id,
                                                   row->source_key)
                       : -1;
 

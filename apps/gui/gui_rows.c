@@ -764,14 +764,13 @@ static long long row_packed_area(tp_id128 source_id, const char *source_key) {
     if (tp_id128_is_nil(source_id) || !source_key || source_key[0] == '\0') {
         return 0;
     }
-    const int atlas_index =
-        gui_view_atlas_index(gui_project_snapshot());
-    const tp_result *result = gui_pack_result(atlas_index);
+    const tp_id128 atlas_id = gui_view_atlas_id();
+    const tp_result *result = gui_pack_result(atlas_id);
     if (!result) {
         return 0;
     }
     const int idx = gui_pack_find_sprite_ref(
-        atlas_index, source_id, source_key);
+        atlas_id, source_id, source_key);
     if (idx < 0 || idx >= result->sprite_count) {
         return 0;
     }
@@ -807,7 +806,7 @@ void build_rows(void) {
     /* §61.1 size reads live pack regions: a repack publishes a new result (new version) without touching
      * the model/source generations, so fold the pack version into the key or sort-by-size would stay stale. */
     const uint64_t pack_version =
-        gui_pack_result_version(atlas_index);
+        gui_pack_result_version(a ? a->id : tp_id128_nil());
     if (a && s_row_cache_valid && tp_id128_eq(s_row_cache_atlas_id, a->id) &&
         s_row_cache_snapshot_generation == snapshot_generation &&
         s_row_cache_source_generation == source_generation &&
@@ -1913,8 +1912,7 @@ void select_row_for_result_region(const tp_result *result, int region_idx) {
 
 void select_row_for_region(int region_idx) {
     select_row_for_result_region(
-        gui_pack_result(
-            gui_view_atlas_index(gui_project_snapshot())),
+        gui_pack_result(gui_view_atlas_id()),
         region_idx);
 }
 // #endregion

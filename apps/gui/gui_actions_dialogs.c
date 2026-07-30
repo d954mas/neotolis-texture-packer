@@ -511,7 +511,7 @@ void gui_actions_pump_lifecycle(void) {
         nt_app_quit();
         return;
     }
-    gui_pack_clear(-1);
+    gui_pack_clear(tp_id128_nil());
     gui_shell_reset_shown_result();
     cancel_edit();
     gui_view_reconcile_observation(gui_project_snapshot());

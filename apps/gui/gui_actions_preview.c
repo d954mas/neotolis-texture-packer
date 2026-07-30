@@ -367,7 +367,7 @@ void open_preview_ref(const gui_animation_ref *ref) {
     /* A fresh arming has never seen a result yet, so a not-yet-packed atlas keeps
      * showing the hint instead of being reported as a released result. */
     s_actions.preview_had_result = false;
-    if (!gui_pack_result(atlas_index)) {
+    if (!gui_pack_result(ref->atlas_id)) {
         set_status("Pack (Ctrl+P) to preview the animation on packed regions.");
     } else {
         set_statusf("Previewing '%s' \xE2\x80\x94 Space play/pause.", animation->name);
@@ -453,7 +453,9 @@ static void preview_frames_rebuild(const tp_session_snapshot *snapshot,
      * so it is the resident fast path -- never the residency flip S21 removed
      * from the every-frame path. `result` (the caller's peek of THIS atlas) is
      * unaffected either way: making an atlas resident cannot evict itself. */
-    if (!gui_pack_result(atlas_index)) {
+    const tp_id128 atlas_id =
+        s_actions.preview_animation_ref.atlas_id;
+    if (!gui_pack_result(atlas_id)) {
         s_actions.preview_frames.count = 0;
         s_actions.preview_frames.valid = false;
         return;
@@ -476,7 +478,7 @@ static void preview_frames_rebuild(const tp_session_snapshot *snapshot,
 #endif
         const tp_snapshot_frame *frame = &frames[i];
         const int sprite_index = gui_pack_find_sprite_ref(
-            atlas_index, frame->source_id, frame->source_key);
+            atlas_id, frame->source_id, frame->source_key);
         if (sprite_index < 0 || sprite_index >= result->sprite_count) {
             continue;
         }
@@ -540,8 +542,10 @@ void update_preview(void) {
      * every frame of a preview whose atlas is not the viewed one flip residency
      * twice (two index rebuilds + two LRU passes per frame), and under budget
      * pressure could evict the very result the canvas had just bound. */
-    const tp_result *pr = gui_pack_result_peek(atlas_index);
-    const uint64_t result_version = gui_pack_result_version(atlas_index);
+    const tp_result *pr = gui_pack_result_peek(
+        s_actions.preview_animation_ref.atlas_id);
+    const uint64_t result_version = gui_pack_result_version(
+        s_actions.preview_animation_ref.atlas_id);
     s_canvas.anim_sprite = -1;
     s_preview_frame_count = 0;
     if (!an) {

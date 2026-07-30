@@ -56,28 +56,28 @@ void set_statusf_ex(status_sev_t sev, const char *fmt, ...) {
     set_status_ex(sev, fmt);
 }
 
-const tp_result *gui_pack_result(int atlas_index) {
-    (void)atlas_index;
+const tp_result *gui_pack_result(tp_id128 atlas_id) {
+    (void)atlas_id;
     return NULL;
 }
 
-uint64_t gui_pack_result_version(int atlas_index) {
-    (void)atlas_index;
+uint64_t gui_pack_result_version(tp_id128 atlas_id) {
+    (void)atlas_id;
     return 0U; /* no pack-result slot in the row benchmark -> stable version, packed area stays 0 */
 }
 
-int gui_pack_find_sprite_ref(int atlas_index, tp_id128 source_id,
+int gui_pack_find_sprite_ref(tp_id128 atlas_id, tp_id128 source_id,
                              const char *source_key) {
-    (void)atlas_index;
+    (void)atlas_id;
     (void)source_id;
     (void)source_key;
     return -1; /* no packed regions -> every §61.1 `size` resolves to 0 */
 }
 
-bool gui_pack_sprite_matches_ref(int atlas_index, int sprite_index,
+bool gui_pack_sprite_matches_ref(tp_id128 atlas_id, int sprite_index,
                                  tp_id128 source_id,
                                  const char *source_key) {
-    (void)atlas_index;
+    (void)atlas_id;
     (void)sprite_index;
     (void)source_id;
     (void)source_key;
