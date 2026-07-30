@@ -977,60 +977,6 @@ void test_save_as_preflight_success_does_not_submit_or_write(void) {
     (void)remove(path);
 }
 
-void test_save_as_preflight_observe_failure_preserves_draft_and_model(void) {
-    char path[TP_IDENTITY_PATH_MAX];
-    (void)snprintf(
-        path, sizeof path,
-        "%s/preflight-observe-failure.ntpacker_project",
-        TP_GUI_IDENTITY_TEST_DIR);
-    (void)remove(path);
-
-    const tp_session_snapshot *snapshot =
-        gui_project_snapshot();
-    const tp_snapshot_atlas *atlas =
-        tp_session_snapshot_atlas_at(snapshot, 0);
-    TEST_ASSERT_NOT_NULL(atlas);
-    const tp_id128 atlas_id = atlas->id;
-    const int value = atlas->padding + 1;
-    const int64_t revision =
-        tp_session_snapshot_revision(snapshot);
-    const int undo_depth =
-        gui_project_undo_depth();
-    TEST_ASSERT_TRUE(
-        test_offer_atlas_draft(
-            atlas_id, revision,
-            GUI_ATLAS_PADDING, value, 0.0F));
-
-    gui_project__test_fail_next_observe();
-    char error[256] = {0};
-    TEST_ASSERT_EQUAL_INT(
-        TP_STATUS_OOM,
-        gui_project_save_as_preflight(
-            path, error, sizeof error));
-    TEST_ASSERT_NOT_NULL(
-        strstr(error, "observation test allocation failure"));
-    TEST_ASSERT_EQUAL_INT64(
-        revision,
-        tp_session_revision(
-            gui_project__test_session()));
-    TEST_ASSERT_EQUAL_INT(
-        undo_depth,
-        gui_project_undo_depth());
-    TEST_ASSERT_FALSE(gui_scan_exists(path));
-    TEST_ASSERT_EQUAL_INT(
-        GUI_EDIT_EDITING,
-        gui_draft_phase());
-    int preserved = 0;
-    TEST_ASSERT_TRUE(
-        gui_atlas_edit_value(
-            atlas_id, GUI_ATLAS_PADDING,
-            &preserved, NULL));
-    TEST_ASSERT_EQUAL_INT(value, preserved);
-
-    gui_draft_discard();
-    (void)remove(path);
-}
-
 void test_open_current_canonical_identity_rejects_before_replacement(void) {
     char path[TP_IDENTITY_PATH_MAX];
     (void)snprintf(
@@ -2425,16 +2371,7 @@ void test_save_as_projects_clean_identity_only_at_common_frame_observation(void)
         gui_project_save_as(
             save_path, error, sizeof error));
 
-    /* The Save receipt is exact and synchronous, while presentation state
-     * remains the prior immutable observation until the next frame cut. */
-    TEST_ASSERT_TRUE(gui_project_is_dirty());
-    TEST_ASSERT_FALSE(gui_project_has_path());
-    tp_error frame_error = {{0}};
-    TEST_ASSERT_EQUAL_INT(
-        TP_STATUS_OK,
-        gui_project_frame_begin(
-            &frame_error));
-    gui_project_frame_end();
+    /* Save synchronously refreshes the one borrowed session view. */
     TEST_ASSERT_FALSE(gui_project_is_dirty());
     TEST_ASSERT_TRUE(gui_project_has_path());
 
@@ -2535,134 +2472,6 @@ void test_save_as_roundtrip_releases_writer_before_open_and_keeps_external_guard
     TEST_ASSERT_EQUAL_INT(0, remove(rebound_lock_path));
 }
 
-static void exhaust_two_observation_failures(void) {
-    tp_error error = {{0}};
-    TEST_ASSERT_EQUAL_INT(
-        TP_STATUS_OOM,
-        gui_project_frame_begin(&error));
-    gui_project_frame_end();
-    TEST_ASSERT_EQUAL_INT(
-        TP_STATUS_OOM,
-        gui_project_frame_begin(&error));
-    gui_project_frame_end();
-    TEST_ASSERT_EQUAL_INT(
-        TP_STATUS_OK,
-        gui_project_frame_begin(&error));
-    gui_project_frame_end();
-}
-
-void test_committed_atlas_create_stays_successful_until_echo_reconciles(void) {
-    gui_project__test_fail_observes(3);
-    const gui_project_create_result created =
-        gui_project_add_atlas();
-    TEST_ASSERT_TRUE(created.committed);
-    TEST_ASSERT_TRUE(created.observation_pending);
-    TEST_ASSERT_EQUAL_INT(-1, created.visible_index);
-    TEST_ASSERT_FALSE(tp_id128_is_nil(created.created_id));
-    TEST_ASSERT_EQUAL_INT64(
-        1, tp_session_revision(
-               gui_project__test_session()));
-    TEST_ASSERT_EQUAL_INT(
-        1, tp_session_snapshot_atlas_count(
-               gui_project_snapshot()));
-
-    exhaust_two_observation_failures();
-    const tp_session_snapshot *snapshot =
-        gui_project_snapshot();
-    TEST_ASSERT_NOT_NULL(
-        tp_session_snapshot_atlas_by_id(
-            snapshot, created.created_id));
-}
-
-void test_committed_target_create_stays_successful_until_echo_reconciles(void) {
-    const tp_session_snapshot *before =
-        gui_project_snapshot();
-    const tp_snapshot_atlas *atlas =
-        tp_session_snapshot_atlas_at(before, 0);
-    TEST_ASSERT_NOT_NULL(atlas);
-    const tp_id128 atlas_id = atlas->id;
-    gui_project__test_fail_observes(3);
-    const gui_project_create_result created =
-        gui_project_add_target(
-            atlas_id,
-            tp_session_snapshot_revision(before));
-    TEST_ASSERT_TRUE(created.committed);
-    TEST_ASSERT_TRUE(created.observation_pending);
-    TEST_ASSERT_EQUAL_INT(-1, created.visible_index);
-    TEST_ASSERT_FALSE(tp_id128_is_nil(created.created_id));
-    TEST_ASSERT_EQUAL_INT64(
-        1, tp_session_revision(
-               gui_project__test_session()));
-    TEST_ASSERT_EQUAL_INT(
-        1, atlas->target_count);
-
-    exhaust_two_observation_failures();
-    const tp_session_snapshot *snapshot =
-        gui_project_snapshot();
-    const tp_snapshot_atlas *observed =
-        tp_session_snapshot_atlas_by_id(
-            snapshot, atlas_id);
-    bool found = false;
-    for (int index = 0;
-         observed && index < observed->target_count;
-         ++index) {
-        const tp_snapshot_target *target =
-            tp_session_snapshot_target_at(
-                snapshot, observed->id, index);
-        found = found ||
-                (target &&
-                 tp_id128_eq(
-                     target->id,
-                     created.created_id));
-    }
-    TEST_ASSERT_TRUE(found);
-}
-
-void test_committed_animation_create_stays_successful_until_echo_reconciles(void) {
-    const tp_session_snapshot *before =
-        gui_project_snapshot();
-    const tp_snapshot_atlas *atlas =
-        tp_session_snapshot_atlas_at(before, 0);
-    TEST_ASSERT_NOT_NULL(atlas);
-    const tp_id128 atlas_id = atlas->id;
-    gui_project__test_fail_observes(3);
-    const gui_project_create_result created =
-        gui_project_create_animation(
-            atlas_id,
-            tp_session_snapshot_revision(before),
-            "pending-echo", NULL, 0);
-    TEST_ASSERT_TRUE(created.committed);
-    TEST_ASSERT_TRUE(created.observation_pending);
-    TEST_ASSERT_EQUAL_INT(-1, created.visible_index);
-    TEST_ASSERT_FALSE(tp_id128_is_nil(created.created_id));
-    TEST_ASSERT_EQUAL_INT64(
-        1, tp_session_revision(
-               gui_project__test_session()));
-    TEST_ASSERT_EQUAL_INT(
-        0, atlas->animation_count);
-
-    exhaust_two_observation_failures();
-    const tp_session_snapshot *snapshot =
-        gui_project_snapshot();
-    const tp_snapshot_atlas *observed =
-        tp_session_snapshot_atlas_by_id(
-            snapshot, atlas_id);
-    bool found = false;
-    for (int index = 0;
-         observed && index < observed->animation_count;
-         ++index) {
-        const tp_snapshot_animation *animation =
-            tp_session_snapshot_animation_at(
-                snapshot, observed->id, index);
-        found = found ||
-                (animation &&
-                 tp_id128_eq(
-                     animation->id,
-                     created.created_id));
-    }
-    TEST_ASSERT_TRUE(found);
-}
-
 int main(int argc, char **argv) {
     (void)setvbuf(stdout, NULL, _IONBF, 0);
     if (tp_build_is_worker_invocation(argc, argv)) {
@@ -2719,15 +2528,7 @@ int main(int argc, char **argv) {
     RUN_TEST(
         test_save_as_preflight_success_does_not_submit_or_write);
     RUN_TEST(
-        test_save_as_preflight_observe_failure_preserves_draft_and_model);
-    RUN_TEST(
         test_open_current_canonical_identity_rejects_before_replacement);
     RUN_TEST(test_required_recovery_without_root_warns_but_allows_edit_undo_redo);
-    RUN_TEST(
-        test_committed_atlas_create_stays_successful_until_echo_reconciles);
-    RUN_TEST(
-        test_committed_target_create_stays_successful_until_echo_reconciles);
-    RUN_TEST(
-        test_committed_animation_create_stays_successful_until_echo_reconciles);
     return UNITY_END();
 }

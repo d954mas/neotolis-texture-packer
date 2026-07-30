@@ -161,7 +161,10 @@ typedef enum tp_status {
      * output left empty, and the async pack job surfaces this as
      * TP_SESSION_JOB_CANCELLED. Distinct from the generic faults so a caller can tell
      * "you asked me to stop" apart from "the input was bad". */
-    TP_STATUS_CANCELLED
+    TP_STATUS_CANCELLED,
+
+    /* A session already owns one transient Refresh, Pack, or Export task. */
+    TP_STATUS_BUSY
 } tp_status;
 
 /* No heap and no borrowed pointers, so a plain struct copy of a tp_error stays
@@ -338,7 +341,8 @@ static inline const char *tp_file_io_phase_id(tp_file_io_phase phase) {
       "file_durability_uncertain")                                                 \
     X(FILE_IO_FAILED, "project file I/O failed", "file_io_failed")                 \
     X(BUILDER_CRASHED, "builder crashed", "builder_crashed")                       \
-    X(CANCELLED, "cancelled", "cancelled")
+    X(CANCELLED, "cancelled", "cancelled")                                          \
+    X(BUSY, "session task is busy", "busy")
 
 static inline const char *tp_status_str(tp_status status) {
     switch (status) {

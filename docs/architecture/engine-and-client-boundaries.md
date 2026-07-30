@@ -75,9 +75,10 @@ writer produces `project_live`.
 
 ## Native GUI
 
-The GUI owns one session host and one presentation client. Views submit intents;
-the client owns draft conflict rules, transaction submission, snapshot/event
-refresh, job observation, and lifecycle cutover.
+The GUI owns one small session host. Views submit intents; actions own draft
+conflict rules, the thin mutation adapter submits one typed operation batch,
+and the host owns `update + borrowed view`, task completion, and active/candidate
+lifecycle cutover. There is no in-process transport/client mirror.
 
 GUI presentation state—selection, filter, scroll, modal state, draft text,
 preview playback, GPU resources—is not persisted unless explicitly represented

@@ -237,28 +237,17 @@ gui_pack_done gui_pack_poll(gui_pack_result_info *out) {
      * the drain loop the blocking adapters spin -- and the store must be pumped
      * from the one thread that owns it. */
     gui_pack__cold_pump();
-    gui_host_completion completion = {0};
-    if (!gui_project_host_take_completion(
-            &completion)) {
+    tp_session_job_result result = {0};
+    if (!gui_project_take_completion(&result)) {
         return GUI_PACK_DONE_NONE;
     }
-    tp_session_job_result result =
-        completion.result;
-    completion.result =
-        (tp_session_job_result){0};
-    if (result.kind == TP_SESSION_JOB_NONE) {
-        result.kind = completion.envelope.kind;
-        result.state = completion.state;
-        result.status = completion.status;
-        result.error = completion.error;
-    }
     const bool publish_result =
-        completion.publish_result;
+        result.rejection ==
+        TP_SESSION_JOB_REJECTION_NONE;
     const tp_session_job_rejection rejection =
-        completion.rejection;
+        result.rejection;
     const tp_status completion_status =
-        completion.status;
-    gui_host_completion_destroy(&completion);
+        result.status;
     const bool cancelled =
         result.state == TP_SESSION_JOB_CANCELLED ||
         rejection ==

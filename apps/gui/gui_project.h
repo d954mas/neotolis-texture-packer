@@ -14,8 +14,8 @@
  *
  * Every mutation becomes typed operation intent and commits atomically through tp_session;
  * one accepted transaction captures one semantic diff and one undo step. Undo/Redo also
- * run through tp_session. One gui_session_client atomically observes and frame-pins the
- * immutable state consumed by presentation.
+ * run through tp_session. One small host updates the session and borrows its
+ * immutable current view once per frame.
  * Value edits use one view-local draft reducer and build a narrow typed
  * operation only at submit.
  *
@@ -34,8 +34,6 @@
 #include "tp_core/tp_job.h"
 #include "tp_core/tp_session_snapshot_query.h"
 #include "gui_project_view.h"
-#include "gui_session_client.h"
-#include "gui_host_queue.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -64,6 +62,20 @@ typedef struct gui_project_controller_status_port {
     gui_project_controller_attached_fn attached;
     void *context;
 } gui_project_controller_status_port;
+
+typedef struct gui_session_submit_identity {
+    tp_id128 origin_view_id;
+    tp_id128 draft_instance_id;
+} gui_session_submit_identity;
+
+typedef struct gui_session_submit_terminal {
+    char transaction_id[33];
+    gui_session_submit_identity identity;
+    tp_status status;
+    bool committed;
+    bool no_change;
+    int64_t revision;
+} gui_session_submit_terminal;
 
 /* Creates the initial fresh in-memory project (one default atlas, no path, clean). Crash recovery is
  * collected and resolved separately through the R6 APIs below; startup never adopts an orphan live. */
@@ -106,7 +118,7 @@ tp_status gui_recovery_resolve_entry(const gui_recovery_entry *entry, gui_recove
                                      const char *target_path, char *err_out, size_t err_cap);
 
 /* --- accessors --- */
-/* Immutable read view owned and frame-pinned by gui_session_client. */
+/* Immutable read view borrowed from the active session and pinned per frame. */
 const tp_session_snapshot *gui_project_snapshot(void);
 /* Changes whenever the client publishes or releases a model snapshot.
  * Borrowing GUI caches include this token in their lifetime key. */
@@ -124,12 +136,6 @@ bool gui_project_observed_input_token(
 tp_status gui_project_frame_begin(tp_error *err);
 void gui_project_frame_end(void);
 bool gui_project_frame_is_pinned(void);
-tp_status gui_project_register_observation_reducer(
-    gui_session_client_reducer_fn reduce, void *context, tp_error *err);
-bool gui_project_submit_receipt_query(
-    const char transaction_id[33],
-    gui_session_submit_identity identity,
-    gui_session_submit_terminal *out);
 /* Host-thread admission facade. Request payloads are copied on enqueue; the
  * queue never exposes or retains the mutable session. */
 tp_status gui_project_job_enqueue_pack(
@@ -155,11 +161,10 @@ tp_status gui_project_lifecycle_pump(
 void gui_project_lifecycle_force_close(void);
 gui_project_lifecycle_state
 gui_project_lifecycle_state_query(void);
-/* Host-owner ingress for the one staged job completion. The queue's typed
- * completion IS the contract; the caller destroys it with
- * gui_host_completion_destroy. */
-bool gui_project_host_take_completion(
-    gui_host_completion *out);
+/* Transfers the one terminal completion produced by the most recent session
+ * update. The caller destroys it with tp_session_job_result_destroy. */
+bool gui_project_take_completion(
+    tp_session_job_result *out);
 bool gui_project_job_busy(void);
 tp_session_job_kind gui_project_job_active_kind(void);
 tp_session_job_observed_state gui_project_job_observed_state(void);
@@ -345,9 +350,6 @@ bool gui_project_take_op_error(char *out, size_t cap);
 tp_session *gui_project__test_session(void);
 #endif
 #ifdef TP_ENABLE_TEST_SEAMS
-void gui_project__test_fail_next_observe(void);
-void gui_project__test_fail_observes(unsigned int count);
-bool gui_project__test_host_has_staged_completion(void);
 uint64_t gui_project__test_open_call_count(void);
 #endif
 

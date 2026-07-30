@@ -43,5 +43,9 @@ tp_status tp_session_snapshot__capture(
  * ownership remains with the caller. */
 tp_status tp_session_snapshot__materialize_captured(
     tp_session_snapshot *snapshot, tp_error *err);
+/* Rebuilds only the snapshot half of the borrowed live view when its committed
+ * cut changed. On failure the previous view remains intact. */
+tp_status tp_session_view__refresh_snapshot(
+    tp_session *session, tp_error *err);
 
 #endif /* TP_SESSION_SNAPSHOT_INTERNAL_H */

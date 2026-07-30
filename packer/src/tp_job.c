@@ -219,11 +219,11 @@ static void job_cancel_owned(tp_session_owned_job *owned) {
  * than at destroy: for a big Pack that is every page's pixels, held for as long as
  * the host takes to consume the terminal state. The terminal result keeps its
  * status/error/metadata -- only the released pointers are cleared, so a later
- * tp_session_job_take_result reads NULL pack pointers, never freed memory. The
+ * tp_session_update reads NULL pack pointers, never freed memory. The
  * descriptor and observation_targets are untouched (the session borrows them).
  *
  * A released Pack payload also stops claiming SUCCEEDED. Leaving the terminal
- * state alone let tp_session_job_take_result hand back a SUCCEEDED Pack with
+ * state alone let tp_session_update hand back a SUCCEEDED Pack with
  * NULL arena/result -- a caller that trusts the state (they all do) then
  * dereferences NULL. The rejection is reported as what it is: CANCELLED when
  * this job's own cancellation was accepted, otherwise a structured failure for
@@ -1049,40 +1049,6 @@ bool tp_session_job_active(const tp_session *session) {
     return active;
 }
 
-tp_status tp_session_job_poll(tp_session *session,
-                              tp_session_job_progress *out,
-                              tp_error *err) {
-    if (!session || !out) {
-        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
-                            "job poll requires session and output");
-    }
-    tp_live_job *job =
-        (tp_live_job *)tp_session_job_acquire_internal(session);
-    if (!job) {
-        return tp_error_set(err, TP_STATUS_NOT_FOUND,
-                            "session has no active job");
-    }
-    if (job->owner.pump) {
-        job->owner.pump(&job->owner);
-    }
-    (void)tp_session_job_observation_admit_internal(
-        session, &job->owner);
-    memset(out, 0, sizeof *out);
-    out->kind = job->kind;
-    out->state = (tp_session_job_state)atomic_load_explicit(
-        &job->state, memory_order_acquire);
-    out->current =
-        atomic_load_explicit(&job->current, memory_order_relaxed);
-    out->total =
-        atomic_load_explicit(&job->total, memory_order_relaxed);
-    out->elapsed_ms =
-        out->state == TP_SESSION_JOB_RUNNING
-            ? job_now_ms() - job->started_ms
-            : job->elapsed_ms;
-    tp_session_job_release_internal(&job->owner);
-    return TP_STATUS_OK;
-}
-
 tp_status tp_session_job_cancel(tp_session *session, tp_error *err) {
     tp_live_job *job =
         (tp_live_job *)tp_session_job_acquire_internal(session);
@@ -1097,38 +1063,6 @@ tp_status tp_session_job_cancel(tp_session *session, tp_error *err) {
                : tp_error_set(
                      err, TP_STATUS_INVALID_ARGUMENT,
                      "job cancellation was already requested or the job is terminal");
-}
-
-tp_status tp_session_job_take_result(tp_session *session,
-                                     tp_session_job_result *out,
-                                     tp_error *err) {
-    if (!session || !out) {
-        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
-                            "job result requires session and output");
-    }
-    tp_live_job *job =
-        (tp_live_job *)tp_session_job_acquire_internal(session);
-    if (!job) {
-        return tp_error_set(err, TP_STATUS_NOT_FOUND,
-                            "session has no active job");
-    }
-    if ((tp_session_job_state)atomic_load_explicit(
-            &job->state, memory_order_acquire) ==
-        TP_SESSION_JOB_RUNNING) {
-        tp_session_job_release_internal(&job->owner);
-        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
-                            "job is still running");
-    }
-    const tp_status status = tp_session_job_detach_internal(
-        session, &job->owner, err);
-    if (status != TP_STATUS_OK) {
-        tp_session_job_release_internal(&job->owner);
-        return status;
-    }
-    tp_session_job_release_internal(&job->owner);
-    *out = job->terminal_result;
-    out->_owner = (tp_session_job_result_handle *)job;
-    return TP_STATUS_OK;
 }
 
 void tp_session_job_result_destroy(tp_session_job_result *result) {

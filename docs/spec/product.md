@@ -93,7 +93,8 @@ require a newer schema and an explicit migration contract.
 The native GUI and saved-file CLI are capability-equivalent where their product
 shapes overlap, while using appropriate interfaces:
 
-- GUI: one live session, snapshots/events, drafts, history, recovery, jobs.
+- GUI: one live session, one borrowed current view, drafts, history, recovery,
+  and one active task.
 - CLI: one-shot queries or mutations over a saved project, with structured
   output and predictable dry runs.
 

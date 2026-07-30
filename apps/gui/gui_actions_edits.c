@@ -485,78 +485,6 @@ static bool draft_is_net_zero(
     return current.integer == committed.integer;
 }
 
-static void reduce_draft_observation(
-    void *context,
-    const tp_session_observation *observation,
-    uint64_t instance_generation) {
-    (void)instance_generation;
-    gui_draft_owner *draft = context;
-    gui_edit_state *edit =
-        draft ? &draft->lifecycle : NULL;
-    if (!edit || edit->phase == GUI_EDIT_IDLE) {
-        return;
-    }
-    const tp_session_snapshot *snapshot =
-        tp_session_observation_snapshot(observation);
-    const int64_t revision =
-        snapshot
-            ? tp_session_snapshot_revision(snapshot)
-            : edit->base_revision;
-    const bool target_present =
-        snapshot ? draft_target_present(draft, snapshot)
-                 : edit->target_present;
-    tp_error error = {{0}};
-    if (tp_session_observation_resync_required(observation)) {
-        gui_session_submit_terminal terminal = {0};
-        const bool exact_terminal =
-            edit->phase == GUI_EDIT_SUBMITTING &&
-            gui_project_submit_receipt_query(
-                edit->submitted_transaction_id,
-                draft_identity(edit),
-                &terminal) &&
-            (terminal.no_change ||
-             terminal.echo_state ==
-                 GUI_SESSION_SUBMIT_ECHO_OBSERVED);
-        (void)gui_edit_resync(
-            edit, revision, target_present,
-            exact_terminal, &error);
-        draft_clear_if_idle(draft);
-        return;
-    }
-
-    const size_t event_count =
-        tp_session_observation_event_count(observation);
-    for (size_t index = 0U;
-         edit->phase != GUI_EDIT_IDLE &&
-         index < event_count;
-         ++index) {
-        const tp_session_event *source =
-            tp_session_observation_event_at(
-                observation, index);
-        if (!source ||
-            source->revision_after ==
-                source->revision_before) {
-            continue;
-        }
-        bool exact_echo = false;
-        if (edit->phase == GUI_EDIT_SUBMITTING &&
-            strcmp(
-                edit->submitted_transaction_id,
-                source->transaction_id) == 0) {
-            gui_session_submit_terminal terminal = {0};
-            exact_echo =
-            gui_project_submit_receipt_query(
-                source->transaction_id,
-                draft_identity(edit),
-                &terminal);
-        }
-        (void)gui_edit_model_revision(
-            edit, source->revision_after,
-            target_present, exact_echo, &error);
-    }
-    draft_clear_if_idle(draft);
-}
-
 static bool ensure_draft_owner(void) {
     if (!s_actions.draft_initialized) {
         tp_id128 view_id = tp_id128_nil();
@@ -569,22 +497,6 @@ static bool ensure_draft_owner(void) {
             &s_actions.draft.lifecycle,
             view_id);
         s_actions.draft_initialized = true;
-    }
-    if (!s_actions.draft_reducer_registered) {
-        tp_error error = {{0}};
-        const tp_status status =
-            gui_project_register_observation_reducer(
-                reduce_draft_observation,
-                &s_actions.draft, &error);
-        if (status != TP_STATUS_OK) {
-            set_statusf_ex(
-                STATUS_ERROR,
-                "Could not observe GUI drafts: %s",
-                error.msg[0] ? error.msg
-                             : tp_status_str(status));
-            return false;
-        }
-        s_actions.draft_reducer_registered = true;
     }
     return true;
 }
@@ -657,11 +569,36 @@ bool gui_atlas_edit_value(
     return true;
 }
 
+static void reconcile_draft_view(void) {
+    gui_draft_owner *draft = &s_actions.draft;
+    gui_edit_state *edit = &draft->lifecycle;
+    if (!s_actions.draft_initialized ||
+        edit->phase == GUI_EDIT_IDLE) {
+        return;
+    }
+    const tp_session_snapshot *snapshot =
+        gui_project_snapshot();
+    if (!snapshot) {
+        return;
+    }
+    const int64_t revision =
+        tp_session_snapshot_revision(snapshot);
+    const bool target_present =
+        draft_target_present(draft, snapshot);
+    tp_error error = {{0}};
+    (void)gui_edit_model_revision(
+        edit, revision, target_present,
+        false, &error);
+    draft_clear_if_idle(draft);
+}
+
 gui_edit_phase gui_draft_phase(void) {
+    reconcile_draft_view();
     return s_actions.draft.lifecycle.phase;
 }
 
 bool gui_draft_can_apply(void) {
+    reconcile_draft_view();
     return s_actions.draft.lifecycle.phase ==
                GUI_EDIT_CONFLICTED &&
            s_actions.draft.lifecycle.target_present;
@@ -1482,8 +1419,7 @@ static bool submit_draft(bool apply_mine) {
                 ? gui_edit_submit_result(
                       edit, true, terminal.status,
                       terminal.committed, terminal.no_change,
-                      terminal.echo_state ==
-                          GUI_SESSION_SUBMIT_ECHO_OBSERVED,
+                      terminal.committed,
                       terminal.revision, current_revision,
                       &reduce_error)
                 : gui_edit_submit_result(

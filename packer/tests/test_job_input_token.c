@@ -212,14 +212,14 @@ static tp_id128 add_enabled_export_target(
 
 static tp_session_job_result wait_for_result(tp_session *session) {
     tp_error error = {{0}};
-    tp_session_job_progress progress = {0};
+    tp_session_job_result result = {0};
     bool terminal = false;
     for (long spin = 0; spin < 10000000L; ++spin) {
         TEST_ASSERT_EQUAL_INT_MESSAGE(
             TP_STATUS_OK,
-            tp_session_job_poll(session, &progress, &error),
+            tp_session_update(session, &result, &error),
             error.msg);
-        if (progress.state != TP_SESSION_JOB_RUNNING) {
+        if (result.kind != TP_SESSION_JOB_NONE) {
             terminal = true;
             break;
         }
@@ -227,11 +227,6 @@ static tp_session_job_result wait_for_result(tp_session *session) {
     }
     TEST_ASSERT_TRUE_MESSAGE(terminal,
                              "worker process did not terminate");
-    tp_session_job_result result = {0};
-    TEST_ASSERT_EQUAL_INT_MESSAGE(
-        TP_STATUS_OK,
-        tp_session_job_take_result(session, &result, &error),
-        error.msg);
     return result;
 }
 
@@ -255,27 +250,18 @@ void test_process_pack_terminal_is_published_after_host_poll(void) {
         tp_session_pack_job_start(session, &request, &error),
         error.msg);
 
-    tp_session_observation *observation = NULL;
-    tp_session_observation_token token = {0};
+    tp_session_job_result result = {0};
     bool terminal = false;
     for (long spin = 0; spin < 10000000L; ++spin) {
-        tp_session_job_progress progress = {0};
         TEST_ASSERT_EQUAL_INT_MESSAGE(
             TP_STATUS_OK,
-            tp_session_job_poll(session, &progress, &error),
+            tp_session_update(session, &result, &error),
             error.msg);
-        TEST_ASSERT_EQUAL_INT_MESSAGE(
-            TP_STATUS_OK,
-            tp_session_observe(session, observation ? &token : NULL,
-                               &observation, &error),
-            error.msg);
-        if (!observation) {
-            thrd_yield();
-            continue;
-        }
-        token = tp_session_observation_token_query(observation);
+        const struct tp_session_view *view =
+            tp_session_view(session);
+        TEST_ASSERT_NOT_NULL(view);
         const tp_session_job_observed_state state =
-            tp_session_observation_job_state(observation);
+            view->task;
         if (state.terminal) {
             if (state.state != TP_SESSION_JOB_SUCCEEDED) {
                 TEST_MESSAGE(state.terminal_error.msg);
@@ -285,46 +271,29 @@ void test_process_pack_terminal_is_published_after_host_poll(void) {
             TEST_ASSERT_TRUE(state.request_id > 0U);
             TEST_ASSERT_EQUAL_INT(TP_SESSION_JOB_SUCCEEDED,
                                   state.state);
-            const tp_session_job_observed_result *observed =
-                tp_session_observation_job_result(observation);
-            TEST_ASSERT_NOT_NULL(observed);
-            TEST_ASSERT_TRUE(observed->present);
-            TEST_ASSERT_NOT_NULL(observed->result);
-            TEST_ASSERT_NOT_NULL(observed->result->pack.arena);
-            TEST_ASSERT_NOT_NULL(observed->result->pack.result);
+            TEST_ASSERT_EQUAL_INT(
+                TP_SESSION_JOB_PACK, result.kind);
+            TEST_ASSERT_NOT_NULL(result.pack.arena);
+            TEST_ASSERT_NOT_NULL(result.pack.result);
             TEST_ASSERT_EQUAL_STRING(
                 "atlas1",
-                observed->result->pack.result->atlas_name);
+                result.pack.result->atlas_name);
             terminal = true;
             break;
         }
-        tp_session_observation_destroy(observation);
-        observation = NULL;
         thrd_yield();
     }
     TEST_ASSERT_TRUE_MESSAGE(terminal,
-                             "terminal observation was not admitted");
-
-    tp_session_job_result result = {0};
-    TEST_ASSERT_EQUAL_INT(
-        TP_STATUS_OK,
-        tp_session_job_take_result(session, &result, &error));
-    TEST_ASSERT_EQUAL_PTR(
-        result.pack.arena,
-        tp_session_observation_job_result(observation)
-            ->result->pack.arena);
+                             "terminal completion was not admitted");
     TEST_ASSERT_EQUAL_STRING(
         "atlas1", result.pack.result->atlas_name);
     tp_session_destroy(session);
-    TEST_ASSERT_NOT_NULL(
-        tp_session_observation_job_result(observation)
-            ->result->pack.result);
+    TEST_ASSERT_NOT_NULL(result.pack.result);
     tp_session_job_result_destroy(&result);
     TEST_ASSERT_NULL(result._owner);
     TEST_ASSERT_NULL(result.pack.arena);
     TEST_ASSERT_NULL(result.pack.result);
     tp_session_job_result_destroy(&result);
-    tp_session_observation_destroy(observation);
     remove_tree(work_dir);
 }
 

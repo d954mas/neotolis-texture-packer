@@ -40,9 +40,9 @@ become structured job failures. They do not abort the GUI or corrupt the live
 session.
 
 The session runtime admits at most one concrete Pack job or Export command at a
-time. The GUI host queue owns at most one pending or active start envelope and
-explicitly drains an old owner before replacement. A superseded receipt is
-never presented as current.
+time. A second start returns `busy`. The small GUI project host owns only the
+active/candidate session pair and explicitly cancels and drains an old task
+before replacement. A superseded completion is never presented as current.
 
 ## Pack-input identity
 
@@ -94,8 +94,8 @@ candidate. Cache storage is not persisted to disk.
 
 ## Pack versus Export
 
-Pack publishes a terminal result into session-observed job state. The GUI may
-then adopt a successful receipt into its preview/cache. Export uses the same
+Pack transfers one terminal result through `tp_session_update`. The GUI may
+then adopt a successful completion into its preview/cache. Export uses the same
 captured model, effective settings, pack core, normalization, and target
 writers, then publishes external files.
 

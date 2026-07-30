@@ -99,27 +99,28 @@ stack.
 recovery binding, snapshots, event sequence, source-runtime generation, and at
 most one concrete derived job.
 
-Session mutation and observation publication run on one owning host thread.
-Worker processes never mutate the session. Replacement is a prepare/drain/
-commit lifecycle: an old job or observation cannot publish into a new session
-instance generation.
+Session mutation and view publication run on one owning host thread. Worker
+processes never mutate the session. Replacement is a prepare/drain/commit
+lifecycle: an old task cannot publish into a new session instance generation.
 
-## Observation and snapshots
+## Current view and snapshots
 
-Clients consume immutable snapshots and a pull-based observation token:
+Live clients call `tp_session_update` once at their host boundary, then borrow
+the current `tp_session_view` until the next non-const session call. That one
+cut contains:
 
 - current model snapshot;
 - revision, dirty, history, recovery, and source-runtime state;
-- current job state and terminal result;
-- events after a caller's last observed sequence.
+- current task progress and terminal metadata.
 
-If the event window is no longer available, the client resynchronizes from an
-owned snapshot. Borrowed observation data is valid only for the documented
-observation lifetime; views do not retain pointers across a mutation or refresh.
+The heavy terminal payload transfers out of `update` exactly once. The session
+retains only compact terminal metadata. Owned snapshots remain available for
+real file, thread, or transport boundaries; the frame loop does not allocate
+one per update.
 
 The GUI client converts frame intents and explicit edit drafts into session
-calls, then rebuilds presentation from the next observation. Drafts are UI
-state, not a second hidden project copy.
+calls, then renders from the borrowed current view. Drafts are UI state, not a
+second hidden project copy.
 
 The file CLI uses immutable load/apply-preview facilities for queries and dry
 runs, and a short-lived writable session for saved-file mutations.

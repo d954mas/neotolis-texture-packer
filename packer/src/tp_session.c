@@ -9,11 +9,13 @@
 #include "tp_project_lease.h"
 #include "tp_core/tp_recovery.h"
 #include "tp_core/tp_journal.h"
+#include "tp_core/tp_job.h"
 #include "tp_core/tp_sprite_index.h"
 #include "tp_core/tp_srckey.h"
 #include "tp_core/tp_transaction.h"
 #include "tp_recovery_live_seam.h"
 #include "tp_session_layout.h"
+#include "tp_session_snapshot_internal.h"
 #include "tp_job_owner_internal.h"
 #include "tp_model_seam.h"
 #include "tp_project_internal.h"
@@ -471,8 +473,7 @@ void tp_session_destroy(tp_session *session) {
         job->cancel(job);
         tp_session_job_release_internal(job);
     }
-    tp_session_job_release_internal(session->observed_job_owner);
-    tp_session_job_release_internal(session->observed_result_owner);
+    tp_session_snapshot_destroy(session->view_snapshot);
     if (session->recovery_live) {
         const bool preserve = tp_model__recovery_degraded(session->model) ||
                               !tp_recovery_live_healthy(session->recovery_live) ||
@@ -489,6 +490,224 @@ void tp_session_destroy(tp_session *session) {
 // #endregion
 
 // #region jobs
+static bool session_job_targets_exist(
+    const tp_session *session,
+    const tp_session_job_descriptor *descriptor) {
+    const tp_project *project =
+        tp_model_project(session->model);
+    for (size_t index = 0U;
+         index < descriptor->target_count;
+         ++index) {
+        const tp_session_job_target *target =
+            &descriptor->targets[index];
+        const tp_project_atlas *atlas =
+            tp_project_atlas_by_id(
+                project, target->atlas_id);
+        if (!atlas) {
+            return false;
+        }
+        if (target->kind ==
+            TP_SESSION_JOB_TARGET_EXPORT_TARGET) {
+            if (tp_id128_is_nil(target->id) ||
+                !tp_project_atlas_target_by_id(
+                    atlas, target->id)) {
+                return false;
+            }
+        } else if (target->kind !=
+                   TP_SESSION_JOB_TARGET_ATLAS) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static void session_job_state_from_sample(
+    tp_session *session,
+    const tp_session_owned_job *job,
+    const tp_session_job_sample *sample) {
+    tp_session_job_observed_state *state =
+        &session->observed_job_state;
+    const tp_session_job_descriptor *descriptor =
+        &job->observation_descriptor;
+    state->present = true;
+    state->session_instance_generation =
+        descriptor->session_instance_generation;
+    state->request_id = descriptor->request_id;
+    state->kind = descriptor->kind;
+    state->state = sample->state;
+    state->current = sample->current;
+    state->total = sample->total;
+    state->cancellation_requested =
+        sample->cancellation_requested;
+    state->terminal =
+        sample->state != TP_SESSION_JOB_RUNNING;
+    state->base_input_token =
+        descriptor->base_input_token;
+    state->terminal_status =
+        sample->terminal_status;
+    state->terminal_error =
+        sample->terminal_error;
+}
+
+static bool session_job_state_equal(
+    const tp_session_job_observed_state *left,
+    const tp_session_job_observed_state *right) {
+    return left->present == right->present &&
+           left->session_instance_generation ==
+               right->session_instance_generation &&
+           left->request_id == right->request_id &&
+           left->kind == right->kind &&
+           left->state == right->state &&
+           left->current == right->current &&
+           left->total == right->total &&
+           left->cancellation_requested ==
+               right->cancellation_requested &&
+           left->terminal == right->terminal &&
+           left->result_accepted ==
+               right->result_accepted &&
+           left->rejection == right->rejection &&
+           tp_session_input_token_equal(
+               left->base_input_token,
+               right->base_input_token) &&
+           left->terminal_status ==
+               right->terminal_status &&
+           strcmp(left->terminal_error.msg,
+                  right->terminal_error.msg) == 0 &&
+           left->terminal_error.file_io.phase ==
+               right->terminal_error.file_io.phase &&
+           strcmp(left->terminal_error.file_io.path,
+                  right->terminal_error.file_io.path) == 0 &&
+           left->terminal_error.file_io.native_code ==
+               right->terminal_error.file_io.native_code;
+}
+
+static bool session_recovery_health_equal(
+    const tp_session_recovery_health *left,
+    const tp_session_recovery_health *right) {
+    return left->notice_id == right->notice_id &&
+           left->available == right->available &&
+           left->degraded == right->degraded &&
+           left->first_cause == right->first_cause &&
+           left->has_last_durable_revision ==
+               right->has_last_durable_revision &&
+           left->last_durable_revision ==
+               right->last_durable_revision &&
+           left->has_last_durable_time ==
+               right->has_last_durable_time &&
+           left->last_durable_time ==
+               right->last_durable_time &&
+           left->generation == right->generation;
+}
+
+tp_status tp_session_update(
+    tp_session *session,
+    tp_session_job_result *optional_owned_completion,
+    tp_error *err) {
+    if (!session) {
+        return tp_error_set(
+            err, TP_STATUS_INVALID_ARGUMENT,
+            "session update requires session");
+    }
+    tp_session__assert_owner_thread(session);
+    if (optional_owned_completion) {
+        memset(optional_owned_completion, 0,
+               sizeof *optional_owned_completion);
+    }
+    const tp_status snapshot_status =
+        tp_session_view__refresh_snapshot(
+            session, err);
+    if (snapshot_status != TP_STATUS_OK) {
+        return snapshot_status;
+    }
+
+    const tp_session_job_observed_state prior_task =
+        session->observed_job_state;
+    const tp_session_recovery_health prior_recovery =
+        session->view.recovery_health;
+    tp_session_owned_job *job =
+        tp_session_job_acquire_internal(session);
+    if (job) {
+        if (job->pump) {
+            job->pump(job);
+        }
+        tp_session_job_sample sample = {0};
+        if (job->observe &&
+            job->observe(job, &sample)) {
+            session_job_state_from_sample(
+                session, job, &sample);
+            if (sample.state !=
+                TP_SESSION_JOB_RUNNING) {
+                tp_session_job_rejection rejection =
+                    TP_SESSION_JOB_REJECTION_NONE;
+                if (sample.cancellation_requested ||
+                    sample.state ==
+                        TP_SESSION_JOB_CANCELLED) {
+                    rejection =
+                        TP_SESSION_JOB_REJECTION_CANCELLED;
+                } else if (!session_job_targets_exist(
+                               session,
+                               &job->observation_descriptor)) {
+                    rejection =
+                        TP_SESSION_JOB_REJECTION_TARGET_DELETED;
+                }
+                if (rejection !=
+                        TP_SESSION_JOB_REJECTION_NONE &&
+                    sample.terminal_result &&
+                    job->release_payload) {
+                    job->release_payload(job);
+                    (void)job->observe(job, &sample);
+                    session_job_state_from_sample(
+                        session, job, &sample);
+                }
+                session->observed_job_state.rejection =
+                    rejection;
+                session->observed_job_state
+                    .result_accepted =
+                    rejection ==
+                        TP_SESSION_JOB_REJECTION_NONE &&
+                    sample.terminal_result != NULL;
+                NT_ASSERT(session->active_job == job);
+                session->active_job = NULL;
+                tp_session_job_release_internal(job);
+                if (sample.terminal_result &&
+                    optional_owned_completion) {
+                    *optional_owned_completion =
+                        *sample.terminal_result;
+                    optional_owned_completion->rejection =
+                        rejection;
+                    optional_owned_completion->_owner =
+                        (tp_session_job_result_handle *)job;
+                    job = NULL;
+                }
+            }
+        }
+        tp_session_job_release_internal(job);
+    }
+
+    session->view.task =
+        session->observed_job_state;
+    session->view.recovery_health =
+        tp_session_recovery_health_query(session);
+    if ((!session_job_state_equal(
+             &prior_task, &session->view.task) ||
+         !session_recovery_health_equal(
+             &prior_recovery,
+             &session->view.recovery_health)) &&
+        session->view.generation < UINT64_MAX) {
+        ++session->view.generation;
+    }
+    return TP_STATUS_OK;
+}
+
+const struct tp_session_view *tp_session_view(
+    const tp_session *session) {
+    if (!session) {
+        return NULL;
+    }
+    tp_session__assert_owner_thread(session);
+    return &session->view;
+}
+
 void tp_session_owned_job_init(tp_session_owned_job *job,
                                void (*cancel)(tp_session_owned_job *job),
                                void (*destroy)(tp_session_owned_job *job)) {
@@ -502,6 +721,21 @@ void tp_session_owned_job_init(tp_session_owned_job *job,
     memset(&job->observation_descriptor, 0,
            sizeof job->observation_descriptor);
     job->observe = NULL;
+}
+
+void tp_session_owned_job_configure_observation(
+    tp_session_owned_job *job,
+    const tp_session_job_descriptor *descriptor,
+    tp_session_job_observe_fn observe) {
+    NT_ASSERT(job != NULL);
+    NT_ASSERT(descriptor != NULL);
+    NT_ASSERT(descriptor->kind != TP_SESSION_JOB_NONE);
+    NT_ASSERT(
+        descriptor->target_count == 0U ||
+        descriptor->targets != NULL);
+    NT_ASSERT(observe != NULL);
+    job->observation_descriptor = *descriptor;
+    job->observe = observe;
 }
 
 void tp_session_job_retain_internal(tp_session_owned_job *job) {
@@ -538,23 +772,31 @@ tp_status tp_session_job_start_internal(
                             "session was discarded");
     }
     if (session->active_job) {
-        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+        return tp_error_set(err, TP_STATUS_BUSY,
                             "a Pack or Export job is already active");
     }
-    const tp_status validation_status =
-        tp_session_job_observation__validate_begin(session, job, err);
-    if (validation_status != TP_STATUS_OK) {
-        return validation_status;
+    if (!job->observe ||
+        job->observation_descriptor.kind ==
+            TP_SESSION_JOB_NONE ||
+        (job->observation_descriptor.target_count > 0U &&
+         !job->observation_descriptor.targets)) {
+        return tp_error_set(
+            err, TP_STATUS_INVALID_ARGUMENT,
+            "job start requires descriptor and observe callback");
     }
     /* Reserve the request identity before process creation so the exact
      * admitted identity is encoded into the child request. A failed spawn may
      * consume an id, but publishes no job/result state. Cannot fail twice:
      * __begin below re-enters the same reservation helper and finds the id
      * already non-zero. */
-    const tp_status reservation_status =
-        tp_session_job_observation__reserve_request_id(session, job, err);
-    if (reservation_status != TP_STATUS_OK) {
-        return reservation_status;
+    if (job->observation_descriptor.request_id == 0U) {
+        if (session->next_job_request_id == UINT64_MAX) {
+            return tp_error_set(
+                err, TP_STATUS_INVALID_ARGUMENT,
+                "session job request id space is exhausted");
+        }
+        job->observation_descriptor.request_id =
+            ++session->next_job_request_id;
     }
     /* Process creation is fail-atomic with observable publication. The start
      * callback only spawns/encodes; it never pumps or calls the session. */
@@ -562,19 +804,20 @@ tp_status tp_session_job_start_internal(
     if (start_status != TP_STATUS_OK) {
         return start_status;
     }
-    tp_session_owned_job *retired = NULL;
-    /* Cannot fail here, and that is enforced, not hoped for: __validate_begin
-     * above checked both of its rejections and the request-id reservation just
-     * made the id non-zero, with no other admission possible in between on this
-     * one owner thread. The start callback only spawns; it never touches the
-     * descriptor. So this is an invariant, not a recoverable branch -- there is
-     * no half-started job to roll back. */
-    const tp_status observation_status =
-        tp_session_job_observation__begin(session, job, &retired, err);
-    NT_ASSERT(observation_status == TP_STATUS_OK);
-    (void)observation_status;
     session->active_job = job;
-    tp_session_job_release_internal(retired);
+    session->observed_job_state =
+        (tp_session_job_observed_state){
+            .present = true,
+            .session_instance_generation =
+                job->observation_descriptor
+                    .session_instance_generation,
+            .request_id =
+                job->observation_descriptor.request_id,
+            .kind = job->observation_descriptor.kind,
+            .state = TP_SESSION_JOB_RUNNING,
+            .base_input_token =
+                job->observation_descriptor.base_input_token,
+        };
     return TP_STATUS_OK;
 }
 
@@ -593,19 +836,10 @@ tp_status tp_session_job_attach_internal(tp_session *session,
                             "session was discarded");
     }
     if (session->active_job) {
-        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+        return tp_error_set(err, TP_STATUS_BUSY,
                             "a Pack or Export job is already active");
     }
-    tp_session_owned_job *retired = NULL;
-    if (job->observe) {
-        const tp_status observation_status =
-            tp_session_job_observation__begin(session, job, &retired, err);
-        if (observation_status != TP_STATUS_OK) {
-            return observation_status;
-        }
-    }
     session->active_job = job;
-    tp_session_job_release_internal(retired);
     return TP_STATUS_OK;
 }
 #endif /* TP_ENABLE_TEST_SEAMS */
@@ -636,9 +870,6 @@ tp_status tp_session_job_detach_internal(tp_session *session,
                             "session no longer owns that job handle");
     }
     session->active_job = NULL;
-    tp_session_owned_job *retired =
-        tp_session_job_observation__detach(session, expected);
-    tp_session_job_release_internal(retired);
     return TP_STATUS_OK;
 }
 // #endregion

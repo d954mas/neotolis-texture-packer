@@ -178,14 +178,14 @@ void test_process_spawn_failure_is_unpublished_but_has_reserved_identity(void) {
     TEST_ASSERT_TRUE(probe.request_id_seen > 0U);
     TEST_ASSERT_NULL(tp_session_job_acquire_internal(session));
 
-    tp_session_observation *observation = NULL;
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
-        tp_session_observe(session, NULL, &observation, &error));
-    TEST_ASSERT_NOT_NULL(observation);
+        tp_session_update(session, NULL, &error));
+    const struct tp_session_view *view =
+        tp_session_view(session);
+    TEST_ASSERT_NOT_NULL(view);
     TEST_ASSERT_FALSE(
-        tp_session_observation_job_state(observation).present);
-    tp_session_observation_destroy(observation);
+        view->task.present);
 
     tp_session_job_release_internal(&job.owner);
     TEST_ASSERT_EQUAL_INT(

@@ -25,6 +25,7 @@
 #include "tp_core/tp_build_worker.h"
 #include "tp_core/tp_job.h"
 #include "tp_core/tp_scan.h"
+#include "tp_core/tp_transaction.h"
 #include "tp_test_seams.h"
 
 #include "time/nt_time.h"

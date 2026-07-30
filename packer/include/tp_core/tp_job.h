@@ -40,14 +40,6 @@ typedef struct tp_export_command_request {
     tp_id128 atlas_id;
 } tp_export_command_request;
 
-typedef struct tp_session_job_progress {
-    tp_session_job_kind kind;
-    tp_session_job_state state;
-    int current;
-    int total;
-    double elapsed_ms;
-} tp_session_job_progress;
-
 struct tp_pack_image_hash_cache;
 
 typedef enum tp_pack_freshness {
@@ -109,6 +101,7 @@ typedef struct tp_session_export_job_result {
 struct tp_session_job_result {
     tp_session_job_kind kind;
     tp_session_job_state state;
+    tp_session_job_rejection rejection;
     tp_status status;
     tp_error error;
     double elapsed_ms;
@@ -130,21 +123,11 @@ tp_status tp_session_export_start(tp_session *session,
                                   const tp_export_command_request *request,
                                   tp_error *err);
 bool tp_session_job_active(const tp_session *session);
-/* Host-thread admission step: pumps the owned process and publishes its latest
- * typed progress/terminal projection into session-observed state. */
-tp_status tp_session_job_poll(tp_session *session,
-                              tp_session_job_progress *out, tp_error *err);
 /* Accepts cancellation only before the terminal-boundary claim. Export
  * linearizes that claim immediately after its final eligible writer returns;
  * a request accepted before the claim may own the outcome even if that writer
  * just returned. Repeated requests and requests after the claim are rejected. */
 tp_status tp_session_job_cancel(tp_session *session, tp_error *err);
-/* Succeeds only after poll reports a terminal state. Returns an owned receipt
- * that pins any successful Pack arena/result, then releases the session's
- * active-job handle. */
-tp_status tp_session_job_take_result(tp_session *session,
-                                     tp_session_job_result *out,
-                                     tp_error *err);
 void tp_session_job_result_destroy(tp_session_job_result *result);
 /* Shrinks a TAKEN result's receipt to what it actually has to retain: the
  * arena behind `pack.result`. Frees the request-side buffers the live job was
@@ -155,7 +138,7 @@ void tp_session_job_result_destroy(tp_session_job_result *result);
  * context, which is value-owned precisely so destroying the response frame
  * cannot dangle it -- stays valid, and
  * tp_session_job_result_destroy remains the single, exactly-once release.
- * Only a result returned by tp_session_job_take_result may be compacted (an
+ * Only a result returned by tp_session_update may be compacted (an
  * owner-less result is a no-op); a caller that keeps the receipt alive long
  * term (e.g. pinning it in a result cache) MUST compact first, or the pin
  * silently retains the whole request. Idempotent. */

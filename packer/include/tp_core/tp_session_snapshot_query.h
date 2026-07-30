@@ -129,7 +129,7 @@ uint64_t tp_session_snapshot_event_sequence(
 bool tp_session_snapshot_dirty(const tp_session_snapshot *snapshot);
 /* Recovery health is deliberately NOT a snapshot field. It is live session
  * state that changes without a project mutation, so a pinned snapshot would
- * hand out a stale copy. tp_session_observation_recovery_health (fresh at the
+ * hand out a stale copy. tp_session_view recovery health (fresh at the
  * observation cut) and tp_session_recovery_health_query are the only sources. */
 tp_session_identity tp_session_snapshot_identity(
     const tp_session_snapshot *snapshot);

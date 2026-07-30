@@ -4,9 +4,30 @@
 #include <stdatomic.h>
 
 #include "tp_core/tp_session.h"
-#include "tp_session_job_observation_internal.h"
+
+typedef struct tp_session_job_descriptor {
+    uint64_t session_instance_generation;
+    uint64_t request_id;
+    tp_session_job_kind kind;
+    tp_session_input_token base_input_token;
+    const tp_session_job_target *targets;
+    size_t target_count;
+} tp_session_job_descriptor;
+
+typedef struct tp_session_job_sample {
+    tp_session_job_state state;
+    int current;
+    int total;
+    bool cancellation_requested;
+    tp_status terminal_status;
+    tp_error terminal_error;
+    const tp_session_job_result *terminal_result;
+} tp_session_job_sample;
 
 typedef struct tp_session_owned_job tp_session_owned_job;
+typedef bool (*tp_session_job_observe_fn)(
+    tp_session_owned_job *job,
+    tp_session_job_sample *out);
 struct tp_session_owned_job {
     _Atomic unsigned refs;
     void (*cancel)(tp_session_owned_job *job);
@@ -24,6 +45,11 @@ struct tp_session_owned_job {
     tp_session_job_descriptor observation_descriptor;
     tp_session_job_observe_fn observe;
 };
+
+void tp_session_owned_job_configure_observation(
+    tp_session_owned_job *job,
+    const tp_session_job_descriptor *descriptor,
+    tp_session_job_observe_fn observe);
 
 void tp_session_owned_job_init(tp_session_owned_job *job,
                                void (*cancel)(tp_session_owned_job *job),

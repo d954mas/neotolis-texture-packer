@@ -143,6 +143,71 @@ tp_status tp_session_snapshot__materialize_captured(
     return snapshot_materialize(snapshot, err);
 }
 
+static bool snapshot_matches_session(
+    const tp_session_snapshot *snapshot,
+    const tp_session *session) {
+    if (!snapshot || !session) {
+        return false;
+    }
+    return snapshot->revision ==
+               tp_model_revision(session->model) &&
+           snapshot->admission_sequence ==
+               session->admission_sequence &&
+           snapshot->model_generation ==
+               session->model_generation &&
+           snapshot->source_generation ==
+               session->source_generation &&
+           snapshot->event_sequence ==
+               session->event_sequence &&
+           snapshot->dirty ==
+               tp_model_dirty(session->model) &&
+           snapshot->identity.kind ==
+               session->identity.kind &&
+           strcmp(snapshot->identity.canonical_path,
+                  session->identity.canonical_path) == 0 &&
+           snapshot->has_saved_file_fingerprint ==
+               session->has_saved_file_fingerprint &&
+           (!snapshot->has_saved_file_fingerprint ||
+            tp_id128_eq(
+                snapshot->saved_file_fingerprint,
+                session->saved_file_fingerprint));
+}
+
+tp_status tp_session_view__refresh_snapshot(
+    tp_session *session, tp_error *err) {
+    NT_ASSERT(session != NULL);
+    if (snapshot_matches_session(
+            session->view_snapshot, session)) {
+        session->view.snapshot =
+            session->view_snapshot;
+        return TP_STATUS_OK;
+    }
+    tp_session_snapshot *replacement = NULL;
+    tp_status status = tp_session_snapshot__capture(
+        session, &replacement, err);
+    if (status == TP_STATUS_OK) {
+        status =
+            tp_session_snapshot__materialize_captured(
+                replacement, err);
+    }
+    if (status != TP_STATUS_OK) {
+        return status;
+    }
+    tp_session_snapshot *retired =
+        session->view_snapshot;
+    session->view_snapshot = replacement;
+    session->view.snapshot = replacement;
+    if (session->view.snapshot_generation <
+        UINT64_MAX) {
+        ++session->view.snapshot_generation;
+    }
+    if (session->view.generation < UINT64_MAX) {
+        ++session->view.generation;
+    }
+    tp_session_snapshot_destroy(retired);
+    return TP_STATUS_OK;
+}
+
 static tp_status snapshot_materialize(tp_session_snapshot *snapshot,
                                       tp_error *err) {
     const tp_project *project = snapshot->project;

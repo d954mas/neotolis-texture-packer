@@ -59,7 +59,24 @@ set(_arch_view_files
 # guarded path as a checker bug (fail-closed) unless the path is registered
 # here, and a registered path that comes back is a deletion regression.
 set(_arch_deleted_files
-    apps/gui/gui_project_pending.c)
+    apps/gui/gui_project_pending.c
+    apps/gui/client_parity_manifest.c
+    apps/gui/gui_host_binding.c
+    apps/gui/gui_host_binding.h
+    apps/gui/gui_host_queue.c
+    apps/gui/gui_host_queue.h
+    apps/gui/gui_session_client.c
+    apps/gui/gui_session_client.h
+    apps/gui/test_client_parity.c
+    apps/gui/test_gui_host_binding.c
+    apps/gui/test_gui_host_queue.c
+    apps/gui/test_gui_session_adapter.c
+    apps/gui/test_gui_session_client.c
+    packer/src/tp_session_job_observation.c
+    packer/src/tp_session_job_observation_internal.h
+    packer/src/tp_session_observation.c
+    packer/tests/test_session_job_observation.c
+    packer/tests/test_session_observation.c)
 
 if(NOT DEFINED ARCH_EXPECT_RULE)
     foreach(_view IN LISTS _arch_view_files)
@@ -658,7 +675,8 @@ file(GLOB _gui_shipping_sources LIST_DIRECTORIES false
 
 foreach(_source IN LISTS _gui_shipping_sources)
     cmake_path(GET _source FILENAME _filename)
-    if(_filename STREQUAL "gui_host_queue.c"
+    if(_filename STREQUAL "gui_project.c"
+       OR _filename STREQUAL "gui_project_file.c"
        OR _filename STREQUAL "gui_selftest.c")
         continue()
     endif()
@@ -685,7 +703,6 @@ foreach(_entry IN ITEMS
         "apps/gui/gui_project.c|tp_session_observe"
         "apps/gui/gui_project_file.c|tp_session_observe"
         "apps/gui/gui_project_internal.h|tp_session_snapshot[ \t]*\\*[ \t]*snapshot"
-        "apps/gui/gui_project_internal.h|snapshot_lifetime_generation"
         "apps/gui/gui_rows.c|tp_session_snapshot_source_generation"
         "apps/gui/gui_project_file.c|recompute_name")
     string(REPLACE "|" ";" _parts "${_entry}")
@@ -721,10 +738,9 @@ foreach(_source IN LISTS _gui_observation_sources)
     endif()
 endforeach()
 
-# Completed A2c mutation cut.
-_arch_assert_absent("apps/gui/gui_session_adapter.c" "tp_session_apply" "A2c")
+# Completed A2c mutation cut. The thin adapter is the sole GUI operation-batch
+# ingress and therefore calls the session directly.
 _arch_assert_absent("apps/gui/gui_session_adapter.c" "\"project\\.edit\"" "A2c")
-_arch_assert_absent("apps/gui/gui_session_adapter.h" "tp_session[ \t]*\\*" "A2c")
 foreach(_path IN ITEMS apps/gui/gui_project.c
                        apps/gui/gui_project_mutations.c)
     _arch_assert_absent(
@@ -743,7 +759,7 @@ _arch_assert_absent("apps/gui/main.c"
 
 foreach(_source IN LISTS _gui_shipping_sources)
     cmake_path(GET _source FILENAME _filename)
-    if(_filename STREQUAL "gui_session_client.c"
+    if(_filename STREQUAL "gui_session_adapter.c"
        OR _filename STREQUAL "gui_selftest.c")
         continue()
     endif()
@@ -802,10 +818,6 @@ foreach(_symbol IN ITEMS
 endforeach()
 _arch_assert_absent(
     "apps/gui/gui_project_internal.h"
-    "tp_session[ \t\r\n]*\\*[ \t\r\n]*session[ \t\r\n]*;"
-    "A2d single session storage")
-_arch_assert_absent(
-    "apps/gui/gui_project_internal.h"
     "gui_session_client[ \t\r\n]+client[ \t\r\n]*;"
     "A2d single client storage")
 _arch_assert_absent(
@@ -824,7 +836,6 @@ foreach(_path IN ITEMS
             "${_path}" "${_symbol}" "A2d")
     endforeach()
 endforeach()
-_arch_assert_absent("apps/gui/gui_project_file.c" "tp_session_discard" "A2d")
 _arch_assert_absent("apps/gui/gui_actions_dialogs.c" "gui_project_new" "A2d")
 _arch_assert_absent("apps/gui/gui_actions_dialogs.c" "gui_project_open" "A2d")
 _arch_assert_absent("apps/gui/main.c" "gui_project_open" "A2d")
@@ -861,7 +872,8 @@ endforeach()
 # gui_host_binding_undo/redo/save/save_as/invalidate_sources.
 foreach(_source IN LISTS _gui_shipping_sources)
     cmake_path(GET _source FILENAME _filename)
-    if(_filename STREQUAL "gui_host_binding.c")
+    if(_filename STREQUAL "gui_project.c"
+       OR _filename STREQUAL "gui_project_file.c")
         continue()
     endif()
     cmake_path(RELATIVE_PATH _source BASE_DIRECTORY "${_arch_root}"
@@ -882,25 +894,8 @@ foreach(_source IN LISTS _gui_shipping_sources)
     endforeach()
 endforeach()
 
-# The host queue is the host owner's private ingress, not a GUI-wide API.
-# This containment sweep replaces the old async-family carve-out: instead of
-# pretending the queue is async and then exempting it, the queue keeps its
-# host-thread session calls and its symbols stay inside the owner set.
-# P5 closed the last bypass: gui_project.c's direct queue calls (enqueue,
-# take_completion, busy, active_kind, the staged-completion test seam) are now
-# gui_host_binding_* ingress functions, so the binding pair IS the owner set.
-set(_arch_host_queue_owners
-    apps/gui/gui_host_queue.c
-    apps/gui/gui_host_queue.h
-    apps/gui/gui_host_binding.c
-    apps/gui/gui_host_binding.h)
-
-# The active session is borrowed, never held. P5 shrank this list: the
-# lifecycle/file owner and the mutation owner ask the host binding (commands)
-# or gui_session_client_is_attached (liveness) instead of borrowing.
-# gui_project.c keeps the accessor itself, gui_project_internal.h its
-# declaration, and gui_project_recovery.c the borrow the session-scoped core
-# recovery API genuinely needs.
+# The active session is stored by the small project host. Other GUI modules may
+# borrow it only through the narrow internal accessor.
 set(_arch_borrow_session_owners
     apps/gui/gui_project.c
     apps/gui/gui_project_internal.h
@@ -915,11 +910,15 @@ foreach(_source IN LISTS _gui_observation_sources)
        "^apps/gui/(test_[^/]*|tp_bench_[^/]*|client_parity_[^/]*)\\.(c|h)$")
         continue()
     endif()
-    if(NOT "${_relative}" IN_LIST _arch_host_queue_owners)
-        _arch_assert_absent(
-            "${_relative}" "gui_host_queue_[A-Za-z0-9_]*"
-            "A2d host queue stays inside the host owner")
-    endif()
+    _arch_assert_absent(
+        "${_relative}" "gui_host_queue_[A-Za-z0-9_]*"
+        "A2d deleted host queue does not return")
+    _arch_assert_absent(
+        "${_relative}" "gui_host_binding_[A-Za-z0-9_]*"
+        "A2d deleted host binding does not return")
+    _arch_assert_absent(
+        "${_relative}" "gui_session_client_[A-Za-z0-9_]*"
+        "A2d deleted pseudo-client does not return")
     if(NOT "${_relative}" IN_LIST _arch_borrow_session_owners)
         _arch_assert_absent(
             "${_relative}" "gui_project__borrow_active_session"
@@ -1078,15 +1077,9 @@ _arch_assert_absent(
     "tp_arena_destroy[ \t\r\n]*\\([ \t\r\n]*result[ \t\r\n]*->[ \t\r\n]*pack[ \t\r\n]*\\.[ \t\r\n]*arena"
     "A5 job result lifetime has one retained owner")
 
-# A6 job-owner test seams. Two internal entry points exist ONLY for tests:
-# tp_session_job_attach_internal (adopts the active-job lease for a job it did
-# not start) and tp_session_job_observation_begin_internal (publishes a second
-# live observed owner). Production has no route to either -- the sole production
-# start path, tp_session_job_start_internal, spawns fail-atomically and rejects a
-# second live owner -- but the USA-07 reverse/superseded admission table is only
-# reachable through them, so they are kept and fenced instead of deleted. Both
-# declaration and definition sit behind TP_ENABLE_TEST_SEAMS; this rule is what
-# makes the fence load-bearing.
+# A6 job-owner test seam. tp_session_job_attach_internal adopts the active-job
+# lease for a test-owned job. Production has no route to it; the sole
+# production start path spawns fail-atomically and rejects a second live owner.
 #
 # Two halves, because either one alone can be satisfied trivially:
 # 1. the guarded SYMBOL is inside a TP_ENABLE_TEST_SEAMS conditional in each of
@@ -1100,13 +1093,6 @@ foreach(_path IN ITEMS packer/src/tp_session.c
         "${_path}" "tp_session_job_attach_internal"
         "A6 job-owner seams stay compiled out of shipping")
 endforeach()
-foreach(_path IN ITEMS packer/src/tp_session_job_observation.c
-                       packer/src/tp_session_job_observation_internal.h)
-    _arch_assert_seam_fenced(
-        "${_path}" "tp_session_job_observation_begin_internal"
-        "A6 job-owner seams stay compiled out of shipping")
-endforeach()
-
 file(GLOB_RECURSE _job_seam_sources LIST_DIRECTORIES false
     "${_arch_root}/apps/*.c"
     "${_arch_root}/apps/*.h"
@@ -1127,13 +1113,9 @@ foreach(_source IN LISTS _job_seam_sources)
             "${_relative}" "tp_session_job_attach_internal"
             "A6 job attach is a test seam, not a production entry point")
     endif()
-    if(NOT _relative STREQUAL "packer/src/tp_session_job_observation.c"
-       AND NOT _relative STREQUAL
-               "packer/src/tp_session_job_observation_internal.h")
-        _arch_assert_absent(
-            "${_relative}" "tp_session_job_observation_begin_internal"
-            "A6 job observation begin is a test seam, not a production entry point")
-    endif()
+    _arch_assert_absent(
+        "${_relative}" "tp_session_job_observation_begin_internal"
+        "A6 deleted job observation seam does not return")
 endforeach()
 
 message(STATUS "architecture boundaries hold")

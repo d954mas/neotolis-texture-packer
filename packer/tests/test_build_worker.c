@@ -324,7 +324,7 @@ void test_worker_publishes_unicode_long_path(void) {
  * survive. The in-memory half is a structural property of the take_result
  * contract, not something this worker-layer test can observe: tp_pack returns
  * *out_result == NULL on any non-OK worker status (tp_pack.c:577-580), and
- * tp_session_job_take_result transfers a pack arena/result ONLY when the job
+ * tp_session_update transfers a pack arena/result ONLY when the job
  * state is SUCCEEDED (tp_job.c:473-478) -- a FAILED/CRASHED job hands back no
  * result, so a consumer's last successful preview cannot be replaced. The
  * positive direction (SUCCEEDED -> non-NULL result) is pinned by

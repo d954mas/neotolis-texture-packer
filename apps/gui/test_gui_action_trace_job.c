@@ -577,56 +577,6 @@ void test_sequential_drafts_and_dependent_intent_advance_exactly(void) {
         tp_session_snapshot_revision(snapshot));
 }
 
-void test_prepare_failure_preserves_buffered_edit(void) {
-    const tp_session_snapshot *snapshot =
-        gui_project_snapshot();
-    const tp_snapshot_atlas *atlas =
-        tp_session_snapshot_atlas_at(
-            snapshot, 0);
-    TEST_ASSERT_NOT_NULL(atlas);
-    const tp_id128 atlas_id = atlas->id;
-    const int padding_before = atlas->padding;
-    const int64_t revision_before =
-        tp_session_snapshot_revision(snapshot);
-
-    gui_edit_atlas_setting(
-        atlas_id, revision_before,
-        GUI_ATLAS_PADDING,
-        padding_before + 3, 0.0F);
-    apply_pending();
-    TEST_ASSERT_EQUAL_INT64(
-        revision_before,
-        tp_session_snapshot_revision(
-            gui_project_snapshot()));
-
-    gui_project__test_fail_next_observe();
-    tp_error error = {{0}};
-    TEST_ASSERT_EQUAL_INT(
-        TP_STATUS_OOM,
-        gui_project_lifecycle_begin_new(
-            &error));
-    TEST_ASSERT_EQUAL_INT(
-        GUI_PROJECT_LIFECYCLE_OPEN_IDLE,
-        gui_project_lifecycle_state_query());
-    TEST_ASSERT_EQUAL_INT64(
-        revision_before,
-        tp_session_snapshot_revision(
-            gui_project_snapshot()));
-
-    gui_request_gesture_commit();
-    apply_pending();
-    TEST_ASSERT_EQUAL_INT64(
-        revision_before + 1,
-        tp_session_snapshot_revision(
-            gui_project_snapshot()));
-    atlas = tp_session_snapshot_atlas_by_id(
-        gui_project_snapshot(), atlas_id);
-    TEST_ASSERT_NOT_NULL(atlas);
-    TEST_ASSERT_EQUAL_INT(
-        padding_before + 3,
-        atlas->padding);
-}
-
 void test_busy_new_enters_drain_and_resets_only_after_completion(void) {
     TEST_ASSERT_TRUE(
         gui_pack_init(
@@ -819,12 +769,8 @@ void test_late_export_cancel_keeps_completed_success_outcome(void) {
     TEST_ASSERT_FALSE(gui_pack_async_cancelling());
 
     gui_pack_result_info info;
-    TEST_ASSERT_EQUAL_INT(
-        TP_STATUS_OK,
-        gui_project_frame_begin(NULL));
     const gui_pack_done done =
         gui_pack_poll(&info);
-    gui_project_frame_end();
     TEST_ASSERT_EQUAL_INT(GUI_PACK_DONE_EXPORT_OK, done);
     TEST_ASSERT_EQUAL_INT(1, info.atlases_skipped);
 }
@@ -839,17 +785,17 @@ void test_terminal_job_completion_is_consumed_before_cutover(void) {
             error, sizeof error));
     for (int attempt = 0;
          attempt < 5000 &&
-         !gui_project__test_host_has_staged_completion();
+         gui_pack_async_busy();
          ++attempt) {
         TEST_ASSERT_EQUAL_INT(
             TP_STATUS_OK,
-            gui_project_lifecycle_pump(NULL, NULL));
-        if (!gui_project__test_host_has_staged_completion()) {
+            gui_project_frame_begin(NULL));
+        gui_project_frame_end();
+        if (gui_pack_async_busy()) {
             nt_time_sleep(0.001);
         }
     }
-    TEST_ASSERT_TRUE(
-        gui_project__test_host_has_staged_completion());
+    TEST_ASSERT_FALSE(gui_pack_async_busy());
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
         gui_project_lifecycle_begin_new(NULL));
@@ -860,14 +806,10 @@ void test_terminal_job_completion_is_consumed_before_cutover(void) {
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
         gui_project_lifecycle_pump(NULL, NULL));
-    TEST_ASSERT_EQUAL_INT(
-        TP_STATUS_OK,
-        gui_project_frame_begin(NULL));
     gui_pack_result_info info = {0};
     TEST_ASSERT_EQUAL_INT(
         GUI_PACK_DONE_EXPORT_OK,
         gui_pack_poll(&info));
-    gui_project_frame_end();
     gui_project_lifecycle_kind completed =
         GUI_PROJECT_LIFECYCLE_NONE;
     TEST_ASSERT_EQUAL_INT(
@@ -914,7 +856,6 @@ int main(int argc, char **argv) {
     RUN_TEST(test_lifecycle_discard_continues_without_submitting_draft);
     RUN_TEST(test_failed_atlas_gesture_aborts_dependent_action_batch);
     RUN_TEST(test_sequential_drafts_and_dependent_intent_advance_exactly);
-    RUN_TEST(test_prepare_failure_preserves_buffered_edit);
     RUN_TEST(test_busy_new_enters_drain_and_resets_only_after_completion);
     RUN_TEST(test_lifecycle_apply_mine_resolves_conflict_before_continuing);
     RUN_TEST(test_exit_failed_apply_keeps_confirmation_and_draft_open);

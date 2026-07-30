@@ -192,7 +192,6 @@ typedef struct gui_actions_state {
 #endif
     gui_draft_owner draft;
     bool draft_initialized;
-    bool draft_reducer_registered;
     bool draft_apply_mine;
     bool gesture_commit;
 

@@ -68,26 +68,6 @@ tp_add_test(NAME session
     MAKE_DIRS "${CMAKE_BINARY_DIR}/tp_session_test"
     ARGS "${CMAKE_BINARY_DIR}/tp_session_test")
 
-# The observe-after-cut hook is compiled out of the shipped library, so this
-# target recompiles its TU with TP_ENABLE_TEST_SEAMS (same pattern as
-# tp_test_job_input_token recompiling tp_job.c).
-# tinycthread: tp_session_layout.h stores the owner thread, and tp_core links
-# tinycthread PRIVATE, so a target recompiling a session TU needs its headers.
-tp_add_test(NAME session_observation
-    SOURCES test_session_observation.c ../src/tp_session_observation.c
-        ../src/tp_session_snapshot.c ../src/tp_project_generation.c
-    LIBS tp_core tinycthread unity PRIVATE_SRC SEAMS)
-
-# USA-07 reverse/superseded admission needs a second live observed owner, which
-# tp_session_job_start_internal refuses to create. The coverage runs against
-# tp_session_job_observation_begin_internal, a seam compiled out of the shipped
-# library, so this target recompiles its TU with TP_ENABLE_TEST_SEAMS (same
-# pattern as tp_test_session_observation recompiling tp_session_observation.c).
-tp_add_test(NAME session_job_observation
-    SOURCES test_session_job_observation.c ../src/tp_session_job_observation.c
-        ../src/tp_session_snapshot.c ../src/tp_project_generation.c
-    LIBS tp_core tinycthread unity PRIVATE_SRC SEAMS)
-
 # Owner refcount invariants must remain executable in Release, where libc
 # assert() would compile away. The parent probe succeeds only when its child
 # terminates on the production generation owner's invalid-release path.

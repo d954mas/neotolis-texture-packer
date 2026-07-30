@@ -279,8 +279,8 @@ _session_deps='#include[[:space:]]*[<"][^>"]*(apps/|gui|cli|protocol|cJSON)'
 _session_impl='(^|[^A-Za-z0-9_])(fopen|fwrite|open|CreateFile|LockFile|tp_journal_(encode|decode)[A-Za-z0-9_]*|tp_pack|tp_export_run)[[:space:]]*\('
 # All session TUs plus the shared private header. R10c's
 # mutable-project-ownership scan runs over the .c TUs only.
-_session_gate_srcs="packer/src/tp_session.c packer/src/tp_session_observation.c packer/src/tp_session_job_observation.c packer/src/tp_session_snapshot.c packer/src/tp_session_snapshot_query.c packer/src/tp_session_internal.h packer/src/tp_session_job_observation_internal.h"
-_session_gate_owner_srcs="packer/src/tp_session.c packer/src/tp_session_observation.c packer/src/tp_session_job_observation.c packer/src/tp_session_snapshot.c packer/src/tp_session_snapshot_query.c"
+_session_gate_srcs="packer/src/tp_session.c packer/src/tp_session_snapshot.c packer/src/tp_session_snapshot_query.c packer/src/tp_session_internal.h"
+_session_gate_owner_srcs="packer/src/tp_session.c packer/src/tp_session_snapshot.c packer/src/tp_session_snapshot_query.c"
 r10a=$(grep -nE "$_session_deps" $_session_gate_srcs 2>/dev/null |
     grep -v 'boundary-ok:')
 [ -n "$r10a" ] && hit "R10a frontend/protocol dependency in tp_session" "$r10a"
@@ -578,19 +578,18 @@ tp_project_model_internal tp_project|tp_project_parse
 tp_project_parse_internal tp_project_parse|tp_project_write
 tp_project_write_internal tp_project_parse|tp_project_write
 tp_project_identity_internal tp_project_identity|tp_project_parse|tp_project_write|tp_history_codec_read|tp_input|tp_model|tp_model_journal|tp_op_validate_atlas|tp_op_validate_source_sprite|tp_op_validate_animation|tp_op_validate_target|tp_session|tp_txn_apply
-tp_project_generation_internal tp_model|tp_project_generation|tp_session_snapshot|tp_session_observation
+tp_project_generation_internal tp_model|tp_project_generation|tp_session_snapshot
 tp_project_mutation_internal tp_project|tp_project_parse|tp_diff_entity|tp_diff_apply|tp_diff_capture|tp_export_run|tp_input|tp_op_apply|tp_op_validate|tp_op_validate_animation|tp_op_validate_target|tp_session|tp_session_snapshot|tp_session_snapshot_query
 tp_txn_internal         tp_model|tp_model_journal|tp_txn_apply|tp_txn_parse|tp_txn_encode|tp_txn_idset|tp_txn_lower|tp_txn_result|tp_project_clone|tp_history
-tp_model_seam           tp_session|tp_session_snapshot|tp_session_observation|tp_session_job_observation|tp_recovery_claim|tp_recovery_store|tp_txn_internal|tp_txn_apply|tp_txn_parse|tp_txn_encode|tp_txn_idset|tp_txn_lower|tp_project_clone|tp_history
+tp_model_seam           tp_session|tp_session_snapshot|tp_recovery_claim|tp_recovery_store|tp_txn_internal|tp_txn_apply|tp_txn_parse|tp_txn_encode|tp_txn_idset|tp_txn_lower|tp_project_clone|tp_history
 tp_recovery_live_seam   tp_session|tp_recovery|tp_recovery_internal
-tp_session_internal     tp_session|tp_session_observation|tp_session_job_observation|tp_session_snapshot|tp_session_layout|tp_recovery|tp_recovery_claim|tp_validate|tp_validate_target_settings|tp_export|tp_export_run|tp_input|tp_sprite_index
-tp_session_job_observation_internal tp_session|tp_session_observation|tp_session_job_observation|tp_job|tp_job_owner_internal
-tp_session_layout       tp_session|tp_session_observation|tp_session_job_observation|tp_session_snapshot
-tp_session_snapshot_internal tp_job|tp_session_observation|tp_session_snapshot|tp_session_snapshot_query
+tp_session_internal     tp_session|tp_session_snapshot|tp_session_layout|tp_recovery|tp_recovery_claim|tp_validate|tp_validate_target_settings|tp_export|tp_export_run|tp_input|tp_sprite_index
+tp_session_layout       tp_session|tp_session_snapshot
+tp_session_snapshot_internal tp_job|tp_session|tp_session_snapshot|tp_session_snapshot_query
 tp_recovery_backend_types_internal tp_recovery_backend_posix|tp_recovery_backend_win32|tp_recovery_state_internal
 tp_recovery_internal    tp_recovery|tp_recovery_state_internal|tp_recovery_claim|tp_recovery_scan|tp_recovery_store
 tp_recovery_state_internal tp_recovery|tp_recovery_claim|tp_recovery_scan|tp_recovery_store
-tp_job_owner_internal   tp_session|tp_session_observation|tp_session_job_observation|tp_job
+tp_job_owner_internal   tp_session|tp_job
 tp_source_plan_internal tp_source_plan|tp_op_validate|tp_op_validate_source_sprite
 tp_source_path_text_internal tp_source_path_text|tp_op_validate|tp_project|tp_project_identity|tp_project_parse|tp_source_plan
 tp_srckey_internal      tp_srckey|tp_project_identity|tp_op_validate_animation|tp_validate_source|tp_validate_sprite
@@ -817,7 +816,9 @@ else
     trap - EXIT
 fi
 
-# 22. Spec §16 verification-id traceability. Every USA-01..USA-32 must be OWNED,
+# 22. Retained verification-id traceability. The pre-session-view USA ids were
+#     removed with their obsolete observation/client contracts; every remaining
+#     USA id must still be OWNED,
 #     and ownership has exactly two classes:
 #       test -- a `/* USA-nn ... */` tag within 3 lines of the `void test_`
 #               definition it claims, in a TEST source file, AND that function
@@ -840,11 +841,9 @@ fi
 #     production comment, CMakeLists note, or the gate's own self-test text
 #     satisfied: an id could keep its tag long after its last test was deleted.
 _usa_ids() {
-    _usa_i=1
-    while [ "$_usa_i" -le 32 ]; do
-        printf 'USA-%02d\n' "$_usa_i"
-        _usa_i=$((_usa_i + 1))
-    done
+    printf '%s\n' \
+        USA-11 USA-14 USA-15 USA-16 USA-17 USA-18 USA-19 USA-20 USA-21 \
+        USA-22 USA-23 USA-24 USA-25 USA-27 USA-28 USA-29 USA-31
 }
 # Reads the ids present in a corpus on $1, prints the ids that are absent.
 _usa_missing() {
@@ -1095,9 +1094,6 @@ else
         hit "R22-selftest" "R22 failed to credit an explicit gate owner"
     rm -rf "$_r22_dir"
     trap - EXIT
-fi
-if [ -z "$(_usa_missing "$(_usa_ids | grep -v '^USA-07$')")" ]; then
-    hit "R22-selftest" "R22 detector failed to catch an id with no owning test"
 fi
 if [ -n "$(_usa_missing "$(_usa_ids)")" ]; then
     hit "R22-selftest" "R22 detector false-positives on a fully covered id set"
