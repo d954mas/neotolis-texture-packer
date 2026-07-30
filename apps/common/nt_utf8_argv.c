@@ -90,32 +90,6 @@ bool nt_win_current_directory_utf8(char *out, size_t output_capacity,
     return convert_and_free(wide, out, output_capacity, error, error_capacity);
 }
 
-bool nt_win_temp_path_utf8(char *out, size_t output_capacity, char *error,
-                           size_t error_capacity) {
-    if (!out || output_capacity == 0U) {
-        set_error(error, error_capacity, "invalid temporary-path output");
-        return false;
-    }
-    out[0] = '\0';
-    const DWORD needed = GetTempPathW(0U, NULL);
-    if (needed == 0U || (size_t)needed > SIZE_MAX / sizeof(wchar_t)) {
-        set_error(error, error_capacity, "Windows could not query the temporary directory");
-        return false;
-    }
-    wchar_t *wide = (wchar_t *)malloc((size_t)needed * sizeof *wide);
-    if (!wide) {
-        set_error(error, error_capacity, "out of memory reading the temporary directory");
-        return false;
-    }
-    const DWORD copied = GetTempPathW(needed, wide);
-    if (copied == 0U || copied >= needed) {
-        free(wide);
-        set_error(error, error_capacity, "Windows temporary directory changed while reading");
-        return false;
-    }
-    return convert_and_free(wide, out, output_capacity, error, error_capacity);
-}
-
 bool nt_win_module_path_utf8(char *out, size_t output_capacity, char *error,
                              size_t error_capacity) {
     if (!out || output_capacity == 0U) {

@@ -48,8 +48,11 @@
 extern "C" {
 #endif
 
-/* Stores the work-dir intent used when starting typed Pack jobs and creates it.
- * Returns false instead of retaining a truncated or unusable directory. */
+/* Stores the work-dir intent used when starting typed Pack/Export jobs and
+ * creates it. Returns false instead of retaining a truncated or unusable
+ * directory. The shipped GUI passes the shared app scratch root
+ * (app_scratch_root(), apps/common); tests pass their own sandbox. Each job
+ * gets its own `req-` directory UNDER this one, created by the job worker. */
 bool gui_pack_init(const char *work_dir);
 
 /* Packs atlas `atlas_index` through a typed session job and stores the returned

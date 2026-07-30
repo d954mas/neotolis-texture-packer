@@ -35,13 +35,13 @@
 #include <unistd.h>
 #endif
 
+#include "app_scratch.h"
 #include "cli_exit.h"
 #include "cli_out.h"
 #include "tp_core/tp_arena.h"
 #include "tp_core/tp_error.h"
 #include "tp_core/tp_export.h"
 #include "tp_core/tp_export_run.h"
-#include "tp_core/tp_scan.h"
 #include "tp_core/tp_session.h"
 
 #ifdef NTPACKER_CLI_PACK_ARENA_FAULT_SEAM
@@ -119,48 +119,30 @@ static tp_status abspath_cwd(const char *p, char *out, size_t cap,
                               "absolute output-directory path is too long");
 }
 
-/* A transient work dir for the session .ntpack files (system temp; gitignored). */
+/* One `ntpacker pack` process serves exactly one request, so its request id is
+ * fixed; the pid in the directory name is what separates concurrent runs. */
+#define CLI_PACK_REQUEST_ID UINT64_C(1)
+
+/* A PRIVATE work dir for this run's session .ntpack files, under the shared app
+ * scratch root (apps/common/app_scratch.h). Not the system temp dir: Linux /tmp
+ * is usually a RAM-backed tmpfs, so a large artifact would be charged to RAM,
+ * and Windows disk cleaners may remove files mid-run. Not a shared directory
+ * either: two concurrent runs used to write the same `<atlas>.ntpack`, and
+ * tp_pack does not delete the artifact it produced, so the shared directory
+ * also accumulated one file per atlas forever. The run releases this directory
+ * on every exit path through app_scratch_request_dir_release(). */
 static tp_status cli_work_dir(char *out, size_t cap, tp_error *err) {
     if (!out || cap == 0U) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
                             "invalid pack work-directory output");
     }
-    char tmp[TP_IDENTITY_PATH_MAX];
-#ifdef _WIN32
-    char platform_error[160] = {0};
-    if (!nt_win_temp_path_utf8(tmp, sizeof tmp, platform_error,
-                               sizeof platform_error)) {
-        return tp_error_set(err, TP_STATUS_PATH_RESOLVE_FAILED, "%s",
-                            platform_error);
+    char root[TP_IDENTITY_PATH_MAX];
+    const tp_status status = app_scratch_root(root, sizeof root, err);
+    if (status != TP_STATUS_OK) {
+        out[0] = '\0';
+        return status;
     }
-#else
-    const char *t = getenv("TMPDIR");
-    if (!t || !t[0]) {
-        t = "/tmp";
-    }
-    const int temp_copied = snprintf(tmp, sizeof tmp, "%s", t);
-    if (temp_copied < 0 || (size_t)temp_copied >= sizeof tmp) {
-        return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
-                            "temporary-directory path is too long");
-    }
-#endif
-    const size_t temp_length = strlen(tmp);
-    const bool has_separator = temp_length > 0U &&
-                               (tmp[temp_length - 1U] == '/' ||
-                                tmp[temp_length - 1U] == '\\');
-    const int joined = snprintf(out, cap, has_separator ? "%sntpacker_work"
-                                                       : "%s/ntpacker_work",
-                                tmp);
-    if (joined < 0 || (size_t)joined >= cap) {
-        return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
-                            "pack work-directory path is too long");
-    }
-    tp_mkdirs(out);
-    if (!tp_scan_is_dir(out)) {
-        return tp_error_set(err, TP_STATUS_PATH_RESOLVE_FAILED,
-                            "could not create pack work directory '%s'", out);
-    }
-    return TP_STATUS_OK;
+    return app_scratch_request_dir(root, CLI_PACK_REQUEST_ID, out, cap, err);
 }
 
 /* Stable string names for the structured notice enums (JSON is machine-readable:
@@ -528,6 +510,7 @@ int cmd_pack(const char *project_path, const char *opt_atlas, const char *opt_ta
     if (job_status != TP_STATUS_OK) {
         cli_emit_error(json, quiet, tp_status_id(job_status), "%s",
                        job_error.msg[0] ? job_error.msg : tp_status_str(job_status));
+        app_scratch_request_dir_release(work_dir);
         return job_status == TP_STATUS_OOM ? CLI_EXIT_INTERNAL : CLI_EXIT_PROJECT;
     }
 
@@ -750,6 +733,7 @@ int cmd_pack(const char *project_path, const char *opt_atlas, const char *opt_ta
         if (sb.oom) {
             tp_sb_free(&sb);
             tp_export_snapshot_job_destroy(job);
+            app_scratch_request_dir_release(work_dir);
             cli_emit_error(true, false, "oom", "out of memory building pack report");
             return CLI_EXIT_INTERNAL;
         }
@@ -768,5 +752,8 @@ int cmd_pack(const char *project_path, const char *opt_atlas, const char *opt_ta
     }
 
     tp_export_snapshot_job_destroy(job);
+    /* tp_pack leaves the `<atlas>.ntpack` it produced behind, so the private
+     * request directory must go with the run that made it. */
+    app_scratch_request_dir_release(work_dir);
     return exit_code;
 }

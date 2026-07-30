@@ -57,6 +57,9 @@ add_custom_target(report_loc_inventory
     VERBATIM)
 add_subdirectory(apps/smoke)
 add_subdirectory(packer)
+# apps/common holds the small modules both shipped clients compile directly; its
+# CMakeLists owns only their tests, which link tp_core (packer/).
+add_subdirectory(apps/common)
 # apps/gui and apps/cli link tp_core/tp_build (packer/), so add them after.
 add_subdirectory(apps/gui)
 add_subdirectory(apps/cli)

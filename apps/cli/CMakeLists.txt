@@ -7,7 +7,11 @@ set(CLI_OUTPUT_DIR "${CMAKE_SOURCE_DIR}/build/apps/cli/${NT_PRESET_NAME}")
 
 set(_ntpacker_sources main.c cli_exit.c cli_out.c cli_project.c cli_inspect.c cli_validate.c cli_pack.c
     cli_mutate.c cli_mutate_source.c cli_mutate_atlas.c cli_mutate_sprite.c
-    cli_mutate_anim.c cli_mutate_target.c)
+    cli_mutate_anim.c cli_mutate_target.c
+    # Shared app scratch root (<user cache dir>/ntpacker/work) + the CRT-local
+    # UTF-8 FS adapters its request-directory release uses.
+    "${CMAKE_SOURCE_DIR}/apps/common/app_scratch.c"
+    "${CMAKE_SOURCE_DIR}/apps/common/nt_utf8_fs.c")
 if(WIN32)
     list(APPEND _ntpacker_sources "${CMAKE_SOURCE_DIR}/apps/common/nt_utf8_argv.c")
 endif()

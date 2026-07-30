@@ -33,7 +33,8 @@ if(WIN32)
 endif()
 
 add_executable(ntpacker-gui main.c gui_state.c gui_widgets.c gui_actions.c gui_actions_dialogs.c gui_actions_edits.c gui_actions_intents.c gui_actions_pack.c gui_actions_preview.c gui_actions_recovery.c gui_rows.c gui_selftest.c gui_startup.c gui_paths.c gui_log_file.c gui_crash.c gui_bootstrap.c gui_project.c gui_project_file.c gui_project_mutations.c gui_project_recovery.c gui_session_adapter.c gui_session_client.c gui_edit_state.c gui_host_queue.c gui_host_binding.c gui_scan.c gui_canvas.c gui_canvas_resources.c gui_pack.c gui_pack_jobs.c gui_pack_preview.c gui_view_settings.c gui_view_lists.c gui_view_canvas.c gui_view_chrome.c
-    "${CMAKE_SOURCE_DIR}/apps/common/nt_utf8_fs.c")
+    "${CMAKE_SOURCE_DIR}/apps/common/nt_utf8_fs.c"
+    "${CMAKE_SOURCE_DIR}/apps/common/app_scratch.c")
 if(WIN32)
     target_sources(ntpacker-gui PRIVATE "${CMAKE_SOURCE_DIR}/apps/common/nt_utf8_argv.c")
 endif()

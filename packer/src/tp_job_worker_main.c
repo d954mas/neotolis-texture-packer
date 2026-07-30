@@ -588,6 +588,30 @@ static tp_status run_export(const tp_job_worker_proto_request *request,
                             "nothing to export");
     }
 
+    /* Export gets the same private per-request directory as Pack (master spec §10.4).
+     * Export packs each atlas through tp_pack, which writes
+     * `<work_dir>/<atlas_name>.ntpack` and -- unlike Pack -- never deletes it,
+     * so a shared work_dir meant two Exports of the same atlas (two instances,
+     * or a native Export racing a preview Pack) wrote and read ONE file through
+     * one name, and every Export left that file behind forever. The name is
+     * keyed on the HOST pid for the same reason Pack's is: one naming contract,
+     * one reaper (tp_worker_reap_stale_dirs). Unlike Pack's, this directory
+     * never outlives the worker -- nothing here is handed to the host -- so it
+     * is removed on every exit path below. */
+    char request_dir[TP_IDENTITY_PATH_MAX + 32];
+    bool request_dir_too_long = false;
+    if (!make_request_dir(request->work_dir, request->request_id,
+                          request->host_pid, request_dir, sizeof request_dir,
+                          &request_dir_too_long)) {
+        return request_dir_too_long
+                   ? tp_error_set(
+                         err, TP_STATUS_INVALID_ARGUMENT,
+                         "job worker Export work directory path is too long")
+                   : tp_error_set(
+                         err, TP_STATUS_FILE_IO_FAILED,
+                         "job worker could not create its private Export directory");
+    }
+
     tp_status first_status = TP_STATUS_OK;
     int current = 0;
     for (int i = 0; i < project->atlas_count; ++i) {
@@ -653,7 +677,7 @@ static tp_status run_export(const tp_job_worker_proto_request *request,
             };
             status = tp_export_run_ex(
                 project, i, input.descs, input.count,
-                request->work_dir, arena, &notices, &runs, &opts,
+                request_dir, arena, &notices, &runs, &opts,
                 &atlas_error);
         } else if (status == TP_STATUS_OK) {
             status = TP_STATUS_OOM;
@@ -725,6 +749,10 @@ static tp_status run_export(const tp_job_worker_proto_request *request,
             break;
         }
     }
+    /* Nothing in here is published to the host: the exported files already went
+     * to their target output paths, and the staged `.ntpack` was an internal
+     * step. Take it with us on success, failure, and cancellation alike. */
+    tp_worker_remove_dir_tree(request_dir);
     const bool cancelled = tp_cancel_source_fired(cancel);
     response->export_result.partial_publication =
         response->export_result.targets > 0 &&

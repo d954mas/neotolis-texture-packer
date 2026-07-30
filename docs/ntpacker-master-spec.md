@@ -980,12 +980,25 @@ to a disk cache in the first implementation.
 
 The Pack artifact file the job worker writes (§10.6) is not a counter-example to
 that rule. It is a transient private handoff, not a cache: one file inside a
-per-request private directory under the worker's work directory, keyed by worker
-pid and request id, read exactly once by the host and then deleted — on
-adoption, on cancel, on failure, and on job destroy. A pid-liveness reaper
-removes directories orphaned by a crash. Nothing reads it a second time, nothing
-looks it up by pack-input hash, and it never outlives the request that produced
-it. Result reuse remains memory-only.
+per-request private directory under the host-chosen work directory, keyed by the
+HOST pid and the request id (the pid whose death makes the directory garbage —
+the directory outlives the worker until the host has read the artifact), read
+exactly once by the host and then deleted — on adoption, on cancel, on failure,
+and on job destroy. Every Export request gets its own private directory under
+the same work directory and by the same naming rule; nothing in it is published
+to the host, so the worker removes it on success, failure, and cancellation
+alike. A pid-liveness reaper removes directories orphaned by a crash. Nothing
+reads it a second time, nothing looks it up by pack-input hash, and it never
+outlives the request that produced it. Result reuse remains memory-only.
+
+That work directory is one shared application scratch root — `<user cache
+dir>/ntpacker/work` (`%LOCALAPPDATA%` on Windows, `$XDG_CACHE_HOME` else
+`$HOME/.cache` elsewhere) — resolved identically by every client. It is
+deliberately neither the executable's directory (read-only for an installed
+build, and shared by every running instance) nor the system temp directory
+(RAM-backed on most Linux distributions, and swept by Windows disk cleaners
+mid-job). A scratch root that cannot be resolved or created fails the job
+request as structured data; there is no fallback location.
 
 Inactive Pack results are stored in a compressed representation containing
 layout/metadata/notices and compressed atlas pages or the normal serialized

@@ -51,6 +51,7 @@
 #include "ui/nt_ui_vlist.h"
 #include "window/nt_window.h"
 
+#include "app_scratch.h" /* shared <user cache dir>/ntpacker/work resolver (CLI uses it too) */
 #include "ntpacker_ui_assets.h"
 #if defined(_WIN32)
 #include "nt_utf8_argv.h"
@@ -1061,13 +1062,22 @@ static int gui_main_utf8(int argc, char *argv[]) {
     }
 #endif
 
-    /* in-process packing: session .ntpack goes under the exe dir (existing convention) */
-    char pack_session[GUI_PATHS_MAX + 128];
-    (void)snprintf(pack_session, sizeof pack_session, "%s/pack_session", s_exe_dir);
-    const bool pack_work_ready = gui_pack_init(pack_session);
+    /* Transient job output goes to the one app scratch root the CLI uses too
+     * (<user cache dir>/ntpacker/work). An exe-dir convention cannot work: an
+     * installed exe dir is read-only, and every instance of the app would share
+     * one transient namespace. There is no fallback -- an unresolvable scratch
+     * root is a reported failure, not a quietly different location. */
+    char scratch_root[GUI_PATHS_MAX];
+    tp_error scratch_error = {{0}};
+    const bool pack_work_ready =
+        app_scratch_root(scratch_root, sizeof scratch_root, &scratch_error) ==
+            TP_STATUS_OK &&
+        gui_pack_init(scratch_root);
     if (!pack_work_ready) {
         set_status_ex(STATUS_ERROR,
-                      "Pack work directory is unavailable or exceeds the supported path limit.");
+                      scratch_error.msg[0]
+                          ? scratch_error.msg
+                          : "Pack work directory is unavailable or exceeds the supported path limit.");
     }
 
     /* open a project passed on the command line (errors go to the status bar).
