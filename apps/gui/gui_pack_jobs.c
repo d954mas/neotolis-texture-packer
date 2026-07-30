@@ -68,18 +68,14 @@ static const char *job_rejection_message(
     switch (rejection) {
     case TP_SESSION_JOB_REJECTION_NONE:
         return "";
-    case TP_SESSION_JOB_REJECTION_SUPERSEDED:
-        return "job result was superseded";
     case TP_SESSION_JOB_REJECTION_CANCELLED:
         return "job was cancelled";
     case TP_SESSION_JOB_REJECTION_TARGET_DELETED:
         return "job target was deleted";
     case TP_SESSION_JOB_REJECTION_OLD_INSTANCE:
         return "job belongs to an old session instance";
-    case TP_SESSION_JOB_REJECTION_DUPLICATE:
-        return "duplicate job result";
     case TP_SESSION_JOB_REJECTION_SESSION_CLOSED:
-        return "session closed before result admission";
+        return "session closed before job admission";
     default:
         NT_ASSERT(false);
         return "unknown job rejection";

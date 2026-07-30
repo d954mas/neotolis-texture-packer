@@ -7,6 +7,18 @@
 #include "time/nt_time.h"
 #include "unity.h"
 
+/* The published rejection vocabulary is exactly the classes that have a
+ * producer: CANCELLED/TARGET_DELETED from session job admission and
+ * OLD_INSTANCE/SESSION_CLOSED from host start admission. Adding a member without
+ * a producer, or reordering them, breaks this pin. */
+_Static_assert(
+    TP_SESSION_JOB_REJECTION_NONE == 0 &&
+        TP_SESSION_JOB_REJECTION_CANCELLED == 1 &&
+        TP_SESSION_JOB_REJECTION_TARGET_DELETED == 2 &&
+        TP_SESSION_JOB_REJECTION_OLD_INSTANCE == 3 &&
+        TP_SESSION_JOB_REJECTION_SESSION_CLOSED == 4,
+    "public job rejection vocabulary is producer-backed and closed");
+
 static tp_session *make_session(void) {
     tp_rng rng = tp_rng_os();
     tp_session *session = NULL;
@@ -172,15 +184,80 @@ void test_begin_drain_rejects_queued_start_without_admitting_it(void) {
         gui_host_queue_take_completion(
             &queue, &completion));
     TEST_ASSERT_FALSE(completion.publish_result);
+    /* The refusal is typed: the class is authoritative and the prose is detail. */
+    TEST_ASSERT_EQUAL_INT(
+        TP_SESSION_JOB_REJECTION_SESSION_CLOSED,
+        completion.rejection);
+    TEST_ASSERT_EQUAL_INT(
+        TP_SESSION_JOB_FAILED, completion.state);
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_INVALID_ARGUMENT,
         completion.status);
+    TEST_ASSERT_NOT_EQUAL_INT(
+        0, (int)strlen(completion.error.msg));
     TEST_ASSERT_EQUAL_UINT64(
         1U, completion.envelope.request_id);
     gui_host_completion_destroy(&completion);
     TEST_ASSERT_EQUAL_INT(
         GUI_HOST_READY_TO_CUTOVER,
         gui_host_queue_lifecycle(&queue));
+}
+
+/* A queued start that no longer belongs to the host instance is refused at the
+ * drain with the typed OLD_INSTANCE class instead of prose alone. The refusal is
+ * host-side: it is READY the moment it is staged, so it never travels through
+ * the observation reducer that projects accepted results. */
+void test_stale_instance_start_is_rejected_as_old_instance(void) {
+    tp_session *session = make_session();
+    gui_host_queue queue;
+    tp_error error = {{0}};
+    gui_host_queue_init(&queue);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_host_queue_open(&queue, 73U, &error));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_host_queue_enqueue_export(
+            &queue, tp_id128_nil(),
+            TP_GUI_HOST_QUEUE_TEST_DIR, &error));
+    gui_host_queue__test_retag_pending_start_instance(
+        &queue, 72U);
+
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_host_queue_drain(
+            &queue, session, &error));
+    TEST_ASSERT_FALSE(
+        gui_host_queue__test_active(&queue));
+
+    gui_host_completion completion = {0};
+    TEST_ASSERT_TRUE(
+        gui_host_queue_take_completion(
+            &queue, &completion));
+    TEST_ASSERT_FALSE(completion.publish_result);
+    TEST_ASSERT_EQUAL_INT(
+        TP_SESSION_JOB_REJECTION_OLD_INSTANCE,
+        completion.rejection);
+    TEST_ASSERT_EQUAL_INT(
+        TP_SESSION_JOB_FAILED, completion.state);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_INVALID_ARGUMENT,
+        completion.status);
+    TEST_ASSERT_NOT_EQUAL_INT(
+        0, (int)strlen(completion.error.msg));
+    TEST_ASSERT_EQUAL_UINT64(
+        72U,
+        completion.envelope
+            .session_instance_generation);
+    gui_host_completion_destroy(&completion);
+
+    /* The host stays a usable OPEN owner behind the refusal. */
+    TEST_ASSERT_EQUAL_INT(
+        GUI_HOST_OPEN,
+        gui_host_queue_lifecycle(&queue));
+    TEST_ASSERT_FALSE(
+        gui_host_queue_busy(&queue));
+    tp_session_destroy(session);
 }
 
 void test_duplicate_queued_cancel_is_rejected(void) {
@@ -820,6 +897,8 @@ int main(int argc, char **argv) {
     RUN_TEST(test_open_rejects_zero_instance_generation);
     RUN_TEST(
         test_begin_drain_rejects_queued_start_without_admitting_it);
+    RUN_TEST(
+        test_stale_instance_start_is_rejected_as_old_instance);
     RUN_TEST(test_duplicate_queued_cancel_is_rejected);
     RUN_TEST(
         test_terminal_receipt_waits_for_authoritative_observation);

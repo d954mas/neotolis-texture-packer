@@ -119,13 +119,18 @@ typedef enum tp_session_job_state {
     TP_SESSION_JOB_CANCELLED
 } tp_session_job_state;
 
+/* Why an observed job produced no publishable result, as machine data rather
+ * than prose. Every member has a producer: CANCELLED/TARGET_DELETED come from
+ * session job admission, OLD_INSTANCE/SESSION_CLOSED from host start admission.
+ * NONE means the refusal has no class of its own and the terminal status/error
+ * pair carries the whole outcome. The observation's own internal admission
+ * classification is a separate, wider vocabulary; only classes an observer must
+ * be able to act on are published here. */
 typedef enum tp_session_job_rejection {
     TP_SESSION_JOB_REJECTION_NONE = 0,
-    TP_SESSION_JOB_REJECTION_SUPERSEDED,
     TP_SESSION_JOB_REJECTION_CANCELLED,
     TP_SESSION_JOB_REJECTION_TARGET_DELETED,
     TP_SESSION_JOB_REJECTION_OLD_INSTANCE,
-    TP_SESSION_JOB_REJECTION_DUPLICATE,
     TP_SESSION_JOB_REJECTION_SESSION_CLOSED
 } tp_session_job_rejection;
 

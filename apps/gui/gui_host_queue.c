@@ -137,9 +137,14 @@ static void commit_start(gui_host_queue *queue) {
     queue->next_request_id++;
 }
 
+/* A host-side refusal is structured data: `rejection` is the authoritative
+ * machine class and the error carries the human-readable detail for the same
+ * fact. NONE is passed only when the refusal has no admission class of its own,
+ * so the terminal status/error pair is the whole outcome. */
 static void stage_host_failure(
     gui_host_queue *queue,
     gui_host_job_envelope envelope,
+    tp_session_job_rejection rejection,
     tp_status status, const tp_error *error) {
     NT_ASSERT(queue != NULL);
     NT_ASSERT(!has_staged_completion(queue));
@@ -148,6 +153,7 @@ static void stage_host_failure(
             .publish_result = false,
             .envelope = envelope,
             .state = TP_SESSION_JOB_FAILED,
+            .rejection = rejection,
             .status = status,
             .error = error ? *error : (tp_error){0},
         };
@@ -242,14 +248,18 @@ tp_status gui_host_queue_begin_drain(
             (gui_host_command){0};
         if (have_rejected_start &&
             !has_staged_completion(queue)) {
-            tp_error rejection = {{0}};
+            /* The start never reached the session and the instance it was tagged
+             * for is being torn down by this drain, so SESSION_CLOSED is its
+             * machine class. */
+            tp_error detail = {{0}};
             const tp_status status = tp_error_set(
-                &rejection,
+                &detail,
                 TP_STATUS_INVALID_ARGUMENT,
                 "host stopped before queued job admission");
             stage_host_failure(
-                queue, rejected, status,
-                &rejection);
+                queue, rejected,
+                TP_SESSION_JOB_REJECTION_SESSION_CLOSED,
+                status, &detail);
         }
     }
     queue->cancel_queued = cancel_active;
@@ -462,8 +472,11 @@ static tp_status admit_start(
             "host received an invalid start command");
     }
     if (status != TP_STATUS_OK) {
+        /* The session refused the start on its own terms: the typed status and
+         * error ARE the classification, so no admission class is claimed. */
         stage_host_failure(
             queue, command->envelope,
+            TP_SESSION_JOB_REJECTION_NONE,
             status, &error);
         return TP_STATUS_OK;
     }
@@ -527,15 +540,23 @@ tp_status gui_host_queue_drain(
             command.envelope
                     .session_instance_generation !=
                 queue->session_instance_generation) {
-            tp_error rejection = {{0}};
+            /* OLD_INSTANCE is the machine class of a start that reaches admission
+             * no longer belonging to the host instance that runs it -- the
+             * generation compare is the discriminating guard. The three companion
+             * guards cannot coexist with a queued start under the queue FSM (a
+             * start is only accepted by an idle OPEN host, and every lifecycle
+             * transition that changes the instance generation clears the pending
+             * start first); they remain as defense in the same class. */
+            tp_error detail = {{0}};
             const tp_status status = tp_error_set(
-                &rejection,
+                &detail,
                 TP_STATUS_INVALID_ARGUMENT,
                 "host rejected stale or ineligible job start");
             if (!has_staged_completion(queue)) {
                 stage_host_failure(
                     queue, command.envelope,
-                    status, &rejection);
+                    TP_SESSION_JOB_REJECTION_OLD_INSTANCE,
+                    status, &detail);
             }
         } else {
             const tp_status start_status =
@@ -780,6 +801,16 @@ bool gui_host_queue__test_has_staged(
     const gui_host_queue *queue) {
     return queue &&
            has_staged_completion(queue);
+}
+
+void gui_host_queue__test_retag_pending_start_instance(
+    gui_host_queue *queue,
+    uint64_t session_instance_generation) {
+    if (queue && has_pending_start(queue)) {
+        queue->pending_start.envelope
+            .session_instance_generation =
+            session_instance_generation;
+    }
 }
 
 void gui_host_queue__test_retag_staged_request(

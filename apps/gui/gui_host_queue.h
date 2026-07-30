@@ -32,6 +32,11 @@ typedef struct gui_host_job_envelope {
     tp_session_job_kind kind;
 } gui_host_job_envelope;
 
+/* `rejection` is the authoritative machine class of a completion that publishes
+ * no result; `status`/`error` carry the human-readable detail of the same fact
+ * and never contradict it. A completion the session observed carries the class
+ * the session admitted; a completion the host itself refused before admission
+ * carries the host's own class. */
 typedef struct gui_host_completion {
     bool publish_result;
     gui_host_job_envelope envelope;
@@ -118,6 +123,11 @@ bool gui_host_queue__test_has_staged(
     const gui_host_queue *queue);
 void gui_host_queue__test_retag_staged_request(
     gui_host_queue *queue, uint64_t request_id);
+/* Ages a queued start out of the live host instance. Every lifecycle transition
+ * that changes the instance generation clears the pending start first, so the
+ * drain's OLD_INSTANCE guard has no other reachable driver. */
+void gui_host_queue__test_retag_pending_start_instance(
+    gui_host_queue *queue, uint64_t session_instance_generation);
 /* Positions the monotonic request-id counter so the exhaustion branch in start
  * admission is reachable in a test without submitting 2^64 jobs. */
 void gui_host_queue__test_set_next_request_id(
