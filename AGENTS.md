@@ -79,6 +79,25 @@ handling of invalid input.
 - Minimize commentary to blocking questions, material progress, risk/evidence,
   and the final result.
 
+## Execution Economy
+
+- Optimize for delivered value, user time, latency, and agent/tool cost. Process
+  supports the work; it is never the deliverable.
+- Execute clear bounded tasks directly. Do not add planning artifacts, research
+  phases, subagents, or extra approval checkpoints unless they reduce total work
+  or address a concrete current risk.
+- Do not add hooks, wrappers, validators, gates, roles, or workflow layers for
+  hypothetical failures. Reuse the simplest existing mechanism; get user
+  approval before introducing process that adds recurring friction.
+- Treat reviewer findings as hypotheses, not commands. Verify practical impact
+  and reject theoretical or low-value findings instead of converting them into
+  ceremony.
+- Scale verification to blast radius: structural checks for docs/config,
+  focused tests for focused code, and full suites or review swarms only for
+  broad/high-risk changes or an explicit user request.
+- Prefer deletion and simplification over framework growth. Stop when the user
+  goal and acceptance criteria are met; do not continue polishing unasked.
+
 ## Agent Workflow
 
 The main conversation is the lead. Use `.claude/skills/packer-work/SKILL.md` for
