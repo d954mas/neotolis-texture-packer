@@ -69,6 +69,8 @@ handling of invalid input.
 
 - Preserve pre-existing tracked, untracked, and ignored user work. Do not
   overwrite, revert, stage, or commit it unless the user puts it in scope.
+- Put one-off probes and temporary experiments under
+  `scratchpad/experiments/<name>/`, never in the repository root.
 - Keep clients thin and changes at the narrowest owning layer.
 - Complete work with evidence: inspect the final diff, run checks proportional
   to risk, verify acceptance criteria, and report anything not validated.
