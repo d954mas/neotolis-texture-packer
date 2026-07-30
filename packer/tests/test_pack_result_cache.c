@@ -527,7 +527,7 @@ void test_exact_byte_accounting_and_eviction(void) {
 }
 
 /* Zero budget must never demote the "highest sequence is always resolvable"
- * guarantee (store contract, decision 0004). An out-of-order store (seq 2 stored
+ * guarantee (store contract). An out-of-order store (seq 2 stored
  * first/active, seq 1 stored late, demoting seq 2 to inactive) would otherwise let
  * the budget-0 LRU evict seq 2 immediately, leaving authoritative() returning the
  * stale seq 1. The max-sequence entry is exempt from eviction like the active pin;
@@ -676,7 +676,7 @@ void test_incompressible_entry_is_evicted_instead_of_kept_cold(void) {
 }
 
 /* The floor is a policy; "the active pin and the highest sequence are never
- * evicted" is a contract (decision 0004). The contract wins: such an entry stays
+ * evicted" is a contract. The contract wins: such an entry stays
  * HOT and raw-accounted, and is never queued for compression again. */
 void test_ratio_floor_never_evicts_the_max_sequence_entry(void) {
     fake_pin noise; /* the HIGHEST sequence, and incompressible */
@@ -840,7 +840,7 @@ void test_selection_by_sequence_ignores_store_order(void) {
     tp_pack_result_cache *cache = tp_pack_result_cache_create(1ULL << 30);
     /* The NEWER request (seq 2) completes/stores FIRST; the OLDER request
      * (seq 1) completes LATE and stores second. The older completion must NOT
-     * become authoritative (§10.3, decision 0004). */
+     * become authoritative. */
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, store_pin(cache, id_of(2U), 2U, &newer));
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, store_pin(cache, id_of(1U), 1U, &older));
 

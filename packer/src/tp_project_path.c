@@ -214,7 +214,7 @@ static tp_status tp_relativize_append(char *out, size_t cap, size_t *used,
 /* Rewrites `abs` (an absolute, '/'-normalized path) relative to `base_dir`
  * (likewise). Falls back to copying `abs` when the two live on different roots
  * (different Windows drives / drive-vs-rootless) -- the caller's notice concern
- * (ux.md §3.6.3). Result is '/'-normalized. */
+ * (docs/formats/project-v5.md). Result is '/'-normalized. */
 tp_status tp_relativize(const char *abs, const char *base_dir, char *out,
                                size_t cap) {
     if (!abs || !base_dir || !out || cap == 0U) {

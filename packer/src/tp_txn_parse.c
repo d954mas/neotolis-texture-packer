@@ -5,7 +5,7 @@
  * the transaction/project decoders and their shared tp_json_internal admission
  * helper; it never crosses a public header.
  *
- * VALIDATION ORDER (decision 0011 §6, pinned): (1) structural decode -- envelope
+ * VALIDATION ORDER (pinned): (1) structural decode -- envelope
  * faults fail
  * fast and alone (bad JSON, bad/absent schema, bad version, missing/typed field, bad
  * 32-hex id, a number outside the +/-2^53 range-checked converter, an unknown
@@ -15,7 +15,7 @@
  * malformed *_id) collected in STABLE order (op_index asc, then field order). Only
  * when all shape checks pass are ops lowered to typed tp_operation and applied to a
  * clone (where the model-DEPENDENT semantic faults surface first-op-wins -- see
- * tp_txn_apply.c and decision 0011).
+ * tp_txn_apply.c).
  *
  * Unknown-field policy = REJECT at the envelope and transaction levels (structural,
  * here) and at the operation level (shape collect-all, here) -- stricter than the

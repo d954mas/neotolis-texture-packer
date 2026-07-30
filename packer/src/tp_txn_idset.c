@@ -1,6 +1,6 @@
 /*
  * The transaction-id idempotency retention store, in-memory default
- * behind the pluggable tp_txn_idstore interface (master spec §7.2). Re-submitting a
+ * behind the pluggable tp_txn_idstore interface. Re-submitting a
  * committed 32-hex transaction id is a duplicate the caller rejects (duplicate_id);
  * the on-disk journal can back the SAME interface later without touching the
  * apply core. Only COMMITTED ids are ever recorded, so idempotency blocks exactly

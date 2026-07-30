@@ -1,6 +1,7 @@
 /*
  * Element-level deep-copy / free + positional collection primitives for the
- * semantic diff. The diff STATE-CAPTURES touched entities (docs/decisions/0012), so
+ * semantic diff. The diff STATE-CAPTURES touched entities
+ * (docs/architecture/model-operations-and-session.md), so
  * it needs to copy one source/sprite/animation/target/frame/atlas-subtree out of the
  * live model and, on inverse/redo, splice a deep copy back in at an exact index.
  *
@@ -8,7 +9,7 @@
  * frame/copy_sprite_fields <-> clone_atlas/clone_frames) but are kept SEPARATE on
  * purpose: routing them through the diff fault-seam (tp_diff__alloc), not the clone
  * seam (cl_alloc), keeps tp_project_clone.c's clone alloc-count goldens byte-stable, and the diff
- * owns its captured data with its own single-free discipline (decision 0012 §6).
+ * owns its captured data with its own single-free discipline.
  *
  * !! FORK-SYNC WARNING !! A persistent field added to tp_project_clone.c
  * MUST be added here too, or Undo/Redo silently restores a non-byte-identical project.

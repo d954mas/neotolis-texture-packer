@@ -7,7 +7,8 @@
  * the oracle test. NOT a public header -- tests include it from src/ the same way
  * test_transaction.c includes tp_txn_internal.h.
  *
- * The diff is STATE-CAPTURE (docs/decisions/0012): per op we record the touched
+ * The diff is STATE-CAPTURE (docs/architecture/model-operations-and-session.md):
+ * per op we record the touched
  * entity's before/after DATA + ordering position, keyed by the effect class, so the
  * inverse restores the data directly (byte-exact under the array-order-sensitive
  * serializer). Every captured entity/string is OWNED by the diff record and freed
@@ -31,7 +32,7 @@ typedef enum tp_diff_coll {
 } tp_diff_coll;
 
 /* ---- per-op diff shape (drives capture + inverse/redo) ------------------- *
- * Grouped by decision 0012 effect class. Only the shape's own fields are
+ * Grouped by operation effect class. Only the shape's own fields are
  * populated per
  * entry; every other owned pointer stays NULL so tp_diff_op_free is a safe no-op on
  * it (the tp_operation_free pattern). */

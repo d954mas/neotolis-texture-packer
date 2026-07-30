@@ -2,14 +2,14 @@
 #define TP_CORE_TP_PACK_READ_H
 
 /* Parses the .ntpack the builder just wrote back into the canonical tp_result
- * model (plan §2). A single .ntpack may hold several atlases (owner decision:
- * project = multiple atlases), so both entry points return an array of
+ * model (docs/formats/ntpack-binary.md). A single .ntpack may hold several
+ * atlases, so both entry points return an array of
  * tp_result* -- one per NT_ASSET_ATLAS entry, in file order.
  *
- * `names` is the reverse map hash(name)->name (plan §2.8). Sprite region names
+ * `names` is the reverse map hash(name)->name. Sprite region names
  * are resolved through it; a miss is a hard error (TP_STATUS_UNKNOWN_REGION).
  * Atlas display names are resolved the same way but fall back to a hex string
- * ("atlas_%016llx") on a miss instead of erroring (plan §2.8). May be NULL, in
+ * ("atlas_%016llx") on a miss instead of erroring. May be NULL, in
  * which case every lookup misses.
  *
  * Every array/string/pixel buffer in the output is allocated from `arena`;

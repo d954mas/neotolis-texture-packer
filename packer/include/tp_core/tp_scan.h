@@ -2,8 +2,8 @@
 #define TP_CORE_TP_SCAN_H
 
 /* Directory-walk + image-extension whitelist -- the single source shared by every
- * frontend that expands a folder source into sprites (arch review §3.1/A2: was
- * duplicated GUI-side). tp_core already does file I/O (project load/save); walking
+ * frontend that expands a folder source into sprites. tp_core already does file
+ * I/O (project load/save); walking
  * a folder to find sprite images is not new surface area (AGENTS.md: no UI/CLI
  * parsing here, but plain FS access is fine -- see plan risk R6). */
 

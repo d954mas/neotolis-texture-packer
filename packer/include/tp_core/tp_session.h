@@ -21,7 +21,7 @@ typedef struct tp_txn_result tp_txn_result;
 typedef struct tp_project tp_project;
 typedef struct tp_journal tp_journal;
 
-/* ---- shared visible History (F3, master spec §8-§9.5) -------------------- *
+/* ---- shared visible History (docs/architecture/model-operations-and-session.md) *
  * One session-owned enumerable History surface shared by every view (GUI/MCP/Dev
  * API). It is a pull model: a client counts rows and copies each out; there are no
  * push callbacks, so the F3-01 "subscriber disconnect / callback reentrancy" faults
@@ -302,7 +302,7 @@ uint64_t tp_session_event_sequence(const tp_session *session);
  *
  * PULL MODEL (F3-01 W4): events are pulled here (events_after) with snapshot resync
  * on window overflow -- there is no client push callback to register. So that
- * packet's "event subscriber disconnect" and "callback reentrancy rejection" faults
+ * "event subscriber disconnect" and "callback reentrancy rejection" faults
  * are N/A by design: nothing to disconnect, and no re-entrant callback can occur. */
 tp_status tp_session_events_after(const tp_session *session, uint64_t after_sequence,
                                   tp_session_event *out, size_t capacity,

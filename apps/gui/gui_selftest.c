@@ -976,7 +976,7 @@ void run_selftest(void) {
     NT_ASSERT(st == TP_STATUS_OK && nsrc == 2 &&
               "Save As round-trip requires releasing the prior writer before Open");
 
-    /* Master spec 14.2: live Save must not overwrite an external rewrite after Open. The exact
+    /* Live Save must not overwrite an external rewrite after Open. The exact
      * sentinel remains on disk; a deliberate Save As to another identity is still allowed. */
     static const char external_sentinel[] = "external-edit-sentinel";
     { FILE *xf = fopen(save_path, "wb"); NT_ASSERT(xf); (void)fwrite(external_sentinel, 1, sizeof external_sentinel, xf); (void)fclose(xf); }
@@ -1731,7 +1731,7 @@ void run_selftest(void) {
         (void)remove(fpath);
     }
 
-    /* --- animations (ux.md §3.7b): pure playback map, create-from-selection natural sort, reorder,
+    /* --- animations: pure playback map, create-from-selection natural sort, reorder,
      *     round-trip preserves frames order + playback + flips, remove-frame path --- */
     {
         bool fin = false;

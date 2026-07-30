@@ -130,7 +130,7 @@ static const nt_ui_label_style_t g_danger_base = {.font_id = 0, .font_size = FS_
 static const nt_ui_label_style_t g_caption_base = {.font_id = 0, .font_size = FS_CAPTION, .color = {140.0F, 148.0F, 164.0F, 255.0F}};
 static const nt_ui_label_style_t g_canvas_hint_base = {.font_id = 0, .font_size = FS_HINT, .color = {98.0F, 104.0F, 120.0F, 255.0F}, .align = CLAY_TEXT_ALIGN_CENTER};
 static const nt_ui_label_style_t g_tag_base = {.font_id = 0, .font_size = FS_TAG, .color = {245.0F, 244.0F, 243.0F, 255.0F}};
-/* Missing-file rows / placeholder (ux.md §3.7): amber warning accent (§2.1 warn). */
+/* Missing-file rows / placeholder: amber warning accent. */
 static const nt_ui_label_style_t g_warn_base = {.font_id = 0, .font_size = FS_ROW, .color = {228.0F, 158.0F, 92.0F, 255.0F}};
 /* Hyperlink label (About repo link): link-blue so it reads as clickable; hover tint on the button
  * behind it is the extra affordance (no cursor-shape API). */

@@ -157,7 +157,7 @@ bool gui_animation_edit_matches(tp_id128 atlas_id, tp_id128 animation_id) {
 
 // #endregion
 
-// #region animation + preview actions (ux.md §3.7b)
+// #region animation + preview actions
 const tp_snapshot_animation *preview_animation(void) {
     const tp_session_snapshot *snapshot = gui_project_snapshot();
     return s_preview_active && snapshot

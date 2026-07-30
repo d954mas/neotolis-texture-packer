@@ -2,8 +2,7 @@
 #define TP_CORE_TP_INPUT_H
 
 /* Project -> pack input: expand one atlas's sources into the sprite descs tp_pack
- * consumes. This is the single home for the bridge the GUI used to own
- * (arch review §3.1: assemble()/desc_add() in gui_pack.c): the raw-name policy
+ * consumes. This is the single home for the bridge the GUI used to own: the raw-name policy
  * (folder child = rel WITH ext; file source = basename WITH ext), override lookup
  * by tp_sprite_export_key, per-sprite override encoding (+1 shape), and the
  * effective-shape/extrude rule. Frontends call this instead of assembling descs
@@ -47,7 +46,7 @@ typedef struct tp_pack_input {
  * keyed by its basename; a folder source is scanned recursively (tp_scan, entries
  * already sorted by rel path) and its children appended in scan order. Descs are
  * emitted per-source-then-sorted-within-source with NO global sort across sources
- * -- packing layout depends on input order (arch review R2). Each sprite's
+ * -- packing layout depends on input order. Each sprite's
  * per-sprite overrides are looked up by tp_sprite_export_key and encoded onto the
  * desc. Zero descs is not an error (the caller decides whether "empty" is fatal).
  * An absent, unreadable, or unstatable source fails the complete build rather than

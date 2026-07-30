@@ -76,7 +76,7 @@ target_link_libraries(tp_core PUBLIC nt_shared nt_hash nt_log PRIVATE Threads::T
 # tp_srckey.h never exposes utf8proc types; its allocations are freed in-TU.
 target_link_libraries(tp_core PRIVATE cjson stb_image stb_image_write utf8proc)
 # miniz + tinycthread (both engine-vendored, no basisu, no nt_builder) power the
-# pack-result store's compressed cold tier (packet S28): raw deflate for the page
+# pack-result store's compressed cold tier: raw deflate for the page
 # blobs, C11 threads for the one background encoder and the fork-join promote.
 # PRIVATE: tp_pack_result_cache.h exposes neither, and every buffer either library
 # touches is allocated and freed inside tp_pack_result_cache.c.
@@ -96,7 +96,7 @@ nt_set_sanitizer_flags(tp_core)
 # Isolated so ONLY pack-time consumers (GUI, CLI, smoke, pack tests) pull
 # nt_builder -> nt_basisu_encoder. Since #283 the GUI links tp_build directly.
 # tp_build_worker.c + tp_build_worker_main.c + the per-OS tp_proc backend add the
-# private child-process Pack boundary (decision 0018, H0.3-b): the production
+# private child-process Pack boundary: the production
 # pack re-execs the host in a hidden __build-worker mode so an nt_builder
 # abort/alloc/codec/write failure lands in a child, not the host.
 add_library(tp_build STATIC src/tp_pack.c src/tp_build_driver.c src/tp_build_proto.c

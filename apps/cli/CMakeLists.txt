@@ -1,4 +1,4 @@
-# ntpacker: AI-first CLI frontend (plan docs/plans/op-layer-and-cli.md, step B1).
+# ntpacker: saved-file CLI frontend over the shared operation/session contracts.
 # Console exe. Links tp_build now (pack/export land in B3); tp_build PUBLIC-links
 # tp_core + nt_builder, so the model/export API + exporter registry come
 # transitively. CRT: -U_DLL to match tp_build/nt_builder's static CRT (same pin

@@ -1,4 +1,4 @@
-/* Phase 1b tp_pack invariants + determinism (plan §3.4, task 10).
+/* tp_pack invariants + determinism.
  *
  * Packs the smoke disc set (reusing apps/smoke's fill_disc) plus one INJECTED
  * DUPLICATE (identical pixels, different name) through tp_pack into a scratch

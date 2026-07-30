@@ -1,5 +1,4 @@
-/* Private build-worker outcome + oracle + containment suite (decision 0018,
- * ROADMAP H0.3-b / H0.4).
+/* Private build-worker outcome + oracle + containment suite.
  *
  * Proves the process boundary end to end:
  *  - a normal pack routed THROUGH the worker process is byte-identical to a
@@ -320,7 +319,7 @@ void test_worker_publishes_unicode_long_path(void) {
 /* A crashing worker -> BUILDER_CRASHED, the host survives, a prior artifact at the
  * same path is untouched (no publish), and staging is gone.
  *
- * This pins the on-disk half of decision 0018's "the last successful preview
+ * This pins the on-disk guarantee that the last successful preview
  * remains authoritative": a crash publishes nothing, so the prior artifact bytes
  * survive. The in-memory half is a structural property of the take_result
  * contract, not something this worker-layer test can observe: tp_pack returns

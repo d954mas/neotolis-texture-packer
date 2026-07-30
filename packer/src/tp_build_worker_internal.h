@@ -1,7 +1,8 @@
 #ifndef TP_BUILD_WORKER_INTERNAL_H
 #define TP_BUILD_WORKER_INTERNAL_H
 
-/* Parent side of the private build worker (decision 0018, ROADMAP H0.3-b/H0.4).
+/* Parent side of the private build worker
+ * (docs/architecture/jobs-pack-and-cache.md).
  * This is the production Pack cutover: tp_pack hands validated settings + decoded
  * pixels here, and the builder runs in a re-exec'd child process so an
  * NT_BUILD_ASSERT, allocation, codec, or write failure in nt_builder can never

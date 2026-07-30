@@ -2,11 +2,11 @@
 #define TP_CORE_TP_MODEL_H
 
 /*
- * Canonical sprite/atlas model (docs/research/SUMMARY.md §5d, plan §2.6).
+ * Canonical packed sprite/atlas model (docs/formats/json-neotolis.md).
  * Every pointer here is arena-owned (tp_arena.h) -- destroying the arena that
  * produced a tp_result frees the whole thing in one shot.
  *
- * Coordinate spaces (do not mix these up -- see plan §2.6/§2.7):
+ * Coordinate spaces (do not mix these up; see docs/formats/ntpack-binary.md):
  *   - frame / spriteSourceSize / sourceSize / pivot are all y-down PNG space
  *     (origin top-left, y increases downward), NOT the engine's y-up runtime
  *     space.
@@ -32,7 +32,7 @@ typedef struct tp_point {
 } tp_point;
 
 /*
- * D4 transform mask (plan §2.4, nt_atlas_format.h transform byte).
+ * D4 transform mask (docs/formats/ntpack-binary.md, nt_atlas_format.h).
  * Apply order is diagonal -> flipH -> flipV; when bit2 (diagonal) is set the
  * trim dimensions (w,h) are swapped before flipping. 0 = identity.
  */

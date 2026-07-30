@@ -1,4 +1,4 @@
-/* Defold exporter tests (ROADMAP Phase 5). Proves:
+/* Defold exporter contract tests. Proves:
  *   (a) golden  -- exact `.tpinfo` + `.tpatlas` bytes for a hand-built result
  *                  (untrimmed rect, trimmed rect, pivot px, is_solid true/false);
  *   (b) rotated -- the one representable 90-degree mask emits rotated:true with a
@@ -1210,7 +1210,7 @@ static bool pack_demo_atlas(const demo_atlas *da, tp_arena *ar) {
             opts.animations = &anim;
             opts.animation_count = 1;
         }
-        /* explicit animations only (auto-grouping removed, ux.md 3.7b). */
+        /* Explicit project animations only; no filename auto-grouping. */
         tp_export_prepared prep;
         if (ok) {
             ok = tp_normalize(res, &opts, ar, &prep, &e) == TP_STATUS_OK;

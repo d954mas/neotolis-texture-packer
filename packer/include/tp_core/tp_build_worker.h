@@ -1,7 +1,8 @@
 #ifndef TP_CORE_TP_BUILD_WORKER_H
 #define TP_CORE_TP_BUILD_WORKER_H
 
-/* Private build-worker entry + dispatch (decision 0018, ROADMAP H0.3-b).
+/* Private build-worker entry + dispatch
+ * (docs/architecture/jobs-pack-and-cache.md).
  *
  * The production Pack path runs nt_builder in a child process so a builder
  * abort/allocation/codec/write failure can never terminate the host. There is

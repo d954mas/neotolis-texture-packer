@@ -2,8 +2,9 @@
 #define TP_CORE_TP_EXPORT_H
 
 /*
- * Pure export layer over the canonical tp_result (ROADMAP Phase 2, SUMMARY.md
- * §5b/§5d/§5h). Everything here lives in tp_core (GUI-linkable, NO nt_builder):
+ * Pure export layer over the canonical tp_result
+ * (docs/architecture/engine-and-client-boundaries.md). Everything here lives
+ * in tp_core (GUI-linkable, NO nt_builder):
  *   - capability flags (what a target FORMAT can hold),
  *   - the exporter registry (data + one write fn over the canonical model),
  *   - the capability -> pack-settings clamp (per-target packing, §5h),
@@ -45,7 +46,7 @@ struct tp_session_snapshot;
 tp_status tp_exporter_id_validate(const char *id, tp_error *err);
 
 /* ------------------------------------------------------------------ */
-/* Capability flags: what a target FORMAT can hold (SUMMARY.md §5b).    */
+/* Capability flags: what a target FORMAT can hold. */
 /* ------------------------------------------------------------------ */
 
 /* caps describe the OUTPUT FORMAT's expressiveness, independent of the packer.
@@ -67,10 +68,10 @@ typedef struct tp_export_caps {
 tp_export_caps tp_export_caps_full(void);
 
 /* ------------------------------------------------------------------ */
-/* Metadata-loss notices (SUMMARY.md §5h): informational, never fatal.  */
+/* Metadata-loss notices: informational, never fatal. */
 /* ------------------------------------------------------------------ */
 
-/* Structured notice classification (ai-first.md item 4, review §3.4): a notice
+/* Structured notice classification (docs/spec/product.md): a notice
  * carries WHICH axis degraded and WHY, so consumers (CLI --json, GUI chip)
  * render from data, not by re-parsing prose. Append-only: never reorder or
  * renumber an existing value. */
@@ -114,7 +115,7 @@ tp_status tp_export_notice_add_ex(tp_export_notices *n, int field_id, int reason
 void tp_export_notices_free(tp_export_notices *n);
 
 /* ------------------------------------------------------------------ */
-/* Normalization pass ("prepareData", ROADMAP Phase 2 deliverable).     */
+/* Normalization pass ("prepareData"). */
 /* ------------------------------------------------------------------ */
 
 /* Per-sprite export-name override (owner requirement: GUI rename). The file on
@@ -125,9 +126,9 @@ typedef struct tp_export_name_override {
     const char *final_name; /* verbatim final export name */
 } tp_export_name_override;
 
-/* One explicit animation from the project (SUMMARY.md §5a). Frames are FINAL
+/* One explicit animation from the project. Frames are FINAL
  * export names in explicit playback order. Animations are assembled EXPLICITLY
- * (docs/design/ux.md 3.7b) -- there is no numeric-suffix auto-grouping. */
+ * (docs/formats/json-neotolis.md) -- there is no numeric-suffix auto-grouping. */
 typedef struct tp_export_frame_ref {
     tp_id128 source_id;
     const char *source_key;
@@ -209,14 +210,14 @@ tp_status tp_normalize(const tp_result *result, const tp_normalize_opts *opts, s
                        tp_export_prepared *out, tp_error *err);
 
 /* ------------------------------------------------------------------ */
-/* Capability -> pack-settings clamp (per-target packing, SUMMARY §5h). */
+/* Capability -> pack-settings clamp (per-target packing). */
 /* ------------------------------------------------------------------ */
 
 /* Restricts `in` to what `caps` can represent, writing `out` (may alias `in`).
  *
  * v1 reality (nt_builder has a single allow_transform bool = all-8-D4 vs
  * identity; there is NO rotate-only mode -- see the future NONE/ROT90/D4
- * transform-policy engine PR, SUMMARY.md §5g): transforms stay ON only when the
+ * transform-policy engine PR): transforms stay ON only when the
  * target can hold the FULL D4 the builder would bake, i.e. rotate90 AND flips.
  * A rotate90-only target (flips == false) therefore packs IDENTITY-ONLY in v1
  * (TODO: rotation-only once the builder gains a transform-policy knob). Polygon
@@ -229,14 +230,14 @@ tp_status tp_export_effective_settings(const tp_pack_settings *in, const tp_expo
 bool tp_export_settings_equal(const tp_pack_settings *a, const tp_pack_settings *b);
 
 /* ------------------------------------------------------------------ */
-/* Degradation prediction (review §3.4; the flagship "what will this   */
+/* Degradation prediction (the flagship "what will this               */
 /* format cost you" feedback the CLI dry-run and GUI chip both need).  */
 /* ------------------------------------------------------------------ */
 
 /* Enumerates every metadata/pack degradation exporting atlas[atlas_index] to a
  * target with `caps` would cause, appending a structured notice per axis to
  * `out` (init'd by the caller). This is the ONE enumeration both frontends read
- * (kills the GUI-side copy in review §3.1).
+ * (there is no GUI-side duplicate).
  *
  * PROJECT-KNOWABLE axes are computed from the project alone (no pack needed):
  *   - TRANSFORM: allow_transform on, but caps can't hold the full D4;
@@ -263,7 +264,7 @@ tp_status tp_export_predict_loss_snapshot(const struct tp_session_snapshot *snap
 
 /* Writes each page of `result` to "<write_path_base>-<page>.png". Pages are
  * straight-alpha by default; `premultiply` premultiplies RGB by alpha first
- * (ROADMAP toggle). The parent directory of write_path_base must already exist
+ * when requested. The parent directory of write_path_base must already exist
  * (tp_core has no dir-creation opinion). Deterministic.
  *
  * Plain writes: under the set publication below this base is the private staging

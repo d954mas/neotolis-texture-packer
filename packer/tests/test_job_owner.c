@@ -60,7 +60,7 @@ static tp_status fail_process_start(void *context, tp_error *error) {
 }
 
 /* The worker receives an already-acquired pin. It never touches the session:
- * one host thread owns that (master spec 4.8), and the refcount -- not the
+ * one host thread owns that, and the refcount -- not the
  * session -- is what a worker is allowed to hold across a detach. */
 static int pinned_worker(void *context) {
     worker_args *args = context;

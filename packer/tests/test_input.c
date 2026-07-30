@@ -2,10 +2,10 @@
  * per-sprite effective-shape rule, and the non-RECT extrude clamp in
  * tp_project_atlas_to_settings.
  *
- * Ported semantics under test (was gui_pack.c assemble/desc_add, arch review §3.1):
+ * Shared project-to-pack input semantics under test:
  *   - file source -> raw name = basename WITH ext; folder source -> recursive scan,
  *     rel WITH ext, appended in scan order; per-source-then-sorted order, NO global
- *     sort (arch review R2);
+ *     sort;
  *   - override lookup by tp_sprite_export_key incl. the dotfile-in-folder key case
  *     the A1 fix repaired ("tank/.png" keys as "tank/.png", not "tank/");
  *   - effective shape: slice9 forces RECT, else ov_shape, else atlas shape; the
@@ -334,7 +334,7 @@ void test_extrude_gating(void) {
     tp_pack_input_free(&in);
 }
 
-/* Per-source-then-sorted order, no global sort across sources (arch review R2).
+/* Per-source-then-sorted order, no global sort across sources.
  * ord1 = {y.png, a.png} sorts to [a, y]; ord2 = {b.png}. Expected desc order
  * [a.png, y.png, b.png] -- a global sort would put b before y. */
 void test_per_source_order(void) {
@@ -751,7 +751,7 @@ void test_unrepresentable_project_overrides_fail_before_descriptor_narrowing(voi
     tp_project_destroy(project);
 }
 
-/* The export-path clamp hole (arch review §3.1 / plan A3a step 3): a CONCAVE atlas
+/* Export-path clamp regression: a CONCAVE atlas
  * with extrude>0 must (a) map to settings with extrude clamped to 0, (b) pack via
  * those settings, and (c) export through tp_export_run -- pre-clamp it hard-rejected
  * at tp_pack ("extrude > 0 is only valid for shape RECT"). */

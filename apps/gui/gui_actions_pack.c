@@ -13,7 +13,7 @@
 // #region pack / export actions
 /* Ctrl+P / Pack: start the selected atlas's typed session Pack job. On success clear the
  * preview-stale bit and upload the packed pages to the canvas (atlas-page view); on failure the
- * previous result + the "outdated" tag stay (ux.md §3.3b). */
+ * previous result + the "outdated" tag stay. */
 /* Blocking pack of the selected atlas (deterministic path for selftest + --shot). Interactive
  * Pack starts the same session job and polls its typed result at frame boundaries. */
 void do_pack_blocking(void) {
@@ -77,7 +77,7 @@ void do_pack(void) {
 }
 
 /* Ctrl+E / Export: starts an async export of every atlas with sources + >=1 enabled target on a
- * owned worker process (per-atlas failures non-fatal, ux.md §3.5).
+ * owned worker process (per-atlas failures remain non-fatal).
  * Completion is reported through the classified host receipt. */
 void gui_actions__export(void) {
     if (!gui_actions__submit_draft()) {

@@ -417,7 +417,7 @@ tp_status gui_project_save(char *err_out, size_t err_cap) {
     return TP_STATUS_OK;
 }
 
-/* Master spec 14.2: tp_session exclusively owns the exact-byte Open/Save
+/* tp_session exclusively owns the exact-byte Open/Save
  * baseline and rejects an external replacement before publication. */
 
 static tp_status save_as_preflight(

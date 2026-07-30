@@ -3,15 +3,16 @@
 
 /*
  * Semantic diff / exact inverse (Undo) + redo replay over a committed transaction,
- * and a minimal in-memory undo/redo history (master spec §9-9.5, §59 items
- * 15-17). Builds on the transaction engine (tp_transaction.h): a committed
+ * and a minimal in-memory undo/redo history
+ * (docs/architecture/model-operations-and-session.md). Builds on the transaction engine (tp_transaction.h): a committed
  * transaction captures ONE compact SEMANTIC DIFF -- the per-op before/after data +
  * ordering position needed to invert it -- NOT a full project snapshot. The exact
  * inverse restores the pre-transaction state byte-for-byte; redo re-applies it.
  *
- * INVERSE REPRESENTATION -- state-capture, not inverse-operations (docs/decisions/0012):
+ * INVERSE REPRESENTATION -- state-capture, not inverse operations
+ * (docs/architecture/model-operations-and-session.md):
  * each op's diff records the touched entity's before/after DATA + position (the
- * decision 0012 state-capture shapes: CREATE=after entity+position,
+ * state-capture shapes: CREATE=after entity+position,
  * REMOVE=before entity+position,
  * MOVE=from/to index, SET=before/after field values); a dedicated diff-apply
  * restores the data directly. This is byte-exact under the array-order-sensitive

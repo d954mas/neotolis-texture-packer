@@ -15,7 +15,7 @@ bool gui_pack_preview_publish(tp_session_job_result *job_result,
                               gui_pack_result_info *out);
 bool gui_pack_preview_belongs_to(int atlas_index);
 
-/* Frame tick for the result store's background page compression (packet S28),
+/* Frame tick for the result store's background page compression,
  * called once per frame from the pack-job poll. Not a test seam: it is how the
  * cold tier lands at all. */
 void gui_pack__cold_pump(void);

@@ -2,7 +2,7 @@
 #define TP_CORE_TP_IDENTITY_H
 
 /*
- * Project identity boundary (master spec §5.1, §15-16, §59 items 1-3).
+ * Project identity boundary (docs/architecture/persistence-and-recovery.md).
  *
  * Saved-project identity is the canonical normalized path of the
  * `.ntpacker_project` file; an unsaved session's identity is a random 128-bit

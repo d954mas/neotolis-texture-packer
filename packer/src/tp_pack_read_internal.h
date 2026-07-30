@@ -14,7 +14,7 @@ struct tp_arena;
 extern "C" {
 #endif
 
-/* Exact UV<->pixel conversions for page dims <= 4096 (plan §2.5). Encode is the
+/* Exact UV<->pixel conversions for page dims <= 4096. Encode is the
  * builder's idealized round-half-up; decode inverts it exactly. */
 uint16_t tp_px_to_uv(int32_t px, int32_t page_dim);
 int32_t tp_uv_to_px(uint16_t u, int32_t page_dim);

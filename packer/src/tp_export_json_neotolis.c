@@ -367,7 +367,7 @@ tp_status tp_export_json_neotolis_write(const tp_export_write_ctx *ctx, tp_error
         return st;
     }
 
-    /* Pages sit next to the json; straight-alpha default (ROADMAP). */
+    /* Pages sit next to the JSON and use straight alpha by default. */
     st = tp_export_write_pages(prep->result, write_base, false, err);
     if (st != TP_STATUS_OK) {
         return st;

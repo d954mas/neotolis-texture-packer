@@ -1,7 +1,8 @@
 /*
  * The atomic transaction core over the live tp_project model.
  *
- * Mechanism -- transactional CLONE (docs/decisions/0011): idempotency (a seen id ->
+ * Mechanism -- transactional CLONE
+ * (docs/architecture/model-operations-and-session.md): idempotency (a seen id ->
  * duplicate_id) -> revision precondition (mismatch rejects ALONE, op_index -1, before
  * any per-op work) -> clone the model -> validate+apply each op to the CLONE op-by-op
  * via tp_operation_apply (so op N may depend on ops 1..N-1) -> on FULL
@@ -11,7 +12,7 @@
  * allocation-free pointer swap: provably atomic.
  *
  * SEMANTIC vs SHAPE validation (divergence from a static-table approach,
- * documented in decision 0011): the model-INDEPENDENT shape faults (unknown op,
+ * documented by the operation contract): the model-INDEPENDENT shape faults (unknown op,
  * unknown field, malformed *_id) are collected-all in tp_txn_parse.c before any
  * apply. The model-DEPENDENT semantic faults (dangling id, range, name collision)
  * are validated against the PROGRESSIVELY-applied clone -- which is what lets a

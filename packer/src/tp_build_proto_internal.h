@@ -1,8 +1,8 @@
 #ifndef TP_BUILD_PROTO_INTERNAL_H
 #define TP_BUILD_PROTO_INTERNAL_H
 
-/* Versioned bounded private build-worker protocol (decision 0018, master spec
- * §10.6, ROADMAP H0.3). The parent serializes a request -- validated settings,
+/* Versioned bounded private build-worker protocol
+ * (docs/architecture/jobs-pack-and-cache.md). The parent serializes a request -- validated settings,
  * atlas/sprite metadata and raw RGBA8 pixel blocks, plus a relative ASCII output
  * name -- and the worker returns a versioned result. This slice (H0.3-a) defines
  * and pins the codec; the process transport lands in H0.3-b.
@@ -60,7 +60,7 @@ typedef struct tp_build_proto_sprite {
 
 /* A pack request: the validated atlas knobs (mirror the tp_pack_settings scalar
  * fields), the atlas display name, the relative ASCII output name, and the
- * sprite/pixel blocks. Never carries arbitrary source paths (decision 0018). */
+ * sprite/pixel blocks. Never carries arbitrary source paths. */
 typedef struct tp_build_proto_request {
     int32_t max_size;
     int32_t padding;

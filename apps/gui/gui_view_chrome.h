@@ -31,7 +31,7 @@ void declare_menubar(nt_ui_context_t *ctx);
 /* The File/Edit/Atlas/View/Help drop-down menus (declared every frame; items no-op while closed). */
 void declare_menus(nt_ui_context_t *ctx);
 
-/* Row/canvas right-click context menu (ux.md §3.3e): items depend on which row armed it. */
+/* Row/canvas right-click context menu: items depend on which row armed it. */
 void declare_context_menu(nt_ui_context_t *ctx);
 
 /* Hover tooltips (full text) for this frame's truncated rows, recorded via record_row_tip. */

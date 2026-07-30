@@ -392,7 +392,7 @@ gui_project_create_result gui_project_add_target(
     /* target.create op for the default json-neotolis target (mirrors seed_default_target's exporter +
      * "out/<name>" path). An OP (not the lifecycle seed) so the added target is captured in the diff
      * history and Undo removes exactly this target -- a direct seed leaves no undo step, so Ctrl+Z would
-     * revert the WRONG (prior) edit (decision 0015). */
+     * revert the WRONG (prior) edit. */
     const tp_session_snapshot *snapshot = gui_project_snapshot();
     const tp_snapshot_atlas *atlas = snapshot
                                          ? tp_session_snapshot_atlas_by_id(snapshot, atlas_id)

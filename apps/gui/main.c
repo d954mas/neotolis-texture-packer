@@ -5,7 +5,7 @@
  * through typed session jobs, render the real packed page on the center canvas with
  * zoom/pan + region overlays + selection sync, and export target files through the same boundary.
  * The session is the single mutable source of truth; the GUI reads owned snapshots as a thin editor
- * (AGENTS tool-parity). The Pack button surfaces the "preview stale" state per ux.md §3.3b.
+ * (AGENTS tool-parity). The Pack button surfaces the explicit stale-preview state.
  *
  * Module split: gui_project (state + dirty bits + load/save), gui_scan (display-only folder
  * enumeration), gui_pack (typed job adapter + presentation slots), gui_canvas (dual-mode
@@ -59,7 +59,7 @@
 
 #include "clay.h"
 
-#include "tp_core/tp_build_worker.h" /* private build-worker re-exec dispatch (decision 0018) */
+#include "tp_core/tp_build_worker.h" /* private build-worker re-exec dispatch */
 #include "tp_core/tp_export.h"
 #include "tp_core/tp_names.h" /* tp_sprite_export_key (slice9 frame-sync key) */
 
@@ -362,7 +362,7 @@ static void handle_canvas_double_click(void) {
 /* atlas_fill_pct, strip_group_actions/pages/zoom, declare_canvas_strip, declare_canvas_preview,
  * declare_canvas, status_sev_color/status_sev_icon, and declare_status_pill live in
  * gui_view_canvas.c. handle_canvas_input above stays here per the P-2 lead ruling
- * (docs/plans/gui-decomposition.md §2). */
+ * (the canvas view owns its declaration path). */
 // #endregion
 
 // #region status bar + menus + tooltips
@@ -377,7 +377,7 @@ static void handle_canvas_double_click(void) {
  * gui_view_settings.c/h -- declare_right_panel is called from frame() below; the header exposes
  * only that entry point. */
 
-// #region keyboard shortcuts (ux.md §3.3d)
+// #region keyboard shortcuts
 /* Global shortcuts routed through the SAME actions as the menus. Text-input focus swallows
  * them first (no accidental global actions while typing); an open modal blocks them too. */
 static void handle_shortcuts(void) {
@@ -442,7 +442,7 @@ static void handle_shortcuts(void) {
     }
 }
 
-/* Sprite-list keyboard navigation (ux.md §3.3d). Runs after build_view() so it acts on the
+/* Sprite-list keyboard navigation. Runs after build_view() so it acts on the
  * fresh filtered/sorted view. Same gating as handle_shortcuts: no field focus, no modal, not headless,
  * and Ctrl is reserved for the global shortcuts above. Arrows/Home/End/Enter/F2 drive the list focus. */
 static void handle_list_nav(void) {
@@ -884,7 +884,7 @@ static void frame(void) {
 
 // #region main + init/shutdown
 static int gui_main_utf8(int argc, char *argv[]) {
-    /* Private build-worker re-exec (decision 0018): a pack re-execs this exe with
+    /* Private build-worker re-exec: a pack re-execs this exe with
      * argv[1] == "__build-worker". Service it FIRST -- before engine init, the
      * window, recovery, or any UI -- and return; never open a window as a worker. */
     if (tp_build_is_worker_invocation(argc, argv)) {

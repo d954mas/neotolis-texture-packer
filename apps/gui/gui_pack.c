@@ -14,7 +14,7 @@
 
 #define GUI_PACK_MAX_ATLASES 64
 
-/* Inactive-result byte budget (packets S18, S28). Master spec §10.4 fixes the
+/* Inactive-result byte budget. docs/architecture/jobs-pack-and-cache.md fixes the
  * SHAPE -- one pinned active result, every inactive one in a separate byte-budget
  * LRU -- and leaves "concrete budgets and compression details" to implementation
  * policy, so this constant is that policy and the only place it is written down.
@@ -35,7 +35,7 @@
  * background compression lands (the store counts it raw until then), so the true
  * ceiling is budget + the active pin + the highest-sequence entry + whatever is
  * still encoding; the active and max-sequence entries are exempt from eviction by
- * the store contract (decision 0004). */
+ * the store contract. */
 #define GUI_PACK_RESULT_BUDGET_BYTES (512ULL * 1024ULL * 1024ULL)
 
 typedef struct pack_ref_entry {
@@ -207,7 +207,7 @@ static uint64_t result_page_bytes(const tp_result *result) {
     return bytes;
 }
 
-/* Per-frame tick for the store's background page compression (packet S28). The
+/* Per-frame tick for the store's background page compression. The
  * store is single-threaded and is pumped only from here, on the UI thread that
  * owns it; nothing else in the GUI knows a compression exists. */
 void gui_pack__cold_pump(void) {

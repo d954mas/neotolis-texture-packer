@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Boundary gates (see git history: docs/plans/op-layer-and-cli.md §A6, removed 2026-07-20): greppable rules that
-# keep the tp_core / frontend split honest. Run from the repo root. Exit 0 = clean.
+# Boundary gates: greppable rules that keep the tp_core / frontend split honest.
+# Run from the repo root. Exit 0 = clean.
 # A legit exception is annotated in-source with "boundary-ok:" on the same line.
 set -u
 fail=0
@@ -488,9 +488,8 @@ fi
 # 17. Comment hygiene: shipping source comments are short WHY only, never a phase/
 #     review tag. Bans the bracketed fix/review markers, R5b-x phase labels, Fx-xx
 #     phase tags (incl. suffixed F2-05b-ii-A forms), and the Dx: crash-diagnostic
-#     comment prefix. Spec/decision references are deliberately NOT matched: a bare
-#     "§7.2" or section-qualified "decision 0011 §4" is permitted and must
-#     survive. The Fx-xx alternative omits a trailing \b so a reintroduced F2-05a /
+#     comment prefix. Durable contract references are deliberately NOT matched and
+#     must survive. The Fx-xx alternative omits a trailing \b so a reintroduced F2-05a /
 #     F2-05b-i variant is still caught; the Dx: alternative excludes a leading letter
 #     or '%' so "%H:%M:%S" strftime and "PATH:" are not flagged. Test/bench/selftest
 #     sources are outside shipping_srcs and keep their oracles. A legit hit (e.g. a
@@ -517,9 +516,9 @@ if printf '%s\n' \
     '/* keep the derived suffix [0] slot */' \
     '    (void)snprintf(t, sizeof t, "%H:%M:%S", tm);' \
     '    const char *k = "PATH:";' \
-    '/* selector resolution (master spec §7.2) */' \
-    '/* dedup pending (decision 0012 §6); never merge */' \
-    '/* order rule (decision 0011 §4): id-keyed collections */' |
+    '/* selector resolution (model contract) */' \
+    '/* dedup pending; never merge */' \
+    '/* order rule: id-keyed collections */' |
     grep -qE "$_comment_tags"; then
     hit "R17-selftest" "R17 detector false-positives on legitimate suffix/strftime/PATH/section-reference content"
 fi
@@ -1195,8 +1194,8 @@ FNR == 1 { in_block = 0; depth = 0; split("", seam); seam_only = 0; pending = 0 
 # DEBT, not design. Each name below is a seam that predates this rule and whose
 # owning component is not fenced yet. The list is exact -- full symbol names, no
 # prefixes, no patterns -- so a NEW unfenced seam, including one in an
-# already-listed component, is still a hit. Packet W1-P6 fenced the session,
-# project, and build-worker families and could not reach past its file zone; the
+# already-listed component, is still a hit. The session, project, and
+# build-worker families are already fenced; the
 # owners still owed a fence are tp_diff/tp_history, tp_idset, tp_image, tp_journal,
 # tp_model, tp_op, tp_recovery, tp_txn, tp_validate, the CLI pack-fault binary's
 # tp_export_run arming call, and the GUI's gui_project__test_session.

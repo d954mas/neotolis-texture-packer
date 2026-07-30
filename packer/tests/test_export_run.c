@@ -1,4 +1,4 @@
-/* Per-target packing proof (ROADMAP Phase 2 acceptance, SUMMARY.md §5h).
+/* Per-target packing proof (docs/architecture/jobs-pack-and-cache.md).
  *
  * One project, one atlas (full D4 allowed), three targets over TEST-ONLY
  * capability-restricted descriptors that reuse the json-neotolis writer:

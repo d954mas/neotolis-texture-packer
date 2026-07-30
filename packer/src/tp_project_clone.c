@@ -21,7 +21,7 @@
  * !! FORK-SYNC WARNING !! packer/src/tp_diff_entity.c keeps a DELIBERATE
  * second copy of this deep-copy (fill_atlas/anim/source/target/frame/copy_sprite_fields)
  * on its own fault seam so the diff never perturbs this file's clone-alloc-count goldens
- * (decision 0012 §6). A persistent field added HERE MUST be mirrored THERE, or Undo/Redo
+ * A persistent field added HERE MUST be mirrored THERE, or Undo/Redo
  * silently restores a non-byte-identical project; the test_completeness_oracle_* net in
  * test_diff.c catches a missed field. Keep the two copies in sync.
  */

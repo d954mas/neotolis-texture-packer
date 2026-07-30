@@ -2,7 +2,7 @@
 #define TP_BUILD_DRIVER_INTERNAL_H
 
 /* Private tp_build seam: the in-process nt_builder driver extracted from
- * tp_pack (decision 0018, ROADMAP H0.3). This is the ONLY nt_builder call site
+ * tp_pack. This is the ONLY nt_builder call site
  * in production; tp_pack keeps validate/preflight/name-map/read-back and hands
  * decoded pixels to the driver. The signature mirrors the future private build
  * worker (settings + raw pixels + a resolved output path); the process cutover

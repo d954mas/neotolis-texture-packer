@@ -15,7 +15,7 @@ tp_add_test(NAME identity_id LIBS tp_core unity PRIVATE_SRC)
 tp_add_test(NAME id LIBS tp_core unity PRIVATE_SRC)
 
 # F1-02: source-key normalization / case-fold collision / portability validation
-# against the production tp_status model and master spec §5.3.
+# against the production tp_status and source-key contracts.
 tp_add_test(NAME srckey LIBS tp_core unity)
 
 tp_add_test(NAME source_path_text LIBS tp_core unity PRIVATE_SRC)
@@ -267,7 +267,7 @@ tp_add_test(NAME input
     MAKE_DIRS "${CMAKE_BINARY_DIR}/tp_input_test"
     ARGS "${CMAKE_BINARY_DIR}/tp_input_test")
 
-# Synthetic D4 transform-decode test (plan §3.6). Includes the private helper
+# Synthetic D4 transform-decode test. Includes the private helper
 # header from src/ directly -- no public API pollution.
 tp_add_test(NAME transform_decode LIBS tp_core unity PRIVATE_SRC)
 
@@ -280,11 +280,11 @@ tp_add_test(NAME pack_read
     MAKE_DIRS "${CMAKE_BINARY_DIR}/tp_test"
     ARGS "${CMAKE_BINARY_DIR}/tp_test")
 
-# UV recovery property test (plan §3.3): pure functions, no builder. Includes
+# UV recovery property test: pure functions, no builder. Includes
 # the private helper header from src/ directly.
 tp_add_test(NAME uv_property LIBS tp_core unity PRIVATE_SRC)
 
-# Phase 1b tp_pack invariants + determinism (plan §3.4): drives nt_builder
+# tp_pack invariants + determinism: drives nt_builder
 # (transitive through tp_core) then parses back. Needs a scratch dir for the
 # session .ntpack files. tp_build: drives nt_builder.
 tp_add_test(NAME pack LIBS tp_build unity PRIVATE_SRC
@@ -315,7 +315,7 @@ tp_add_test(NAME pack_result_cache
     MAKE_DIRS "${CMAKE_BINARY_DIR}/tp_pack_result_cache_test"
     ARGS "${CMAKE_BINARY_DIR}/tp_pack_result_cache_test")
 
-# H0.3-a: versioned build-worker protocol codec (decision 0018). Encode/decode
+# Versioned build-worker protocol codec. Encode/decode
 # round-trip across representative inputs plus the fail-closed matrix (truncated,
 # oversized declared length, wrong magic, unsupported version, corrupt payload).
 # tp_build owns the worker/protocol seam.
@@ -328,7 +328,7 @@ tp_add_test(NAME build_driver_oracle LIBS tp_build unity PRIVATE_SRC
     MAKE_DIRS "${CMAKE_BINARY_DIR}/tp_build_driver_oracle_test"
     ARGS "${CMAKE_BINARY_DIR}/tp_build_driver_oracle_test")
 
-# H0.3-b: private build-worker process boundary (decision 0018). Fault-injecting
+# Private build-worker process boundary. Fault-injecting
 # worker binaries -- one per mode via a test-only compile def, the same pattern as
 # the CLI NTPACKER_CLI_*_FAULT_SEAM binaries (production exes have no such mode) --
 # drive the crash / malformed-reply / non-zero-exit outcome mapping. The test exe
@@ -485,7 +485,7 @@ tp_add_test(NAME export_defold
 # directly (links tp_build), mutates+frees the caller buffer immediately after the
 # add, packs, and asserts the packed page is unaffected -> the builder deep-copies
 # (nt_builder_atlas.c:771-775). Pins a lifetime the public header does not promise
-# (see docs/research/neotolis-engine-raw-rgba-lifetime.md). Needs a scratch dir.
+# (see docs/architecture/sources-and-raster.md). Needs a scratch dir.
 tp_add_test(NAME raw_ownership LIBS tp_build unity PRIVATE_SRC
     MAKE_DIRS "${CMAKE_BINARY_DIR}/tp_raw_ownership_test"
     ARGS "${CMAKE_BINARY_DIR}/tp_raw_ownership_test")
@@ -525,7 +525,7 @@ tp_add_test(NAME bench_foundation TARGET tp_bench_foundation
     DEFINES _CRT_SECURE_NO_WARNINGS
     NO_CTEST)
 
-# Packet S27 premise gate: serialized `.ntpack` blob bytes vs the raw RGBA8 page
+# Premise gate: serialized `.ntpack` blob bytes vs the raw RGBA8 page
 # bytes they inflate into, plus the inflate cost, at 1024/2048/4096 synthetic
 # page scales and one 4096 atlas built from the real Kenney bench assets. NOT a
 # ctest: it drives the real nt_builder and allocates hundreds of MiB.

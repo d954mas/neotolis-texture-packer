@@ -274,7 +274,7 @@ tp_status gui_project_submit_sprite_settings(
     const char transaction_id[33],
     gui_session_submit_terminal *terminal, tp_error *err);
 
-/* --- animations (ux.md §3.7b: explicit manual assembly only) --- */
+/* --- animations (explicit project assembly only) --- */
 /* Appends an animation and fills it with `frames` (in the given order) as ONE undo entry. The id is
  * the first free of {base, base"2", base"3", ...}; a NULL/empty base auto-names "anim1"/"anim2"/...
  * `frames` may be NULL/0 for an empty animation. */

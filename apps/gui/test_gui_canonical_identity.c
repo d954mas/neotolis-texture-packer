@@ -1308,7 +1308,7 @@ static uint64_t result_raw_page_bytes(const tp_result *result) {
     return bytes;
 }
 
-/* S18 / master spec §10.4 + S28: switching away from a packed atlas neither
+/* Switching away from a packed atlas neither
  * retains it forever nor drops it -- the result becomes an INACTIVE entry in the
  * byte-budget store, the store compresses its pages in the background, and
  * switching back is a store hit that decompresses them again instead of packing

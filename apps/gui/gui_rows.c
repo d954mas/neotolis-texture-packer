@@ -279,7 +279,7 @@ static char *rows_strdup(const char *text) {
 
 // #endregion
 
-// #region multi-select + natural sort (ux.md §3.7b selection gesture)
+// #region multi-select + natural sort
 #if defined(TP_GUI_VIEW_TEST_DIR)
 static uint64_t s_test_selection_identity_comparisons;
 static uint64_t s_test_selection_compaction_moves;

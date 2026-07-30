@@ -28,7 +28,7 @@
 
 /* Approximate page fill: sum of placed AABB areas (transform-swapped where diagonal) over sum of
  * page areas. Labeled "filled" -- an approximation (ignores padding/margin), good enough for the E'
- * stats line (ux.md §2.1). */
+ * stats line. */
 static float atlas_fill_pct(const tp_result *r) {
     if (!r || r->page_count == 0) {
         return 0.0F;
@@ -54,7 +54,7 @@ static float atlas_fill_pct(const tp_result *r) {
  * icon-only button gets a tooltip in declare_tooltips (mouse-complete). `h` = the row height. --- */
 static void strip_group_actions(nt_ui_context_t *ctx, bool accent, bool labels, float h) {
     if (gui_pack_async_busy()) {
-        /* Busy: a disabled elapsed/progress label + a Cancel affordance (ux.md §3 worker thread). The
+        /* Busy: a disabled elapsed/progress label + a Cancel affordance. The
          * status label always carries text (even in the icon-only tier) so it stays honest. */
         char busy[48];
         if (gui_pack_async_active_kind() == GUI_PACK_ASYNC_EXPORT) {
@@ -338,7 +338,7 @@ static void declare_canvas_strip(nt_ui_context_t *ctx, bool atlas) {
     }
 }
 
-/* Animation preview player in the canvas area (ux.md §3.7b): a control strip (play/pause, frame step,
+/* Animation preview player in the canvas area: a control strip (play/pause, frame step,
  * "cur/total", Close) over the ANIM-mode custom element, or a "Pack to preview" hint without a result. */
 static void declare_canvas_preview(nt_ui_context_t *ctx) {
     const tp_snapshot_animation *an = preview_animation();
@@ -614,7 +614,7 @@ static nt_atlas_region_ref_t *status_sev_icon(status_sev_t sev) {
  * bottom-left of the canvas, replacing the permanent status-bar row. A new message replaces the old
  * (set_status* clears the dismiss bit); the pill exists only while there is a message and it has not been
  * clicked away. No timers -- errors/warnings and success/info alike persist until replaced or dismissed
- * (render-pure; immediate mode). Keeps declare_statusbar's severity language (icon + text tint). ux.md
+ * (render-pure; immediate mode). Keeps declare_statusbar's severity language (icon + text tint).
  * region H (the future notices PANEL) is not built here -- this is the interim single-message surface.
  * Declared as a child of the canvas clip box (s_id_canvas); floating -> escapes the clip and does not
  * disturb sibling layout. */

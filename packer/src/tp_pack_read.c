@@ -23,7 +23,7 @@
 
 // #region pure recovery helpers (exposed to tests via tp_pack_read_internal.h)
 
-/* Builder's idealized encode: round-half-up over an exact page ratio (plan §2.5).
+/* Builder's idealized encode: round-half-up over an exact page ratio.
  * The real builder computes this in float32; the golden tests exercise that path.
  * This double form is the reference the UV property test pins. */
 uint16_t tp_px_to_uv(int32_t px, int32_t page_dim) {
@@ -179,7 +179,7 @@ static tp_status parse_page(const uint8_t *data, size_t total, const NtAssetEntr
     return TP_STATUS_OK;
 }
 
-/* Recover one sprite from a region (plan §2.4-2.6) into `out` (parse scratch). */
+/* Recover one sprite from a region into `out` (parse scratch). */
 static tp_status parse_region(const NtAtlasRegion *reg, const uint8_t *blob, const NtAtlasHeader *ah,
                               const tp_page *pages, uint16_t page_count, const struct tp_name_map *names,
                               tp_arena *arena, region_parse_t *out, const char *atlas_dbg, tp_error *err) {
@@ -338,7 +338,7 @@ static tp_status parse_region(const NtAtlasRegion *reg, const uint8_t *blob, con
     out->first_u = first_u;
     out->first_v = first_v;
 
-    /* Invariants (plan §2.6): a violation means a corrupt pack or reader bug.
+    /* A violation means a corrupt pack or reader bug.
      * NOTE: trim_w/h are the hull's local SPAN (max - min), which for CONVEX /
      * CONCAVE shapes is the clipper2-INFLATED envelope (~1-2px/side past the true
      * trim rect), so trim_w may legitimately exceed source_w. Do NOT bounds-check
@@ -371,7 +371,7 @@ static tp_status parse_region(const NtAtlasRegion *reg, const uint8_t *blob, con
     return TP_STATUS_OK;
 }
 
-/* Walk the atlas entry's meta run (plan §2.1). Records for one resource_id are
+/* Walk the atlas entry's metadata run. Records for one resource_id are
  * contiguous (writer sorts by resource_id) and the entry's meta_offset points
  * at the first; there is NO per-entry count or terminator, so we stop when the
  * record's resource_id changes. Absent meta (meta_offset==0) is not an error. */
@@ -419,7 +419,7 @@ static tp_status read_ppu_meta(const uint8_t *data, size_t total, uint32_t meta_
 static tp_status parse_atlas(const uint8_t *data, size_t total, const NtAssetEntry *entries, uint16_t asset_count,
                             const NtAssetEntry *atlas_entry, const struct tp_name_map *names, tp_arena *arena,
                             tp_result *out, tp_error *err) {
-    /* Atlas display name: same reverse map, hex fallback on miss (plan §2.8). */
+    /* Atlas display name: same reverse map, hex fallback on miss. */
     const char *disp = names ? tp_name_map_lookup(names, atlas_entry->resource_id) : NULL;
     char hexname[32];
     if (!disp) {
@@ -519,7 +519,7 @@ static tp_status parse_atlas(const uint8_t *data, size_t total, const NtAssetEnt
             }
         }
 
-        /* Deterministic order (plan §2.7); names are unique so strcmp is total. */
+        /* Deterministic order; names are unique so strcmp is total. */
         qsort(rp, region_count, sizeof(region_parse_t), cmp_region_by_name);
 
         for (uint16_t i = 0; i < region_count; i++) {
@@ -546,7 +546,7 @@ static tp_status parse_atlas(const uint8_t *data, size_t total, const NtAssetEnt
         out->sprite_count = (int)region_count;
     }
 
-    /* pixels_per_unit meta (plan §2.1) */
+    /* pixels_per_unit metadata */
     float ppu = 1.0f;
     tp_status mst = read_ppu_meta(data, total, atlas_entry->meta_offset, atlas_entry->resource_id, atlas_name, &ppu,
                                   err);

@@ -492,7 +492,7 @@ tp_status tp_export_run_ex(const tp_project *project, int atlas_index, const tp_
     tp_status first_fail = TP_STATUS_OK;
 
     /* Phase 1: resolve exporters + out paths, compute effective settings, pack once
-     * per distinct effective-settings signature (SUMMARY.md §5h shared run). */
+     * per distinct effective-settings signature. */
     for (int t = 0; t < a->target_count; t++) {
         const tp_project_target *tg = &a->targets[t];
         target_group[t] = -1;
@@ -670,7 +670,7 @@ tp_status tp_export_run_ex(const tp_project *project, int atlas_index, const tp_
             /* No writes. The wet path's notices come from the writers, which do not
              * run here -- so predict every degradation instead (full axes: the packed
              * prep supplies the alias/multipage axes on top of the project-knowable
-             * ones). ai-first.md item 6: dry-run reports the predicted losses. */
+             * ones). Dry-run reports the predicted losses. */
             st = tp_export_predict_loss(project, atlas_index, &exp->caps, exp->id, prep, notices, err);
             if (rt) {
                 rt->notice_end = notices ? notices->count : nbefore;

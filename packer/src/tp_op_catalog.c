@@ -5,7 +5,7 @@
  *
  * Every current ntpacker mutation verb appears in the cli_verb column (a compound
  * verb -- `sprite set`, `new` -- names the verb whose canonical lowering is that
- * single op; see decision 0010 §1). Reserved rows
+ * single op). Reserved rows
  * (cli_verb == NULL) are spec-listed ops with no current verb. There is
  * deliberately NO raw field-patch escape hatch (§6.2).
  */
@@ -474,7 +474,8 @@ const char *tp_op_class_name(tp_op_class cls) {
  * they are never spelled twice. Fixed-arity tuples are scalar fields
  * (origin_x/origin_y, slice9_l..b); only genuinely variable-length lists (frames,
  * the clear `fields` list) are JSON arrays. Sprite ops address by the canonical
- * {source_id, src_key} identity (from which sprite_id derives) -- see docs/decisions. */
+ * {source_id, src_key} identity (from which sprite_id derives) -- see
+ * docs/architecture/model-operations-and-session.md. */
 static const char *const f_atlas_create[] = {"atlas_id", "name"};
 static const char *const f_atlas_only[] = {"atlas_id"};
 static const char *const f_atlas_rename[] = {"atlas_id", "name"};

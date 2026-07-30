@@ -1,7 +1,7 @@
 #ifndef NTPACKER_GUI_PACK_H
 #define NTPACKER_GUI_PACK_H
 
-/* Thin GUI adapter over session-owned typed Pack/Export jobs (ux.md §3.2/§3.3b).
+/* Thin GUI adapter over session-owned typed Pack jobs and Export commands.
  * It owns only presentation result slots; input assembly, algorithms, and worker
  * lifetime remain below the frontend boundary.
  *
@@ -12,7 +12,7 @@
  * gui_pack_atlas/gui_pack_export are synchronous adapters used by selftest/shot; they drain the
  * same session-owned typed jobs as interactive use.
  *
- * RESULT RESIDENCY (packets S18/S28, master spec §10.4). Native results are not
+ * RESULT RESIDENCY (docs/architecture/jobs-pack-and-cache.md). Native results are not
  * held one-per-atlas forever. They live in a session-lifetime
  * `tp_pack_result_cache` behind this adapter: the atlas the presentation reads is
  * the store's PINNED active result, and every other packed atlas is an INACTIVE

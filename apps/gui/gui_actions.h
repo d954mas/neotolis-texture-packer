@@ -205,7 +205,7 @@ bool gui_sprite_edit_matches(const sprite_row *row);
 bool gui_atlas_edit_matches(tp_id128 atlas_id);
 bool gui_animation_edit_matches(tp_id128 atlas_id, tp_id128 animation_id);
 
-/* --- animation ops + preview player (ux.md §3.7b) --- */
+/* --- animation ops + preview player --- */
 const tp_snapshot_animation *preview_animation(void); /* active stable-ID target, or NULL */
 int create_animation_from_selection(void);
 void add_selection_frames_to_animation(

@@ -41,7 +41,7 @@
  * UTF-8 destination and publishes to it. */
 #define TP_BUILD_WORKER_OUT_NAME "out.ntpack"
 
-/* Internal safety timeout (decision 0018 kickoff): cancellation is the primary
+/* Internal safety timeout: cancellation is the primary
  * control; this only bounds a wedged builder. Overridable by the cancel/timeout
  * test via tp_build_worker_test_controls.timeout_ms; never user-facing. */
 #define TP_BUILD_WORKER_TIMEOUT_MS (5 * 60 * 1000)

@@ -1,8 +1,8 @@
 #ifndef TP_CORE_TP_PACK_HASH_H
 #define TP_CORE_TP_PACK_HASH_H
 
-/* Canonical semantic pack-input hash (master spec §10.2, §59 items 20/28/29,
- * packet F3-03 T1).
+/* Canonical semantic pack-input hash
+ * (docs/architecture/jobs-pack-and-cache.md).
  *
  * `pack_input_hash` is the content-addressed identity of everything that can
  * change a Pack RESULT: the effective packing settings, the ordered sprite
@@ -15,8 +15,8 @@
  * changed setting/override/target) yields a different hash.
  *
  * Determinism: the input is serialized into a fixed-width little-endian byte
- * stream (version byte FIRST, then reserved input-category tags so future B1
- * linked sources extend it additively -- decision 0020/D-N1) and folded through
+ * stream (version byte FIRST, then reserved input-category tags so future
+ * linked sources extend it additively) and folded through
  * the endian-stable tp_hasher (FNV-1a/128). No pointers, no timestamps, no
  * native-endian integers cross the hash boundary, so the same input yields the
  * same tp_id128 on every OS.
@@ -52,7 +52,7 @@ struct tp_pack_settings;
 
 /* Reserved canonical input-category tags. Additive: new categories append; the
  * existing tags never shift so a serialized stream stays comparable across
- * releases that only ADD inputs (decision 0020/D-N1, B1 linked sources). */
+ * releases that only ADD inputs. */
 typedef enum tp_pack_hash_category {
     TP_PACK_HASH_CAT_ALGO = 1,
     TP_PACK_HASH_CAT_SETTINGS = 2,

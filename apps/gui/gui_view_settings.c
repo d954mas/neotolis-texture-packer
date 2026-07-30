@@ -108,7 +108,7 @@ static bool ui_float_field(nt_ui_context_t *ctx, uint32_t id, char *buf, size_t 
         }
         *out = (float)v;
         if (submitted) {
-            gui_request_gesture_commit(); /* Enter = the field's gesture boundary (decision 0015) */
+            gui_request_gesture_commit(); /* Enter = the field's gesture boundary. */
         }
         return true;
     }
@@ -138,7 +138,7 @@ static bool ui_text_field(nt_ui_context_t *ctx, uint32_t id, char *buf, size_t c
     const bool changed = nt_ui_input_text(ctx, NT_UI_DATA_LAYER(LAYER_IMG), LAYER_TEXT, id, buf, cap, &tp, &s_num_input,
                                           &decl, enabled && !s_blur_inputs, &submitted);
     if (submitted && enabled) {
-        gui_request_gesture_commit(); /* Enter = the field's gesture boundary (decision 0015) */
+        gui_request_gesture_commit(); /* Enter = the field's gesture boundary. */
     }
     return (changed || submitted) && enabled;
 }
@@ -233,7 +233,7 @@ static int row_combo(nt_ui_context_t *ctx, const char *label, uint32_t id, bool 
     }
     PANEL_ROW_END;
     if (sel >= 0) {
-        gui_request_gesture_commit(); /* a dropdown pick is ONE discrete edit -> commit it now (decision 0015) */
+        gui_request_gesture_commit(); /* A dropdown pick is one discrete edit. */
     }
     return sel;
 }
@@ -254,7 +254,7 @@ static bool row_slider(nt_ui_context_t *ctx, const char *label, uint32_t id, cha
             if (nt_ui_slider_int(ctx, NT_UI_DATA_LAYER(LAYER_IMG), LAYER_TEXT, id, NULL, &v, mn, mx, 1, &s_slider_style, &sd, enabled)) {
                 changed = true; /* buffer the live drag value each frame; the COMMIT is the release edge below */
             }
-            /* Gesture-scoped commit (decision 0015): a live drag buffers per frame; committing the whole
+            /* Gesture-scoped commit: a live drag buffers per frame; committing the whole
              * drag as ONE undo step happens on the release edge, not the live return. */
             if (enabled && nt_ui_query_interaction(ctx, id).released_now) {
                 gui_request_gesture_commit();
@@ -285,7 +285,7 @@ static bool row_check(nt_ui_context_t *ctx, const char *label, uint32_t id, bool
     }
     PANEL_ROW_END;
     if (changed) {
-        gui_request_gesture_commit(); /* a checkbox toggle is ONE discrete edit -> commit it now (decision 0015) */
+        gui_request_gesture_commit(); /* A checkbox toggle is one discrete edit. */
     }
     return changed;
 }
@@ -955,7 +955,7 @@ static void declare_export_targets(nt_ui_context_t *ctx,
     }
 }
 
-/* --- Animation editor (ux.md §3.7b): id / fps / playback / flips + ordered frame list --- */
+/* --- Animation editor: id / fps / playback / flips + ordered frame list --- */
 static void declare_animation_editor(nt_ui_context_t *ctx,
                                      const tp_session_snapshot *snapshot,
                                      const tp_snapshot_atlas *a) {

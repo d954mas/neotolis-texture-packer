@@ -588,7 +588,7 @@ static tp_status run_export(const tp_job_worker_proto_request *request,
                             "nothing to export");
     }
 
-    /* Export gets the same private per-request directory as Pack (master spec §10.4).
+    /* Export gets the same private per-request directory as Pack.
      * Export packs each atlas through tp_pack, which writes
      * `<work_dir>/<atlas_name>.ntpack` and -- unlike Pack -- never deletes it,
      * so a shared work_dir meant two Exports of the same atlas (two instances,

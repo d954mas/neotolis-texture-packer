@@ -2,14 +2,14 @@
 #define TP_CORE_TP_PROJECT_H
 
 /*
- * In-memory project model + `.ntpacker_project` JSON load/save (ROADMAP Phase 3,
- * SUMMARY.md §5a). This is the single source of truth the GUI edits live and the
+ * In-memory project model + canonical `.ntpacker_project` JSON load/save
+ * (docs/formats/project-v5.md). This is the single source of truth the GUI edits live and the
  * CLI runs -- so the model is malloc-owned and mutation-friendly (NOT arena: one
  * long-lived project is edited in place), and every list has add/remove helpers.
  *
- * Serialization contract (ux.md §1 principle 7 -- all mandatory, test-pinned):
+ * Serialization contract (docs/formats/project-v5.md -- test-pinned):
  *   - Portable: paths stored PROJECT-RELATIVE, normalized to '/'. Absolute paths
- *     are accepted on load and relativized on save (ux.md §3.6.3).
+ *     are accepted on load and relativized on save.
  *   - Sparse: fields equal to their default are NEVER written; defaults come from
  *     one place (tp_pack_settings_defaults for the packing knobs).
  *   - Deterministic: "version" first, then all other object keys in ascending
@@ -17,7 +17,7 @@
  *     formatted "%.9g" (round-trip stable, unlike "%g"). Re-saving an unmodified
  *     loaded project is byte-identical (memcmp-pinned).
  *
- * Load rules (ux.md §3.6/§3.7):
+ * Load rules:
  *   - version != current -> TP_STATUS_BAD_VERSION.
  *   - unknown keys        -> TP_STATUS_BAD_PROJECT (closed canonical schema).
  *   - malformed JSON / wrong types -> TP_STATUS_BAD_PROJECT (with context).
@@ -97,7 +97,8 @@ typedef struct tp_project_frame {
     char *src_key;       /* normalized source-local key (NFC, ext KEPT) */
 } tp_project_frame;
 
-/* Flipbook metadata over sprite references, orthogonal to placement (SUMMARY.md §5a).
+/* Flipbook metadata over sprite references, orthogonal to placement
+ * (docs/formats/project-v5.md).
  * `frames` are canonical {source, key} references in explicit playback order.
  * `id` is persistent and survives rename/reorder/save/reload; `name` is the
  * logical/display name and human selector. */
@@ -114,7 +115,8 @@ typedef struct tp_project_anim {
 } tp_project_anim;
 
 #define TP_PROJECT_ANIM_FPS_DEFAULT 30.0F
-/* The stable playback vocabulary (pinned to Defold's set, ux.md 3.7b). The wire
+/* The stable playback vocabulary (pinned to Defold's set,
+ * docs/formats/defold-tpinfo.md). The wire
  * carries the ID; the machine-readable field schema (tp_operation.h) carries the
  * matching tokens, and the Defold exporter maps the same ids to its own spelling. */
 #define TP_PROJECT_ANIM_PLAYBACK_ONCE_FORWARD 0
@@ -145,11 +147,10 @@ typedef struct tp_project_target {
     bool enabled;
 } tp_project_target;
 
-/* Source kind. Master spec §11 models a source as
- * `kind: path | atlas`, where a "path" source is either a scanned folder or a
- * single image file; this enum makes that file-vs-folder sub-distinction explicit.
- * APPEND-ONLY (the value is the stored classification): TP_SOURCE_KIND_ATLAS
- * (foreign atlas descriptor) is reserved for Epic B1. `folder` is the zero/default
+/* Current v5 source kind (docs/formats/project-v5.md): a source is either a
+ * scanned folder or a single image file. APPEND-ONLY (the value is the stored
+ * classification): TP_SOURCE_KIND_ATLAS (foreign atlas descriptor) is reserved
+ * for a later schema. `folder` is the zero/default
  * value. add_source without an explicit kind creates a folder source. Serialized
  * as a string token ("folder" is the omitted sparse default; "file" is written). */
 typedef enum tp_source_kind {
@@ -241,7 +242,7 @@ tp_project *tp_project_clone(const tp_project *src);
 
 /* Returns the index of the atlas whose structural id equals `id`, or -1 if none /
  * nil id. Persistent references (and the F2 operation engine) target the id, not
- * the array index, which reorder/remove invalidates (master spec §5.4). */
+ * the array index, which reorder/remove invalidates. */
 int tp_project_find_atlas_by_id(const tp_project *p, tp_id128 id);
 
 /* Borrowed read-only lookup by structural id. Returns NULL for a NULL owner,
@@ -376,7 +377,7 @@ tp_status tp_project_source_path_absolute_lexical(
  * 2=CONCAVE_CONTOUR): a non-zero slice9 border forces RECT, else the sprite's
  * shape override (`ov_shape`, or TP_PROJECT_OV_INHERIT to inherit), else the atlas
  * shape. The single home for the rule the desc builder (tp_input) and the settings
- * view share (arch review §3.1); tp_pack keeps its own equivalent check as a
+ * view share; tp_pack keeps its own equivalent check as a
  * validation safety net. RECT is the only shape that may extrude, so callers gate
  * an extrude override on a RECT result. */
 int tp_project_sprite_effective_shape(int atlas_shape, bool has_slice9, int ov_shape);

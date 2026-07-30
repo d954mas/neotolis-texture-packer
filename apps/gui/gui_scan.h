@@ -6,7 +6,7 @@
 
 #include "tp_core/tp_scan.h"
 
-/* DISPLAY-ONLY recursive folder enumeration for the sprite panel (ux.md region D,
+/* DISPLAY-ONLY recursive folder enumeration for the sprite panel
  * Task 3). A FOLDER source stores only its path in the model; the GUI scans it from
  * disk purely to SHOW child sprites. Scanning-for-packing stays a tp_core concern --
  * this module never feeds the packer, it only fills the left panel's folder rows.
@@ -34,7 +34,7 @@ tp_status gui_scan_get(const char *abs_dir,
 bool gui_scan_is_dir(const char *abs);
 
 /* True if `abs` exists on disk (file OR directory). Used to render missing-file rows
- * (ux.md §3.7) and to keep a stale argv Open from being fatal (F6b). */
+ * and to keep a stale argv Open from being fatal (F6b). */
 bool gui_scan_exists(const char *abs);
 
 /* Typed form used by source rows: preserves NOT_FOUND versus probe failures

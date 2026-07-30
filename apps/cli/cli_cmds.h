@@ -4,7 +4,7 @@
 /* B2 read-verb entry points + the shared immutable project loader. Each verb owns its
  * --json payload (versioned schema) and human summary; the loader centralizes the
  * exit-3 structured error so inspect/validate/pack report a load failure identically
- * (plan "CLI v1 contract", ai-first.md items 2/4/7). */
+ * (docs/formats/cli-report.md). */
 
 #include <stdbool.h>
 

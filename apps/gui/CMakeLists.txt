@@ -1,4 +1,4 @@
-# ntpacker-gui: native GUI shell (roadmap Phase 6 grows this). Skeleton only.
+# ntpacker-gui: native GUI frontend over the shared session/core contracts.
 # Native-only: the root CMakeLists fatal-errors on EMSCRIPTEN, but guard anyway so
 # this file is self-contained if ever pulled into a wasm-configured tree.
 if(NOT EMSCRIPTEN)
@@ -21,7 +21,7 @@ set(_tp_gui_introspect_defines
     NT_INTROSPECT_WRITE_ENABLED=$<BOOL:${NT_INTROSPECT_WRITE_ENABLED}>)
 
 # tinyfiledialogs (vendored in-repo, apps/gui/deps, zlib licence) -- OS-native open/save/
-# folder dialogs (ux.md gap 3). Its own small static lib compiled -w so our -Werror never
+# folder dialogs. Its own small static lib compiled -w so our -Werror never
 # applies to third-party code; default CRT (matches the GUI). Windows needs comdlg32/ole32/
 # shell32 for the native dialogs.
 add_library(tinyfiledialogs STATIC deps/tinyfiledialogs/tinyfiledialogs.c)

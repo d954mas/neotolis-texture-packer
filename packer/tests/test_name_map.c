@@ -1,5 +1,5 @@
-/* tp_name_map: hash(name)->name reverse map (plan §2.8). Also doubles as the
- * R5 check (plan §6): nt_hash64_str is expected to work with no nt_hash_init
+/* tp_name_map: hash(name)->name reverse map. Also checks that
+ * nt_hash64_str works with no nt_hash_init
  * call -- if this ever crashes/asserts, that assumption is wrong and setUp
  * must call nt_hash_init(NULL) first. */
 

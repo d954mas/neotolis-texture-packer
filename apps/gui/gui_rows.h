@@ -27,7 +27,7 @@ void normalize_slashes(char *s);
 /* Returns the basename (past the last / or \) of `p`. */
 const char *path_last(const char *p);
 
-/* --- canonical multi-select set (ux.md §3.7b selection gesture) --- */
+/* --- canonical multi-select set --- */
 typedef struct gui_selected_sprite {
     tp_id128 source_id;
     char *source_key;

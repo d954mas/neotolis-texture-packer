@@ -2,8 +2,7 @@
 #define TP_CORE_TP_NAMES_H
 
 /* Canonical sprite-name / ordering helpers -- the single source of truth for
- * the name policy the GUI, the CLI, and tp_normalize all share (arch review
- * §3.1: four divergent copies collapsed here). Pure string functions, no
+ * the name policy the GUI, the CLI, and tp_normalize all share. Pure string functions, no
  * allocation, no engine types. */
 
 #include <stddef.h>

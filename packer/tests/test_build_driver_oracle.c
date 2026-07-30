@@ -1,4 +1,4 @@
-/* Byte-identical normal-result oracle (decision 0018, ROADMAP H0.3/H0.5).
+/* Byte-identical normal-result oracle.
  *
  * The in-process driver (and tp_pack, which now calls it) must produce a
  * .ntpack byte-for-byte equal to a direct nt_builder invocation with the same

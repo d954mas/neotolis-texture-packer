@@ -1,4 +1,4 @@
-/* UV recovery property test (plan §3.3, task 8). Pure functions, no builder.
+/* UV recovery property test. Pure functions, no builder.
  *
  * For every page dim W in the spec set and EVERY px in [0,W], the exact
  * round-trip tp_uv_to_px(tp_px_to_uv(px,W),W) == px must hold (idealized double

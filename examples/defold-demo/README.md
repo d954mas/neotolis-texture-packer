@@ -96,7 +96,7 @@ The extension is version-locked to Defold releases. This demo pins:
 - dirtylarry at commit `6f2070e909a9`
 
 Bumping either pin is a deliberate small PR that changes the dependency URL and
-the bob.jar version together (see `docs/research/defold.md`).
+the bob.jar version together (see `docs/formats/defold-tpinfo.md`).
 
 ## Building headless (CI proof — follow-up)
 

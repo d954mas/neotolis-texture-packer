@@ -81,7 +81,7 @@ bool render_rename_field(nt_ui_context_t *ctx,
                          bool *changed);
 const char *rename_field_changed_value(void);
 
-/* Compact D4 transform decode for the hover/selection readout (ux.md §2.4). */
+/* Compact D4 transform decode for the hover/selection readout. */
 const char *transform_decode_str(uint8_t t);
 
 /* --- baked icon-atlas region refs (resolved once by main.c's bind_icon_ref/try_bind_resources at

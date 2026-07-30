@@ -1,4 +1,4 @@
-/* PNG page export (ROADMAP Phase 2 acceptance): the exported page decodes to the
+/* PNG page export: the exported page decodes to the
  * expected dims; a known probe pixel proves content + orientation (top-left maps
  * correctly); straight-alpha is the default and the premultiply toggle changes
  * the bytes. Packs one crafted sprite via tp_pack, then writes + decodes pages. */

@@ -1,4 +1,4 @@
-/* F2-04 recovery journal fault suite (master spec §7.1-7.2, §22.3). Proves the
+/* Recovery journal fault suite (docs/architecture/persistence-and-recovery.md). Proves the
  * completion contract: any ACKNOWLEDGED (durably appended) transaction is recoverable
  * and never duplicated after restart; any UNACKNOWLEDGED (torn/failed) transaction is
  * invisible; and the reader is UB-clean on arbitrary/corrupt/short/torn bytes.
@@ -2877,7 +2877,7 @@ void test_compaction_broken_store_keeps_fail_closed_authority(void) {
 
 /* ==== R4: journal-gated undo/redo checkpoints (P1-1) ====================== */
 
-/* Undo is a commit; its durable CHECKPOINT append is best-effort (decision 0019). When the append
+/* Undo is a commit; its durable CHECKPOINT append is best-effort. When the append
  * fails, the undo still COMMITS -- the live document, revision, and history cursor advance and stay
  * VISIBLE -- and only the failed journal record is rolled back, so the durable byte store is left
  * unchanged. A second undo then finds nothing left to undo. */
@@ -2971,7 +2971,7 @@ void test_peek_and_recover_share_retained_id_policy(void) {
     tp_journal_destroy(recover_journal);
 }
 
-/* Redo has the identical best-effort durable gate (decision 0019): when its checkpoint append fails,
+/* Redo has the identical best-effort durable gate: when its checkpoint append fails,
  * the redo still COMMITS -- the redone live state, revision, and cursor advance and stay VISIBLE --
  * and only the failed journal record is rolled back. A second redo then finds nothing left to redo. */
 void test_journal_redo_append_failure_commits_and_rolls_back_only_the_journal_record(void) {

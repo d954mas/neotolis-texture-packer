@@ -93,7 +93,7 @@ tp_status tp_path_canonical_lexical(const char *input, tp_host host, char *out, 
         rest = work + 1;
     } else {
         /* Windows device / verbatim namespace ("\\?\..." / "\\.\...", already
-         * '/'-rewritten). Decision 0006: "\\?\" is a transparent lexical alias
+         * '/'-rewritten). "\\?\" is a transparent lexical alias
          * for the drive form ("//?/X:...") and the UNC form ("//?/UNC/..."); every
          * OTHER "//?/..." form and ALL "//./..." device paths are rejected -- a
          * device path is never a project file. Rewrites `work` in place, then

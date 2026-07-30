@@ -26,7 +26,7 @@ nt_atlas_region_ref_t s_ic_file_plus, s_ic_folder_plus, s_ic_x;
 /* Packet C: status-bar severity icons + the 96px empty-state hero (bound alongside the rest). */
 nt_atlas_region_ref_t s_ic_info, s_ic_circle_check, s_ic_octagon_alert, s_ic_folder_plus_hero;
 
-/* Compact D4 transform decode for the hover/selection readout (ux.md §2.4). */
+/* Compact D4 transform decode for the hover/selection readout. */
 const char *transform_decode_str(uint8_t t) {
     switch (t & 7u) {
         case 0: return "--";

@@ -40,7 +40,7 @@ typedef struct tp_session_history_marker {
  * protocol adapter includes this header. */
 struct tp_session {
     /* The thread that created the session owns it for its whole lifetime; every
-     * entry point asserts against this (master spec 4.8). */
+     * entry point asserts against this ownership rule. */
     thrd_t owner_thread;
     tp_model *model;
     tp_recovery_live *recovery_live;

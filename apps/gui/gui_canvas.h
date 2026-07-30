@@ -1,7 +1,7 @@
 #ifndef NTPACKER_GUI_CANVAS_H
 #define NTPACKER_GUI_CANVAS_H
 
-/* The center canvas, now DUAL-MODE (ux.md region E / §2.4):
+/* The center canvas, now dual-mode:
  *   - SOURCE mode: a single shared-core-decoded source image, letterboxed (selecting a sprite row with no
  *     pack result). Original Task-5 behaviour.
  *   - ATLAS mode: the REAL packed page texture from a tp_result, drawn at a game-owned zoom/pan with

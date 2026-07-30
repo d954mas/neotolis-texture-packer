@@ -70,7 +70,7 @@ typedef struct tp_session_pack_job_result {
     int missing_sources;
     tp_session_input_token input_token_at_start;
     /* Canonical semantic pack_input_hash of the job's immutable start inputs
-     * (master spec §10.2, decision 0004). Freshness is `result_hash ==
+     * (docs/architecture/jobs-pack-and-cache.md). Freshness is `result_hash ==
      * current_pack_input_hash`; the memory cache is keyed by it. Nil only if the
      * hash could not be computed (e.g. an unreadable source) -- a nil hash reads
      * as "always stale" and never matches a current hash. */
@@ -170,8 +170,9 @@ tp_pack_freshness tp_session_pack_result_freshness(
     tp_pack_freshness_reason *out_reason);
 
 /* Recomputes the CURRENT pack_input_hash for `atlas_id` from the live session's
- * immutable snapshot, WITHOUT starting a job (master spec §10.2-10.3, decision
- * 0004). This is the freshness/selection primitive: compare it against a
+ * immutable snapshot, WITHOUT starting a job
+ * (docs/architecture/jobs-pack-and-cache.md). This is the freshness/selection
+ * primitive: compare it against a
  * completed result's hash to decide current-vs-stale, and probe the memory cache
  * with it after Undo/Redo. `cache` may be NULL (decode every call) or a
  * session-lifetime tp_pack_image_hash_cache for cheap repeats; caching never
