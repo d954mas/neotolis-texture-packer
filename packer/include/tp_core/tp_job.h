@@ -8,6 +8,7 @@
 #include "tp_core/tp_model.h"
 #include "tp_core/tp_pack.h"
 #include "tp_core/tp_session.h"
+#include "tp_core/tp_source_runtime.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -39,6 +40,11 @@ typedef struct tp_export_command_request {
      * command to that atlas; frontends never pass a mutable collection index. */
     tp_id128 atlas_id;
 } tp_export_command_request;
+
+typedef struct tp_refresh_job_request {
+    uint64_t session_instance_generation;
+    uint64_t request_id;
+} tp_refresh_job_request;
 
 struct tp_pack_image_hash_cache;
 
@@ -98,6 +104,16 @@ typedef struct tp_session_export_job_result {
     bool publication_uncertain;
 } tp_session_export_job_result;
 
+typedef struct tp_session_refresh_job_result {
+    int added;
+    int removed;
+    int changed;
+    int unavailable;
+    /* Session adopts this immutable replacement before publishing the
+     * terminal completion to a client; client receipts observe NULL. */
+    tp_source_runtime_projection *projection;
+} tp_session_refresh_job_result;
+
 struct tp_session_job_result {
     tp_session_job_kind kind;
     tp_session_job_state state;
@@ -108,13 +124,14 @@ struct tp_session_job_result {
     union {
         tp_session_pack_job_result pack;
         tp_session_export_job_result export_result;
+        tp_session_refresh_job_result refresh;
     };
     /* Private refcounted owner for this result receipt. Callers must treat it
      * as opaque and release through result_destroy. */
     tp_session_job_result_handle *_owner;
 };
 
-/* One concrete derived job may be active per session. The session owns its
+/* One concrete task may be active per session. The session owns its
  * handle/lifetime; algorithms and worker implementation stay in tp_build. */
 tp_status tp_session_pack_job_start(tp_session *session,
                                     const tp_pack_job_request *request,
@@ -122,6 +139,9 @@ tp_status tp_session_pack_job_start(tp_session *session,
 tp_status tp_session_export_start(tp_session *session,
                                   const tp_export_command_request *request,
                                   tp_error *err);
+tp_status tp_session_refresh_start(tp_session *session,
+                                   const tp_refresh_job_request *request,
+                                   tp_error *err);
 bool tp_session_job_active(const tp_session *session);
 /* Accepts cancellation only before the terminal-boundary claim. Export
  * linearizes that claim immediately after its final eligible writer returns;

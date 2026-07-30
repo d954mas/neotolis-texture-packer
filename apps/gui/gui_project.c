@@ -4,7 +4,6 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "gui_scan.h"
 
 #include "core/nt_assert.h"
 #include "tp_core/tp_identity.h"
@@ -182,6 +181,10 @@ const tp_session_snapshot *gui_project_snapshot(void) {
                : NULL;
 }
 
+const tp_source_runtime_projection *gui_project_sources(void) {
+    return s_project.view ? s_project.view->sources : NULL;
+}
+
 uint64_t gui_project_snapshot_lifetime_generation(void) {
     return s_project.snapshot_lifetime_generation;
 }
@@ -298,6 +301,20 @@ tp_status gui_project_job_enqueue_export(
         s_project.session, &request, err);
 }
 
+tp_status gui_project_job_enqueue_refresh(tp_error *err) {
+    if (!gui_project__ingress_is_open()) {
+        return tp_error_set(
+            err, TP_STATUS_INVALID_ARGUMENT,
+            "GUI Refresh requires an open unpinned session");
+    }
+    const tp_refresh_job_request request = {
+        .session_instance_generation =
+            s_project.instance_generation,
+    };
+    return tp_session_refresh_start(
+        s_project.session, &request, err);
+}
+
 tp_status gui_project_job_enqueue_cancel(
     tp_error *err) {
     return s_project.session
@@ -365,27 +382,37 @@ gui_project_session_instance_generation(void) {
     return s_project.instance_generation;
 }
 
-void gui_project_invalidate_sources(void) {
-    gui_scan_invalidate_all();
+void gui_project_refresh_sources(void) {
     if (!gui_project__ingress_is_open()) {
         return;
     }
-    tp_error err = {0};
-    const tp_status status =
-        tp_session_invalidate_sources(
-            s_project.session, &err);
+    tp_error err = {{0}};
+    const tp_refresh_job_request request = {
+        .session_instance_generation =
+            s_project.instance_generation,
+    };
+    const tp_status status = tp_session_refresh_start(
+        s_project.session, &request, &err);
     if (status != TP_STATUS_OK) {
         gui_project__note_session_reject(status, &err);
         return;
     }
-    const tp_status update_status =
-        tp_session_update(
-            s_project.session, NULL, &err);
-    if (update_status != TP_STATUS_OK) {
-        gui_project__note_session_reject(
-            update_status, &err);
-        return;
+#ifdef TP_ENABLE_TEST_SEAMS
+    /* Component tests make mutations and inspect rows in one call stack. Drain
+     * the same background task here; production returns immediately and the
+     * frame pump adopts it asynchronously. */
+    while (tp_session_job_active(s_project.session)) {
+        tp_session_job_result completion = {0};
+        const tp_status update_status = tp_session_update(
+            s_project.session, &completion, &err);
+        tp_session_job_result_destroy(&completion);
+        if (update_status != TP_STATUS_OK) {
+            gui_project__note_session_reject(
+                update_status, &err);
+            return;
+        }
     }
+#endif
     s_project.view =
         tp_session_view(s_project.session);
     gui_project__reduce_view();

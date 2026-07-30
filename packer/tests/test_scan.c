@@ -1,5 +1,5 @@
 /* tp_scan unit tests (op-layer step A2): directory recursion + image-extension
- * whitelist moved out of the GUI (gui_scan.c) into tp_core, single source for every
+ * whitelist lives in tp_core as the single source for every
  * frontend that expands a folder source. Builds a fixture tree under the ctest
  * scratch dir (argv[1]) at runtime and pins TODAY's has_image_ext/entry_cmp
  * behavior verbatim (case-insensitive ext match, byte-wise rel sort, a bare

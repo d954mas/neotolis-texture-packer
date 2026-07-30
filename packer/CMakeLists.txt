@@ -38,6 +38,7 @@ add_library(tp_core STATIC
     src/tp_project_clone.c src/tp_semantic.c src/tp_txn_idset.c src/tp_model.c src/tp_model_journal.c src/tp_txn_result.c src/tp_txn_apply.c
     # Synchronous orchestration and the owned immutable snapshot boundary.
     src/tp_session.c src/tp_session_snapshot.c src/tp_session_snapshot_query.c src/tp_project_generation.c
+    src/tp_source_runtime.c
     src/tp_txn_parse.c src/tp_txn_lower.c src/tp_txn_encode.c
     # Semantic diff, exact inverse/redo, and bounded in-memory history.
     src/tp_diff_entity.c src/tp_diff_capture.c src/tp_diff_apply.c src/tp_history_codec.c src/tp_history_codec_read.c src/tp_history.c
@@ -101,7 +102,7 @@ nt_set_sanitizer_flags(tp_core)
 # abort/alloc/codec/write failure lands in a child, not the host.
 add_library(tp_build STATIC src/tp_pack.c src/tp_build_driver.c src/tp_build_proto.c
     src/tp_build_worker.c src/tp_build_worker_main.c src/tp_export_run.c
-    src/tp_job.c src/tp_job_worker.c src/tp_job_worker_main.c
+    src/tp_job.c src/tp_refresh_job.c src/tp_job_worker.c src/tp_job_worker_main.c
     src/tp_job_worker_proto.c)
 if(WIN32)
     target_sources(tp_build PRIVATE src/tp_proc_win32.c)

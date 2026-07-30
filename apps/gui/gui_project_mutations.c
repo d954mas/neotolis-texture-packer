@@ -98,7 +98,7 @@ bool gui_project_remove_atlas(tp_id128 atlas_id, int64_t expected_revision) {
         gui_project__note_session_reject(status, &err);
         return false;
     }
-    gui_project_invalidate_sources();
+    gui_project_refresh_sources();
     return true;
 }
 
@@ -182,7 +182,7 @@ bool gui_project_add_sources(tp_id128 atlas_id, int64_t expected_revision,
         if (!ok) {
             gui_project__note_session_reject(status, &err);
         } else {
-            gui_project_invalidate_sources();
+            gui_project_refresh_sources();
         }
     }
     free(ids);
@@ -209,7 +209,7 @@ bool gui_project_remove_source(tp_id128 atlas_id, tp_id128 source_id,
         gui_project__note_session_reject(status, &err);
         return false;
     }
-    gui_project_invalidate_sources();
+    gui_project_refresh_sources();
     return true;
 }
 

@@ -46,8 +46,14 @@ stat/scanning can still observe that a path's current filesystem type differs.
 
 ## External refresh
 
-`tp_session_invalidate_sources` advances source-runtime state and adds a
-non-undoable visible refresh marker. It does not:
+Refresh is the third session task kind beside Pack and Export. Admission
+captures an immutable session snapshot, and the worker performs all filesystem
+stat/scanning off the session owner thread. A successful terminal result
+atomically replaces one session-owned immutable source-runtime projection keyed
+by stable atlas/source IDs and source-local keys.
+
+The adopted replacement advances source-runtime state and adds a non-undoable
+visible refresh marker. It does not:
 
 - change project revision;
 - change semantic dirty state;
@@ -55,10 +61,12 @@ non-undoable visible refresh marker. It does not:
 - rewrite stored project paths;
 - start Pack.
 
-The current GUI exposes explicit Refresh and also verifies sources during Pack
-or Export. It does not implement persistent filesystem watchers. Watcher-driven
-invalidation is a target capability and must preserve the same semantic-purity
-boundary.
+The GUI exposes explicit Refresh and renders only the borrowed projection from
+`tp_session_view`. It has no filesystem scan cache, fingerprint baseline, or
+parallel source truth. Pack and Export read their own immutable job inputs and
+do not implicitly start Refresh. The current product does not implement
+persistent filesystem watchers. Watcher-driven refresh is a target capability
+and must preserve the same task admission and semantic-purity boundary.
 
 ## Raster decode boundary
 

@@ -4,7 +4,6 @@
 #include <string.h>
 
 #include "core/nt_assert.h"
-#include "gui_scan.h"
 #include "tp_core/tp_identity.h"
 #include "tp_core/tp_session.h"
 
@@ -341,7 +340,7 @@ tp_status gui_project_lifecycle_pump(
             gui_project_note_recovery_setup_failure(
                 "the recovery directory is not configured");
         }
-        gui_project_invalidate_sources();
+        gui_project_refresh_sources();
     } else {
         NT_ASSERT(
             kind ==
@@ -431,7 +430,7 @@ bool gui_project_undo(void) {
         return false;
     }
     s_project.preview_stale = true; /* restored model no longer matches the last pack */
-    gui_project_invalidate_sources();
+    gui_project_refresh_sources();
     return true;
 }
 
@@ -454,7 +453,7 @@ bool gui_project_redo(void) {
         return false;
     }
     s_project.preview_stale = true;
-    gui_project_invalidate_sources();
+    gui_project_refresh_sources();
     return true;
 }
 // #endregion

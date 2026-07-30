@@ -8,7 +8,7 @@
  * drafts or enqueue structural requests with stable identities; apply_pending
  * consumes them at the top of the next frame. Include discipline:
  * actions -> gui_state + gui_rows + model headers
- * (gui_project/gui_scan/gui_canvas/gui_pack) + tinyfiledialogs; it must never include
+ * (gui_project/gui_canvas/gui_pack) + tinyfiledialogs; it must never include
  * widgets or any view header. */
 
 #include <stdbool.h>
@@ -166,14 +166,10 @@ void gui_request_redo(void);
  * must use gui_request_undo/gui_request_redo. */
 void do_undo(void);
 void do_redo(void);
-/* F15: the synchronous refresh cost (fp_collect x2 + source invalidate + diff) with NO UI/status/canvas
- * side effects -- for the --bench-perf headless probe. Preserves the refresh semantic-purity invariant
- * (no revision/dirty change). Out params may be NULL; returns false on a scan failure. */
+/* Headless seam that drains the same session Refresh task and preserves
+ * revision/dirty state. */
 bool gui_actions_refresh_diff_headless(int *out_added, int *out_removed,
                                        int *out_changed);
-/* Drops the retained last-successful runtime fingerprint. Production refresh
- * also resets automatically when the owning session changes. */
-void gui_actions_refresh_fingerprint_reset(void);
 /* Refresh policy seam: after runtime invalidation, even a later diff failure
  * leaves the retained preview stale. */
 bool gui_actions_refresh_should_mark_stale(tp_status status,

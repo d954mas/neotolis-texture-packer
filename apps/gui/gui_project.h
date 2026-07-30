@@ -120,6 +120,7 @@ tp_status gui_recovery_resolve_entry(const gui_recovery_entry *entry, gui_recove
 /* --- accessors --- */
 /* Immutable read view borrowed from the active session and pinned per frame. */
 const tp_session_snapshot *gui_project_snapshot(void);
+const tp_source_runtime_projection *gui_project_sources(void);
 /* Changes whenever the client publishes or releases a model snapshot.
  * Borrowing GUI caches include this token in their lifetime key. */
 uint64_t gui_project_snapshot_lifetime_generation(void);
@@ -143,6 +144,7 @@ tp_status gui_project_job_enqueue_pack(
     const char *preview_exporter_id, tp_error *err);
 tp_status gui_project_job_enqueue_export(
     tp_id128 atlas_id, const char *work_dir, tp_error *err);
+tp_status gui_project_job_enqueue_refresh(tp_error *err);
 tp_status gui_project_job_enqueue_cancel(tp_error *err);
 tp_status gui_project_lifecycle_begin_new(tp_error *err);
 tp_status gui_project_lifecycle_begin_open(
@@ -179,7 +181,7 @@ bool gui_project_is_dirty(void);
 bool gui_project_is_stale(void);
 /* Single owner for external source-runtime invalidation: drops the scan cache,
  * advances the session source generation/event, and invalidates the GUI view. */
-void gui_project_invalidate_sources(void);
+void gui_project_refresh_sources(void);
 
 /* --- dirty/stale projection --- */
 /* Clears preview_stale after a successful pack (unused this round; #282). */

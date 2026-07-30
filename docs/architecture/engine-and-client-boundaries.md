@@ -56,6 +56,7 @@ The core names product client shapes independently of transport:
 | Recovery | not applicable | available | available |
 | Pack job | not applicable | available | available |
 | Export command | available | available | available |
+| Source Refresh job | not applicable | available | available |
 | Async inspect job | not applicable | not implemented | not implemented |
 | Async validate job | not applicable | not implemented | not implemented |
 
@@ -80,7 +81,9 @@ writer produces `project_live`.
 The GUI owns one small session host. Views submit intents; actions own draft
 conflict rules, the thin mutation adapter submits one typed operation batch,
 and the host owns `update + borrowed view`, task completion, and active/candidate
-lifecycle cutover. There is no in-process transport/client mirror.
+lifecycle cutover. Source rows are rendered from the session-owned immutable
+runtime projection; the GUI does not scan or fingerprint source files. There is
+no in-process transport/client mirror.
 
 GUI presentation state—selection, filter, scroll, modal state, draft text,
 preview playback, GPU resources—is not persisted unless explicitly represented

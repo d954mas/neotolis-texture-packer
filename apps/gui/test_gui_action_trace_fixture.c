@@ -142,7 +142,6 @@ void reset_public_action_state(void) {
 void setUp(void) {
     tp_scan__test_reset_all();
     tp_job__test_reset_all();
-    gui_actions_refresh_fingerprint_reset();
     (void)snprintf(s_save_path, sizeof s_save_path,
                    "%s/action-trace.ntpacker_project",
                    TP_GUI_TRACE_TEST_DIR);
@@ -163,11 +162,9 @@ void setUp(void) {
 void tearDown(void) {
     tp_scan__test_reset_all();
     tp_job__test_reset_all();
-    gui_actions_refresh_fingerprint_reset();
     multi_sel_clear();
     gui_pack_shutdown();
     gui_project_test_shutdown(true);
-    gui_scan_shutdown();
     (void)remove(s_save_path);
     (void)test_rmdir(TP_GUI_TRACE_TEST_DIR);
 }

@@ -48,7 +48,6 @@
 #include "gui_project_test_driver.h"
 #include "gui_session_adapter.h" /* snapshot-read helpers behind the deleted forwarders */
 #include "gui_rows.h"     /* build_rows / multi_sel_* / select_row_for_region */
-#include "gui_scan.h"     /* gui_scan_* */
 #include "gui_shell.h"    /* UI_STATE_SLOTS / UI_STATE_PROBE_MAX / UI_ROW_ID_RING */
 #include "gui_startup.h"  /* H/P1-8: gui_startup_decide + GUI_STARTUP_* (J14 truth table) */
 #include "gui_state.h"    /* s_canvas / disclosures / modals / s_ctx / shared UI ids */
@@ -1035,17 +1034,14 @@ void run_selftest(void) {
                                                           folder_source_id, folder_abs,
                                                           sizeof folder_abs,
                                                           &folder_error) == TP_STATUS_OK) {
-        const gui_scan_result *sc = NULL;
-        if (gui_scan_get(folder_abs, &sc, &folder_error) != TP_STATUS_OK) {
-            sc = NULL;
-        }
-        if (!sc) {
+        tp_scan_result sc = {0};
+        if (tp_scan_dir(folder_abs, &sc, &folder_error) != TP_STATUS_OK) {
             nt_log_error("SELFTEST: folder scan failed: %s", folder_error.msg);
         } else {
-            nt_log_info("SELFTEST: folder scan found %d image(s)", sc->count);
-            if (sc->count > 0) {
+            nt_log_info("SELFTEST: folder scan found %d image(s)", sc.count);
+            if (sc.count > 0) {
                 char sprite[192];
-                (void)snprintf(sprite, sizeof sprite, "%s", sc->entries[0].rel);
+                (void)snprintf(sprite, sizeof sprite, "%s", sc.entries[0].rel);
                 char *dot = strrchr(sprite, '.');
                 if (dot) {
                     *dot = '\0';
@@ -1056,6 +1052,7 @@ void run_selftest(void) {
                 nt_log_info("SELFTEST: rename region '%s' -> override='%s'", sprite, (ov && ov->rename) ? ov->rename : "(none)");
             }
         }
+        tp_scan_free(&sc);
     }
 
     /* --- save_buffer / load_buffer round-trip in-app --- */
@@ -1086,20 +1083,17 @@ void run_selftest(void) {
         (void)fputs("PNGDATA", tf);
         (void)fclose(tf);
     }
-    gui_scan_invalidate_all();
-    const gui_scan_result *refresh_scan = NULL;
+    tp_scan_result refresh_scan = {0};
     tp_error refresh_error = {0};
-    const int before_n =
-        gui_scan_get(rdir, &refresh_scan, &refresh_error) == TP_STATUS_OK
-            ? refresh_scan->count
-            : -1;
+    const int before_n = tp_scan_dir(rdir, &refresh_scan, &refresh_error) == TP_STATUS_OK
+                             ? refresh_scan.count
+                             : -1;
+    tp_scan_free(&refresh_scan);
     (void)remove(rfile);
-    gui_scan_invalidate_all();
-    refresh_scan = NULL;
-    const int after_n =
-        gui_scan_get(rdir, &refresh_scan, &refresh_error) == TP_STATUS_OK
-            ? refresh_scan->count
-            : -1;
+    const int after_n = tp_scan_dir(rdir, &refresh_scan, &refresh_error) == TP_STATUS_OK
+                            ? refresh_scan.count
+                            : -1;
+    tp_scan_free(&refresh_scan);
     nt_log_info("SELFTEST: refresh cycle temp png before=%d after=%d (removed=%d)", before_n, after_n, before_n - after_n);
 #ifdef _WIN32
     (void)RemoveDirectoryA(rdir);
@@ -1123,7 +1117,6 @@ void run_selftest(void) {
                     i_basic = i;
                 }
             }
-            gui_scan_invalidate_all();
             double ms_r = 0.0;
             double ms_b = 0.0;
             char pe[256] = {0};
@@ -1277,7 +1270,6 @@ void run_selftest(void) {
             gui_project_add_atlas().visible_index;
         if (sidx >= 0) {
             (void)gui_project_add_source(sidx, sdir);
-            gui_scan_invalidate_all();
             double sms = 0.0;
             char serr[256] = {0};
             char snote[128] = {0};
@@ -1453,7 +1445,6 @@ void run_selftest(void) {
             write_tga_2x2(fp);
         }
         (void)gui_project_add_source(0, pdir);
-        gui_scan_invalidate_all();
         double cms = 0.0;
         char cerr[256] = {0};
         char cnote[128] = {0};
@@ -1605,7 +1596,6 @@ void run_selftest(void) {
         char afolder[512];
         to_abs("examples/defold-demo/examples/anim_trim/anims", afolder, sizeof afolder);
         (void)gui_project_add_source(0, afolder);
-        gui_scan_invalidate_all();
 
         gui_project_mark_packed(); /* pretend current, then a setting change must set stale */
         const tp_session_snapshot *setting_snapshot = NULL;
@@ -1654,13 +1644,13 @@ void run_selftest(void) {
         if (source0 && tp_session_snapshot_resolve_path(source_snapshot, source_atlas->id,
                                                         source0->id, afabs, sizeof afabs,
                                                         &source_error) == TP_STATUS_OK) {
-            const gui_scan_result *sc = NULL;
-            if (gui_scan_get(afabs, &sc, &source_error) == TP_STATUS_OK &&
-                sc->count > 0) {
+            tp_scan_result sc = {0};
+            if (tp_scan_dir(afabs, &sc, &source_error) == TP_STATUS_OK &&
+                sc.count > 0) {
                 char source_key[TP_SRCKEY_MAX];
                 char spn[192];
-                (void)snprintf(source_key, sizeof source_key, "%s", sc->entries[0].rel);
-                (void)snprintf(spn, sizeof spn, "%s", sc->entries[0].rel);
+                (void)snprintf(source_key, sizeof source_key, "%s", sc.entries[0].rel);
+                (void)snprintf(spn, sizeof spn, "%s", sc.entries[0].rel);
                 char *dot = strrchr(spn, '.');
                 if (dot) {
                     *dot = '\0';
@@ -1692,6 +1682,7 @@ void run_selftest(void) {
                 nt_log_info("SELFTEST: sprite '%s' RECT override -> vert_count=%d (expect 4)", spn, vc);
                 NT_ASSERT(vc == 4 && "RECT per-sprite override packs a 4-vert rect");
             }
+            tp_scan_free(&sc);
         }
 
         /* save + export a fresh GUI project -> the seeded target writes files (audit I1) */
@@ -1759,7 +1750,6 @@ void run_selftest(void) {
         }
         NT_ASSERT(gui_project_add_source(aidx, anim_source_dir) == GUI_ADD_ADDED &&
                   "animation selector fixture adds one real source");
-        gui_scan_invalidate_all();
         multi_sel_clear();
         multi_sel_add("walk_10"); /* deliberately out of natural order */
         multi_sel_add("walk_2");
@@ -1971,7 +1961,6 @@ void run_selftest(void) {
         }
         NT_ASSERT(gui_project_add_source(0, add_frames_dir) == GUI_ADD_ADDED &&
                   "deferred add-frames fixture adds one real source");
-        gui_scan_invalidate_all();
         const int f1anim = gui_project_create_animation(0, "addf", NULL, 0); /* empty animation */
         NT_ASSERT(selftest_select_animation_at(0, f1anim));
         multi_sel_clear();
@@ -2137,7 +2126,6 @@ void run_selftest(void) {
         char pfolder[512];
         to_abs("examples/defold-demo/examples/anim_trim/anims", pfolder, sizeof pfolder);
         (void)gui_project_add_source(0, pfolder);
-        gui_scan_invalidate_all();
     }
 
     /* --- H/P2-14: Add Atlas auto-name must SCAN for a free atlasN, not blindly use atlas_count+1 (which
@@ -2361,7 +2349,6 @@ void run_selftest(void) {
         char j7folder[512];
         to_abs("examples/defold-demo/examples/anim_trim/anims", j7folder, sizeof j7folder);
         (void)gui_project_add_source(0, j7folder);
-        gui_scan_invalidate_all();
         (void)gui_project_take_op_error(NULL, 0);
         NT_ASSERT(gui_project__test_attach_memory_recovery() && "J7: memory journal attached");
         gui_pack_clear(-1); /* no prior result */
@@ -2828,7 +2815,6 @@ void run_selftest(void) {
         char rfolder[512];
         to_abs("examples/defold-demo/examples/anim_trim/anims", rfolder, sizeof rfolder);
         (void)gui_project_add_source(0, rfolder);
-        gui_scan_invalidate_all();
     }
 
     /* --- About modal: open it so the auto-quit frames render it (OK/Esc close it interactively) --- */
@@ -3265,7 +3251,6 @@ void selftest_pre_frame(void) {
                     GUI_ATLAS_MAX_SIZE, 256, 0.0F);
                 NT_ASSERT(gui_actions__submit_draft() &&
                           "SELFTEST: stale-scene max-size draft submits");
-                gui_scan_invalidate_all();
             }
             double pms = 0.0;
             char perr[256] = {0};
@@ -3388,7 +3373,6 @@ void selftest_pre_frame(void) {
                     GUI_ATLAS_ALLOW_TRANSFORM, 1, 0.0F);
                 NT_ASSERT(gui_actions__submit_draft() &&
                           "SELFTEST preview: allow-transform draft submits");
-                gui_scan_invalidate_all();
             }
             double nms = 0.0;
             char nerr[256] = {0};
@@ -3497,7 +3481,6 @@ void selftest_pre_frame(void) {
             char afolder[512];
             to_abs("examples/defold-demo/examples/anim_trim/anims", afolder, sizeof afolder);
             (void)gui_project_add_source(0, afolder);
-            gui_scan_invalidate_all();
             char base[600];
             (void)snprintf(base, sizeof base, "%s/selftest_async_export/at0", s_exe_dir); /* ABSOLUTE -> resolves w/o a saved dir */
             selftest_set_target_at(0, 0, "json-neotolis", base, true);
@@ -3549,7 +3532,6 @@ void selftest_pre_frame(void) {
             char afolder[512];
             to_abs("examples/defold-demo/examples/anim_trim/anims", afolder, sizeof afolder);
             (void)gui_project_add_source(0, afolder);
-            gui_scan_invalidate_all();
             gui_project_mark_stale();
             char aerr[256] = {0};
             const bool started = gui_pack_async_start(0, aerr, sizeof aerr);
@@ -3588,7 +3570,6 @@ void selftest_pre_frame(void) {
             char afolder[512];
             to_abs("examples/defold-demo/examples/anim_trim/anims", afolder, sizeof afolder);
             (void)gui_project_add_source(1, afolder);
-            gui_scan_invalidate_all();
             char aerr[256] = {0};
             const bool started = gui_pack_async_start(1, aerr, sizeof aerr);
             NT_ASSERT(started && "SELFTEST: stable-publication pack must start");
@@ -3623,7 +3604,6 @@ void selftest_pre_frame(void) {
             char afolder[512];
             to_abs("examples/defold-demo/examples/anim_trim/anims", afolder, sizeof afolder);
             (void)gui_project_add_source(0, afolder);
-            gui_scan_invalidate_all();
             double pms = 0.0;
             char perr[256] = {0};
             char pnote[128] = {0};
@@ -3699,7 +3679,6 @@ void selftest_pre_frame(void) {
             char afolder[512];
             to_abs("examples/defold-demo/examples/anim_trim/anims", afolder, sizeof afolder);
             (void)gui_project_add_source(0, afolder);
-            gui_scan_invalidate_all();
             char aerr[256] = {0};
             const bool started = gui_pack_async_start(0, aerr, sizeof aerr);
             NT_ASSERT(started && gui_pack_async_busy() &&

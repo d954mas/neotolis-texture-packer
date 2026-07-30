@@ -7,8 +7,8 @@
  * The session is the single mutable source of truth; the GUI reads owned snapshots as a thin editor
  * (AGENTS tool-parity). The Pack button surfaces the explicit stale-preview state.
  *
- * Module split: gui_project (state + dirty bits + load/save), gui_scan (display-only folder
- * enumeration), gui_pack (typed job adapter + presentation slots), gui_canvas (dual-mode
+ * Module split: gui_project (session host), gui_pack (typed task adapter +
+ * presentation slots), gui_canvas (dual-mode
  * source-image / atlas-page custom nt_ui element). main.c is init/frame/shutdown + layout +
  * the OS file dialogs (tinyfiledialogs).
  *
@@ -62,6 +62,7 @@
 #include "tp_core/tp_build_worker.h" /* private build-worker re-exec dispatch */
 #include "tp_core/tp_export.h"
 #include "tp_core/tp_names.h" /* tp_sprite_export_key (slice9 frame-sync key) */
+#include "tp_core/tp_scan.h"
 
 #include "gui_canvas.h"
 #include "gui_bootstrap.h"
@@ -72,7 +73,6 @@
 #include "gui_rows.h"
 #include "gui_pack.h"
 #include "gui_project.h"
-#include "gui_scan.h"
 #include "gui_shell.h"    /* shell-owned surface the dev seams read (UI pool caps) */
 #include "gui_paths.h"    /* app-data root + exe-dir resolver (canonical home for s_exe_dir) */
 #include "gui_log_file.h" /* rotating app-side log file (nt_log sink); no-op under headless */
@@ -1091,7 +1091,7 @@ static int gui_main_utf8(int argc, char *argv[]) {
     if (proj_arg != NULL) {
         char err[256];
         const bool recovery_pending = s_recovery_open;
-        switch (gui_startup_decide(true, gui_scan_exists(proj_arg), recovery_pending)) {
+        switch (gui_startup_decide(true, tp_scan_exists(proj_arg), recovery_pending)) {
         case GUI_STARTUP_DEFER:
             /* The startup recovery modal is up and can Save-to-original the very file named on the CLI.
              * Opening it into the live editor now would load the STALE pre-crash copy behind the modal, so a
@@ -1270,7 +1270,6 @@ static int gui_main_utf8(int argc, char *argv[]) {
     gui_canvas_shutdown(&s_canvas);
     gui_pack_shutdown();
     gui_rows_shutdown();
-    gui_scan_shutdown();
     gui_project_shutdown();
     nt_ui_destroy_context(s_ctx);
     nt_ui_module_shutdown();

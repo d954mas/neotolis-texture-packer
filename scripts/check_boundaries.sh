@@ -318,15 +318,14 @@ if ! printf '    snapshot->project = model->project;\n' |
     hit "R10-selftest" "R10c detector missed mixed snapshot/model ownership"
 fi
 
-# 11. GUI source refresh has one publication choke point. The scan backend may
-#     clear its own cache, but shipping callers must also advance the session
-#     source generation/event through gui_project_invalidate_sources().
+# 11. Source filesystem truth is a session-owned projection. The deleted GUI
+#     scan/cache path must not reappear in shipping code or tests.
 r11=$(find apps/gui -type f \( -name '*.c' -o -name '*.h' \) |
-    grep -vE '/(gui_project|gui_scan|gui_selftest|test_[^/]*|tp_bench_[^/]*)\.(c|h)$' |
-    xargs grep -nE 'gui_scan_invalidate_all[[:space:]]*\(' 2>/dev/null)
-[ -n "$r11" ] && hit "R11 raw GUI source invalidation outside project chokepoint" "$r11"
-if ! printf '    gui_scan_invalidate_all();\n' | grep -qE 'gui_scan_invalidate_all[[:space:]]*\('; then
-    hit "R11-selftest" "R11 detector failed to catch a seeded raw invalidation"
+    xargs grep -nE 'gui_scan(_[A-Za-z0-9_]+)?[[:space:]]*\(' 2>/dev/null)
+[ -n "$r11" ] && hit "R11 legacy GUI source scan/cache path" "$r11"
+if ! printf '    gui_scan_get(path, &result, &error);\n' |
+    grep -qE 'gui_scan(_[A-Za-z0-9_]+)?[[:space:]]*\('; then
+    hit "R11-selftest" "R11 detector failed to catch a seeded GUI scan"
 fi
 
 # 12. Deferred collection intents capture stable IDs + expected revision, never
@@ -589,7 +588,8 @@ tp_session_snapshot_internal tp_job|tp_session|tp_session_snapshot|tp_session_sn
 tp_recovery_backend_types_internal tp_recovery_backend_posix|tp_recovery_backend_win32|tp_recovery_state_internal
 tp_recovery_internal    tp_recovery|tp_recovery_state_internal|tp_recovery_claim|tp_recovery_scan|tp_recovery_store
 tp_recovery_state_internal tp_recovery|tp_recovery_claim|tp_recovery_scan|tp_recovery_store
-tp_job_owner_internal   tp_session|tp_job
+tp_job_owner_internal   tp_session|tp_job|tp_refresh_job
+tp_source_runtime_internal tp_source_runtime|tp_refresh_job|tp_session
 tp_source_plan_internal tp_source_plan|tp_op_validate|tp_op_validate_source_sprite
 tp_source_path_text_internal tp_source_path_text|tp_op_validate|tp_project|tp_project_identity|tp_project_parse|tp_source_plan
 tp_srckey_internal      tp_srckey|tp_project_identity|tp_op_validate_animation|tp_validate_source|tp_validate_sprite

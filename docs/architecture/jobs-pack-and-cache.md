@@ -3,10 +3,11 @@
 **Status:** Current architecture.
 
 Pack is an explicit derived job. Export is an explicit external side-effect
-command that shares the session's runtime ordering, progress, and cancellation
-handle; it is neither a derived job nor a model transaction. Project edits,
-external source refresh, Undo/Redo, and cache misses never start Pack
-automatically.
+command. Refresh is an explicit source-I/O job that produces a replacement
+runtime projection. All three share the session's single task slot, progress,
+cancellation, and terminal-transfer contract. Export is neither a derived job
+nor a model transaction. Project edits, Refresh, Undo/Redo, and cache misses
+never start Pack automatically.
 
 ## Immutable job input
 
@@ -54,10 +55,12 @@ Malformed output, non-zero exit, crash, hang, timeout, and partial artifacts
 become structured job failures. They do not abort the GUI or corrupt the live
 session.
 
-The session runtime admits at most one concrete Pack job or Export command at a
-time. A second start returns `busy`. The small GUI project host owns only the
-active/candidate session pair and explicitly cancels and drains an old task
-before replacement. A superseded completion is never presented as current.
+The session runtime admits at most one Pack, Export, or Refresh task at a time.
+A second start returns `busy`. Refresh performs source filesystem I/O on its
+worker and the session adopts its stable-ID-keyed immutable projection only if
+the captured model generation is still current. The small GUI project host owns
+only the active/candidate session pair and explicitly cancels and drains an old
+task before replacement. A superseded completion is never presented as current.
 
 ## Pack-input identity
 

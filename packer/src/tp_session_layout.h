@@ -41,6 +41,7 @@ struct tp_session {
     tp_project_lease *project_lease;
     tp_session_owned_job *active_job;
     tp_session_snapshot *view_snapshot;
+    struct tp_source_runtime_projection *source_projection;
     struct tp_session_view view;
     tp_session_job_observed_state observed_job_state;
     tp_session_identity identity;

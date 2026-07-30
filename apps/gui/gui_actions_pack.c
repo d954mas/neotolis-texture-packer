@@ -248,6 +248,29 @@ static void poll_async(void) {
                 set_status_ex(warning ? STATUS_WARNING : STATUS_INFO, message);
             }
             break;
+        case GUI_PACK_DONE_REFRESH_OK:
+            gui_canvas_invalidate(&s_canvas);
+            gui_project_mark_stale();
+            if (info.unavailable > 0) {
+                set_statusf_ex(
+                    STATUS_WARNING,
+                    "Refresh: +%d new, %d removed, %d changed; %d source unavailable",
+                    info.added, info.removed, info.changed,
+                    info.unavailable);
+            } else {
+                set_statusf(
+                    "Refresh: +%d new, %d removed, %d changed",
+                    info.added, info.removed, info.changed);
+            }
+            break;
+        case GUI_PACK_DONE_REFRESH_FAIL:
+            set_statusf_ex(
+                STATUS_WARNING, "Refresh failed: %s",
+                info.err[0] ? info.err : "source scan failed");
+            break;
+        case GUI_PACK_DONE_REFRESH_CANCELLED:
+            set_status_ex(STATUS_INFO, "Refresh cancelled.");
+            break;
         case GUI_PACK_DONE_PREVIEW_OK:
             if (info.input_changed) {
                 preview_target_reset();

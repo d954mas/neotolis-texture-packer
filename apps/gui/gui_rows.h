@@ -79,7 +79,7 @@ typedef struct sprite_row {
     char *abs;                /* malloc-owned exact resolved decode path */
     /* --- sort inputs (§61.1); populated per-atlas by build_rows, read by the view comparator --- */
     long long size;           /* packed area (frame w*h) from this atlas's pack result; 0 if unpacked/no region */
-    long long mtime;          /* live file mtime (scan entry / gui_scan_stat); 0 if missing/unstattable/folder */
+    long long mtime;          /* source-runtime projection mtime; 0 if missing/unstattable/folder */
     int added_at;             /* source insertion index -- the order the source was added to the project */
 } sprite_row;
 extern sprite_row *s_rows;

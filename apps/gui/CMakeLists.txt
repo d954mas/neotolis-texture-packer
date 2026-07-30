@@ -32,7 +32,7 @@ if(WIN32)
     target_link_libraries(tinyfiledialogs PUBLIC comdlg32 ole32 shell32 user32)
 endif()
 
-add_executable(ntpacker-gui main.c gui_state.c gui_widgets.c gui_actions.c gui_actions_dialogs.c gui_actions_edits.c gui_actions_intents.c gui_actions_pack.c gui_actions_preview.c gui_actions_recovery.c gui_rows.c gui_selftest.c gui_startup.c gui_paths.c gui_log_file.c gui_crash.c gui_bootstrap.c gui_project.c gui_project_file.c gui_project_mutations.c gui_project_recovery.c gui_session_adapter.c gui_edit_state.c gui_scan.c gui_canvas.c gui_canvas_resources.c gui_pack.c gui_pack_jobs.c gui_pack_preview.c gui_view_settings.c gui_view_lists.c gui_view_canvas.c gui_view_chrome.c
+add_executable(ntpacker-gui main.c gui_state.c gui_widgets.c gui_actions.c gui_actions_dialogs.c gui_actions_edits.c gui_actions_intents.c gui_actions_pack.c gui_actions_preview.c gui_actions_recovery.c gui_rows.c gui_selftest.c gui_startup.c gui_paths.c gui_log_file.c gui_crash.c gui_bootstrap.c gui_project.c gui_project_file.c gui_project_mutations.c gui_project_recovery.c gui_session_adapter.c gui_edit_state.c gui_canvas.c gui_canvas_resources.c gui_pack.c gui_pack_jobs.c gui_pack_preview.c gui_view_settings.c gui_view_lists.c gui_view_canvas.c gui_view_chrome.c
     "${CMAKE_SOURCE_DIR}/apps/common/nt_utf8_fs.c"
     "${CMAKE_SOURCE_DIR}/apps/common/app_scratch.c")
 if(WIN32)
@@ -150,28 +150,6 @@ if(WIN32 AND CMAKE_BUILD_TYPE STREQUAL "Release")
     target_link_options(ntpacker-gui PRIVATE "LINKER:/entry:mainCRTStartup")
 endif()
 
-# GUI row rebuild benchmark. It compiles the production gui_rows/gui_scan
-# sources with narrow stubs; no window, renderer, pack job, or event loop.
-# CTest enforces only correctness/count/complexity. Absolute timing is advisory.
-add_executable(tp_bench_gui_rows tp_bench_gui_rows.c gui_rows.c gui_scan.c)
-target_link_libraries(tp_bench_gui_rows PRIVATE tp_core nt_time nt_ui)
-target_include_directories(tp_bench_gui_rows PRIVATE
-    "${CMAKE_SOURCE_DIR}/packer/tests"
-    "${CMAKE_SOURCE_DIR}/packer/src")
-target_compile_definitions(tp_bench_gui_rows PRIVATE
-    NTPACKER_GUI_BENCH=1
-    _CRT_SECURE_NO_WARNINGS
-    ${_tp_gui_introspect_defines}
-)
-nt_set_warning_flags(tp_bench_gui_rows)
-nt_set_sanitizer_flags(tp_bench_gui_rows)
-set_target_properties(tp_bench_gui_rows PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${GUI_OUTPUT_DIR}")
-add_test(NAME tp_gui_rows_complexity
-    COMMAND tp_bench_gui_rows "${CMAKE_CURRENT_BINARY_DIR}/tp_gui_rows_ctest" 1)
-set_tests_properties(tp_gui_rows_complexity PROPERTIES
-    TIMEOUT 180
-    LABELS "benchmark;gui")
-
 tp_add_gui_test(NAME gui_edit_state
     SOURCES
         test_gui_edit_state.c
@@ -215,7 +193,6 @@ set(_tp_gui_headless_sources
     gui_project_recovery.c
     gui_session_adapter.c
     gui_edit_state.c
-    gui_scan.c
     gui_canvas.c
     gui_canvas_resources.c
     gui_pack.c

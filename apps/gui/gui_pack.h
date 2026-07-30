@@ -186,7 +186,8 @@ int gui_pack_preview_diff(tp_id128 atlas_id, const char *exporter_id, char *chip
 typedef enum {
     GUI_PACK_ASYNC_NONE = 0,
     GUI_PACK_ASYNC_PACK,
-    GUI_PACK_ASYNC_EXPORT
+    GUI_PACK_ASYNC_EXPORT,
+    GUI_PACK_ASYNC_REFRESH
 } gui_pack_async_kind;
 
 typedef enum {
@@ -197,6 +198,9 @@ typedef enum {
     GUI_PACK_DONE_EXPORT_OK,
     GUI_PACK_DONE_EXPORT_FAIL,
     GUI_PACK_DONE_EXPORT_CANCELLED,
+    GUI_PACK_DONE_REFRESH_OK,
+    GUI_PACK_DONE_REFRESH_FAIL,
+    GUI_PACK_DONE_REFRESH_CANCELLED,
     /* Export-target PREVIEW pack (EXP-PREVIEW): lands in the SEPARATE preview slot, never the session
      * slot; the native pack/export/stale state is untouched. */
     GUI_PACK_DONE_PREVIEW_OK,
@@ -220,6 +224,10 @@ typedef struct {
     int atlases_skipped; /* export: atlases skipped for no usable input */
     bool partial_publication; /* cancelled export left committed outputs */
     bool publication_uncertain; /* failed writer may have published artifacts */
+    int added;
+    int removed;
+    int changed;
+    int unavailable;
     char err[256];      /* failure / first-error text */
     char note[128];     /* pack: notice text */
 } gui_pack_result_info;
@@ -238,6 +246,7 @@ bool gui_pack_async_start(tp_id128 atlas_id, char *err, size_t err_cap);
 /* Starts an async export of every exporting atlas. false (fills err) if busy / nothing to export /
  * relative out-paths need a saved project. */
 bool gui_pack_export_async_start(char *err, size_t err_cap);
+bool gui_refresh_async_start(char *err, size_t err_cap);
 /* Consumes one completion only after host drain + atomic observation classified
  * its envelope. Applies a Pack slot swap only for an accepted result. */
 gui_pack_done gui_pack_poll(gui_pack_result_info *out);

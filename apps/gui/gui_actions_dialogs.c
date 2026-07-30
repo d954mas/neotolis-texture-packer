@@ -7,7 +7,7 @@
 
 #include "gui_state.h"
 #include "gui_project.h"
-#include "gui_scan.h"
+#include "tp_core/tp_scan.h"
 #include "gui_pack.h"
 #include "gui_paths.h"
 #include "gui_shell.h"
@@ -21,7 +21,7 @@ bool gui_actions__open_dialog(void) {
     if (!path) {
         return false;
     }
-    if (!gui_scan_exists(path)) {
+    if (!tp_scan_exists(path)) {
         set_statusf_ex(STATUS_WARNING, "project not found: %s", path); /* never fatal (F6b) */
         return false;
     }
@@ -505,7 +505,6 @@ void gui_actions_pump_lifecycle(void) {
     }
     gui_actions__discard_edits();
     gui_actions__clear_pending();
-    gui_actions_refresh_fingerprint_reset();
     if (completed ==
         GUI_PROJECT_LIFECYCLE_SHUTDOWN) {
         nt_app_quit();

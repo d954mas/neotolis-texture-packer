@@ -73,6 +73,8 @@ static const char *job_rejection_message(
         return "job was cancelled";
     case TP_SESSION_JOB_REJECTION_TARGET_DELETED:
         return "job target was deleted";
+    case TP_SESSION_JOB_REJECTION_INPUT_CHANGED:
+        return "job inputs changed while it was running";
     case TP_SESSION_JOB_REJECTION_OLD_INSTANCE:
         return "job belongs to an old session instance";
     case TP_SESSION_JOB_REJECTION_SESSION_CLOSED:
@@ -164,7 +166,6 @@ bool gui_pack_async_start(tp_id128 atlas_id, char *err, size_t err_cap) {
         }
         return false;
     }
-    gui_project_invalidate_sources();
     const tp_session_snapshot *snapshot = gui_project_snapshot();
     const tp_snapshot_atlas *atlas =
         snapshot ? tp_session_snapshot_atlas_by_id(snapshot, atlas_id) : NULL;
@@ -195,7 +196,6 @@ static bool export_start(tp_id128 atlas_id, char *err, size_t err_cap) {
         }
         return false;
     }
-    gui_project_invalidate_sources();
     tp_error error = {{0}};
     return report_job_start(
         gui_project_job_enqueue_export(
@@ -206,6 +206,21 @@ static bool export_start(tp_id128 atlas_id, char *err, size_t err_cap) {
 
 bool gui_pack_export_async_start(char *err, size_t err_cap) {
     return export_start(tp_id128_nil(), err, err_cap);
+}
+
+bool gui_refresh_async_start(char *err, size_t err_cap) {
+    if (gui_project_job_busy()) {
+        if (err) {
+            (void)snprintf(
+                err, err_cap,
+                "busy -- a Pack, Export, or Refresh task is already running");
+        }
+        return false;
+    }
+    tp_error error = {{0}};
+    return report_job_start(
+        gui_project_job_enqueue_refresh(&error),
+        &error, err, err_cap);
 }
 
 gui_pack_done gui_pack_poll(gui_pack_result_info *out) {
@@ -314,10 +329,7 @@ gui_pack_done gui_pack_poll(gui_pack_result_info *out) {
             done = preview ? GUI_PACK_DONE_PREVIEW_FAIL
                            : GUI_PACK_DONE_PACK_FAIL;
         }
-    } else {
-        NT_ASSERT(
-            result.kind ==
-            TP_SESSION_JOB_EXPORT);
+    } else if (result.kind == TP_SESSION_JOB_EXPORT) {
         if (out) {
             out->targets = result.export_result.targets;
             out->files = result.export_result.files;
@@ -356,6 +368,27 @@ gui_pack_done gui_pack_poll(gui_pack_result_info *out) {
                     result.export_result.notices, result.elapsed_ms,
                     result.export_result.first_error[0] ? ": " : "",
                     result.export_result.first_error);
+    } else {
+        NT_ASSERT(result.kind == TP_SESSION_JOB_REFRESH);
+        if (out) {
+            out->added = result.refresh.added;
+            out->removed = result.refresh.removed;
+            out->changed = result.refresh.changed;
+            out->unavailable = result.refresh.unavailable;
+            (void)snprintf(
+                out->err, sizeof out->err, "%s",
+                rejected_failure
+                    ? job_rejection_message(rejection)
+                    : result.error.msg);
+        }
+        if (cancelled) {
+            done = GUI_PACK_DONE_REFRESH_CANCELLED;
+        } else if (rejected_failure ||
+                   result.state == TP_SESSION_JOB_FAILED) {
+            done = GUI_PACK_DONE_REFRESH_FAIL;
+        } else {
+            done = GUI_PACK_DONE_REFRESH_OK;
+        }
     }
 
     tp_session_job_result_destroy(&result);
@@ -447,6 +480,8 @@ gui_pack_async_kind gui_pack_async_active_kind(void) {
             : gui_project_job_active_kind();
     return kind == TP_SESSION_JOB_EXPORT
                ? GUI_PACK_ASYNC_EXPORT
+               : kind == TP_SESSION_JOB_REFRESH
+                     ? GUI_PACK_ASYNC_REFRESH
                : kind == TP_SESSION_JOB_PACK
                      ? GUI_PACK_ASYNC_PACK
                      : GUI_PACK_ASYNC_NONE;
@@ -540,7 +575,7 @@ bool gui_pack_preview_async_start(tp_id128 atlas_id, const char *exporter_id,
         }
         return false;
     }
-    gui_project_invalidate_sources();
+    gui_project_refresh_sources();
     const tp_session_snapshot *snapshot = gui_project_snapshot();
     const tp_snapshot_atlas *atlas =
         snapshot ? tp_session_snapshot_atlas_by_id(snapshot, atlas_id) : NULL;

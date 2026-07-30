@@ -108,7 +108,8 @@ typedef struct tp_session_event {
 typedef enum tp_session_job_kind {
     TP_SESSION_JOB_NONE = 0,
     TP_SESSION_JOB_PACK,
-    TP_SESSION_JOB_EXPORT
+    TP_SESSION_JOB_EXPORT,
+    TP_SESSION_JOB_REFRESH
 } tp_session_job_kind;
 
 typedef enum tp_session_job_state {
@@ -129,6 +130,7 @@ typedef enum tp_session_job_rejection {
     TP_SESSION_JOB_REJECTION_NONE = 0,
     TP_SESSION_JOB_REJECTION_CANCELLED,
     TP_SESSION_JOB_REJECTION_TARGET_DELETED,
+    TP_SESSION_JOB_REJECTION_INPUT_CHANGED,
     TP_SESSION_JOB_REJECTION_OLD_INSTANCE,
     TP_SESSION_JOB_REJECTION_SESSION_CLOSED
 } tp_session_job_rejection;
@@ -171,6 +173,7 @@ struct tp_session_view {
     uint64_t generation;
     uint64_t snapshot_generation;
     const tp_session_snapshot *snapshot;
+    const struct tp_source_runtime_projection *sources;
     tp_session_recovery_health recovery_health;
     tp_session_job_observed_state task;
 };
@@ -231,7 +234,6 @@ tp_status tp_session_save_as(tp_session *session, const char *path,
 tp_status tp_session_save_new(tp_session *session, const char *path,
                               tp_session_save_result *result, tp_error *err);
 tp_status tp_session_discard(tp_session *session, tp_error *err);
-tp_status tp_session_invalidate_sources(tp_session *session, tp_error *err);
 /* Declares recovery expected for this live host so availability/reporting can
  * expose missing or degraded recovery. Model commands remain available when
  * recovery is unavailable. */

@@ -15,6 +15,7 @@
 #include "tp_core/tp_transaction.h"
 #include "tp_recovery_live_seam.h"
 #include "tp_session_layout.h"
+#include "tp_source_runtime_internal.h"
 #include "tp_session_snapshot_internal.h"
 #include "tp_job_owner_internal.h"
 #include "tp_model_seam.h"
@@ -474,6 +475,7 @@ void tp_session_destroy(tp_session *session) {
         tp_session_job_release_internal(job);
     }
     tp_session_snapshot_destroy(session->view_snapshot);
+    tp_source_runtime_destroy(session->source_projection);
     if (session->recovery_live) {
         const bool preserve = tp_model__recovery_degraded(session->model) ||
                               !tp_recovery_live_healthy(session->recovery_live) ||
@@ -644,6 +646,14 @@ tp_status tp_session_update(
                         TP_SESSION_JOB_CANCELLED) {
                     rejection =
                         TP_SESSION_JOB_REJECTION_CANCELLED;
+                } else if (
+                    job->observation_descriptor.kind ==
+                        TP_SESSION_JOB_REFRESH &&
+                    job->observation_descriptor.base_input_token
+                            .model_generation !=
+                        session->model_generation) {
+                    rejection =
+                        TP_SESSION_JOB_REJECTION_INPUT_CHANGED;
                 } else if (!session_job_targets_exist(
                                session,
                                &job->observation_descriptor)) {
@@ -666,6 +676,30 @@ tp_status tp_session_update(
                     rejection ==
                         TP_SESSION_JOB_REJECTION_NONE &&
                     sample.terminal_result != NULL;
+                if (rejection ==
+                        TP_SESSION_JOB_REJECTION_NONE &&
+                    sample.terminal_result &&
+                    sample.terminal_result->kind ==
+                        TP_SESSION_JOB_REFRESH &&
+                    sample.terminal_result->state ==
+                        TP_SESSION_JOB_SUCCEEDED &&
+                    sample.terminal_result->refresh.projection) {
+                    tp_source_runtime_destroy(
+                        session->source_projection);
+                    session->source_projection =
+                        sample.terminal_result->refresh.projection;
+                    sample.terminal_result->refresh.projection =
+                        NULL;
+                    session->admission_sequence++;
+                    session->source_generation++;
+                    const int64_t revision =
+                        tp_model_revision(session->model);
+                    publish_event(
+                        session,
+                        TP_SESSION_EVENT_SOURCE_RUNTIME_CHANGED,
+                        NULL, revision, revision, NULL, NULL);
+                    history_record_refresh(session);
+                }
                 NT_ASSERT(session->active_job == job);
                 session->active_job = NULL;
                 tp_session_job_release_internal(job);
@@ -683,6 +717,14 @@ tp_status tp_session_update(
         }
         tp_session_job_release_internal(job);
     }
+
+    const tp_status refreshed_snapshot_status =
+        tp_session_view__refresh_snapshot(session, err);
+    if (refreshed_snapshot_status != TP_STATUS_OK) {
+        return refreshed_snapshot_status;
+    }
+    session->view.sources =
+        session->source_projection;
 
     session->view.task =
         session->observed_job_state;
@@ -773,7 +815,7 @@ tp_status tp_session_job_start_internal(
     }
     if (session->active_job) {
         return tp_error_set(err, TP_STATUS_BUSY,
-                            "a Pack or Export job is already active");
+                            "a session task is already active");
     }
     if (!job->observe ||
         job->observation_descriptor.kind ==
@@ -837,7 +879,7 @@ tp_status tp_session_job_attach_internal(tp_session *session,
     }
     if (session->active_job) {
         return tp_error_set(err, TP_STATUS_BUSY,
-                            "a Pack or Export job is already active");
+                            "a session task is already active");
     }
     session->active_job = job;
     return TP_STATUS_OK;
@@ -1352,25 +1394,6 @@ tp_status tp_session_discard(tp_session *session, tp_error *err) {
     return TP_STATUS_OK;
 }
 
-tp_status tp_session_invalidate_sources(tp_session *session, tp_error *err) {
-    if (!session) {
-        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
-                            "source invalidation requires session");
-    }
-    tp_session__assert_owner_thread(session);
-    if (session->discarded) {
-        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "session was discarded");
-    }
-    session->admission_sequence++;
-    session->source_generation++;
-    const int64_t revision = tp_model_revision(session->model);
-    publish_event(session, TP_SESSION_EVENT_SOURCE_RUNTIME_CHANGED, NULL,
-                  revision, revision, NULL, NULL);
-    /* A runtime source refresh is a visible NON-undoable row (§9.3). It never
-     * mutates revision, dirty, or Undo history -- only the source generation. */
-    history_record_refresh(session);
-    return TP_STATUS_OK;
-}
 // #endregion
 
 // #region queries

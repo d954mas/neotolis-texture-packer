@@ -16,6 +16,7 @@
 
 #include "tp_core/tp_operation.h"
 #include "tp_core/tp_identity.h"
+#include "tp_core/tp_job.h"
 #include "tp_project_lease.h"
 #include "tp_project_identity_internal.h"
 #include "tp_core/tp_recovery.h"
@@ -72,6 +73,28 @@ static tp_session *make_session(void) {
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_session_create(&rng, &session, &err));
     TEST_ASSERT_NOT_NULL(session);
     return session;
+}
+
+static tp_status session_refresh_sources(tp_session *session, tp_error *err) {
+    const tp_refresh_job_request request = {0};
+    tp_status status = tp_session_refresh_start(session, &request, err);
+    if (status != TP_STATUS_OK) {
+        return status;
+    }
+    while (tp_session_job_active(session)) {
+        tp_session_job_result completion = {0};
+        status = tp_session_update(session, &completion, err);
+        if (status != TP_STATUS_OK) {
+            tp_session_job_result_destroy(&completion);
+            return status;
+        }
+        if (completion.kind != TP_SESSION_JOB_NONE) {
+            status = completion.status;
+        }
+        tp_session_job_result_destroy(&completion);
+        thrd_yield();
+    }
+    return status;
 }
 
 static tp_operation rename_op(tp_id128 atlas_id, const char *name);
@@ -1135,10 +1158,10 @@ void test_journal_sync_failure_commits_and_degrades_recovery(void) {
     tp_session_destroy(session);
 }
 
-void test_source_invalidation_is_runtime_only_and_event_window_resyncs(void) {
+void test_source_refresh_is_runtime_only_and_event_window_resyncs(void) {
     tp_session *session = make_session();
     tp_error err;
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_session_invalidate_sources(session, &err));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, session_refresh_sources(session, &err));
     tp_session_snapshot *snapshot = NULL;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_session_snapshot_create(session, &snapshot, &err));
     TEST_ASSERT_EQUAL_INT64(0, tp_session_snapshot_revision(snapshot));
@@ -3194,7 +3217,7 @@ void test_history_dto_runtime_refresh_is_visible_and_keeps_revision(void) {
     const int64_t revision_before = tp_session_revision(session);
 
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
-                          tp_session_invalidate_sources(session, &err));
+                          session_refresh_sources(session, &err));
     /* §9.3: a refresh is a visible NON-undoable row; it does not change revision
      * or Undo availability. */
     TEST_ASSERT_EQUAL_INT64(revision_before, tp_session_revision(session));
@@ -3223,7 +3246,7 @@ void test_history_dto_new_edit_after_undo_discards_redo_rows(void) {
     tp_txn_result_free(&r);
     /* A refresh at the tip is anchored above edit-2 (in the future redo branch). */
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
-                          tp_session_invalidate_sources(session, &err));
+                          session_refresh_sources(session, &err));
     TEST_ASSERT_EQUAL_INT(3, tp_session_history_count(session));
 
     /* Undo back past edit-2 (cursor moves; rows remain). */
@@ -3252,7 +3275,7 @@ void test_history_dto_budget_eviction_shrinks_rows(void) {
 
     /* A refresh before any edit anchors at cursor 0 (below the whole spine). */
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
-                          tp_session_invalidate_sources(session, &err));
+                          session_refresh_sources(session, &err));
     TEST_ASSERT_EQUAL_INT(1, tp_session_history_count(session));
 
     /* Cap the retained edit steps at 2, then commit 3 edits. */
@@ -3296,7 +3319,7 @@ typedef struct owner_thread_probe {
     tp_status apply_status;
     tp_status undo_status;
     tp_status redo_status;
-    tp_status invalidate_status;
+    tp_status refresh_status;
     tp_status observe_status;
     bool committed;
     bool observation_present;
@@ -3354,7 +3377,7 @@ static int owner_thread_main(void *context) {
 
     probe->undo_status = tp_session_undo(session, &err);
     probe->redo_status = tp_session_redo(session, &err);
-    probe->invalidate_status = tp_session_invalidate_sources(session, &err);
+    probe->refresh_status = session_refresh_sources(session, &err);
 
     probe->revision_after_redo = tp_session_revision(session);
     probe->history_count = tp_session_history_count(session);
@@ -3394,7 +3417,7 @@ void test_session_owner_is_the_creating_thread_not_the_main_thread(void) {
     TEST_ASSERT_TRUE(probe.committed);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, probe.undo_status);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, probe.redo_status);
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, probe.invalidate_status);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, probe.refresh_status);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, probe.observe_status);
     TEST_ASSERT_TRUE(probe.observation_present);
     TEST_ASSERT_TRUE(probe.observation_has_snapshot);
@@ -3429,7 +3452,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_journal_admission_failure_commits_and_degrades_recovery);
     RUN_TEST(test_journal_encode_failure_commits_and_degrades_recovery);
     RUN_TEST(test_journal_sync_failure_commits_and_degrades_recovery);
-    RUN_TEST(test_source_invalidation_is_runtime_only_and_event_window_resyncs);
+    RUN_TEST(test_source_refresh_is_runtime_only_and_event_window_resyncs);
     RUN_TEST(test_save_as_and_open_are_session_owned_commands);
     RUN_TEST(test_save_as_does_not_mutate_held_snapshot_project_dir);
     RUN_TEST(test_detached_recovery_save_publishes_new_model_generation);

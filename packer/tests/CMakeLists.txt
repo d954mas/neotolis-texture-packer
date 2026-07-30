@@ -64,7 +64,7 @@ tp_add_test(NAME session
     SOURCES test_session.c ../src/tp_session_snapshot.c
         ../src/tp_project_generation.c ../src/tp_project_save.c
         ../src/tp_project_clone.c
-    LIBS tp_core tinycthread unity PRIVATE_SRC SEAMS
+    LIBS tp_build tinycthread unity PRIVATE_SRC SEAMS
     MAKE_DIRS "${CMAKE_BINARY_DIR}/tp_session_test"
     ARGS "${CMAKE_BINARY_DIR}/tp_session_test")
 

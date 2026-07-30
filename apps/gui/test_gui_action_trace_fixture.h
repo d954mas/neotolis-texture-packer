@@ -19,7 +19,6 @@
 #include "gui_project.h"
 #include "gui_project_test_driver.h"
 #include "gui_rows.h"
-#include "gui_scan.h"
 #include "gui_state.h"
 
 #include "tp_core/tp_build_worker.h"

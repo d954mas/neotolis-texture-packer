@@ -21,7 +21,7 @@ typedef struct tp_session_job_sample {
     bool cancellation_requested;
     tp_status terminal_status;
     tp_error terminal_error;
-    const tp_session_job_result *terminal_result;
+    tp_session_job_result *terminal_result;
 } tp_session_job_sample;
 
 typedef struct tp_session_owned_job tp_session_owned_job;

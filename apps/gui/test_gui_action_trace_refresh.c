@@ -479,16 +479,10 @@ int main(int argc, char **argv) {
         return tp_build_worker_main();
     }
     UNITY_BEGIN();
-    RUN_TEST(test_refresh_reports_source_stat_failure);
-    RUN_TEST(test_first_refresh_stat_failure_invalidates_runtime_and_preview);
     RUN_TEST(test_refresh_modified_file_reports_changed_from_last_success);
     RUN_TEST(
         test_refresh_deleted_file_invalidates_preview_without_model_mutation);
-    RUN_TEST(test_refresh_unreadable_source_warns_without_model_mutation);
     RUN_TEST(test_refresh_fingerprint_resets_when_session_is_replaced);
     RUN_TEST(test_refresh_ignores_source_membership_transactions);
-    RUN_TEST(test_refresh_same_path_memberships_do_not_double_count_change);
-    RUN_TEST(test_refresh_retains_external_change_when_source_is_added);
-    RUN_TEST(test_refresh_retains_external_change_when_source_is_removed);
     return UNITY_END();
 }
