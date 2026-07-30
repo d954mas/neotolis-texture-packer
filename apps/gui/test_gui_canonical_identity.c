@@ -44,9 +44,9 @@ static char s_left_file[512];
 static char s_right_file[512];
 static uint64_t s_test_submit_id;
 
-static gui_session_submit_identity test_submit_identity(
+static gui_project_operation_submit_identity test_submit_identity(
     char transaction_id[33]) {
-    gui_session_submit_identity identity = {0};
+    gui_project_operation_submit_identity identity = {0};
     identity.origin_view_id.bytes[0] = 1U;
     ++s_test_submit_id;
     identity.draft_instance_id.bytes[0] = 2U;
@@ -72,9 +72,9 @@ static bool test_submit_atlas_name(
     tp_id128 atlas_id, int64_t revision,
     const char *name) {
     char transaction_id[33];
-    const gui_session_submit_identity identity =
+    const gui_project_operation_submit_identity identity =
         test_submit_identity(transaction_id);
-    gui_session_submit_terminal terminal = {0};
+    gui_project_operation_submit_terminal terminal = {0};
     tp_error error = {{0}};
     const gui_text_ref ref = {
         atlas_id, tp_id128_nil(), tp_id128_nil(), NULL,
@@ -89,9 +89,9 @@ static bool test_submit_animation_name(
     const gui_animation_ref *animation,
     const char *name) {
     char transaction_id[33];
-    const gui_session_submit_identity identity =
+    const gui_project_operation_submit_identity identity =
         test_submit_identity(transaction_id);
-    gui_session_submit_terminal terminal = {0};
+    gui_project_operation_submit_terminal terminal = {0};
     tp_error error = {{0}};
     const gui_text_ref ref = {
         animation->atlas_id, animation->animation_id,
@@ -107,9 +107,9 @@ static bool test_submit_sprite_name(
     const gui_sprite_ref *sprite,
     const char *name) {
     char transaction_id[33];
-    const gui_session_submit_identity identity =
+    const gui_project_operation_submit_identity identity =
         test_submit_identity(transaction_id);
-    gui_session_submit_terminal terminal = {0};
+    gui_project_operation_submit_terminal terminal = {0};
     tp_error error = {{0}};
     const gui_text_ref ref = {
         sprite->atlas_id, tp_id128_nil(),

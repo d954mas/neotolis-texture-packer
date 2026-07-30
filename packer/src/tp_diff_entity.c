@@ -5,18 +5,9 @@
  * it needs to copy one source/sprite/animation/target/frame/atlas-subtree out of the
  * live model and, on inverse/redo, splice a deep copy back in at an exact index.
  *
- * These mirror tp_project_clone.c's element copies (fill_atlas/anim/source/target/
- * frame/copy_sprite_fields <-> clone_atlas/clone_frames) but are kept SEPARATE on
- * purpose: routing them through the diff fault-seam (tp_diff__alloc), not the clone
- * seam (cl_alloc), keeps tp_project_clone.c's clone alloc-count goldens byte-stable, and the diff
- * owns its captured data with its own single-free discipline.
- *
- * !! FORK-SYNC WARNING !! A persistent field added to tp_project_clone.c
- * MUST be added here too, or Undo/Redo silently restores a non-byte-identical project.
- * The safety net is the completeness oracle test_completeness_oracle_* in test_diff.c:
- * it sets EVERY persistent field of EVERY entity kind non-default and asserts
- * remove->inverse is byte-identical, so a missed field fails there loudly. When you add
- * a field, update BOTH copies AND make_maximal() in test_diff.c.
+ * Persistent field ownership is defined once in tp_project_owned.c. This file
+ * supplies the independent diff allocator/fault domain and positional splice
+ * mechanics; clone supplies a different allocator to the same owned-copy code.
  *
  * OOM-safety invariant (same as tp_project_clone): every owned pointer in a growing
  * copy is ALWAYS a valid malloc or NULL, and a collection count only ever covers
@@ -31,6 +22,7 @@
 #include <string.h>
 
 #include "tp_diff_internal.h"
+#include "tp_project_owned_internal.h"
 #include "tp_project_mutation_internal.h"
 
 /* ---- allocation fault seam (test-only; default disabled) ------------------ */
@@ -108,239 +100,33 @@ char *tp_diff__dup(const char *s, bool *ok) {
     return p;
 }
 
-/* ---- free helpers -------------------------------------------------------- */
+static void *diff_owned_allocate(void *context, size_t size) {
+    (void)context;
+    return tp_diff__alloc(size);
+}
+
+static tp_project_owned_allocator diff_owned_allocator(void) {
+    return (tp_project_owned_allocator){diff_owned_allocate, NULL};
+}
 
 void tp_diff__free_frames(tp_project_frame *frames, int count) {
-    if (!frames) {
-        return;
-    }
-    for (int i = 0; i < count; i++) {
-        free(frames[i].name);
-        free(frames[i].src_key);
-    }
-    free(frames);
+    tp_project_owned_free_frames(frames, count);
 }
 
-void tp_diff__free_sprite_fields(tp_project_sprite *s) {
-    if (!s) {
-        return;
-    }
-    free(s->name);
-    free(s->src_key);
-    free(s->rename);
-    s->name = s->src_key = s->rename = NULL;
+void tp_diff__free_sprite_fields(tp_project_sprite *sprite) {
+    tp_project_owned_free_sprite(sprite);
 }
 
-static void free_source(tp_project_source *s) { free(s->path); }
-static void free_target(tp_project_target *t) {
-    free(t->exporter_id);
-    free(t->out_path);
-}
-static void free_anim(tp_project_anim *a) {
-    free(a->name);
-    tp_diff__free_frames(a->frames, a->frame_count);
-}
-static void free_atlas(tp_project_atlas *a) {
-    free(a->name);
-    for (int i = 0; i < a->source_count; i++) {
-        free_source(&a->sources[i]);
-    }
-    free(a->sources);
-    for (int i = 0; i < a->sprite_count; i++) {
-        tp_diff__free_sprite_fields(&a->sprites[i]);
-    }
-    free(a->sprites);
-    for (int i = 0; i < a->animation_count; i++) {
-        free_anim(&a->animations[i]);
-    }
-    free(a->animations);
-    for (int i = 0; i < a->target_count; i++) {
-        free_target(&a->targets[i]);
-    }
-    free(a->targets);
+tp_status tp_diff__copy_frames(const tp_project_frame *src, int count,
+                               tp_project_frame **out) {
+    return tp_project_owned_copy_frames(
+        out, src, count, diff_owned_allocator());
 }
 
-/* ---- fill helpers (deep-copy src INTO a zeroed dst slot) ------------------ */
-
-tp_status tp_diff__copy_frames(const tp_project_frame *src, int count, tp_project_frame **out) {
-    *out = NULL;
-    if (count <= 0) {
-        return TP_STATUS_OK;
-    }
-    tp_project_frame *fr = (tp_project_frame *)tp_diff__alloc((size_t)count * sizeof *fr);
-    if (!fr) {
-        return TP_STATUS_OOM;
-    }
-    for (int i = 0; i < count; i++) {
-        bool ok = true;
-        fr[i].source_ref = src[i].source_ref;
-        fr[i].name = tp_diff__dup(src[i].name, &ok);
-        if (!ok) {
-            tp_diff__free_frames(fr, i + 1);
-            return TP_STATUS_OOM;
-        }
-        fr[i].src_key = tp_diff__dup(src[i].src_key, &ok);
-        if (!ok) {
-            tp_diff__free_frames(fr, i + 1);
-            return TP_STATUS_OOM;
-        }
-    }
-    *out = fr;
-    return TP_STATUS_OK;
-}
-
-tp_status tp_diff__copy_sprite_fields(const tp_project_sprite *src, tp_project_sprite *dst) {
-    *dst = *src; /* scalars: source_ref, origins, slice9, ov_* */
-    dst->name = dst->src_key = dst->rename = NULL;
-    bool ok = true;
-    dst->name = tp_diff__dup(src->name, &ok);
-    if (!ok) {
-        tp_diff__free_sprite_fields(dst);
-        return TP_STATUS_OOM;
-    }
-    dst->src_key = tp_diff__dup(src->src_key, &ok);
-    if (!ok) {
-        tp_diff__free_sprite_fields(dst);
-        return TP_STATUS_OOM;
-    }
-    dst->rename = tp_diff__dup(src->rename, &ok);
-    if (!ok) {
-        tp_diff__free_sprite_fields(dst);
-        return TP_STATUS_OOM;
-    }
-    return TP_STATUS_OK;
-}
-
-static tp_status fill_source(tp_project_source *dst, const tp_project_source *src) {
-    dst->id = src->id;
-    dst->kind = src->kind;
-    bool ok = true;
-    dst->path = tp_diff__dup(src->path, &ok);
-    return ok ? TP_STATUS_OK : TP_STATUS_OOM;
-}
-
-static tp_status fill_target(tp_project_target *dst, const tp_project_target *src) {
-    dst->id = src->id;
-    dst->enabled = src->enabled;
-    dst->exporter_id = dst->out_path = NULL;
-    bool ok = true;
-    dst->exporter_id = tp_diff__dup(src->exporter_id, &ok);
-    if (!ok) {
-        return TP_STATUS_OOM;
-    }
-    dst->out_path = tp_diff__dup(src->out_path, &ok);
-    return ok ? TP_STATUS_OK : TP_STATUS_OOM;
-}
-
-static tp_status fill_frame(tp_project_frame *dst, const tp_project_frame *src) {
-    dst->source_ref = src->source_ref;
-    dst->name = dst->src_key = NULL;
-    bool ok = true;
-    dst->name = tp_diff__dup(src->name, &ok);
-    if (!ok) {
-        return TP_STATUS_OOM;
-    }
-    dst->src_key = tp_diff__dup(src->src_key, &ok);
-    return ok ? TP_STATUS_OK : TP_STATUS_OOM;
-}
-
-static tp_status fill_anim(tp_project_anim *dst, const tp_project_anim *src) {
-    *dst = *src; /* scalars: id, fps, playback, flips */
-    dst->name = NULL;
-    dst->frames = NULL;
-    dst->frame_count = dst->frame_cap = 0;
-    bool ok = true;
-    dst->name = tp_diff__dup(src->name, &ok);
-    if (!ok) {
-        return TP_STATUS_OOM;
-    }
-    tp_status st = tp_diff__copy_frames(src->frames, src->frame_count, &dst->frames);
-    if (st != TP_STATUS_OK) {
-        return st;
-    }
-    dst->frame_count = src->frame_count;
-    dst->frame_cap = src->frame_count;
-    return TP_STATUS_OK;
-}
-
-/* Deep-copy a full atlas subtree into a zeroed dst slot (name + sources + sparse
- * sprites + animations w/ frames + targets). Grows each sub-count as it fills so a
- * mid-way OOM leaves a destroy-safe partial atlas. */
-static tp_status fill_atlas(tp_project_atlas *dst, const tp_project_atlas *src) {
-    *dst = *src; /* every scalar knob + id */
-    dst->name = NULL;
-    dst->sources = NULL;
-    dst->source_count = dst->source_cap = 0;
-    dst->sprites = NULL;
-    dst->sprite_count = dst->sprite_cap = 0;
-    dst->animations = NULL;
-    dst->animation_count = dst->animation_cap = 0;
-    dst->targets = NULL;
-    dst->target_count = dst->target_cap = 0;
-
-    bool ok = true;
-    dst->name = tp_diff__dup(src->name, &ok);
-    if (!ok) {
-        return TP_STATUS_OOM;
-    }
-
-    if (src->source_count > 0) {
-        dst->sources = (tp_project_source *)tp_diff__alloc((size_t)src->source_count * sizeof(tp_project_source));
-        if (!dst->sources) {
-            return TP_STATUS_OOM;
-        }
-        dst->source_cap = src->source_count;
-        for (int i = 0; i < src->source_count; i++) {
-            if (fill_source(&dst->sources[i], &src->sources[i]) != TP_STATUS_OK) {
-                dst->source_count = i + 1; /* include the partial slot for destroy */
-                return TP_STATUS_OOM;
-            }
-            dst->source_count++;
-        }
-    }
-    if (src->sprite_count > 0) {
-        dst->sprites = (tp_project_sprite *)tp_diff__alloc((size_t)src->sprite_count * sizeof(tp_project_sprite));
-        if (!dst->sprites) {
-            return TP_STATUS_OOM;
-        }
-        dst->sprite_cap = src->sprite_count;
-        for (int i = 0; i < src->sprite_count; i++) {
-            if (tp_diff__copy_sprite_fields(&src->sprites[i], &dst->sprites[i]) != TP_STATUS_OK) {
-                dst->sprite_count = i + 1;
-                return TP_STATUS_OOM;
-            }
-            dst->sprite_count++;
-        }
-    }
-    if (src->animation_count > 0) {
-        dst->animations = (tp_project_anim *)tp_diff__alloc((size_t)src->animation_count * sizeof(tp_project_anim));
-        if (!dst->animations) {
-            return TP_STATUS_OOM;
-        }
-        dst->animation_cap = src->animation_count;
-        for (int i = 0; i < src->animation_count; i++) {
-            if (fill_anim(&dst->animations[i], &src->animations[i]) != TP_STATUS_OK) {
-                dst->animation_count = i + 1;
-                return TP_STATUS_OOM;
-            }
-            dst->animation_count++;
-        }
-    }
-    if (src->target_count > 0) {
-        dst->targets = (tp_project_target *)tp_diff__alloc((size_t)src->target_count * sizeof(tp_project_target));
-        if (!dst->targets) {
-            return TP_STATUS_OOM;
-        }
-        dst->target_cap = src->target_count;
-        for (int i = 0; i < src->target_count; i++) {
-            if (fill_target(&dst->targets[i], &src->targets[i]) != TP_STATUS_OK) {
-                dst->target_count = i + 1;
-                return TP_STATUS_OOM;
-            }
-            dst->target_count++;
-        }
-    }
-    return TP_STATUS_OK;
+tp_status tp_diff__copy_sprite_fields(const tp_project_sprite *src,
+                                      tp_project_sprite *dst) {
+    return tp_project_owned_copy_sprite(
+        dst, src, diff_owned_allocator());
 }
 
 /* ---- standalone captured-element copy / free (COLL shape) ----------------- */
@@ -353,8 +139,10 @@ tp_status tp_diff__copy_elem(tp_diff_coll coll, const void *src, void **out) {
             if (!d) {
                 return TP_STATUS_OOM;
             }
-            if (fill_source(d, (const tp_project_source *)src) != TP_STATUS_OK) {
-                free_source(d);
+            if (tp_project_owned_copy_source(
+                    d, (const tp_project_source *)src,
+                    diff_owned_allocator()) != TP_STATUS_OK) {
+                tp_project_owned_free_source(d);
                 free(d);
                 return TP_STATUS_OOM;
             }
@@ -366,8 +154,10 @@ tp_status tp_diff__copy_elem(tp_diff_coll coll, const void *src, void **out) {
             if (!d) {
                 return TP_STATUS_OOM;
             }
-            if (fill_target(d, (const tp_project_target *)src) != TP_STATUS_OK) {
-                free_target(d);
+            if (tp_project_owned_copy_target(
+                    d, (const tp_project_target *)src,
+                    diff_owned_allocator()) != TP_STATUS_OK) {
+                tp_project_owned_free_target(d);
                 free(d);
                 return TP_STATUS_OOM;
             }
@@ -379,9 +169,10 @@ tp_status tp_diff__copy_elem(tp_diff_coll coll, const void *src, void **out) {
             if (!d) {
                 return TP_STATUS_OOM;
             }
-            if (fill_frame(d, (const tp_project_frame *)src) != TP_STATUS_OK) {
-                free(d->name);
-                free(d->src_key);
+            if (tp_project_owned_copy_frame(
+                    d, (const tp_project_frame *)src,
+                    diff_owned_allocator()) != TP_STATUS_OK) {
+                tp_project_owned_free_frame(d);
                 free(d);
                 return TP_STATUS_OOM;
             }
@@ -393,8 +184,10 @@ tp_status tp_diff__copy_elem(tp_diff_coll coll, const void *src, void **out) {
             if (!d) {
                 return TP_STATUS_OOM;
             }
-            if (fill_anim(d, (const tp_project_anim *)src) != TP_STATUS_OK) {
-                free_anim(d);
+            if (tp_project_owned_copy_anim(
+                    d, (const tp_project_anim *)src,
+                    diff_owned_allocator()) != TP_STATUS_OK) {
+                tp_project_owned_free_anim(d);
                 free(d);
                 return TP_STATUS_OOM;
             }
@@ -406,8 +199,10 @@ tp_status tp_diff__copy_elem(tp_diff_coll coll, const void *src, void **out) {
             if (!d) {
                 return TP_STATUS_OOM;
             }
-            if (fill_atlas(d, (const tp_project_atlas *)src) != TP_STATUS_OK) {
-                free_atlas(d);
+            if (tp_project_owned_copy_atlas(
+                    d, (const tp_project_atlas *)src,
+                    diff_owned_allocator()) != TP_STATUS_OK) {
+                tp_project_owned_free_atlas(d);
                 free(d);
                 return TP_STATUS_OOM;
             }
@@ -423,16 +218,23 @@ void tp_diff__free_elem(tp_diff_coll coll, void *elem) {
         return;
     }
     switch (coll) {
-        case TP_DIFF_COLL_SOURCE: free_source((tp_project_source *)elem); break;
-        case TP_DIFF_COLL_TARGET: free_target((tp_project_target *)elem); break;
+        case TP_DIFF_COLL_SOURCE:
+            tp_project_owned_free_source((tp_project_source *)elem);
+            break;
+        case TP_DIFF_COLL_TARGET:
+            tp_project_owned_free_target((tp_project_target *)elem);
+            break;
         case TP_DIFF_COLL_FRAME: {
             tp_project_frame *f = (tp_project_frame *)elem;
-            free(f->name);
-            free(f->src_key);
+            tp_project_owned_free_frame(f);
             break;
         }
-        case TP_DIFF_COLL_ANIM: free_anim((tp_project_anim *)elem); break;
-        case TP_DIFF_COLL_ATLAS: free_atlas((tp_project_atlas *)elem); break;
+        case TP_DIFF_COLL_ANIM:
+            tp_project_owned_free_anim((tp_project_anim *)elem);
+            break;
+        case TP_DIFF_COLL_ATLAS:
+            tp_project_owned_free_atlas((tp_project_atlas *)elem);
+            break;
     }
     free(elem);
 }
@@ -483,7 +285,8 @@ tp_status tp_diff__insert_atlas(tp_project *p, int index, const tp_project_atlas
     if (!slot) {
         return TP_STATUS_OOM;
     }
-    return fill_atlas((tp_project_atlas *)slot, src);
+    return tp_project_owned_copy_atlas(
+        (tp_project_atlas *)slot, src, diff_owned_allocator());
 }
 /* The positional REMOVE direction delegates to the canonical public remover:
  * the bounds-check + element free-discipline + down-shift lives in ONE place, killing
@@ -507,7 +310,8 @@ tp_status tp_diff__insert_source(tp_project_atlas *a, int index, const tp_projec
     if (!slot) {
         return TP_STATUS_OOM;
     }
-    return fill_source((tp_project_source *)slot, src);
+    return tp_project_owned_copy_source(
+        (tp_project_source *)slot, src, diff_owned_allocator());
 }
 tp_status tp_diff__remove_source(tp_project_atlas *a, int index) {
     tp_status st = tp_project_atlas_remove_source(a, index); /* delegate free+shift */
@@ -526,13 +330,14 @@ tp_status tp_diff__insert_anim(tp_project_atlas *a, int index, const tp_project_
     if (!slot) {
         return TP_STATUS_OOM;
     }
-    return fill_anim((tp_project_anim *)slot, src);
+    return tp_project_owned_copy_anim(
+        (tp_project_anim *)slot, src, diff_owned_allocator());
 }
 tp_status tp_diff__remove_anim(tp_project_atlas *a, int index) {
     if (index < 0 || index >= a->animation_count) {
         return TP_STATUS_OUT_OF_BOUNDS;
     }
-    free_anim(&a->animations[index]);
+    tp_project_owned_free_anim(&a->animations[index]);
     arr_remove(a->animations, &a->animation_count, sizeof(tp_project_anim), index);
     return TP_STATUS_OK;
 }
@@ -545,7 +350,8 @@ tp_status tp_diff__insert_target(tp_project_atlas *a, int index, const tp_projec
     if (!slot) {
         return TP_STATUS_OOM;
     }
-    return fill_target((tp_project_target *)slot, src);
+    return tp_project_owned_copy_target(
+        (tp_project_target *)slot, src, diff_owned_allocator());
 }
 tp_status tp_diff__remove_target(tp_project_atlas *a, int index) {
     tp_status st = tp_project_atlas_remove_target(a, index); /* delegate free+shift */
@@ -563,7 +369,8 @@ tp_status tp_diff__insert_frame(tp_project_anim *an, int index, const tp_project
     if (!slot) {
         return TP_STATUS_OOM;
     }
-    return fill_frame((tp_project_frame *)slot, src);
+    return tp_project_owned_copy_frame(
+        (tp_project_frame *)slot, src, diff_owned_allocator());
 }
 tp_status tp_diff__remove_frame_at(tp_project_anim *an, int index) {
     tp_status st = tp_project_anim_remove_frame(an, index); /* delegate free+shift */

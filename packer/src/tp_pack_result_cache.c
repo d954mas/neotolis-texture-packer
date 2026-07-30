@@ -9,7 +9,7 @@
 
 #include "core/nt_assert.h"
 #include "tp_core/tp_arena.h"
-#include "tp_core/tp_model.h"
+#include "tp_core/tp_pack_result.h"
 
 /* Bytes of one page fed to the deflator between cancellation checks. This is the
  * ONLY thing that bounds how long the owning thread waits when it has to join an

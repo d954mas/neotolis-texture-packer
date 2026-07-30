@@ -9,7 +9,7 @@
 
 #include <stdbool.h>
 
-#include "tp_core/tp_model.h"
+#include "tp_core/tp_pack_result.h"
 
 /* True when the sprite's hull is exactly the axis-aligned trim quad (a plain
  * RECT) -- then the canonical frame/source rect already describes it and no

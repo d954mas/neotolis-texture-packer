@@ -12,7 +12,7 @@
 #include <stdint.h>
 
 #include "tp_core/tp_id.h"
-#include "tp_core/tp_model.h"
+#include "tp_core/tp_pack_result.h"
 #include "tp_core/tp_operation.h"
 #include "tp_core/tp_scan.h"
 #include "tp_core/tp_session_snapshot_query.h"

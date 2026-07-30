@@ -120,7 +120,7 @@
 #include "tp_bench_support.h"
 
 #include "tp_core/tp_arena.h"
-#include "tp_core/tp_model.h"
+#include "tp_core/tp_pack_result.h"
 #include "tp_core/tp_pack.h"
 #include "tp_core/tp_pack_result_cache.h"
 #include "tp_build_driver_internal.h"

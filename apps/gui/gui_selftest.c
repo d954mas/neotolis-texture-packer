@@ -31,7 +31,7 @@
 #include "tp_core/tp_error.h"   /* tp_status_str / tp_error */
 #include "tp_core/tp_export.h"  /* tp_exporter_count/at (preview-target selector index) */
 #include "tp_core/tp_id.h"      /* stable structural-ID assertions */
-#include "tp_core/tp_model.h"   /* tp_result */
+#include "tp_core/tp_pack_result.h"   /* tp_result */
 #include "tp_core/tp_names.h"   /* tp_sprite_export_key (region -> override key) */
 #include "tp_core/tp_journal.h" /* in-memory recovery fixture */
 #include "tp_core/tp_scan.h"    /* tp_mkdirs (portable temp-dir creation for the CI stress dirs) */
@@ -46,7 +46,7 @@
 #include "gui_pack.h"     /* gui_pack_* + GUI_PACK_ASYNC_* */
 #include "gui_project.h"  /* gui_project_* + GUI_SPRITE_OV_SHAPE / GUI_ADD_DUPLICATE */
 #include "gui_project_test_driver.h"
-#include "gui_session_adapter.h" /* snapshot-read helpers behind the deleted forwarders */
+#include "gui_project_operations.h" /* snapshot-read helpers behind the deleted forwarders */
 #include "gui_rows.h"     /* build_rows / multi_sel_* / select_row_for_region */
 #include "gui_shell.h"    /* UI_STATE_SLOTS / UI_STATE_PROBE_MAX / UI_ROW_ID_RING */
 #include "gui_startup.h"  /* H/P1-8: gui_startup_decide + GUI_STARTUP_* (J14 truth table) */
@@ -294,7 +294,7 @@ static bool selftest_remove_atlas_at(int index) {
 static tp_status selftest_copy_atlas_name_at(int index, char *out, size_t capacity,
                                              tp_error *err) {
     const tp_snapshot_atlas *atlas = selftest_atlas_at(index, NULL);
-    return atlas ? gui_session_copy_atlas_name(gui_project_snapshot(), atlas->id,
+    return atlas ? gui_project_operation_copy_atlas_name(gui_project_snapshot(), atlas->id,
                                               out, capacity, err)
                  : tp_error_set(err, TP_STATUS_NOT_FOUND, "atlas index was not found");
 }

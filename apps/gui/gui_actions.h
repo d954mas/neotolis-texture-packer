@@ -14,7 +14,7 @@
 #include <stdbool.h>
 
 #include "gui_edit_state.h"
-#include "tp_core/tp_model.h"   /* tp_result (preview_target_result return type) */
+#include "tp_core/tp_pack_result.h"   /* tp_result (preview_target_result return type) */
 
 #include "gui_project_view.h" /* passive identities + deferred-edit enqueue types */
 #include "gui_rows.h"    /* sprite_row (start_sprite_edit parameter) */

@@ -22,7 +22,7 @@
 #include "tp_core/tp_error.h"
 #include "tp_core/tp_id.h"
 #include "tp_core/tp_identity.h"
-#include "tp_core/tp_model.h"
+#include "tp_core/tp_pack_result.h"
 #include "tp_core/tp_pack.h"
 
 #ifdef __cplusplus

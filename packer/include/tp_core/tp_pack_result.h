@@ -1,5 +1,5 @@
-#ifndef TP_CORE_TP_MODEL_H
-#define TP_CORE_TP_MODEL_H
+#ifndef TP_CORE_TP_PACK_RESULT_H
+#define TP_CORE_TP_PACK_RESULT_H
 
 /*
  * Canonical packed sprite/atlas model (docs/formats/json-neotolis.md).
@@ -92,4 +92,4 @@ typedef struct tp_result {
 }
 #endif
 
-#endif /* TP_CORE_TP_MODEL_H */
+#endif /* TP_CORE_TP_PACK_RESULT_H */

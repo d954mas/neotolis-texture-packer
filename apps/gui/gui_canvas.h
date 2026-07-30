@@ -24,7 +24,7 @@
 #include "ui/nt_ui.h"
 
 #include "tp_core/tp_identity.h" /* TP_IDENTITY_PATH_MAX */
-#include "tp_core/tp_model.h" /* tp_result / tp_sprite */
+#include "tp_core/tp_pack_result.h" /* tp_result / tp_sprite */
 
 #ifdef __cplusplus
 extern "C" {

@@ -315,7 +315,7 @@ foreach(_source IN LISTS _arch_sources)
                       "#include:${CMAKE_MATCH_1}")
         endif()
         if(_is_view
-           AND _directive MATCHES "[<\"](tp_core/tp_(model|project|operation|validate|client_capability|export)\\.h)[>\"]")
+           AND _directive MATCHES "[<\"](tp_core/tp_(pack_result|project|operation|validate|client_capability|export)\\.h)[>\"]")
             _arch_hit(VIEW_MODEL_POLICY "${_relative}" "0"
                       "#include:${CMAKE_MATCH_1}")
         endif()
@@ -738,9 +738,9 @@ foreach(_source IN LISTS _gui_observation_sources)
     endif()
 endforeach()
 
-# Completed A2c mutation cut. The thin adapter is the sole GUI operation-batch
-# ingress and therefore calls the session directly.
-_arch_assert_absent("apps/gui/gui_session_adapter.c" "\"project\\.edit\"" "A2c")
+# Completed A2c mutation cut. The explicit operation-lowering module is the
+# sole GUI operation-batch ingress and therefore calls the session directly.
+_arch_assert_absent("apps/gui/gui_project_operations.c" "\"project\\.edit\"" "A2c")
 foreach(_path IN ITEMS apps/gui/gui_project.c
                        apps/gui/gui_project_mutations.c)
     _arch_assert_absent(
@@ -759,7 +759,7 @@ _arch_assert_absent("apps/gui/main.c"
 
 foreach(_source IN LISTS _gui_shipping_sources)
     cmake_path(GET _source FILENAME _filename)
-    if(_filename STREQUAL "gui_session_adapter.c"
+    if(_filename STREQUAL "gui_project_operations.c"
        OR _filename STREQUAL "gui_selftest.c")
         continue()
     endif()
@@ -768,7 +768,7 @@ foreach(_source IN LISTS _gui_shipping_sources)
     _arch_assert_absent(
         "${_relative}" "tp_session_apply"
         "A2c single GUI mutation owner")
-    if(NOT _filename STREQUAL "gui_session_adapter.c"
+    if(NOT _filename STREQUAL "gui_project_operations.c"
        AND NOT _filename STREQUAL "gui_session_client.c")
         _arch_assert_absent(
             "${_relative}" "gui_session_client_submit"
@@ -1049,7 +1049,7 @@ _arch_assert_absent(
     "TP_TF_OUT_PATH"
     "A5 target path uses the narrow identified endpoint")
 _arch_assert_absent(
-    "apps/gui/gui_session_adapter.c"
+    "apps/gui/gui_project_operations.c"
     "gui_session_client_snapshot"
     "A5 submit receipts have one owner")
 _arch_assert_absent(

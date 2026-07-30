@@ -15,9 +15,9 @@ client intent
 
 ## Canonical model
 
-`tp_project` owns the persistent graph described by
-[project format v5](../formats/project-v5.md). `tp_model` wraps it with runtime
-state:
+The authored `tp_project` aggregate owns the persistent graph described by
+[project format v5](../formats/project-v5.md). `tp_model` is the private
+transaction owner around that aggregate and runtime state:
 
 - monotonic revision;
 - semantic saved baseline and dirty state;
@@ -31,6 +31,12 @@ transaction or Undo/Redo transition. Save does not increment revision.
 Dirty state is semantic identity compared with the last saved baseline, not
 `revision != saved_revision`. A transaction that returns the graph to the saved
 meaning becomes clean even though its revision remains higher.
+
+Persistent entity deep-copy/free is defined once in the private
+`tp_project_owned` module. Clone and semantic diff retain independent allocator
+and fault-injection domains, but both supply those allocators to the same field
+ownership implementation. Packed output is the distinct public `tp_result`
+surface declared by `tp_pack_result.h`; it is not an authored model.
 
 ## Operation catalog
 
@@ -118,9 +124,11 @@ retains only compact terminal metadata. Owned snapshots remain available for
 real file, thread, or transport boundaries; the frame loop does not allocate
 one per update.
 
-The GUI client converts frame intents and explicit edit drafts into session
-calls, then renders from the borrowed current view. Drafts are UI state, not a
-second hidden project copy.
+The GUI client converts frame intents and explicit edit drafts into typed
+operations in its local `gui_project_operations` lowering module, submits them
+to the session, then renders from the borrowed current view. This is not a
+session adapter or client mirror. Drafts are UI state, not a second hidden
+project copy.
 
 The file CLI uses immutable load/apply-preview facilities for queries and dry
 runs, and a short-lived writable session for saved-file mutations.

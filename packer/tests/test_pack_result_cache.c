@@ -34,7 +34,7 @@
 #include "tp_core/tp_build_worker.h"
 #include "tp_core/tp_id.h"
 #include "tp_core/tp_job.h"
-#include "tp_core/tp_model.h"
+#include "tp_core/tp_pack_result.h"
 #include "tp_core/tp_operation.h"
 #include "tp_core/tp_pack.h"
 #include "tp_core/tp_pack_hash.h"

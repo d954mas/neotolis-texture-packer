@@ -26,7 +26,7 @@
 #include <string.h>
 
 #include "tp_core/tp_arena.h"
-#include "tp_core/tp_model.h"
+#include "tp_core/tp_pack_result.h"
 #include "tp_name_map.h"
 #include "tp_pack_read.h"
 #include "../src/tp_fs_internal.h"

@@ -59,7 +59,7 @@ static uint64_t s_test_submit_id;
 static bool test_submit_sprite_name(
     const gui_sprite_ref *sprite,
     const char *name) {
-    gui_session_submit_identity identity = {0};
+    gui_project_operation_submit_identity identity = {0};
     identity.origin_view_id.bytes[0] = 1U;
     ++s_test_submit_id;
     identity.draft_instance_id.bytes[0] = 2U;
@@ -71,7 +71,7 @@ static bool test_submit_sprite_name(
         transaction_id, sizeof transaction_id,
         "%016llx%016llx", 1ULL,
         (unsigned long long)s_test_submit_id);
-    gui_session_submit_terminal terminal = {0};
+    gui_project_operation_submit_terminal terminal = {0};
     tp_error error = {{0}};
     const gui_text_ref ref = {
         sprite->atlas_id, tp_id128_nil(),

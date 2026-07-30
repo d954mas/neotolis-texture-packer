@@ -40,7 +40,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#include "tp_core/tp_model.h" /* tp_result */
+#include "tp_core/tp_pack_result.h" /* tp_result */
 #include "tp_core/tp_id.h"
 #include "tp_core/tp_session.h"
 

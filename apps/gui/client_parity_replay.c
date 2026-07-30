@@ -1,4 +1,4 @@
-#include "gui_session_adapter.h"
+#include "gui_project_operations.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -84,7 +84,7 @@ static int64_t revision_of(tp_session *session, tp_error *err) {
 }
 
 static tp_session *s_replay_client;
-static const gui_session_submit_identity s_replay_identity = {
+static const gui_project_operation_submit_identity s_replay_identity = {
     .origin_view_id = {{0xc1U}},
     .draft_instance_id = {{0xd1U}},
 };
@@ -108,7 +108,7 @@ static const char *next_txn(void) {
 
 static int require_submit_terminal(
     const char *step, tp_status status, const char *transaction_id,
-    const gui_session_submit_terminal *terminal, bool expect_no_change,
+    const gui_project_operation_submit_terminal *terminal, bool expect_no_change,
     const tp_error *err) {
     if (status != TP_STATUS_OK) {
         return fail(step, status, err);
@@ -274,7 +274,7 @@ static int snapshot_counters(tp_session *session, int64_t *revision,
 }
 
 /* Applies one already-built op through the same tp_session path the GUI adapter
- * uses internally (see gui_session_adapter.c apply_atlas_ops), but preserves the
+ * uses internally (see gui_project_operations.c apply_atlas_ops), but preserves the
  * tp_txn_result so a rejected intent's structured {status, field, op_index} can be
  * surfaced. tp_error -- the adapter's only error channel -- flattens the per-field
  * token away, so the harness reads the diagnostic from the very result the adapter
@@ -348,9 +348,9 @@ static int outcome_error(const char *path) {
     memset(&settings, 0, sizeof settings);
     settings.mask = TP_AF_PADDING;
     settings.padding = -1;
-    const tp_status status = gui_session_set_atlas_settings(
+    const tp_status status = gui_project_operation_set_atlas_settings(
         s_replay_client, atlas_id, revision_before, &settings,
-        (gui_session_submit_identity){0}, NULL, NULL, &err);
+        (gui_project_operation_submit_identity){0}, NULL, NULL, &err);
     int64_t revision_after = 0;
     uint64_t events_after = 0U;
     const int snapshot_rc = snapshot_counters(
@@ -421,8 +421,8 @@ static int outcome_no_op(const char *path) {
         return 1;
     }
     const char *transaction_id = next_txn();
-    gui_session_submit_terminal terminal = {0};
-    const tp_status status = gui_session_submit_atlas_name(
+    gui_project_operation_submit_terminal terminal = {0};
+    const tp_status status = gui_project_operation_submit_atlas_name(
         s_replay_client, atlas_id, revision_before, "atlas1",
         s_replay_identity, transaction_id, &terminal, &err);
     int64_t revision_after = 0;
@@ -561,15 +561,15 @@ static int outcome(const char *name, const char *path) {
 
 static int replay_atlas(tp_session *session, const harvest_ids *ids,
                         tp_error *err) {
-    tp_status status = gui_session_create_atlas(
+    tp_status status = gui_project_operation_create_atlas(
         s_replay_client, ids->atlas_id, ids->target_id,
         revision_of(session, err),
         "two", ids->target_exporter, ids->target_out_path,
         ids->target_enabled, NULL, err);
     if (status != TP_STATUS_OK) return fail("atlas create", status, err);
     const char *transaction_id = next_txn();
-    gui_session_submit_terminal terminal = {0};
-    status = gui_session_submit_atlas_name(
+    gui_project_operation_submit_terminal terminal = {0};
+    status = gui_project_operation_submit_atlas_name(
         s_replay_client, ids->atlas_id, revision_of(session, err),
         "golden", s_replay_identity, transaction_id, &terminal, err);
     if (require_submit_terminal(
@@ -580,10 +580,10 @@ static int replay_atlas(tp_session *session, const harvest_ids *ids,
     settings.mask = TP_AF_PADDING | TP_AF_MARGIN;
     settings.padding = 4;
     settings.margin = 2;
-    status = gui_session_set_atlas_settings(s_replay_client, ids->atlas_id,
+    status = gui_project_operation_set_atlas_settings(s_replay_client, ids->atlas_id,
                                             revision_of(session, err),
                                             &settings,
-                                            (gui_session_submit_identity){0},
+                                            (gui_project_operation_submit_identity){0},
                                             NULL, NULL, err);
     return status == TP_STATUS_OK ? 0 : fail("atlas settings", status, err);
 }
@@ -593,7 +593,7 @@ static int replay_source(tp_session *session, const harvest_ids *ids,
     tp_id128 atlas_id;
     if (base_atlas(session, &atlas_id, err) != 0) return 1;
     const char *paths[1] = {ids->source_path};
-    const tp_status status = gui_session_add_sources(
+    const tp_status status = gui_project_operation_add_sources(
         s_replay_client, atlas_id, &ids->source_id, paths, 1,
         ids->source_kind, revision_of(session, err), err);
     return status == TP_STATUS_OK ? 0 : fail("source add", status, err);
@@ -626,8 +626,8 @@ static int replay_sprite(tp_session *session, tp_error *err) {
         resolve_sprite(session, atlas_id, "hero", &source_id, source_key,
                        sizeof source_key, err) != 0) return 1;
     const char *transaction_id = next_txn();
-    gui_session_submit_terminal terminal = {0};
-    tp_status status = gui_session_submit_sprite_name(
+    gui_project_operation_submit_terminal terminal = {0};
+    tp_status status = gui_project_operation_submit_sprite_name(
         s_replay_client, atlas_id, source_id, source_key,
         revision_of(session, err), "hero_final", s_replay_identity,
         transaction_id, &terminal, err);
@@ -648,10 +648,10 @@ static int replay_sprite(tp_session *session, tp_error *err) {
     settings.ov_max_vertices = 6;
     settings.ov_margin = 5;
     settings.ov_extrude = 2;
-    status = gui_session_set_sprite_override(
+    status = gui_project_operation_set_sprite_override(
         s_replay_client, atlas_id, source_id, source_key,
         revision_of(session, err), &settings,
-        (gui_session_submit_identity){0}, NULL, NULL, err);
+        (gui_project_operation_submit_identity){0}, NULL, NULL, err);
     return status == TP_STATUS_OK ? 0 : fail("sprite settings", status, err);
 }
 
@@ -663,8 +663,8 @@ static int replay_sprite_clear(tp_session *session, tp_error *err) {
         resolve_sprite(session, atlas_id, "hero", &source_id, source_key,
                        sizeof source_key, err) != 0) return 1;
     const char *transaction_id = next_txn();
-    gui_session_submit_terminal terminal = {0};
-    tp_status status = gui_session_submit_sprite_name(
+    gui_project_operation_submit_terminal terminal = {0};
+    tp_status status = gui_project_operation_submit_sprite_name(
         s_replay_client, atlas_id, source_id, source_key,
         revision_of(session, err), NULL, s_replay_identity,
         transaction_id, &terminal, err);
@@ -681,10 +681,10 @@ static int replay_sprite_clear(tp_session *session, tp_error *err) {
     settings.ov_max_vertices = TP_PROJECT_OV_INHERIT;
     settings.ov_margin = TP_PROJECT_OV_INHERIT;
     settings.ov_extrude = TP_PROJECT_OV_INHERIT;
-    status = gui_session_set_sprite_override(
+    status = gui_project_operation_set_sprite_override(
         s_replay_client, atlas_id, source_id, source_key,
         revision_of(session, err), &settings,
-        (gui_session_submit_identity){0}, NULL, NULL, err);
+        (gui_project_operation_submit_identity){0}, NULL, NULL, err);
     return status == TP_STATUS_OK ? 0 : fail("sprite clear", status, err);
 }
 
@@ -702,19 +702,19 @@ static int replay_animation(tp_session *session, const harvest_ids *ids,
                        sizeof coin_key, err) != 0) return 1;
     tp_op_sprite_ref frames[2] = {
         {hero_source, hero_key}, {coin_source, coin_key}};
-    tp_status status = gui_session_create_animation(
+    tp_status status = gui_project_operation_create_animation(
         s_replay_client, atlas_id, ids->animation_id,
         revision_of(session, err), "walk", frames, 2, NULL, err);
     if (status != TP_STATUS_OK) return fail("animation create", status, err);
-    status = gui_session_add_animation_frames(
+    status = gui_project_operation_add_animation_frames(
         s_replay_client, atlas_id, ids->animation_id,
         revision_of(session, err), frames, 1, err);
     if (status != TP_STATUS_OK) return fail("animation frame add", status, err);
-    status = gui_session_move_animation_frame(
+    status = gui_project_operation_move_animation_frame(
         s_replay_client, atlas_id, ids->animation_id,
         revision_of(session, err), 0, 2, err);
     if (status != TP_STATUS_OK) return fail("animation frame move", status, err);
-    status = gui_session_remove_animation_frame(
+    status = gui_project_operation_remove_animation_frame(
         s_replay_client, atlas_id, ids->animation_id,
         revision_of(session, err), 1, err);
     if (status != TP_STATUS_OK) return fail("animation frame remove", status, err);
@@ -725,14 +725,14 @@ static int replay_animation(tp_session *session, const harvest_ids *ids,
     settings.playback = 1;
     settings.flip_h = true;
     settings.flip_v = false;
-    status = gui_session_set_animation_settings(
+    status = gui_project_operation_set_animation_settings(
         s_replay_client, atlas_id, ids->animation_id,
         revision_of(session, err), &settings,
-        (gui_session_submit_identity){0}, NULL, NULL, err);
+        (gui_project_operation_submit_identity){0}, NULL, NULL, err);
     if (status != TP_STATUS_OK) return fail("animation settings", status, err);
     const char *transaction_id = next_txn();
-    gui_session_submit_terminal terminal = {0};
-    status = gui_session_submit_animation_name(
+    gui_project_operation_submit_terminal terminal = {0};
+    status = gui_project_operation_submit_animation_name(
         s_replay_client, atlas_id, ids->animation_id,
         revision_of(session, err), "stroll", s_replay_identity,
         transaction_id, &terminal, err);
@@ -745,13 +745,13 @@ static int replay_target(tp_session *session, const harvest_ids *ids,
                          tp_error *err) {
     tp_id128 atlas_id;
     if (base_atlas(session, &atlas_id, err) != 0) return 1;
-    tp_status status = gui_session_create_target(
+    tp_status status = gui_project_operation_create_target(
         s_replay_client, atlas_id, ids->target_id,
         revision_of(session, err), "defold", "out/d", true, NULL, err);
     if (status != TP_STATUS_OK) return fail("target create", status, err);
     const char *transaction_id = next_txn();
-    gui_session_submit_terminal terminal = {0};
-    status = gui_session_submit_target_out_path(
+    gui_project_operation_submit_terminal terminal = {0};
+    status = gui_project_operation_submit_target_out_path(
         s_replay_client, atlas_id, ids->target_id,
         revision_of(session, err), "out/d2", s_replay_identity,
         transaction_id, &terminal, err);
@@ -762,10 +762,10 @@ static int replay_target(tp_session *session, const harvest_ids *ids,
     memset(&settings, 0, sizeof settings);
     settings.mask = TP_TF_ENABLED;
     settings.enabled = false;
-    status = gui_session_set_target(
+    status = gui_project_operation_set_target(
         s_replay_client, atlas_id, ids->target_id,
         revision_of(session, err), &settings,
-        (gui_session_submit_identity){0}, NULL, NULL, err);
+        (gui_project_operation_submit_identity){0}, NULL, NULL, err);
     return status == TP_STATUS_OK ? 0 : fail("target settings", status, err);
 }
 
@@ -781,7 +781,7 @@ static int replay_remove(tp_session *session, const char *family,
         if (!atlas) { tp_session_snapshot_destroy(snapshot); return 1; }
         const tp_id128 id = atlas->id;
         tp_session_snapshot_destroy(snapshot);
-        status = gui_session_remove_atlas(
+        status = gui_project_operation_remove_atlas(
             s_replay_client, id, revision_of(session, err), err);
     } else if (strcmp(family, "source_remove") == 0) {
         const tp_snapshot_atlas *atlas = find_atlas(snapshot, "atlas1");
@@ -789,7 +789,7 @@ static int replay_remove(tp_session *session, const char *family,
         if (!source) { tp_session_snapshot_destroy(snapshot); return 1; }
         const tp_id128 id = source->id;
         tp_session_snapshot_destroy(snapshot);
-        status = gui_session_remove_source(s_replay_client, atlas_id, id,
+        status = gui_project_operation_remove_source(s_replay_client, atlas_id, id,
                                             revision_of(session, err),
                                             err);
     } else if (strcmp(family, "animation_remove") == 0) {
@@ -799,7 +799,7 @@ static int replay_remove(tp_session *session, const char *family,
         if (!animation) { tp_session_snapshot_destroy(snapshot); return 1; }
         const tp_id128 id = animation->id;
         tp_session_snapshot_destroy(snapshot);
-        status = gui_session_remove_animation(s_replay_client, atlas_id, id,
+        status = gui_project_operation_remove_animation(s_replay_client, atlas_id, id,
                                                revision_of(session, err),
                                                err);
     } else {
@@ -808,7 +808,7 @@ static int replay_remove(tp_session *session, const char *family,
         if (!target) { tp_session_snapshot_destroy(snapshot); return 1; }
         const tp_id128 id = target->id;
         tp_session_snapshot_destroy(snapshot);
-        status = gui_session_remove_target(s_replay_client, atlas_id, id,
+        status = gui_project_operation_remove_target(s_replay_client, atlas_id, id,
                                             revision_of(session, err),
                                             err);
     }

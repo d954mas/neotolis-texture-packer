@@ -41,12 +41,12 @@ static void edit_transaction_id(
     out[32] = '\0';
 }
 
-static gui_session_submit_identity draft_identity(
+static gui_project_operation_submit_identity draft_identity(
     const gui_edit_state *edit) {
     if (!edit || edit->phase == GUI_EDIT_IDLE) {
-        return (gui_session_submit_identity){0};
+        return (gui_project_operation_submit_identity){0};
     }
-    return (gui_session_submit_identity){
+    return (gui_project_operation_submit_identity){
         .origin_view_id = edit->view_id,
         .draft_instance_id = edit->draft_instance_id,
     };
@@ -1239,9 +1239,9 @@ void gui_edit_anim_add_frames(const gui_animation_ref *animation,
  * concrete mutation owner. Nothing here knows a field name: the row does. */
 static tp_status submit_draft_operation(
     const gui_draft_owner *draft,
-    gui_session_submit_identity identity,
+    gui_project_operation_submit_identity identity,
     const char transaction_id[33],
-    gui_session_submit_terminal *terminal,
+    gui_project_operation_submit_terminal *terminal,
     tp_error *error) {
     draft_key key;
     draft_resolve(draft, &key);
@@ -1382,9 +1382,9 @@ static bool submit_draft(bool apply_mine) {
         return true;
     }
 
-    const gui_session_submit_identity identity =
+    const gui_project_operation_submit_identity identity =
         draft_identity(edit);
-    gui_session_submit_terminal terminal = {0};
+    gui_project_operation_submit_terminal terminal = {0};
     status = submit_draft_operation(
         draft, identity, transaction_id,
         &terminal, &error);

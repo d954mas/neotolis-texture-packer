@@ -16,7 +16,7 @@
 #include "tp_core/tp_arena.h"
 #include "tp_core/tp_export.h"
 #include "tp_core/tp_identity.h"
-#include "tp_core/tp_model.h"
+#include "tp_core/tp_pack_result.h"
 #include "tp_core/tp_pack.h"
 #include "tp_core/tp_scan.h"
 #include "tp_core/tp_build_worker.h"

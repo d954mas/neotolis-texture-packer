@@ -63,19 +63,19 @@ typedef struct gui_project_controller_status_port {
     void *context;
 } gui_project_controller_status_port;
 
-typedef struct gui_session_submit_identity {
+typedef struct gui_project_operation_submit_identity {
     tp_id128 origin_view_id;
     tp_id128 draft_instance_id;
-} gui_session_submit_identity;
+} gui_project_operation_submit_identity;
 
-typedef struct gui_session_submit_terminal {
+typedef struct gui_project_operation_submit_terminal {
     char transaction_id[33];
-    gui_session_submit_identity identity;
+    gui_project_operation_submit_identity identity;
     tp_status status;
     bool committed;
     bool no_change;
     int64_t revision;
-} gui_session_submit_terminal;
+} gui_project_operation_submit_terminal;
 
 /* Creates the initial fresh in-memory project (one default atlas, no path, clean). Crash recovery is
  * collected and resolved separately through the R6 APIs below; startup never adopts an orphan live. */
@@ -244,9 +244,9 @@ typedef struct gui_text_ref {
  * clear -- callers that mean "clear" pass "". */
 tp_status gui_project_submit_text(
     tp_op_kind kind, const gui_text_ref *ref,
-    const char *value, gui_session_submit_identity identity,
+    const char *value, gui_project_operation_submit_identity identity,
     const char transaction_id[33],
-    gui_session_submit_terminal *terminal, tp_error *err);
+    gui_project_operation_submit_terminal *terminal, tp_error *err);
 
 /* Sets atlas knobs via an atlas.settings.set transaction. The caller supplies the
  * built payload + presence mask; value RANGES are core's (the op validates) and the
@@ -254,32 +254,32 @@ tp_status gui_project_submit_text(
 tp_status gui_project_submit_atlas_settings(
     tp_id128 atlas_id, int64_t expected_revision,
     const tp_op_atlas_settings *settings,
-    gui_session_submit_identity identity,
+    gui_project_operation_submit_identity identity,
     const char transaction_id[33],
-    gui_session_submit_terminal *out_terminal,
+    gui_project_operation_submit_terminal *out_terminal,
     tp_error *err);
 
 /* --- region-panel per-sprite overrides (sparse: a clear that leaves only defaults
  * drops the override entry, keeping byte-identical saves) --- */
 tp_status gui_project_submit_sprite_origin(
     const gui_sprite_ref *sprite, int axis, float value,
-    gui_session_submit_identity identity,
+    gui_project_operation_submit_identity identity,
     const char transaction_id[33],
-    gui_session_submit_terminal *terminal, tp_error *err);
+    gui_project_operation_submit_terminal *terminal, tp_error *err);
 tp_status gui_project_submit_sprite_slice9(
     const gui_sprite_ref *sprite, int component, int value,
-    gui_session_submit_identity identity,
+    gui_project_operation_submit_identity identity,
     const char transaction_id[33],
-    gui_session_submit_terminal *terminal, tp_error *err);
+    gui_project_operation_submit_terminal *terminal, tp_error *err);
 /* Sprite payload submit: the caller supplies the built sprite.settings.set
  * payload + presence mask. Origin/slice9 keep their own entry points because the
  * untouched sibling components are read from the LIVE snapshot here. */
 tp_status gui_project_submit_sprite_settings(
     const gui_sprite_ref *sprite,
     const tp_op_sprite_set *settings,
-    gui_session_submit_identity identity,
+    gui_project_operation_submit_identity identity,
     const char transaction_id[33],
-    gui_session_submit_terminal *terminal, tp_error *err);
+    gui_project_operation_submit_terminal *terminal, tp_error *err);
 
 /* --- animations (explicit project assembly only) --- */
 /* Appends an animation and fills it with `frames` (in the given order) as ONE undo entry. The id is
@@ -294,9 +294,9 @@ bool gui_project_remove_animation(const gui_animation_ref *animation);
 tp_status gui_project_submit_animation_settings(
     const gui_animation_ref *animation,
     const tp_op_anim_settings *settings,
-    gui_session_submit_identity identity,
+    gui_project_operation_submit_identity identity,
     const char transaction_id[33],
-    gui_session_submit_terminal *terminal, tp_error *err);
+    gui_project_operation_submit_terminal *terminal, tp_error *err);
 /* Appends `frames` (in order) to animation `anim_index` as ONE undo entry. */
 bool gui_project_anim_add_frames(const gui_animation_ref *animation,
                                  const tp_op_sprite_ref *frames, int count);
