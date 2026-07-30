@@ -2,6 +2,22 @@
 # Boundary gates: greppable rules that keep the tp_core / frontend split honest.
 # Run from the repo root. Exit 0 = clean.
 # A legit exception is annotated in-source with "boundary-ok:" on the same line.
+#
+# Native Windows CTest can launch Git Bash with a PATH that does not contain
+# Bash's own /usr/bin directory. Establish it using shell parameter expansion
+# before the gate calls grep/sed/awk/mktemp.
+case "${BASH:-}" in
+    */*)
+        _tp_bash_bin=${BASH%/*}
+        case ":${PATH:-}:" in
+            *":$_tp_bash_bin:"*) ;;
+            *) PATH="$_tp_bash_bin${PATH:+:$PATH}" ;;
+        esac
+        export PATH
+        unset _tp_bash_bin
+        ;;
+esac
+
 set -u
 fail=0
 

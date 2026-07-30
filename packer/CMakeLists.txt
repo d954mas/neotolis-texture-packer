@@ -136,21 +136,12 @@ find_program(TP_BASH NAMES bash)
 if(TP_BASH)
     add_test(NAME tp_boundaries_grep
         COMMAND "${TP_BASH}" "${CMAKE_SOURCE_DIR}/scripts/check_boundaries.sh")
-    # The script is a POSIX shell program: it needs grep/sed/awk/find/xargs/
-    # mktemp, not just an interpreter. A non-login bash inherits the caller's
-    # PATH verbatim, so on a plain Windows shell the gate either dies on
-    # "grep: command not found" or, worse, resolves Windows' System32 find.exe
-    # instead of GNU find. The toolbox always ships in the same directory as
-    # the bash we just located (Git for Windows usr/bin, /usr/bin or /bin on
-    # POSIX), so prepend exactly that directory -- no login shell (whose
-    # profile may cd elsewhere and defeat WORKING_DIRECTORY), no PATH probing,
-    # and no cost at run time. A genuinely missing bash still lands in the
-    # fail-closed stand-in below.
-    get_filename_component(TP_BASH_TOOL_DIR "${TP_BASH}" DIRECTORY)
+    # Keep the invocation non-login: a login profile may cd elsewhere and
+    # defeat WORKING_DIRECTORY. The script establishes Bash's own executable
+    # directory in its POSIX PATH before invoking Unix tools.
     set_tests_properties(tp_boundaries_grep PROPERTIES
         WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
-        LABELS "architecture"
-        ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${TP_BASH_TOOL_DIR}")
+        LABELS "architecture")
 else()
     # The stand-in prints the reason and FAIL_REGULAR_EXPRESSION turns that
     # output into a test failure (cmake -E echo itself exits 0), keeping the
