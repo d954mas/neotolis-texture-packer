@@ -14,6 +14,14 @@ session. It does not describe an available command today.
 - GUI, MCP, and Dev API never implement project rules independently.
 - An agent must not edit a second hidden project copy while a GUI session is
   authoritative.
+- A read-only ordinary CLI may inspect the saved file while a live session
+  exists, but its machine report identifies `state_source: "saved_file"` so it
+  cannot be mistaken for live unsaved state.
+- A mutating ordinary CLI receives `project_live` while a cooperating live
+  session owns the path. A deliberate emergency/debug override may bypass that
+  cooperating lease, but it is never the ordinary workflow. Its exact CLI
+  spelling, safeguards, and machine-report field remain open release contracts;
+  it does not authorize silently overwriting an externally changed file.
 
 Equal capability does not require identical endpoint catalogs. A compact
 transaction endpoint may expose the same internal operation vocabulary that the
@@ -106,6 +114,23 @@ Inspect/validate may initially remain synchronous snapshot operations; the
 current capability matrix explicitly marks asynchronous inspect/validate jobs
 as not implemented.
 
+## GUI presence
+
+When automation is present, the GUI exposes connection and authorization state,
+the external controller identity, Disconnect/Revoke, transaction authorship in
+History, and ownership-handoff/recovery progress. These surfaces observe the
+same controller/session state as the transport; they do not infer presence from
+display names or maintain a second authority.
+
+Visible authorship distinguishes human and external-controller transactions.
+The GUI also provides a live activity surface for the controller's current
+transaction/action with a route to the affected project object when one exists.
+Its exact banner, badge, and recent-highlight presentation remains a GUI design
+choice.
+
+Per-action confirmation dialogs and arbitrary UI injection are not required by
+this transport contract.
+
 ## Synchronization
 
 On attach, the client receives a complete immutable snapshot and an observation
@@ -154,3 +179,11 @@ typed preflight, capability loss, dry-run, and publication contracts as human
 operations.
 
 Exact handshake field names and wire schemas remain open release contracts.
+
+## End-to-end acceptance
+
+With a project open in the GUI, one external controller can submit one
+multi-operation transaction through the live transport. The GUI observes one
+History entry with the controller author, and one Undo restores the exact prior
+project meaning. No saved-file shadow copy, delayed merge, or client-specific
+validation path participates in that flow.

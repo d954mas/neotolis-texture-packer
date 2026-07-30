@@ -82,6 +82,17 @@ target a directory or a deterministic archive with a versioned artifact
 manifest. Traversal, absolute names, case collisions, undeclared files, and
 partial publication are rejected.
 
+The packaged distribution form is a ZIP-compatible `.ntformat` archive with
+`format.json` at its root. Exact manifest field names remain versioned/open, but
+manifest, package, format-API, and external data-format versions remain
+different concepts.
+
+Archive export uses canonical `{atlas}/{target}/...` paths and a versioned
+`manifest.json`. The manifest identifies the schema/tool/project and lists
+artifacts with sizes and hashes. The treatment of a timestamp must be settled
+without violating deterministic-output requirements before the archive schema
+is released.
+
 ## Detection
 
 Detection is ranked evidence, never an irreversible hidden choice:
@@ -94,6 +105,12 @@ Detection is ranked evidence, never an irreversible hidden choice:
 
 The selected format ID is stored on a linked source and never silently changes
 on Refresh. A validated Change Format operation is explicit.
+
+Saved-file automation provides machine-readable `atlas detect`, `atlas inspect`,
+and `atlas extract --dry-run --json` capability shapes over this same core.
+Package authors also need list/inspect/validate/test surfaces. Exact
+install/uninstall/rescan command names remain an implementation-time CLI
+decision rather than a durable product contract.
 
 ## Linked atlas sources
 
@@ -172,6 +189,24 @@ spike finds an active defect stream in the used GC, debug-hook, or allocator
 areas, the fallback is the latest PUC Lua 5.4.x without changing the sandbox
 API.
 
+## Reference formats
+
+The reference sequence proves the common path rather than adding
+format-specific orchestration:
+
+1. Neotolis JSON remains the builtin full-fidelity export/import reference with
+   an explicit marker and D4/polygon/multipage extraction fixtures.
+2. TexturePacker JSON Hash is the preferred first external sandboxed-package
+   candidate if implementation-time fixture revalidation confirms it, exposing
+   generic, PixiJS, and Phaser compatibility profiles and exercising detection,
+   trim, rotation, pivot, 9-slice, animations, import, and export.
+3. Defold remains builtin initially. `.tpatlas` provides complete import with
+   animations; `.tpinfo` provides layout-only import through safe companion-file
+   access.
+
+Additional formats follow only after these paths prove the package, IR,
+capability, and conformance contracts.
+
 ## Package verification
 
 Built-in and external packages run equivalent descriptor-level tests:
@@ -182,3 +217,17 @@ Built-in and external packages run equivalent descriptor-level tests:
 - multipage, aliases, and animations;
 - import/export round trips where meaningful;
 - path safety and cancellation/resource limits.
+
+## End-to-end acceptance
+
+A foreign atlas can be detected or explicitly selected, inspected, used as a
+read-only linked source, extracted at full source size into its current atlas,
+repacked through the ordinary raw-RGBA path, and exported to another registered
+format. GUI and CLI use the same importer, materializer, transaction,
+capability, and publication contracts throughout.
+
+The acceptance matrix includes the full-fidelity Neotolis
+D4/polygon/multipage/alias/animation oracle and a real supported
+TexturePacker/Pixi profile covering trim, rotation, pivot or 9-slice, and
+animations. The end-to-end flow must exercise these interoperability facts, not
+only a trivial rectangular single-page atlas.

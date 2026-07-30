@@ -63,6 +63,26 @@ presentation state. A 30-atlas / 5000-sprite bench fixture validates sub-100 ms
 ordinary interactions, non-blocking refresh, virtualized lists, and a bounded
 thumbnail cache.
 
+## Settings provenance and operation surfaces
+
+For every inherited setting the target core exposes both the effective value
+and its origin. Clients use that information consistently:
+
+- an overridden field has a non-default marker;
+- a modified-only view is derived from provenance;
+- reverting means a typed clear/`clear_override` operation at the level that
+  supplied the value, not assigning the currently inherited value;
+- validation runs on effective values.
+
+Any new persisted default layer requires a project schema newer than v5 and an
+explicit migration. The presentation contract does not authorize silently
+adding fields to canonical v5.
+
+The operation catalog supplies stable labels, label templates, argument types,
+ranges/enums, and clear/inherit behavior. The target command palette indexes
+that catalog rather than maintaining a second command vocabulary in the GUI.
+Named Undo uses the same operation/transaction labels.
+
 ## Export interaction
 
 Future project-level export rules are edited at the project root. Atlas
@@ -79,6 +99,22 @@ Export preflight is read-only. It reports:
 
 Opening preflight never edits target configuration. Canonical v5 continues to
 use per-atlas targets until a newer schema and migration land.
+
+## Visible history and diagnostics
+
+The History surface shows semantic transactions from human and automation
+clients in one order. Each entry has its transaction label and author. One
+multi-operation transaction is one entry and one Undo.
+
+A successful Save may appear as a non-undoable checkpoint. Failed Save creates
+no checkpoint. Source refresh/runtime markers may appear as non-undoable
+session information; History is not a persistent audit log.
+
+Structured notices feed a persistent Problems/status surface. A problem retains
+enough typed target information to navigate to the affected project object,
+canvas item, or field. Pack freshness, project dirty state, source health,
+running work, and export loss remain separate facts rather than one generic
+“changed” indicator.
 
 ## Workspace model
 
