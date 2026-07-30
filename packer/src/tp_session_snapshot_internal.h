@@ -32,12 +32,15 @@ struct tp_session_snapshot {
     bool has_saved_file_fingerprint;
 };
 
-/* Caller holds the session gate. The capture retains the exact immutable
- * generation and scalar cut but does not materialize DTO arrays. */
-tp_status tp_session_snapshot__capture_locked(
+/* Runs on the session owner thread; the entry point that reaches it has already
+ * asserted ownership. The capture fixes the observation cut -- the exact
+ * immutable generation plus the committed scalars -- but does not materialize
+ * DTO arrays. */
+tp_status tp_session_snapshot__capture(
     const tp_session *session, tp_session_snapshot **out, tp_error *err);
-/* Materializes a captured snapshot outside the session gate. On failure the
- * capture is destroyed; on success ownership remains with the caller. */
+/* Materializes a captured snapshot after the cut, so a later commit cannot
+ * change what it publishes. On failure the capture is destroyed; on success
+ * ownership remains with the caller. */
 tp_status tp_session_snapshot__materialize_captured(
     tp_session_snapshot *snapshot, tp_error *err);
 

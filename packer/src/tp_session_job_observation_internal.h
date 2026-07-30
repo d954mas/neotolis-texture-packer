@@ -44,8 +44,8 @@ void tp_session_owned_job_configure_observation(
     const tp_session_job_descriptor *descriptor,
     tp_session_job_observe_fn observe);
 
-/* Host-admission-thread port. It acquires the session gate; workers only
- * update their private atomics/immutable terminal payload. */
+/* Host-admission-thread port; it asserts session ownership. Workers only update
+ * their private atomics/immutable terminal payload. */
 tp_session_job_admission tp_session_job_observation_admit_internal(
     tp_session *session, tp_session_owned_job *job);
 
@@ -62,28 +62,29 @@ tp_status tp_session_job_observation_begin_internal(
     tp_session *session, tp_session_owned_job *job, tp_error *err);
 
 /* TEST SEAM, compiled out of every shipping build. Positions the monotonic
- * request-id counter so __reserve_request_id_locked's exhaustion rejection is
+ * request-id counter so __reserve_request_id's exhaustion rejection is
  * reachable without reserving 2^64 ids. */
 void tp_session_job_observation__test_set_next_request_id(
     tp_session *session, uint64_t next_request_id);
 #endif
 
-/* Session-family locked helpers. */
-void tp_session_job_observation__copy_locked(
+/* Session-family helpers. The owner-thread assertion belongs to the entry point
+ * that reaches them, so none of these repeats it. */
+void tp_session_job_observation__copy(
     tp_session *session, tp_session_job_observed_state *out_state,
     tp_session_job_observed_result *out_result,
     tp_session_owned_job **out_job_pin,
     tp_session_owned_job **out_result_pin);
-tp_status tp_session_job_observation__validate_begin_locked(
+tp_status tp_session_job_observation__validate_begin(
     const tp_session *session, const tp_session_owned_job *job,
     tp_error *err);
-tp_session_owned_job *tp_session_job_observation__detach_locked(
+tp_session_owned_job *tp_session_job_observation__detach(
     tp_session *session, tp_session_owned_job *expected);
-tp_status tp_session_job_observation__begin_locked(
+tp_status tp_session_job_observation__begin(
     tp_session *session, tp_session_owned_job *job,
     tp_session_owned_job **out_retired, tp_error *err);
 /* Sole owner of the assign-if-zero / id-space-exhausted rule. */
-tp_status tp_session_job_observation__reserve_request_id_locked(
+tp_status tp_session_job_observation__reserve_request_id(
     tp_session *session, tp_session_owned_job *job, tp_error *err);
 
 #endif

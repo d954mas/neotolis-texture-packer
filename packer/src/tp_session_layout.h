@@ -3,21 +3,11 @@
 
 #include "tp_session_internal.h"
 
-/* struct tp_session embeds the platform lock by value, so the session family's
- * layout header carries the lock type. Only the session writer, snapshot, and
- * atomic-observation TUs read the layout; other includers keep tp_session
- * opaque. */
-#if defined(_WIN32)
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <windows.h>
-#else
-#include <pthread.h>
-#endif
+/* struct tp_session stores its owner thread by value, so the session family's
+ * layout header carries the thread-identity type. Only the session writer,
+ * snapshot, job-observation, and atomic-observation TUs read the layout; other
+ * includers keep tp_session opaque. */
+#include "tinycthread.h"
 
 typedef struct tp_project_lease tp_project_lease;
 typedef struct tp_session_owned_job tp_session_owned_job;
@@ -44,15 +34,14 @@ typedef struct tp_session_history_marker {
     char *path;                     /* checkpoint: owned canonical path; NULL for refresh */
 } tp_session_history_marker;
 
-/* Serialized single-writer session layout, shared by the writer TU and the
- * snapshot TU which samples committed fields under the gate. It stays private
- * to the session family: no frontend or protocol adapter includes this header. */
+/* Single-owner-thread session layout, shared by the writer TU and the snapshot,
+ * job-observation, and atomic-observation TUs that sample committed fields on
+ * that same thread. It stays private to the session family: no frontend or
+ * protocol adapter includes this header. */
 struct tp_session {
-#if defined(_WIN32)
-    SRWLOCK gate;
-#else
-    pthread_mutex_t gate;
-#endif
+    /* The thread that created the session owns it for its whole lifetime; every
+     * entry point asserts against this (master spec 4.8). */
+    thrd_t owner_thread;
     tp_model *model;
     tp_recovery_live *recovery_live;
     tp_project_lease *project_lease;

@@ -49,7 +49,7 @@ bool tp_session_observation_token_equal(
            left.result_generation == right.result_generation;
 }
 
-static tp_session_observation_token current_token_locked(
+static tp_session_observation_token current_token(
     const tp_session *session) {
     tp_session_observation_token token = {
         .event_sequence = session->event_sequence,
@@ -92,26 +92,22 @@ tp_status tp_session_observe(
             "session observation requires session and output");
     }
     *out = NULL;
+    tp_session__assert_owner_thread(session);
 
-    gate_lock(session);
-    const tp_session_observation_token current =
-        current_token_locked(session);
+    const tp_session_observation_token current = current_token(session);
     if (after && tp_session_observation_token_equal(*after, current)) {
-        gate_unlock(session);
         return TP_STATUS_OK;
     }
 
     tp_session_observation *observation =
         (tp_session_observation *)calloc(1U, sizeof *observation);
     if (!observation) {
-        gate_unlock(session);
         return tp_error_set(
             err, TP_STATUS_OOM, "session observation allocation failed");
     }
     observation->token = current;
-    observation->recovery_health =
-        tp_session__recovery_health_locked(session);
-    tp_session_job_observation__copy_locked(
+    observation->recovery_health = tp_session_recovery_health_query(session);
+    tp_session_job_observation__copy(
         (tp_session *)session, &observation->job_state,
         &observation->job_result, &observation->job_pin,
         &observation->result_pin);
@@ -150,10 +146,9 @@ tp_status tp_session_observe(
 
     tp_status status = TP_STATUS_OK;
     if (snapshot_required) {
-        status = tp_session_snapshot__capture_locked(
+        status = tp_session_snapshot__capture(
             session, &observation->snapshot, err);
     }
-    gate_unlock(session);
     if (status != TP_STATUS_OK) {
         tp_session_job_release_internal(observation->job_pin);
         tp_session_job_release_internal(observation->result_pin);
@@ -191,7 +186,7 @@ tp_status tp_session_observe(
      * token keeps the model and owner counters SEPARATE (each half must be
      * comparable on its own for staleness/future detection), while the DTO
      * publishes their composition. Re-deriving the composition here would only
-     * restate tp_session__recovery_health_locked, not check it. */
+     * restate tp_session_recovery_health_query, not check it. */
     *out = observation;
     return TP_STATUS_OK;
 }

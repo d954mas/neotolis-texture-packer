@@ -49,8 +49,8 @@ The core already provides:
 
 The production GUI still caches its snapshot and drops it at GUI-specific
 mutation chokepoints. A direct session commit from Dev API would not invoke
-those paths. The current event and snapshot APIs are also sampled under separate
-locks, so naively composing them can show state whose event metadata was never
+those paths. The event and snapshot APIs are also sampled by independent calls,
+so naively composing them can show state whose event metadata was never
 reduced.
 
 The architectural delta is therefore:
@@ -156,8 +156,12 @@ One host thread owns session lifetime and admission:
 - workers enqueue owned immutable completions;
 - transport and worker threads never call or retain raw `tp_session *`.
 
-The existing session gate remains defensive synchronization and supports
-focused core tests. It is not a lifetime-management substitute.
+The session owns no lock. It records its creating thread and asserts ownership
+at every entry point, in Debug and Release alike, so a call from a transport or
+worker thread aborts at the call instead of silently corrupting session state.
+The assertion makes the rule above checkable; it is not a lifetime-management
+substitute, and it is not synchronization — nothing else may hold a
+`tp_session *` to synchronize with.
 
 ### 6.2 Shutdown and replacement
 
@@ -241,7 +245,7 @@ acknowledgement, draft target binding, or borrowed pointer across a replacement.
 ## 7. Atomic observation contract
 
 Independent `events_after()` and `snapshot_create()` calls cannot define GUI
-correctness because a commit may occur between their lock acquisitions.
+correctness because a commit may be admitted between the two calls.
 
 The core therefore exposes one owned observation operation conceptually shaped
 as:
@@ -279,7 +283,7 @@ already owns.
 
 ### 7.1 Single cut
 
-Under one session gate, observation:
+On the session owner thread, one observation:
 
 1. fixes the output composite token and `cut_sequence`;
 2. determines whether events after the supplied event cursor remain retained;
@@ -288,8 +292,9 @@ Under one session gate, observation:
 5. captures revision, admission sequence, dirty/identity/recovery scalars, model
    and source generations, and current immutable runtime/job/result handles
    available at that cut;
-6. releases the gate;
-7. materializes owned DTO data outside the gate.
+6. closes the cut;
+7. materializes owned DTO data after the cut, so a later commit admitted on that
+   same thread cannot change what the observation publishes.
 
 The observation owns every returned snapshot/handle lifetime. Borrowed aliases
 must not outlive it.
@@ -397,7 +402,7 @@ Borrowed mutable pointers are forbidden.
 `tp_core` owns the observable slot and token generations. `tp_build` job code
 exposes a constant-time, allocation-free projection callback through its
 refcounted opaque job owner. The explicit host-thread job poll/admission step
-pulls that projection under the session gate, validates/adopts it, and retains
+pulls that projection on the session owner thread, validates/adopts it, and retains
 the type-erased owner as the result handle. Workers update only their private
 atomics and immutable terminal payload; they never push into the session.
 `tp_session_observe()` is read-only: it does not pump transport or admit job
@@ -409,8 +414,8 @@ the final release destroys the Pack arena exactly once.
 The accepted-result slot retains its own immutable completion envelope. Starting
 request B changes the current job projection but does not relabel a retained
 result from request A; an atomic observation can therefore contain B's progress
-and A's explicitly tagged result without ambiguity. Worker-thread creation is
-inside the session admission gate, and the job projection becomes visible only
+and A's explicitly tagged result without ambiguity. Worker creation is a step of
+owner-thread admission, and the job projection becomes visible only
 after creation succeeds, so a failed start preserves the prior state, result,
 token, and owners exactly.
 
@@ -708,7 +713,7 @@ completion. No duplicate second runtime is introduced as an interim solution.
 - Revision conflict never modifies project state.
 - Worker completion after replacement/close is discarded by instance
   generation.
-- Transport response serialization never runs under session gate.
+- Transport response serialization never runs on the session owner thread.
 - No UI-thread filesystem traversal, decode, hash, or blocking job join.
 - One observation batch retains/materializes at most one model generation.
 - No-event polling performs no project clone.

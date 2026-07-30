@@ -12,6 +12,8 @@
 #include <unistd.h>
 #endif
 
+#include "tinycthread.h"
+
 #include "tp_core/tp_operation.h"
 #include "tp_core/tp_identity.h"
 #include "tp_project_lease.h"
@@ -3290,6 +3292,131 @@ void test_history_dto_budget_eviction_shrinks_rows(void) {
     tp_session_destroy(session);
 }
 
+/* Successor to the deleted session-gate coverage. tp_session holds no lock: one
+ * thread owns it from create to destroy and every entry point asserts that
+ * ownership. The owner is the CREATING thread, not the process main thread, so
+ * the whole ingress surface -- admission, commands, queries, snapshot, and
+ * atomic observation -- must run green on a spawned owner. The cross-thread
+ * half is a programming error the assertion traps in Debug and Release alike;
+ * it is deliberately not executed, because a trap would abort the suite.
+ * Unity's assertions longjmp to the runner's frame, so the spawned owner only
+ * records outcomes and main asserts them after the join. */
+typedef struct owner_thread_probe {
+    tp_status create_status;
+    tp_status snapshot_status;
+    tp_status apply_status;
+    tp_status undo_status;
+    tp_status redo_status;
+    tp_status invalidate_status;
+    tp_status observe_status;
+    bool committed;
+    bool observation_present;
+    bool observation_has_snapshot;
+    int64_t revision_after_redo;
+    int history_count;
+    uint64_t event_sequence;
+} owner_thread_probe;
+
+static int owner_thread_main(void *context) {
+    owner_thread_probe *probe = context;
+    uint8_t seed = 0x40U;
+    tp_rng rng = {deterministic_fill, &seed};
+    tp_error err = {{0}};
+    tp_session *session = NULL;
+    probe->create_status = tp_session_create(&rng, &session, &err);
+    if (probe->create_status != TP_STATUS_OK) {
+        return 1;
+    }
+
+    tp_session_snapshot *snapshot = NULL;
+    probe->snapshot_status =
+        tp_session_snapshot_create(session, &snapshot, &err);
+    tp_id128 atlas_id = tp_id128_nil();
+    if (probe->snapshot_status == TP_STATUS_OK) {
+        atlas_id = tp_session_snapshot_atlas_at(snapshot, 0)->id;
+        tp_session_snapshot_destroy(snapshot);
+    }
+
+    static const char kName[] = "owned-by-spawned-thread";
+    tp_operation op;
+    memset(&op, 0, sizeof op);
+    op.kind = TP_OP_ATLAS_RENAME;
+    op.atlas_id = atlas_id;
+    op.u.atlas_rename.name = (char *)malloc(sizeof kName);
+    if (!op.u.atlas_rename.name) {
+        tp_session_destroy(session);
+        return 1;
+    }
+    memcpy(op.u.atlas_rename.name, kName, sizeof kName);
+    tp_txn_request req;
+    memset(&req, 0, sizeof req);
+    req.schema = TP_TXN_SCHEMA;
+    (void)snprintf(req.id_hex, sizeof req.id_hex, "%s",
+                   "0123456789abcdef0123456789abcdef");
+    req.expected_revision = 0;
+    req.ops = &op;
+    req.op_count = 1;
+    tp_txn_result result;
+    memset(&result, 0, sizeof result);
+    probe->apply_status = tp_session_apply(session, &req, &result, &err);
+    probe->committed = result.committed;
+    tp_txn_result_free(&result);
+    tp_operation_free(&op);
+
+    probe->undo_status = tp_session_undo(session, &err);
+    probe->redo_status = tp_session_redo(session, &err);
+    probe->invalidate_status = tp_session_invalidate_sources(session, &err);
+
+    probe->revision_after_redo = tp_session_revision(session);
+    probe->history_count = tp_session_history_count(session);
+    probe->event_sequence = tp_session_event_sequence(session);
+    (void)tp_session_can_undo(session);
+    (void)tp_session_can_redo(session);
+    (void)tp_session_undo_depth(session);
+    (void)tp_session_redo_depth(session);
+    (void)tp_session_recovery_available(session);
+    (void)tp_session_recovery_health_query(session);
+
+    tp_session_observation *observation = NULL;
+    probe->observe_status =
+        tp_session_observe(session, NULL, &observation, &err);
+    probe->observation_present = observation != NULL;
+    probe->observation_has_snapshot =
+        tp_session_observation_snapshot(observation) != NULL;
+    tp_session_observation_destroy(observation);
+
+    tp_session_destroy(session);
+    return 0;
+}
+
+void test_session_owner_is_the_creating_thread_not_the_main_thread(void) {
+    owner_thread_probe probe;
+    memset(&probe, 0, sizeof probe);
+    thrd_t owner;
+    TEST_ASSERT_EQUAL_INT(thrd_success,
+                          thrd_create(&owner, owner_thread_main, &probe));
+    int worker_result = 1;
+    TEST_ASSERT_EQUAL_INT(thrd_success, thrd_join(owner, &worker_result));
+    TEST_ASSERT_EQUAL_INT(0, worker_result);
+
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, probe.create_status);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, probe.snapshot_status);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, probe.apply_status);
+    TEST_ASSERT_TRUE(probe.committed);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, probe.undo_status);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, probe.redo_status);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, probe.invalidate_status);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, probe.observe_status);
+    TEST_ASSERT_TRUE(probe.observation_present);
+    TEST_ASSERT_TRUE(probe.observation_has_snapshot);
+    /* commit, undo, redo -> revision 3; the runtime refresh never advances it. */
+    TEST_ASSERT_EQUAL_INT64(3, probe.revision_after_redo);
+    /* one edit row + one runtime-refresh marker. */
+    TEST_ASSERT_EQUAL_INT(2, probe.history_count);
+    /* committed, undone, redone, source-runtime-changed. */
+    TEST_ASSERT_EQUAL_UINT64(4U, probe.event_sequence);
+}
+
 int main(int argc, char **argv) {
     TEST_ASSERT_TRUE(argc >= 2);
     g_scratch = argv[1];
@@ -3355,5 +3482,6 @@ int main(int argc, char **argv) {
     RUN_TEST(test_history_dto_runtime_refresh_is_visible_and_keeps_revision);
     RUN_TEST(test_history_dto_new_edit_after_undo_discards_redo_rows);
     RUN_TEST(test_history_dto_budget_eviction_shrinks_rows);
+    RUN_TEST(test_session_owner_is_the_creating_thread_not_the_main_thread);
     return UNITY_END();
 }

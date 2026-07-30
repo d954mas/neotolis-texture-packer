@@ -18,7 +18,7 @@ typedef struct fake_job {
 } fake_job;
 
 typedef struct worker_args {
-    tp_session *session;
+    tp_session_owned_job *pinned;
     fake_job *job;
 } worker_args;
 
@@ -59,10 +59,12 @@ static tp_status fail_process_start(void *context, tp_error *error) {
                         "intentional process spawn failure");
 }
 
+/* The worker receives an already-acquired pin. It never touches the session:
+ * one host thread owns that (master spec 4.8), and the refcount -- not the
+ * session -- is what a worker is allowed to hold across a detach. */
 static int pinned_worker(void *context) {
     worker_args *args = context;
-    tp_session_owned_job *owner =
-        tp_session_job_acquire_internal(args->session);
+    tp_session_owned_job *owner = args->pinned;
     atomic_store_explicit(&args->job->acquire_ok,
                           owner == &args->job->owner,
                           memory_order_relaxed);
@@ -96,7 +98,9 @@ void test_detach_cannot_destroy_a_concurrently_pinned_job(void) {
                           tp_session_job_attach_internal(session, &job.owner,
                                                          &error));
 
-    worker_args args = {session, &job};
+    tp_session_owned_job *pinned = tp_session_job_acquire_internal(session);
+    TEST_ASSERT_EQUAL_PTR(&job.owner, pinned);
+    worker_args args = {pinned, &job};
     thrd_t thread;
     TEST_ASSERT_EQUAL_INT(thrd_success,
                           thrd_create(&thread, pinned_worker, &args));

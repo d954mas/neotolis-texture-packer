@@ -68,7 +68,10 @@ static bool running_state_changed(
                sample->cancellation_requested;
 }
 
-static tp_session_job_admission admit_locked(
+/* Split from its entry point because it has ten rejection exits: the retired
+ * result owner is reported out and released exactly once by the caller, so no
+ * exit can leak or double-release it. */
+static tp_session_job_admission admit_observed_job(
     tp_session *session, tp_session_owned_job *job,
     tp_session_owned_job **out_retired_result) {
     NT_ASSERT(session != NULL);
@@ -184,10 +187,10 @@ static tp_session_job_admission admit_locked(
 /* The single site that turns "no request id yet" into an admitted request id.
  * Both host entry points route through it -- tp_session_job_start_internal
  * reserves before it spawns (so the exact admitted identity is encoded into the
- * child request) and __begin_locked reserves for the attach path -- so the
+ * child request) and __begin reserves for the attach path -- so the
  * assign-if-zero rule and the exhaustion rejection cannot drift apart. Calling
  * it twice for the same job is a no-op: a non-zero id is already reserved. */
-tp_status tp_session_job_observation__reserve_request_id_locked(
+tp_status tp_session_job_observation__reserve_request_id(
     tp_session *session, tp_session_owned_job *job, tp_error *err) {
     NT_ASSERT(session != NULL);
     NT_ASSERT(job != NULL);
@@ -209,12 +212,12 @@ tp_status tp_session_job_observation__reserve_request_id_locked(
  * reachable without reserving 2^64 ids. Compiled out of the shipped library. */
 void tp_session_job_observation__test_set_next_request_id(
     tp_session *session, uint64_t next_request_id) {
-    NT_ASSERT(session != NULL);
+    tp_session__assert_owner_thread(session);
     session->next_job_request_id = next_request_id;
 }
 #endif
 
-tp_status tp_session_job_observation__begin_locked(
+tp_status tp_session_job_observation__begin(
     tp_session *session, tp_session_owned_job *job,
     tp_session_owned_job **out_retired, tp_error *err) {
     NT_ASSERT(session != NULL);
@@ -222,13 +225,13 @@ tp_status tp_session_job_observation__begin_locked(
     NT_ASSERT(out_retired != NULL);
     *out_retired = NULL;
     const tp_status shape_status =
-        tp_session_job_observation__validate_begin_locked(
+        tp_session_job_observation__validate_begin(
             session, job, err);
     if (shape_status != TP_STATUS_OK) {
         return shape_status;
     }
     const tp_status reservation_status =
-        tp_session_job_observation__reserve_request_id_locked(
+        tp_session_job_observation__reserve_request_id(
             session, job, err);
     if (reservation_status != TP_STATUS_OK) {
         return reservation_status;
@@ -265,11 +268,11 @@ tp_status tp_session_job_observation__begin_locked(
     return TP_STATUS_OK;
 }
 
-/* Sole owner of the "publishable observed job" shape rule. __begin_locked calls
+/* Sole owner of the "publishable observed job" shape rule. __begin calls
  * it on the way in, and the start path calls it alone as a pre-flight: there the
- * request id is reserved explicitly through __reserve_request_id_locked, which
+ * request id is reserved explicitly through __reserve_request_id, which
  * owns that separate rejection. One definition, so the two paths cannot drift. */
-tp_status tp_session_job_observation__validate_begin_locked(
+tp_status tp_session_job_observation__validate_begin(
     const tp_session *session, const tp_session_owned_job *job,
     tp_error *err) {
     NT_ASSERT(session != NULL);
@@ -293,17 +296,14 @@ tp_status tp_session_job_observation_begin_internal(
             err, TP_STATUS_INVALID_ARGUMENT,
             "job observation begin requires session and owner");
     }
-    gate_lock(session);
+    tp_session__assert_owner_thread(session);
     if (session->discarded) {
-        gate_unlock(session);
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
                             "session was discarded");
     }
     tp_session_owned_job *retired = NULL;
     const tp_status status =
-        tp_session_job_observation__begin_locked(
-            session, job, &retired, err);
-    gate_unlock(session);
+        tp_session_job_observation__begin(session, job, &retired, err);
     tp_session_job_release_internal(retired);
     return status;
 }
@@ -314,16 +314,15 @@ tp_session_job_admission tp_session_job_observation_admit_internal(
     if (!session || !job) {
         return TP_SESSION_JOB_ADMISSION_SUPERSEDED;
     }
-    gate_lock(session);
+    tp_session__assert_owner_thread(session);
     tp_session_owned_job *retired = NULL;
     const tp_session_job_admission admission =
-        admit_locked(session, job, &retired);
-    gate_unlock(session);
+        admit_observed_job(session, job, &retired);
     tp_session_job_release_internal(retired);
     return admission;
 }
 
-void tp_session_job_observation__copy_locked(
+void tp_session_job_observation__copy(
     tp_session *session, tp_session_job_observed_state *out_state,
     tp_session_job_observed_result *out_result,
     tp_session_owned_job **out_job_pin,
@@ -341,7 +340,7 @@ void tp_session_job_observation__copy_locked(
     tp_session_job_retain_internal(*out_result_pin);
 }
 
-tp_session_owned_job *tp_session_job_observation__detach_locked(
+tp_session_owned_job *tp_session_job_observation__detach(
     tp_session *session, tp_session_owned_job *expected) {
     NT_ASSERT(session != NULL);
     if (session->observed_job_owner != expected ||

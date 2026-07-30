@@ -1,7 +1,7 @@
 /* Immutable snapshot materialization and the DTO/selector query surface, split
  * from tp_session.c as the session family's read-only second responsibility zone.
- * It reads committed state through tp_session_layout.h under the shared writer
- * gate and never mutates the live model or its project. */
+ * It reads committed state through tp_session_layout.h on the session's owner
+ * thread and never mutates the live model or its project. */
 #include "tp_core/tp_session.h"
 
 #include <stdlib.h>
@@ -80,11 +80,9 @@ tp_status tp_session_snapshot_create(const tp_session *session,
                             "snapshot requires session and output");
     }
     *out = NULL;
+    tp_session__assert_owner_thread(session);
     tp_session_snapshot *snapshot = NULL;
-    gate_lock(session);
-    tp_status status =
-        tp_session_snapshot__capture_locked(session, &snapshot, err);
-    gate_unlock(session);
+    tp_status status = tp_session_snapshot__capture(session, &snapshot, err);
     if (status != TP_STATUS_OK) {
         return status;
     }
@@ -95,7 +93,7 @@ tp_status tp_session_snapshot_create(const tp_session *session,
     return status;
 }
 
-tp_status tp_session_snapshot__capture_locked(
+tp_status tp_session_snapshot__capture(
     const tp_session *session, tp_session_snapshot **out, tp_error *err) {
     NT_ASSERT(session != NULL);
     NT_ASSERT(out != NULL);

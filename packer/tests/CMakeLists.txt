@@ -50,16 +50,20 @@ tp_add_test(NAME transaction LIBS tp_core unity PRIVATE_SRC)
 
 # Architecture foundation M1: the synchronous session is the only live model
 # owner; snapshots are independently owned and rejected commits publish nothing.
-tp_add_test(NAME session LIBS tp_core unity PRIVATE_SRC
+# tinycthread: the owner-thread contract test drives a whole session lifecycle
+# on a spawned owner, proving the owner is the creating thread.
+tp_add_test(NAME session LIBS tp_core tinycthread unity PRIVATE_SRC
     MAKE_DIRS "${CMAKE_BINARY_DIR}/tp_session_test"
     ARGS "${CMAKE_BINARY_DIR}/tp_session_test")
 
 # The observe-after-cut hook is compiled out of the shipped library, so this
 # target recompiles its TU with TP_ENABLE_TEST_SEAMS (same pattern as
 # tp_test_job_input_token recompiling tp_job.c).
+# tinycthread: tp_session_layout.h stores the owner thread, and tp_core links
+# tinycthread PRIVATE, so a target recompiling a session TU needs its headers.
 tp_add_test(NAME session_observation
     SOURCES test_session_observation.c ../src/tp_session_observation.c
-    LIBS tp_core unity PRIVATE_SRC SEAMS)
+    LIBS tp_core tinycthread unity PRIVATE_SRC SEAMS)
 
 # USA-07 reverse/superseded admission needs a second live observed owner, which
 # tp_session_job_start_internal refuses to create. The coverage runs against
@@ -68,7 +72,7 @@ tp_add_test(NAME session_observation
 # pattern as tp_test_session_observation recompiling tp_session_observation.c).
 tp_add_test(NAME session_job_observation
     SOURCES test_session_job_observation.c ../src/tp_session_job_observation.c
-    LIBS tp_core unity PRIVATE_SRC SEAMS)
+    LIBS tp_core tinycthread unity PRIVATE_SRC SEAMS)
 
 # Owner refcount invariants must remain executable in Release, where libc
 # assert() would compile away. The parent probe succeeds only when its child
