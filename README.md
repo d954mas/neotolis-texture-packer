@@ -1,134 +1,41 @@
 # Neotolis Texture Packer
 
-A standalone texture/atlas packer built on [neotolis-engine](https://github.com/d954mas/neotolis-engine):
-**one packing core, two equal frontends** (native GUI + CLI), pluggable export
-formats. The packer is the engine's NFP/Minkowski **concave** vector packer —
-it nests true silhouettes (not just rectangles), tries all 8 D4 orientations
-(4 rotations × 2 flips), trims, deduplicates, and packs deterministically.
-
-**Status: v0.2.0.** The native GUI and the `ntpacker` CLI both ship: headless
-pack/export, project inspection/validation, and full project editing from the
-command line sit alongside the GUI's packing, settings, and animations.
-The shared core now owns typed operations, transactions, revisions, semantic
-history and recovery. Project files use one strict canonical schema (v5); this
-pre-release build intentionally does not load or migrate v1–v4 projects.
-Undo/Redo uses compact semantic history records. Local recovery currently syncs
-those records per edit; the normative target decouples recovery I/O from model
-commit while retaining a healthy RPO of at most 5 seconds. Project Save uses
-synced sibling-temp atomic publication. Windows arguments and all core
-filesystem paths cross one strict UTF-8 boundary.
-
-[`docs/ntpacker-master-spec.md`](docs/ntpacker-master-spec.md) is the normative
-product and architecture specification. [`docs/ROADMAP.md`](docs/ROADMAP.md)
-is its derived execution tracker, and
-[`docs/plans/master-spec-implementation-plan.md`](docs/plans/master-spec-implementation-plan.md)
-is the task-level handoff for implementation.
-
-## Download
-
-Prebuilt binaries for Windows / Linux / macOS:
-[**Releases**](https://github.com/d954mas/neotolis-texture-packer/releases).
-Unzip and run `ntpacker-gui`. Try it on
-`examples/showcase/showcase.ntpacker_project` (60 CC0 animal sprites) or the
-Defold comparison demo below. Release archives also include the complete
-[`examples/`](examples/README.md) catalog, including a 100-atlas/1,000-source
-benchmark project.
+A standalone native texture/atlas packer built on
+[neotolis-engine](https://github.com/d954mas/neotolis-engine). One shared core
+owns project semantics, packing, export, persistence, history, and recovery;
+the native GUI and saved-file CLI are thin clients over those contracts.
 
 ## What works today
 
-- **GUI (`ntpacker-gui`)** — create/open/save `.ntpacker_project` files; add
-  image files and live-linked folders; multiple atlases per project; rename
-  atlases/regions (inline, file on disk untouched); undo/redo (Ctrl+Z/Y);
-  refresh sources (F5) with add/remove/change detection; missing files are
-  flagged, never fatal; per-monitor DPI scaling; in-process (threaded)
-  packing with the packed atlas on a zoom/pan canvas — hull/frame/trim/pivot
-  overlays, per-region vertex readout, pack stats.
-- **Settings panel** — all packing knobs (shape, page size up to 16384,
-  padding, alpha threshold, rotations, POT…) plus **per-region overrides**
-  (shape/rotation/max-vertices/margin/extrude, inherit by default); invalid
-  combinations are disabled with a reason, never a crash.
-- **Animations** — multi-select sprites → "Create animation from selection";
-  frame reorder, fps, the full Defold playback set, flips; preview player
-  with scrubber. Explicit assembly only — no name-based auto-detection, by
-  design (`docs/research/animation-grouping.md`).
-- **Export dialog** (Ctrl+E) — per-target enable + output path, then export.
-- **Export: `defold`** — `.tpinfo`/`.tpatlas` for
-  [extension-texturepacker](https://github.com/defold/extension-texturepacker)
-  (pinned 2.7.0), including animations; see `docs/formats/defold-tpinfo.md`.
-- **Export: `json-neotolis`** — full-fidelity JSON (D4 transforms, polygon
-  hulls, pivots, slice-9, aliases, multi-page, animations) + page PNGs.
-  Schema: `docs/formats/json-neotolis.md`. Deterministic byte-identical output.
-- **Per-target capability packing** — each export target repacks with
-  `project settings ∩ target capabilities`; features a format can't hold are
-  simply not used for that target (notices for genuine metadata loss, never
-  blocking errors).
-- **`.ntpack`** — the engine's native runtime pack is always produced (it is
-  also the GUI preview artifact: what you see is literally the atlas that
-  ships).
-- **CLI (`ntpacker`)** — headless `pack`/`export`, byte-identical to the
-  GUI's export output (pinned by a CLI==core byte-parity ctest);
-  `inspect`/`validate` for machine-readable project inspection; full project
-  editing from the command line (`new`/`add`/`remove`/`set`, `sprite
-  set`/`unset`, `anim create`/`add-frame`/`move-frame`/…, `target`/`atlas`
-  add/remove/set) so a script or an AI agent can build and edit a project
-  from nothing; `--json` on every verb with a stable, versioned per-verb
-  schema; a frozen exit-code contract (0 ok … 6 partial success … 7 validate
-  `--strict` findings · 8 typed pre-publication file I/O failure); `--dry-run`
-  reports what a pack would write and every
-  predicted metadata loss without touching disk. This is the saved-file
-  automation interface for humans and agents. Live editing of the same unsaved
-  GUI session belongs to the planned Dev API/MCP surface (master spec Part II).
+- strict canonical-v5 projects with multiple atlases;
+- folder and individual image-file sources;
+- deterministic Pack and Export through a contained builder worker;
+- atlas and per-sprite packing settings;
+- stable structural IDs and explicit animations;
+- semantic revision, dirty state, Undo/Redo, durable Save, and best-effort GUI
+  recovery;
+- a native preview-oriented GUI;
+- complete saved-file CLI editing, inspection, validation, Pack, Export, dry
+  run, versioned JSON reports, and stable exit codes;
+- full-fidelity `json-neotolis` export;
+- Defold export with capability adaptation and structured loss notices.
 
-## Known limitations
+The current product does not yet ship filesystem watchers, linked foreign-atlas
+sources, Import/Export IR, unified format packages, Lua handlers, MCP, or a Dev
+API transport.
 
-- Packing already runs on a GUI worker, and the shared session owns mutation,
-  semantic history and recovery. Canonical pack-input hashes, a multi-result
-  memory LRU and the full stale/current preview behavior are still planned.
-- The Defold target packs without rotations until the engine grows a
-  rotation-only transform mode
-  ([engine#285](https://github.com/d954mas/neotolis-engine/issues/285));
-  9-slice is dropped for Defold with a notice.
-- Duplicate frames are only merged when the source files are identical;
-  identical-after-trim dedup is engine work in progress
-  ([engine#286](https://github.com/d954mas/neotolis-engine/issues/286)).
-- Known user-controlled builder preconditions (including an impossible sprite
-  footprint) are rejected as structured errors. The engine builder is still
-  in-process, so allocation, codec/output I/O, and an unknown engine assertion
-  can terminate GUI or CLI until the private builder-worker boundary in H0.3-H0.5
-  is complete ([engine#287](https://github.com/d954mas/neotolis-engine/issues/287)).
-- Polygon hulls on anti-aliased edges can be noisy — raise the alpha
-  threshold or lower max vertices
-  ([engine#288](https://github.com/d954mas/neotolis-engine/issues/288)).
-- The window's X button bypasses the unsaved-changes prompt (engine gap);
-  window size / recent projects are not remembered yet.
-- The application-owned project/image paths use the strict UTF-8/Win32-wide
-  boundary, but the engine's native resource loader still opens the bundled GUI
-  pack through a narrow path. A Unicode or extended-length installation
-  directory can therefore prevent UI resource loading until the engine public
-  filesystem API is fixed upstream.
-- CLI: no `--verbose` and no machine-readable progress stream yet (needs an
-  engine log-writer opt-out so live progress can coexist cleanly with
-  `--json`); `--json` payloads themselves are complete — only in-flight
-  progress is stderr-only text for now.
+Start at [`docs/README.md`](docs/README.md) for current product, architecture,
+format, and explicitly labeled target contracts.
 
-## Next development sequence
+## Download
 
-1. Complete H0.3-H0.5: isolate the engine builder in a bounded private process,
-   keep UTF-8/publication in the parent, and pin crash/cancel/full-disk parity.
-2. Native Neotolis atlas import, inspection, materialization, and
-   `atlas detect`/`inspect`/`extract`.
-3. Linked read-only atlas sources and transactional Extract Sprites.
-4. Session/Pack hashes and stale/current behavior, format packages, sandboxed
-   Lua/templates, then live
-   Dev API/MCP collaboration.
-
-Watchers update runtime source state and mark previews stale; they do **not**
-auto-pack in the current target design. See the roadmap for dependencies and
-acceptance gates.
+Prebuilt binaries for Windows, Linux, and macOS are published on the
+[Releases](https://github.com/d954mas/neotolis-texture-packer/releases) page.
+Release archives contain `ntpacker-gui`, `ntpacker`, and the example catalog.
 
 ## Build
 
-Requires CMake 3.25+, Ninja, Clang. Clone with submodules:
+Requires CMake 3.25+, Ninja, Clang, and a recursive clone:
 
 ```bash
 git clone --recursive https://github.com/d954mas/neotolis-texture-packer.git
@@ -137,54 +44,45 @@ cmake --build --preset native-debug
 ctest --preset native-debug
 ```
 
-Release preset: `native-release`. CI builds and tests Linux/Windows/macOS on
-every push; tagged `v*` releases produce binaries for all three platforms.
-
-### Running the GUI
-
-The exe lands at `build/apps/gui/<preset>/ntpacker-gui.exe`. In VS Code just
-press **F5** (`.vscode/launch.json` is checked in). Open
-`examples/defold-demo/defold-demo.ntpacker_project` for a ready-made project
-over real assets.
-
-### Running the CLI
-
-The exe lands at `build/apps/cli/<preset>/ntpacker(.exe)`. One-liner:
+The release equivalents are:
 
 ```bash
-ntpacker pack examples/showcase/showcase.ntpacker_project --dry-run --json
+cmake --preset native-release
+cmake --build --preset native-release
+ctest --preset native-release
 ```
 
-Run `ntpacker help` for the full verb/flag list, or see
-`docs/formats/cli-report.md` for the machine payload schemas.
+The GUI executable is under `build/apps/gui/<preset>/`; the CLI is under
+`build/apps/cli/<preset>/`. Run `ntpacker help` for the command catalog or read
+the [CLI machine-report contract](docs/formats/cli-report.md).
+
+## Examples
+
+- `examples/showcase/` — a ready-made project over 60 CC0 animal sprites.
+- `examples/defold-demo/` — Defold integration and export comparison.
+- `examples/projects/` — deterministic user-openable test and performance
+  projects.
 
 ## Repository layout
 
-| Path | What |
+| Path | Ownership |
 |---|---|
-| `packer/` | `tp_core` (canonical project I/O, operations/session, semantic history/recovery, validation, normalization and exporters) + `tp_build` (drives the engine builder) + tests |
-| `apps/cli/` | `ntpacker` — headless CLI frontend over `tp_core` |
-| `apps/common/` | shared version header (`ntpacker_version.h`) used by both frontends |
-| `apps/gui/` | `ntpacker-gui` (engine `nt_ui` frontend) |
+| `packer/` | shared `tp_core`/`tp_build`, project model, operations, session, packing, export, history, recovery, and tests |
+| `apps/cli/` | file-oriented `ntpacker` frontend |
+| `apps/gui/` | native `ntpacker-gui` frontend |
+| `apps/common/` | shared application utilities |
 | `apps/smoke/` | toolchain smoke test |
-| `examples/defold-demo/` | Defold project with real assets (from [extension-texturepacker](https://github.com/defold/extension-texturepacker), MIT) for the three-way atlas comparison: Defold native / TexturePacker / ntpacker |
-| `examples/showcase/` | ready-made project over 60 CC0 animal sprites ([Kenney](https://kenney.nl)) — open it and press Pack |
-| `examples/projects/` | deterministic user-openable test and performance projects, including the 100-atlas/1,000-source fixture |
-| `docs/` | master specification, derived roadmap, implementation plan, format contracts, and research history |
-| `external/neotolis-engine` | the engine (submodule, read-only here — changes go upstream) |
+| `docs/` | current and target product contracts, architecture, and wire formats |
+| `examples/` | executable and user-openable examples |
+| `external/neotolis-engine/` | read-only engine submodule; fixes ship upstream |
 
-`AGENTS.md` documents the repository invariants and the agent workflow used to
-develop this project.
+Repository invariants and contributor workflow are in [`AGENTS.md`](AGENTS.md).
 
-## Feedback & issues
+## Feedback and license
 
-Found a bug, a wrong export, or missing behavior? Please
-[open an issue](https://github.com/d954mas/neotolis-texture-packer/issues) —
-I read every report and fix them. Attach the `.ntpacker_project` (and a couple
-of source images if the problem is packing/export related): projects are
-small, portable, and make reports instantly reproducible.
+Please [open an issue](https://github.com/d954mas/neotolis-texture-packer/issues)
+for incorrect output or missing behavior. Reproducible project and source
+fixtures are especially useful.
 
-## License
-
-MIT. Bundled third-party bits keep their own licenses
-(`apps/gui/deps/tinyfiledialogs` — zlib; `examples/defold-demo/UPSTREAM-LICENSE` — MIT).
+The project is MIT licensed. Bundled third-party components retain their own
+licenses.

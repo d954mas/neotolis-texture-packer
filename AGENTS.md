@@ -9,10 +9,11 @@ and thin CLI and native GUI clients. Target work adds canonical Import/Export
 IRs, the unified format registry, and capability-equivalent MCP and Dev API
 clients.
 
-`docs/ntpacker-master-spec.md` is the normative product and architecture source.
-`docs/ROADMAP.md` and `docs/plans/master-spec-implementation-plan.md` are derived
-execution documents and must not contradict it. Plans and research are not
-authority unless the master spec explicitly retains an executable contract.
+`docs/spec/product.md` is the current product contract. Approved future behavior
+is explicitly labeled `Target contract` under `docs/spec/`. Current ownership
+and implementation boundaries live under `docs/architecture/`; serialized and
+CLI wire contracts live under `docs/formats/`. Plans, research, review history,
+and superseded implementation records are not durable authority.
 
 Humans and machine/AI agents are equal first-class operators. Every capability
 needs an appropriate headless contract, structured diagnostics, and graceful
@@ -22,7 +23,8 @@ handling of invalid input.
 
 - Start every task with this file, branch/HEAD, `git status`, and the user request.
 - Use `docs/README.md` to select the minimum task-relevant documentation.
-- Read only relevant master-spec sections for product or architecture decisions.
+- Read the current product contract or an explicitly labeled target contract for
+  product decisions, and the narrow owning architecture document for boundaries.
 - Read `docs/formats/` for an affected serialized or CLI report contract.
 - Consult decisions, plans, research, tests, and Git history only as evidence
   required by the task; do not preload the whole documentation tree.
@@ -37,7 +39,7 @@ handling of invalid input.
 - `apps/cli/` — file-oriented `ntpacker` frontend.
 - `apps/gui/` — native GUI frontend over the same core contracts.
 - `apps/smoke/` — minimal builder environment smoke test.
-- `docs/` — product, architecture, format, decision, and historical material.
+- `docs/` — current and target product contracts, architecture, and wire formats.
 - `examples/defold-demo/` — executable Defold export integration example.
 
 ## Hard Invariants
