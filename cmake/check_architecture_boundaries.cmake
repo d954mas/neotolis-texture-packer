@@ -104,6 +104,35 @@ function(_arch_hit rule relative_path line_number symbol)
     set_property(GLOBAL PROPERTY "ARCH_HITS_${rule}" "${_hits}")
 endfunction()
 
+# Every forbidden SITE is judged on its own. A whole-file `MATCHES` answers only
+# "does this file contain one?" and reports the FIRST capture, so the second and
+# later sites of the same rule in one file were never recorded -- and a first
+# site covered by a per-symbol debt allowance therefore muted the rest of the
+# file. `MATCHALL` makes a scan report one hit per site, so every site meets the
+# allowances alone; the per-match re-`MATCHES` is only how CMake hands back the
+# capture group, and a match the same pattern rejects is a checker bug that
+# fails closed.
+#
+# `text` must already carry the `_symbols` rewrite below: `MATCHALL` returns a
+# CMake list, so a `;` inside a matched site would split that site across two
+# elements.
+#
+# T9 replaces this regex scanner with a parser-backed gate, which is why this
+# generalization is a deliberate, recorded double-spend: a scan that silently
+# reports only its first hit is a live hole in every rule until then.
+function(_arch_scan_all rule relative_path text pattern group prefix)
+    string(REGEX MATCHALL "${pattern}" _matches "${text}")
+    foreach(_match IN LISTS _matches)
+        if(NOT _match MATCHES "${pattern}")
+            message(FATAL_ERROR
+                "${rule}: MATCHALL yielded '${_match}', which the same pattern "
+                "rejects, so the scan cannot name the symbol it found.")
+        endif()
+        _arch_hit("${rule}" "${relative_path}" "0"
+                  "${prefix}${CMAKE_MATCH_${group}}")
+    endforeach()
+endfunction()
+
 if(DEFINED ARCH_EXPECT_RULE)
     file(GLOB_RECURSE _arch_sources LIST_DIRECTORIES false
         "${_arch_scan_root}/*.c"
@@ -205,11 +234,45 @@ foreach(_source IN LISTS _arch_sources)
 
     # Directives, calls, and declarations are scanned as normalized whole-file
     # text so line continuations cannot weaken a dependency boundary.
-    file(READ "${_source}" _scan)
-    string(REGEX REPLACE "/\\*([^*]|\\*+[^*/])*\\*+/" " " _scan "${_scan}")
-    string(REGEX REPLACE "//[^\r\n]*" " " _scan "${_scan}")
-    set(_directives "${_scan}")
+    file(READ "${_source}" _raw)
+    # Comments and literals are ONE lexical layer, so they are removed in ONE
+    # alternation whose leftmost match wins: whichever token opens first
+    # consumes the others. Removing them in ordered passes is precisely how a
+    # scan quietly stops finding things -- a `'"'` character literal opens a
+    # string that runs to the next quote ANYWHERE in the file (which is what hid
+    # two `system()` calls in gui_view_chrome.c from every whole-file scan), and
+    # a `//` inside a string erases the rest of a real line. No symbol, call, or
+    # declaration scan reads a literal, so blanking all of them loses nothing.
+    string(REGEX REPLACE
+           "/\\*([^*]|\\*+[^*/])*\\*+/|//[^\r\n]*|\"([^\"\\\\]|\\\\.)*\"|'([^'\\\\\r\n]|\\\\.)*'"
+           " " _code "${_raw}")
+    # An include names its header inside a STRING, so the directive text must
+    # keep string literals and can only drop comments. It therefore cannot share
+    # the pass above -- CMake rejects backreferences under alternation, and a
+    # literal-PRESERVING single pass needs one -- and a `/*` or `//` written
+    # inside a string literal is read here as a comment opener.
+    string(REGEX REPLACE "/\\*([^*]|\\*+[^*/])*\\*+/" " " _directives "${_raw}")
+    string(REGEX REPLACE "//[^\r\n]*" " " _directives "${_directives}")
     string(REGEX REPLACE "\\\\[ \t]*[\r\n]+" "" _directives "${_directives}")
+    # ...so the residual is CAUGHT rather than assumed. `_code` is lexed
+    # correctly, so it holds the true directive count; if the ordered pass above
+    # ends up with fewer, a comment opener inside a literal swallowed real
+    # directives and the include scan is blind to them. Fail closed: a scan that
+    # cannot see its input must not report "no violations". (A `#include`
+    # written INSIDE a string literal survives in `_directives` and not in
+    # `_code`, which is why only a LOSS is an error.)
+    string(REGEX MATCHALL "#[ \t]*include" _code_includes "${_code}")
+    string(REGEX MATCHALL "#[ \t]*include" _directive_includes "${_directives}")
+    list(LENGTH _code_includes _code_include_count)
+    list(LENGTH _directive_includes _directive_include_count)
+    if(_directive_include_count LESS _code_include_count)
+        message(FATAL_ERROR
+            "include scan lost a directive to a comment/literal desync: "
+            "${_relative} has ${_code_include_count} include directive(s) but "
+            "the comment strip left ${_directive_include_count}. A `/*` or "
+            "`//` inside a string literal is being read as a comment opener, "
+            "so the include rules cannot see this file.")
+    endif()
     # EVERY include directive is judged on its own. A single whole-file MATCHES
     # answers only "does this file contain one?" and reports the FIRST capture,
     # so the second and later forbidden includes of the same rule were never
@@ -246,34 +309,43 @@ foreach(_source IN LISTS _arch_sources)
         endif()
     endforeach()
 
-    # String literals are irrelevant to symbol/call checks below.
-    string(REGEX REPLACE "\"([^\"\\\\]|\\\\.)*\"" "\"\"" _scan "${_scan}")
-    if(_is_view
-       AND _scan MATCHES "(^|[^A-Za-z0-9_])(fopen|open|stat|opendir|readdir|FindFirstFile[A-Z]*)[ \t\r\n]*\\(")
-        _arch_hit(VIEW_IO "${_relative}" "0"
-                  "${CMAKE_MATCH_2}")
+    # `MATCHALL` returns a CMake list, so a `;` inside a matched site would
+    # split that site across two elements. The statement separator is REWRITTEN
+    # rather than blanked because the declarator scans below need a terminator
+    # to tell a retained member from a cast or a parameter; `@` is not C outside
+    # comments and literals, both of which are already gone.
+    string(REPLACE ";" "@" _symbols "${_code}")
+    if(_is_view)
+        _arch_scan_all(VIEW_IO "${_relative}" "${_symbols}"
+            "(^|[^A-Za-z0-9_])(fopen|open|stat|opendir|readdir|FindFirstFile[A-Z]*)[ \t\r\n]*\\("
+            2 "")
+        _arch_scan_all(VIEW_PLATFORM "${_relative}" "${_symbols}"
+            "(^|[^A-Za-z0-9_])(system|popen)[ \t\r\n]*\\("
+            2 "")
     endif()
-    if(_is_view
-       AND _scan MATCHES "(^|[^A-Za-z0-9_])(system|popen)[ \t\r\n]*\\(")
-        _arch_hit(VIEW_PLATFORM "${_relative}" "0"
-                  "${CMAKE_MATCH_2}")
+    if(_is_core)
+        _arch_scan_all(CORE_FRONTEND "${_relative}" "${_symbols}"
+            "(^|[^A-Za-z0-9_])((gui_|cli_|mcp_|devapi_)[A-Za-z0-9_]*)[ \t\r\n]*\\("
+            2 "")
     endif()
-    if(_is_core
-       AND _scan MATCHES "(^|[^A-Za-z0-9_])((gui_|cli_|mcp_|devapi_)[A-Za-z0-9_]*)[ \t\r\n]*\\(")
-        _arch_hit(CORE_FRONTEND "${_relative}" "0"
-                  "${CMAKE_MATCH_2}")
+    if(_is_async)
+        # The declared NAME is part of the symbol: two raw sessions in one async
+        # TU are two distinct debts, and identical hit records would be folded
+        # back into one by the debt report's de-duplication.
+        _arch_scan_all(ASYNC_RAW_SESSION "${_relative}" "${_symbols}"
+            "(^|[^A-Za-z0-9_])((const[ \t\r\n]+)?tp_session)[ \t\r\n]*\\*[ \t\r\n]*([A-Za-z_][A-Za-z0-9_]*)"
+            4 "tp_session-pointer:")
     endif()
-    if(_is_async
-       AND _scan MATCHES "(^|[^A-Za-z0-9_])((const[ \t\r\n]+)?tp_session)[ \t\r\n]*\\*[ \t\r\n]*[A-Za-z_][A-Za-z0-9_]*")
-        _arch_hit(ASYNC_RAW_SESSION "${_relative}" "0"
-                  "tp_session-pointer")
-    endif()
+    # The struct BODY is extracted first and its members scanned separately.
+    # One pattern spanning both steps let the greedy body wildcard swallow every
+    # member but the last, so a queue retaining two sessions reported one hit no
+    # matter which scan mode the member match ran in.
     if(_relative MATCHES "^apps/gui/gui_host_queue\\.(c|h)$"
-       AND _scan MATCHES "typedef[ \t\r\n]+struct[ \t\r\n]+gui_host_queue[ \t\r\n]*\\{[^}]*((const[ \t\r\n]+)?tp_session)[ \t\r\n]*\\*[ \t\r\n]*[A-Za-z_][A-Za-z0-9_]*[ \t\r\n]*;")
-        _arch_hit(
-            HOST_QUEUE_RAW_SESSION_STORAGE
-            "${_relative}" "0"
-            "retained-tp_session-member")
+       AND _symbols MATCHES "typedef[ \t\r\n]+struct[ \t\r\n]+gui_host_queue[ \t\r\n]*\\{([^}]*)\\}")
+        _arch_scan_all(HOST_QUEUE_RAW_SESSION_STORAGE "${_relative}"
+            "${CMAKE_MATCH_1}"
+            "(^|[^A-Za-z0-9_])((const[ \t\r\n]+)?tp_session)[ \t\r\n]*\\*[ \t\r\n]*([A-Za-z_][A-Za-z0-9_]*)[ \t\r\n]*@"
+            4 "retained-tp_session-member:")
     endif()
 endforeach()
 
@@ -413,13 +485,11 @@ endfunction()
 #   - a file that is not listed at all must still have zero hits.
 #
 # Entry format: "<file-regex>|<symbol>,<symbol>,...". Include-directive hits use
-# the symbol form "#include:<header>"; whole-file call scans use the call name.
-# Include directives are now scanned one at a time, so EVERY forbidden header a
-# file names is reported and must be listed here — an allowed first include no
-# longer masks a forbidden later one. The whole-file CALL scans still report the
-# FIRST match in a file, so an entry lists every forbidden call that file
-# legitimately makes; otherwise merely reordering code would move the reported
-# hit and fail a green tree. Per-LINE symbol hits carry no such caveat.
+# the symbol form "#include:<header>"; call scans use the call name; declarator
+# scans use "<family>:<declared name>". Every scan reports EVERY site, so an
+# entry must list every forbidden symbol its file legitimately names — no
+# allowed first site masks a forbidden later one, and reordering code cannot
+# move which hit is reported.
 function(_arch_report_debt rule note)
     get_property(_hits GLOBAL PROPERTY "ARCH_HITS_${rule}")
     set(_entries "${ARGN}")

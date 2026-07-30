@@ -210,21 +210,55 @@ foreach(TP_ARCH_CALL_FIXTURE IN ITEMS
         PROPERTIES LABELS "architecture")
 endforeach()
 
-# Include-scan completeness: a view TU naming TWO forbidden platform headers
-# must produce TWO hits. The scan used to be one whole-file MATCH per rule,
-# which reported only the FIRST forbidden include -- so a header covered by a
-# per-symbol debt allowance silently absorbed every later violation in the same
-# file. Asserting the exact count (not just "a hit") is what makes this fixture
-# red before the MATCHALL rewrite and green after.
-add_test(NAME tp_architecture_negative_view_platform_second_include
+# Scan completeness, one fixture per scan kind. Every fixture seeds TWO
+# violations of a single rule and asserts the exact count: a scan that reports
+# only its first hit per file yields 1 and fails here. That count is the whole
+# point -- "a hit was reported" stays green while the rest of the file goes
+# unchecked, which is precisely how an allowed first site used to absorb every
+# later violation of the same family.
+foreach(TP_ARCH_ALL_FIXTURE IN ITEMS
+        # include directives
+        "view_platform_second_include|VIEW_PLATFORM"
+        # call sites
+        "view_io_second_call|VIEW_IO"
+        "view_platform_second_call|VIEW_PLATFORM"
+        "core_frontend_second_call|CORE_FRONTEND"
+        # declarators
+        "async_raw_session_second_declaration|ASYNC_RAW_SESSION"
+        "host_queue_second_member|HOST_QUEUE_RAW_SESSION_STORAGE"
+        # the lexical layer the scans above read: comments and literals must be
+        # removed in ONE pass, or a `'"'` character literal / a `//` inside a
+        # string silently blanks real code and every scan under-reports
+        "view_platform_quote_char_literal|VIEW_PLATFORM"
+        "view_io_comment_in_string|VIEW_IO")
+    string(REPLACE "|" ";" TP_ARCH_ALL_PARTS "${TP_ARCH_ALL_FIXTURE}")
+    list(GET TP_ARCH_ALL_PARTS 0 TP_ARCH_ALL_DIR)
+    list(GET TP_ARCH_ALL_PARTS 1 TP_ARCH_ALL_RULE)
+    add_test(NAME "tp_architecture_negative_${TP_ARCH_ALL_DIR}"
+        COMMAND "${CMAKE_COMMAND}"
+            "-DARCH_ROOT=${CMAKE_SOURCE_DIR}"
+            "-DARCH_SCAN_ROOT=${CMAKE_SOURCE_DIR}/cmake/fixtures/architecture_boundaries/${TP_ARCH_ALL_DIR}"
+            "-DARCH_EXPECT_RULE=${TP_ARCH_ALL_RULE}"
+            "-DARCH_EXPECT_HITS=2"
+            -P "${TP_ARCHITECTURE_CHECK}")
+    set_tests_properties("tp_architecture_negative_${TP_ARCH_ALL_DIR}"
+        PROPERTIES LABELS "architecture")
+endforeach()
+
+# Lexical fail-closed: a `/*` inside a string literal makes the include scan's
+# comment strip swallow real directives. The checker compares its directive
+# count against the correctly-lexed text and aborts rather than reporting "no
+# violations" for a file it cannot see. The fixture asserts that abort, so a
+# silent pass fails this test.
+add_test(NAME tp_architecture_negative_include_scan_lexical_desync
     COMMAND "${CMAKE_COMMAND}"
         "-DARCH_ROOT=${CMAKE_SOURCE_DIR}"
-        "-DARCH_SCAN_ROOT=${CMAKE_SOURCE_DIR}/cmake/fixtures/architecture_boundaries/view_platform_second_include"
-        "-DARCH_EXPECT_RULE=VIEW_PLATFORM"
-        "-DARCH_EXPECT_HITS=2"
+        "-DARCH_SCAN_ROOT=${CMAKE_SOURCE_DIR}/cmake/fixtures/architecture_boundaries/include_scan_lexical_desync"
+        "-DARCH_EXPECT_RULE=VIEW_ADMISSION"
         -P "${TP_ARCHITECTURE_CHECK}")
-set_tests_properties(tp_architecture_negative_view_platform_second_include
-    PROPERTIES LABELS "architecture")
+set_tests_properties(tp_architecture_negative_include_scan_lexical_desync
+    PROPERTIES LABELS "architecture"
+    PASS_REGULAR_EXPRESSION "include scan lost a directive")
 
 # Role classification is not a hit-counted rule: an undeclared gui_view_* file
 # must abort the checker instead of being scanned as a non-view (the bypass
