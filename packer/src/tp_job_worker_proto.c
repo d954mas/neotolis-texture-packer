@@ -147,16 +147,6 @@ static bool bounded_cstr_length(const char *text, size_t cap,
   return false;
 }
 
-static tp_status validate_utf8(const void *bytes, size_t length,
-                               const char *label, tp_error *err) {
-  if (length > 0U && memchr(bytes, '\0', length)) {
-    return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
-                        "tp_job_worker_proto: %s contains NUL", label);
-  }
-  return tp_utf8_validate_bytes((const char *)bytes, length,
-                                TP_STATUS_INVALID_UTF8, label, err);
-}
-
 static bool valid_job_kind(tp_session_job_kind kind) {
   return kind == TP_SESSION_JOB_PACK || kind == TP_SESSION_JOB_EXPORT;
 }
@@ -288,7 +278,7 @@ static tp_status validate_text(const char *text, size_t cap, bool allow_empty,
     return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
                         "tp_job_worker_proto: invalid or oversized %s", label);
   }
-  tp_status status = validate_utf8(text, length, label, err);
+  tp_status status = tp_utf8_validate_text_field(text, length, label, err);
   if (status != TP_STATUS_OK) {
     return status;
   }
@@ -309,7 +299,7 @@ static tp_status copy_text(wire_reader *reader, uint32_t length, size_t cap,
     return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
                         "tp_job_worker_proto: truncated %s", label);
   }
-  tp_status status = validate_utf8(source, length, label, err);
+  tp_status status = tp_utf8_validate_text_field(source, length, label, err);
   if (status != TP_STATUS_OK) {
     return status;
   }
@@ -336,7 +326,7 @@ static tp_status copy_fixed_text(wire_reader *reader, uint32_t length,
     return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
                         "tp_job_worker_proto: truncated %s", label);
   }
-  tp_status status = validate_utf8(source, length, label, err);
+  tp_status status = tp_utf8_validate_text_field(source, length, label, err);
   if (status != TP_STATUS_OK) {
     return status;
   }
@@ -373,7 +363,7 @@ tp_job_worker_proto_encode_request(const tp_job_worker_proto_request *request,
     return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
                         "tp_job_worker_proto: invalid request");
   }
-  tp_status status = validate_utf8(
+  tp_status status = tp_utf8_validate_text_field(
       request->project_json, request->project_json_len, "project JSON", err);
   if (status != TP_STATUS_OK) {
     return status;
@@ -481,7 +471,8 @@ tp_status tp_job_worker_proto_decode_request(const uint8_t *bytes, size_t len,
                           "tp_job_worker_proto: truncated project JSON");
     goto fail;
   }
-  status = validate_utf8(project, project_len, "project JSON", err);
+  status =
+      tp_utf8_validate_text_field(project, project_len, "project JSON", err);
   if (status != TP_STATUS_OK) {
     goto fail;
   }
