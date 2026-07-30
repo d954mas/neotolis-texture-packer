@@ -41,6 +41,37 @@ required for the fields' assertions.
 WAVE 1 START: APPROVED by owner 2026-07-29, including the session-gate
 deletion packet (F1a).
 
+## WAVE 1 — COMPLETE (2026-07-30), CI green
+
+All seven items plus the F1a gate deletion landed: 03c1988 (3), 7f41e83
+(6), 2f8e365 (2), 2e871c6 (1+7), 9904dcb (4), fb0a5c9 (F1a), 33f8901 (5).
+Battery moved 160/159 -> 169/168 (app_scratch contract test + 8 gate
+fixtures). Three items differed from the text below and the difference is
+the finding, not a deviation to excuse:
+
+- Item 4 was written as a mode switch; converting the scans exposed that
+  the gate's lexer stripped comments BEFORE blanking strings, so a `'"'`
+  character literal blanked ~40 real lines and hid two system() calls
+  from every whole-file rule. Comments and literals are one lexical layer
+  now, and the include scan (which must keep strings) aborts if its
+  directive count disagrees with the correctly lexed text.
+- Item 4's "expand the VIEW_PLATFORM allowances to full call lists" was a
+  no-op: that allowance format is per-symbol and already complete. The
+  stale doc comment was corrected instead.
+- Item 5 said "extend A6". A6 lives in the cmake gate and pins two NAMED
+  seams to their fences; the new R24 in the shell gate is its complement
+  (no unfenced seam anywhere in shipping code), not a second copy. The
+  two gates merge under wave-4 item 19.
+- Item 3's design note undercounted: 25 tp_project__test_* declarations,
+  not 22 (three clone seeds are declared in tp_txn_internal.h).
+
+Wave-2 backlog opened by wave 1 (fix these where item 9 lands):
+tp_core_seams library so no image mixes fenced and unfenced TUs;
+tp_export.h names a seam in a PUBLIC header; tp_sb.allocation_count is a
+test probe in a public struct that R24 cannot see; tp_error_set does not
+guarantee well-formed UTF-8 at the producer; the duplicated GUI hex-id
+grammars; req- dir reaping never runs in a CLI-only environment.
+
 ## WAVE 1 — defects (small, start immediately)
 
 1. Locale-dependent folding in tp_project_path.c: tolower at :156 AND
