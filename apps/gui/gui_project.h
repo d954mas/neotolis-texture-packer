@@ -82,6 +82,16 @@ typedef struct gui_project_operation_submit_terminal {
     int64_t revision;
 } gui_project_operation_submit_terminal;
 
+/* One explicit host transition. The caller initializes this to zero, calls
+ * gui_project_step once between UI frames, then destroys `completion` with
+ * tp_session_job_result_destroy when its kind is not NONE. READY remains an
+ * asserted FSM state, but a single step may traverse DRAINING -> READY ->
+ * ACTIVE/CLOSED internally and reports the one typed lifecycle completion. */
+typedef struct gui_project_step_result {
+    gui_project_lifecycle_kind lifecycle_completed;
+    tp_session_job_result completion;
+} gui_project_step_result;
+
 /* Creates the initial fresh in-memory project (one default atlas, no path, clean). Crash recovery is
  * collected and resolved separately through the R6 APIs below; startup never adopts an orphan live. */
 void gui_project_init(void);
@@ -137,6 +147,12 @@ uint64_t gui_project_source_runtime_generation(void);
  * typed source-runtime token. */
 bool gui_project_observed_input_token(
     tp_session_input_token *out);
+/* Sole active-session/lifecycle driver. Admits coalesced Refresh, advances the
+ * core session once, transfers an ACTIVE completion, discards a superseded
+ * completion while draining, completes any ready cutover, and publishes the
+ * borrowed view consumed until the next step. */
+tp_status gui_project_step(
+    gui_project_step_result *out, tp_error *err);
 /* Host-frame observation seam. begin atomically observes/reduces and pins the
  * immutable snapshot; end releases the pin after render/present. */
 tp_status gui_project_frame_begin(tp_error *err);

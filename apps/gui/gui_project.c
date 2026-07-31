@@ -168,6 +168,37 @@ tp_session *gui_project__borrow_active_session(void) {
     return s_project.session;
 }
 
+void gui_project__publish_view(
+    const struct tp_session_view *view) {
+    const bool publishes_snapshot =
+        view && view->snapshot;
+    const bool lifetime_changed =
+        publishes_snapshot !=
+            s_project.snapshot_published ||
+        (publishes_snapshot &&
+         (s_project.published_instance_generation !=
+              s_project.instance_generation ||
+          s_project.published_snapshot_generation !=
+              view->snapshot_generation));
+    if (lifetime_changed) {
+        NT_ASSERT(
+            s_project.snapshot_lifetime_generation <
+            UINT64_MAX);
+        ++s_project.snapshot_lifetime_generation;
+    }
+    s_project.view = view;
+    s_project.snapshot_published =
+        publishes_snapshot;
+    s_project.published_instance_generation =
+        publishes_snapshot
+            ? s_project.instance_generation
+            : 0U;
+    s_project.published_snapshot_generation =
+        publishes_snapshot
+            ? view->snapshot_generation
+            : 0U;
+}
+
 bool gui_project__ingress_is_open(void) {
     return s_project.session &&
            s_project.lifecycle_state ==
@@ -244,6 +275,87 @@ static void admit_pending_refresh(void) {
         status, &error);
 }
 
+tp_status gui_project_step(
+    gui_project_step_result *out, tp_error *err) {
+    gui_project_step_result result = {0};
+    gui_project__assert_lifecycle_invariants();
+    if (!s_project.session) {
+        return tp_error_set(
+            err, TP_STATUS_NOT_FOUND,
+            "GUI host has no live session");
+    }
+    if (s_project.frame_pinned ||
+        s_project.completion_pending) {
+        return tp_error_set(
+            err, TP_STATUS_INVALID_ARGUMENT,
+            "GUI project step requires an unpinned host with no legacy completion");
+    }
+
+    admit_pending_refresh();
+    tp_session_job_result completion = {0};
+    const tp_status update_status =
+        tp_session_update(
+            s_project.session, &completion, err);
+    if (update_status != TP_STATUS_OK) {
+        tp_session_job_result_destroy(
+            &completion);
+        return update_status;
+    }
+    if (s_project.lifecycle_state ==
+        GUI_PROJECT_LIFECYCLE_ACTIVE) {
+        result.completion = completion;
+    } else {
+        /* A replacement/close already owns the terminal intent. The retired
+         * task receipt is not a user-visible completion. */
+        tp_session_job_result_destroy(
+            &completion);
+    }
+
+    gui_project__publish_view(
+        tp_session_view(s_project.session));
+    if (s_project.lifecycle_state !=
+            GUI_PROJECT_LIFECYCLE_ACTIVE) {
+        for (int transition = 0;
+             transition < 2 &&
+             s_project.lifecycle_state !=
+                 GUI_PROJECT_LIFECYCLE_ACTIVE &&
+             s_project.lifecycle_state !=
+                 GUI_PROJECT_LIFECYCLE_CLOSED;
+             ++transition) {
+            const gui_project_lifecycle_state before =
+                s_project.lifecycle_state;
+            gui_project_lifecycle_kind completed =
+                GUI_PROJECT_LIFECYCLE_NONE;
+            const tp_status lifecycle_status =
+                gui_project_lifecycle_pump(
+                    &completed, err);
+            if (lifecycle_status != TP_STATUS_OK) {
+                tp_session_job_result_destroy(
+                    &result.completion);
+                return lifecycle_status;
+            }
+            if (completed !=
+                GUI_PROJECT_LIFECYCLE_NONE) {
+                result.lifecycle_completed =
+                    completed;
+            }
+            if (s_project.lifecycle_state ==
+                before) {
+                break;
+            }
+        }
+    }
+    gui_project__reduce_view();
+    if (out) {
+        *out = result;
+    } else {
+        tp_session_job_result_destroy(
+            &result.completion);
+    }
+    gui_project__assert_lifecycle_invariants();
+    return TP_STATUS_OK;
+}
+
 tp_status gui_project_frame_begin(tp_error *err) {
     gui_project__assert_lifecycle_invariants();
     if (!s_project.session ||
@@ -270,16 +382,14 @@ tp_status gui_project_frame_begin(tp_error *err) {
     if (status != TP_STATUS_OK) {
         return status;
     }
-    s_project.view =
-        tp_session_view(s_project.session);
+    gui_project__publish_view(
+        tp_session_view(s_project.session));
     if (!s_project.view ||
         !s_project.view->snapshot) {
         return tp_error_set(
             err, TP_STATUS_NOT_FOUND,
             "GUI session has no current view");
     }
-    s_project.snapshot_lifetime_generation =
-        s_project.view->snapshot_generation;
     gui_project__reduce_view();
     s_project.frame_pinned = true;
     return TP_STATUS_OK;

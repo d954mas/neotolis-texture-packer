@@ -264,13 +264,10 @@ void gui_project_init(void) {
             attach_status, &err);
         return;
     }
-    s_project.session = initial;
-    s_project.view = tp_session_view(initial);
     s_project.instance_generation = 1U;
-    s_project.snapshot_lifetime_generation =
-        s_project.view
-            ? s_project.view->snapshot_generation
-            : 0U;
+    s_project.session = initial;
+    gui_project__publish_view(
+        tp_session_view(initial));
     s_project.preview_stale = false;
     lifecycle_transition(
         GUI_PROJECT_LIFECYCLE_ACTIVE);
@@ -386,7 +383,7 @@ void gui_project_lifecycle_force_close(void) {
     }
     tp_session_destroy(s_project.session);
     s_project.session = NULL;
-    s_project.view = NULL;
+    gui_project__publish_view(NULL);
     s_project.discard_retired_session = false;
     s_project.frame_pinned = false;
     s_project.refresh_pending = false;
@@ -441,15 +438,15 @@ tp_status gui_project_lifecycle_pump(
             UINT64_MAX) {
             ++s_project.instance_generation;
         }
-        s_project.view =
-            tp_session_view(s_project.session);
+        gui_project__publish_view(
+            tp_session_view(s_project.session));
         reset_cutover_state(kind);
     } else {
         NT_ASSERT(
             kind ==
             GUI_PROJECT_LIFECYCLE_SHUTDOWN);
         s_project.session = NULL;
-        s_project.view = NULL;
+        gui_project__publish_view(NULL);
         s_project.refresh_pending = false;
     }
     if (retired &&

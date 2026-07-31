@@ -1109,6 +1109,82 @@ void test_new_open_and_shutdown_expose_ready_states_before_cutover(void) {
         completed);
 }
 
+void test_snapshot_lifetime_epoch_advances_across_session_cutover(void) {
+    const uint64_t lifetime_before =
+        gui_project_snapshot_lifetime_generation();
+    const tp_session_snapshot *before =
+        gui_project_snapshot();
+    TEST_ASSERT_NOT_NULL(before);
+    const uint64_t local_generation_before =
+        tp_session_view(
+            gui_project__test_session())
+            ->snapshot_generation;
+
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_project_lifecycle_begin_new(NULL));
+    gui_project_lifecycle_kind completed =
+        GUI_PROJECT_LIFECYCLE_NONE;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_project_lifecycle_pump(&completed, NULL));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_project_lifecycle_pump(&completed, NULL));
+    TEST_ASSERT_EQUAL_INT(
+        GUI_PROJECT_LIFECYCLE_NEW, completed);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_project_frame_begin(NULL));
+    gui_project_frame_end();
+
+    const tp_session_snapshot *after =
+        gui_project_snapshot();
+    TEST_ASSERT_NOT_NULL(after);
+    TEST_ASSERT_EQUAL_UINT64(
+        local_generation_before,
+        tp_session_view(
+            gui_project__test_session())
+            ->snapshot_generation);
+    TEST_ASSERT_GREATER_THAN_UINT64(
+        lifetime_before,
+        gui_project_snapshot_lifetime_generation());
+}
+
+void test_project_step_drives_ready_cutover_and_reports_one_terminal(void) {
+    const uint64_t generation =
+        gui_project_session_instance_generation();
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_project_lifecycle_begin_new(NULL));
+    TEST_ASSERT_EQUAL_INT(
+        GUI_PROJECT_LIFECYCLE_NEW_DRAINING,
+        gui_project_lifecycle_state_query());
+
+    gui_project_step_result result = {0};
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        gui_project_step(&result, &error),
+        error.msg);
+
+    TEST_ASSERT_EQUAL_INT(
+        GUI_PROJECT_LIFECYCLE_NEW,
+        result.lifecycle_completed);
+    TEST_ASSERT_EQUAL_INT(
+        TP_SESSION_JOB_NONE,
+        result.completion.kind);
+    TEST_ASSERT_EQUAL_INT(
+        GUI_PROJECT_LIFECYCLE_ACTIVE,
+        gui_project_lifecycle_state_query());
+    TEST_ASSERT_EQUAL_UINT64(
+        generation + 1U,
+        gui_project_session_instance_generation());
+    TEST_ASSERT_NOT_NULL(gui_project_snapshot());
+    tp_session_job_result_destroy(
+        &result.completion);
+}
+
 void test_terminal_completion_survives_edit_and_recovery_sync(void) {
     TEST_ASSERT_TRUE(
         gui_pack_init(
@@ -1263,6 +1339,10 @@ int main(int argc, char **argv) {
     RUN_TEST(test_terminal_job_completion_is_consumed_before_cutover);
     RUN_TEST(
         test_new_open_and_shutdown_expose_ready_states_before_cutover);
+    RUN_TEST(
+        test_snapshot_lifetime_epoch_advances_across_session_cutover);
+    RUN_TEST(
+        test_project_step_drives_ready_cutover_and_reports_one_terminal);
     RUN_TEST(
         test_terminal_completion_survives_edit_and_recovery_sync);
     RUN_TEST(

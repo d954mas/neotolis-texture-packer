@@ -13,9 +13,12 @@ typedef struct gui_project_state {
     uint64_t instance_generation;
     uint64_t reduced_instance_generation;
     uint64_t snapshot_lifetime_generation;
+    uint64_t published_instance_generation;
+    uint64_t published_snapshot_generation;
     uint64_t observed_source_generation;
     int64_t observed_revision;
     bool completion_pending;
+    bool snapshot_published;
     bool refresh_pending;
     bool frame_pinned;
     bool discard_retired_session;
@@ -48,6 +51,8 @@ tp_status gui_project__prepare_candidate_recovery(
 bool gui_project__ingress_is_open(void);
 tp_session *gui_project__mutation_session(void);
 void gui_project__assert_lifecycle_invariants(void);
+void gui_project__publish_view(
+    const struct tp_session_view *view);
 void gui_project__reduce_view(void);
 
 #endif /* NTPACKER_GUI_PROJECT_INTERNAL_H */
