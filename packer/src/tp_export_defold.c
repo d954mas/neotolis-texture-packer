@@ -12,16 +12,15 @@
 
 /* Defold exporter: emits the extension-texturepacker `.tpinfo` (packed layout,
  * protobuf TEXT format) + a starter `.tpatlas` (animation wrapper) + straight-
- * alpha page PNGs. Ground truth: docs/research/defold.md (pinned against
- * extension-texturepacker 2.7.0 / Defold 1.12.4). Field-by-field contract:
- * docs/formats/defold-tpinfo.md.
+ * alpha page PNGs. Field-by-field contract:
+ * docs/formats/defold-tpinfo.md (pinned against the executable demo/tests).
  *
  * Everything is y-down pixel space (TexturePacker convention == our tp_model
  * canonical space), so no y-flip is needed. Deterministic: fixed header, pages
  * in page order, sprites in final-name order within a page, animations in id
  * order, %.9g floats, LF, no timestamps.
  *
- * Capability-driven (SUMMARY.md §5h): the format holds trim, 90-degree rotation,
+ * Capability-driven: the format holds trim, 90-degree rotation,
  * polygons, pivots, multipage and aliases; it has NO 9-slice and NO region-level
  * flips (flips exist only per-animation). caps gates emission and raises a
  * metadata-loss notice for a genuine drop; never a hard error. The per-target
@@ -113,7 +112,7 @@ static bool resolve_tpatlas_file_ref(const char *out_path_base, const char *tpin
 }
 
 /* Our stable playback id -> Defold Playback enum token. The stable enum is pinned
- * to Defold's set (ux.md 3.7b): once_forward(0), loop_forward(1), once_backward(2),
+ * by docs/formats/defold-tpinfo.md: once_forward(0), loop_forward(1), once_backward(2),
  * loop_backward(3), once_pingpong(4), loop_pingpong(5), none(6). NULL for an
  * out-of-range id (caller substitutes ONCE_FORWARD + a notice). */
 static const char *defold_playback(int id) {

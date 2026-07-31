@@ -1,5 +1,4 @@
-/* Private build-worker outcome + oracle + containment suite (decision 0018,
- * ROADMAP H0.3-b / H0.4).
+/* Private build-worker outcome + oracle + containment suite.
  *
  * Proves the process boundary end to end:
  *  - a normal pack routed THROUGH the worker process is byte-identical to a
@@ -43,7 +42,7 @@
 
 #include "tp_core/tp_arena.h"
 #include "tp_core/tp_build_worker.h"
-#include "tp_core/tp_model.h"
+#include "tp_core/tp_pack_result.h"
 #include "tp_core/tp_pack.h"
 #include "tp_core/tp_scan.h"
 #include "tp_build_worker_internal.h"
@@ -320,12 +319,12 @@ void test_worker_publishes_unicode_long_path(void) {
 /* A crashing worker -> BUILDER_CRASHED, the host survives, a prior artifact at the
  * same path is untouched (no publish), and staging is gone.
  *
- * This pins the on-disk half of decision 0018's "the last successful preview
+ * This pins the on-disk guarantee that the last successful preview
  * remains authoritative": a crash publishes nothing, so the prior artifact bytes
  * survive. The in-memory half is a structural property of the take_result
  * contract, not something this worker-layer test can observe: tp_pack returns
  * *out_result == NULL on any non-OK worker status (tp_pack.c:577-580), and
- * tp_session_job_take_result transfers a pack arena/result ONLY when the job
+ * tp_session_update transfers a pack arena/result ONLY when the job
  * state is SUCCEEDED (tp_job.c:473-478) -- a FAILED/CRASHED job hands back no
  * result, so a consumer's last successful preview cannot be replaced. The
  * positive direction (SUCCEEDED -> non-NULL result) is pinned by

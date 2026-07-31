@@ -176,7 +176,7 @@ tp_status tp_export_list_page_files(const tp_result *result, const char *out_pat
 }
 
 /* ======================================================================== */
-/* capability -> pack-settings clamp (SUMMARY.md §5h)                        */
+/* capability -> pack-settings clamp                                        */
 /* ======================================================================== */
 
 tp_status tp_export_effective_settings(const tp_pack_settings *in, const tp_export_caps *caps, tp_pack_settings *out) {
@@ -232,7 +232,7 @@ static const tp_exporter g_json_neotolis = {
 };
 
 /* Defold (extension-texturepacker .tpinfo). Caps = the FORMAT's real abilities
- * (docs/research/defold.md): 90-degree rotation, trim, polygons, pivots (v2.0),
+ * (docs/formats/defold-tpinfo.md): 90-degree rotation, trim, polygons, pivots (v2.0),
  * multipage and aliases YES; region-level flips NO (flips are per-animation only)
  * and 9-slice NO (dropped with a notice). rotate90 && !flips means the per-target
  * clamp packs Defold identity-only in v1 (the anticipated "rotate90-only target"
@@ -253,7 +253,7 @@ static const tp_exporter g_defold = {
     .list_outputs = tp_export_defold_list_outputs, /* also lists the .tpatlas sibling */
 };
 
-/* Built-in table: the v1 user-facing exporters (SUMMARY.md §6 Q5). */
+/* Built-in table: the current user-facing exporters. */
 static const tp_exporter *const g_builtins[] = {&g_json_neotolis, &g_defold};
 #define TP_BUILTIN_COUNT ((int)(sizeof g_builtins / sizeof g_builtins[0]))
 
@@ -332,7 +332,7 @@ tp_status tp_exporter_register(const tp_exporter *e) {
 }
 
 /* ======================================================================== */
-/* degradation prediction (review §3.4)                                     */
+/* degradation prediction                                                    */
 /* ======================================================================== */
 
 /* True if any sprite override in the atlas carries a non-zero 9-slice border. */
@@ -370,7 +370,7 @@ tp_status tp_export_predict_loss(const struct tp_project *project, int atlas_ind
     const tp_project_atlas *a = &project->atlases[atlas_index];
 
     /* Project-knowable axes: native vs capability-clamped pack settings -- the
-     * exact enumeration the GUI chip used to own (review §3.1). */
+     * exact enumeration shared by CLI and GUI. */
     tp_pack_settings native;
     tp_status st = tp_project_atlas_to_settings(project, atlas_index, &native, err);
     if (st != TP_STATUS_OK) {

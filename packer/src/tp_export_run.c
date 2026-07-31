@@ -9,13 +9,14 @@
 
 #include "tp_core/tp_arena.h"
 #include "tp_core/tp_export.h"
-#include "tp_core/tp_model.h"
+#include "tp_core/tp_pack_result.h"
 #include "tp_core/tp_names.h"
 #include "tp_core/tp_pack.h"
 #include "tp_core/tp_project.h"
 #include "tp_core/tp_input.h"
 #include "tp_core/tp_scan.h"
 #include "tp_project_mutation_internal.h"
+#include "tp_export_job_internal.h"
 #include "tp_session_internal.h"
 #ifdef TP_ENABLE_TEST_SEAMS
 #include "tp_test_gate.h"
@@ -492,7 +493,7 @@ tp_status tp_export_run_ex(const tp_project *project, int atlas_index, const tp_
     tp_status first_fail = TP_STATUS_OK;
 
     /* Phase 1: resolve exporters + out paths, compute effective settings, pack once
-     * per distinct effective-settings signature (SUMMARY.md §5h shared run). */
+     * per distinct effective-settings signature. */
     for (int t = 0; t < a->target_count; t++) {
         const tp_project_target *tg = &a->targets[t];
         target_group[t] = -1;
@@ -670,7 +671,7 @@ tp_status tp_export_run_ex(const tp_project *project, int atlas_index, const tp_
             /* No writes. The wet path's notices come from the writers, which do not
              * run here -- so predict every degradation instead (full axes: the packed
              * prep supplies the alias/multipage axes on top of the project-knowable
-             * ones). ai-first.md item 6: dry-run reports the predicted losses. */
+             * ones). Dry-run reports the predicted losses. */
             st = tp_export_predict_loss(project, atlas_index, &exp->caps, exp->id, prep, notices, err);
             if (rt) {
                 rt->notice_end = notices ? notices->count : nbefore;
@@ -799,12 +800,26 @@ tp_status tp_export_snapshot_job_create_ex(const tp_session_snapshot *snapshot,
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
                             "export snapshot job requires snapshot, work dir, and output");
     }
+    return tp_export_project_job_create_internal(
+        tp_session_snapshot_project_internal(snapshot), work_dir,
+        opts, out, err);
+}
+
+tp_status tp_export_project_job_create_internal(
+    const tp_project *project, const char *work_dir,
+    const tp_export_snapshot_job_opts *opts,
+    tp_export_snapshot_job **out, tp_error *err) {
+    if (!project || !work_dir || !out) {
+        return tp_error_set(
+            err, TP_STATUS_INVALID_ARGUMENT,
+            "export project job requires project, work dir, and output");
+    }
     *out = NULL;
     tp_export_snapshot_job *job = calloc(1U, sizeof *job);
     if (!job) {
         return tp_error_set(err, TP_STATUS_OOM, "export snapshot job allocation failed");
     }
-    job->project = tp_project_clone(tp_session_snapshot_project_internal(snapshot));
+    job->project = tp_project_clone(project);
     const size_t work_dir_len = strlen(work_dir) + 1U;
     job->work_dir = malloc(work_dir_len);
     if (job->work_dir) {

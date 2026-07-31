@@ -1,8 +1,8 @@
 #ifndef TP_CORE_TP_ARENA_H
 #define TP_CORE_TP_ARENA_H
 
-/* Minimal bump allocator that owns every tp_result allocation (SUMMARY.md
- * §5g, plan §1.3). The engine exposes no public arena, so tp_core ships its
+/* Minimal bump allocator that owns every tp_result allocation. The engine
+ * exposes no public arena, so tp_core ships its
  * own: destroying/resetting the arena frees/reuses everything allocated from
  * it in one shot -- this is the "owned tp_result" ownership model. */
 

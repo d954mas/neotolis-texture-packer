@@ -1,7 +1,7 @@
 # Vendored: utf8proc
 
 Unicode normalization (NFC) and case-folding for persistent source-key
-canonicalization (master spec §5.3; decision `docs/decisions/0002-utf8proc-nfc.md`).
+canonicalization (`docs/architecture/sources-and-raster.md`).
 
 ## Pinned version
 

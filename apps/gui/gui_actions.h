@@ -5,16 +5,17 @@
  * owner, between-frame structural requests, pack/export/undo/redo/refresh,
  * file dialogs, lifecycle confirmation, animation operations, and preview.
  * This layer is Clay-free AND nt_ui-free. Views declare values into typed
- * drafts or enqueue structural requests with stable identities; apply_pending
- * consumes them at the top of the next frame. Include discipline:
+ * drafts or enqueue structural requests with stable identities;
+ * gui_actions_step consumes them at the next between-frame boundary. Include
+ * discipline:
  * actions -> gui_state + gui_rows + model headers
- * (gui_project/gui_scan/gui_canvas/gui_pack) + tinyfiledialogs; it must never include
+ * (gui_project/gui_canvas/gui_pack) + tinyfiledialogs; it must never include
  * widgets or any view header. */
 
 #include <stdbool.h>
 
 #include "gui_edit_state.h"
-#include "tp_core/tp_model.h"   /* tp_result (preview_target_result return type) */
+#include "tp_core/tp_pack_result.h"   /* tp_result (preview_target_result return type) */
 
 #include "gui_project_view.h" /* passive identities + deferred-edit enqueue types */
 #include "gui_rows.h"    /* sprite_row (start_sprite_edit parameter) */
@@ -23,7 +24,7 @@
 extern "C" {
 #endif
 
-/* --- deferred side-effect queue (enqueued by views, consumed by apply_pending) ---
+/* --- deferred side-effect queue (enqueued by views, consumed by gui_actions_step) ---
  * There is ONE queue and it is private to the actions layer. A view declares an
  * intent through the functions below and can neither read nor reorder what is
  * queued; the drain order is the actions layer's contract, not a view's. */
@@ -35,6 +36,7 @@ void gui_request_add_atlas(void);
 void gui_request_refresh(void);
 void gui_request_pack(void);
 void gui_request_export(void);
+void gui_request_cancel(void);
 void gui_request_add_animation(tp_id128 atlas_id, int64_t expected_revision);
 void gui_request_create_animation_from_selection(void);
 void gui_request_open_preview(const gui_animation_ref *animation);
@@ -55,26 +57,55 @@ typedef enum gui_lifecycle_request {
     GUI_LIFECYCLE_REQUEST_OPEN,
     GUI_LIFECYCLE_REQUEST_EXIT
 } gui_lifecycle_request;
-extern gui_lifecycle_request s_after_confirm;
-extern bool s_confirm_open;
-extern bool s_confirm_draft;
-enum { MODAL_NONE = 0, MODAL_SAVE, MODAL_DISCARD, MODAL_CANCEL };
-extern int s_modal_action;
+typedef enum gui_lifecycle_phase {
+    GUI_LIFECYCLE_IDLE = 0,
+    GUI_LIFECYCLE_RESOLVE_DRAFT,
+    GUI_LIFECYCLE_RESOLVE_DIRTY,
+    GUI_LIFECYCLE_OPEN_DIALOG
+} gui_lifecycle_phase;
+typedef enum gui_lifecycle_choice {
+    GUI_LIFECYCLE_CHOICE_NONE = 0,
+    GUI_LIFECYCLE_CHOICE_ACCEPT,
+    GUI_LIFECYCLE_CHOICE_DISCARD,
+    GUI_LIFECYCLE_CHOICE_CANCEL
+} gui_lifecycle_choice;
+typedef struct gui_lifecycle_view {
+    gui_lifecycle_phase phase;
+    gui_lifecycle_request request;
+} gui_lifecycle_view;
+/* Passive state + typed input are the whole lifecycle UI contract. The
+ * controller owns all transition ordering inside gui_actions_step. */
+gui_lifecycle_view gui_actions_lifecycle_view(void);
+bool gui_actions_lifecycle_active(void);
+void gui_actions_lifecycle_choose(gui_lifecycle_choice choice);
+void gui_actions_lifecycle_dismiss(void);
 
-/* --- R6b: startup crash-recovery modal glue --- */
-extern bool s_recovery_open;                       /* R6b: the startup recovery modal is visible */
-/* The orphan list is stashed inside gui_actions.c; the modal (gui_view_chrome.c) reads it via count/at
- * and requests a per-row action, which is DEFERRED to the next apply_pending() (so the Save-As file dialog
- * and the disk-mutating resolve run outside nt_ui_begin/end, like s_pending_save_as). */
-void gui_actions_open_recovery(const gui_recovery_list *list); /* copy list, set s_recovery_open (main() startup) */
-int  gui_actions_recovery_count(void);
-bool gui_actions_recovery_has_more(void);
-const gui_recovery_entry *gui_actions_recovery_at(int i);      /* NULL if out of range */
-void gui_actions_recovery_request(int row, int action);        /* action = gui_recovery_action; deferred */
+/* --- startup crash-recovery flow --- */
+typedef enum gui_recovery_phase {
+    GUI_RECOVERY_IDLE = 0,
+    GUI_RECOVERY_CHOOSE,
+    GUI_RECOVERY_RESOLVING
+} gui_recovery_phase;
+typedef struct gui_recovery_view {
+    gui_recovery_phase phase;
+    int count;
+    bool has_more;
+} gui_recovery_view;
+void gui_actions_open_recovery(
+    const gui_recovery_list *list);
+gui_recovery_view gui_actions_recovery_view(void);
+bool gui_actions_recovery_active(void);
+const gui_recovery_entry *gui_actions_recovery_at(int i);
+bool gui_actions_recovery_request(
+    int row, gui_recovery_action action);
+void gui_actions_recovery_dismiss(void);
 
-/* --- last successful pack timing (written by the pack actions; read by the canvas stats line) --- */
-extern double s_last_pack_ms;   /* wall-clock ms of the last successful pack (for the stats line) */
-extern tp_id128 s_last_pack_atlas_id;
+/* --- passive last-successful-Pack presentation state --- */
+typedef struct gui_last_pack_view {
+    double duration_ms;
+    tp_id128 atlas_id;
+} gui_last_pack_view;
+gui_last_pack_view gui_actions_last_pack_view(void);
 
 /* --- draft-owned semantic ingress ---
  * A value edit stores stable identity, exact component, typed value, and
@@ -134,51 +165,16 @@ void gui_edit_target_enabled(const gui_target_ref *target, bool enabled);
 void gui_edit_target_exporter(const gui_target_ref *target,
                               const char *exporter_id);
 
-/* --- deferred semantic ingress: commits blur edits and drains action queues --- */
-void apply_pending(void);
-/* Releases the action layer's own heap at exit: every intent still queued (with
- * the frame refs / names it owns), the preview frame map, and the retained
- * refresh fingerprint (its strdup'd paths). Disarms the preview player with it,
- * so nothing survives into a next session. Session, pack and row state are NOT
- * touched -- each of those owners has its own shutdown, and this one holds no
- * reference to any of them, so it runs first. */
-void gui_actions_shutdown(void);
-/* Consumes only host-classified Pack/Export completions after the frame's
- * atomic observation has reduced them. */
-void gui_actions_poll_host_completion(void);
-/* Drives the sole aggregate lifecycle owner between frames and consumes typed
- * cutover/shutdown receipts before the next observation is pinned. */
-void gui_actions_pump_lifecycle(void);
-
-/* Raised by a view widget when an edit gesture ends. apply_pending submits the
+/* Raised by a view widget when an edit gesture ends. gui_actions_step submits the
  * active draft once, producing one transaction and one Undo step. */
 void gui_request_gesture_commit(void);
 
 /* --- pack / export / undo / redo / refresh --- */
-void do_pack(void);          /* interactive async pack of the selected atlas */
-void do_pack_blocking(void); /* deterministic blocking pack (selftest + --shot) */
-/* View-facing semantic ingress. The request is consumed by apply_pending()
+/* View-facing semantic ingress. The request is consumed by gui_actions_step
  * between frames; neither menu declaration nor keyboard handling mutates the
  * session directly. */
 void gui_request_undo(void);
 void gui_request_redo(void);
-/* Host-side executors retained for focused action/self-tests. Shipping views
- * must use gui_request_undo/gui_request_redo. */
-void do_undo(void);
-void do_redo(void);
-/* F15: the synchronous refresh cost (fp_collect x2 + source invalidate + diff) with NO UI/status/canvas
- * side effects -- for the --bench-perf headless probe. Preserves the refresh semantic-purity invariant
- * (no revision/dirty change). Out params may be NULL; returns false on a scan failure. */
-bool gui_actions_refresh_diff_headless(int *out_added, int *out_removed,
-                                       int *out_changed);
-/* Drops the retained last-successful runtime fingerprint. Production refresh
- * also resets automatically when the owning session changes. */
-void gui_actions_refresh_fingerprint_reset(void);
-/* Refresh policy seam: after runtime invalidation, even a later diff failure
- * leaves the retained preview stale. */
-bool gui_actions_refresh_should_mark_stale(tp_status status,
-                                           bool sources_invalidated);
-
 /* --- new/open/exit confirm flow entry points --- */
 void request_new(void);
 void request_open(void);
@@ -205,9 +201,11 @@ bool gui_sprite_edit_matches(const sprite_row *row);
 bool gui_atlas_edit_matches(tp_id128 atlas_id);
 bool gui_animation_edit_matches(tp_id128 atlas_id, tp_id128 animation_id);
 
-/* --- animation ops + preview player (ux.md §3.7b) --- */
+/* --- animation ops + preview player --- */
 const tp_snapshot_animation *preview_animation(void); /* active stable-ID target, or NULL */
+#ifdef NTPACKER_GUI_SELFTEST
 int create_animation_from_selection(void);
+#endif
 void add_selection_frames_to_animation(
     const gui_animation_ref *animation);
 void open_preview_ref(const gui_animation_ref *animation);

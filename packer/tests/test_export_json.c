@@ -1,4 +1,4 @@
-/* json-neotolis golden fidelity + determinism (ROADMAP Phase 2 acceptance).
+/* json-neotolis golden fidelity + determinism.
  *
  * For every fixture case (rotated/flipped/trimmed/polygon/slice9/alias/multipage
  * + edges): build a .ntpack via nt_builder -> parse back -> normalize -> export
@@ -6,7 +6,7 @@
  * every fixture-known field survives at full fidelity, and re-export is
  * byte-identical (determinism). Golden decision: programmatic field assertions +
  * determinism memcmp (no committed golden file -- it would churn with the packer;
- * ROADMAP acceptance is schema-match + fidelity, which these assertions pin). */
+ * The assertions pin schema match and fidelity. */
 
 #define _CRT_SECURE_NO_WARNINGS
 
@@ -20,7 +20,7 @@
 
 #include "tp_core/tp_arena.h"
 #include "tp_core/tp_export.h"
-#include "tp_core/tp_model.h"
+#include "tp_core/tp_pack_result.h"
 #include "tp_name_map.h"
 #include "tp_pack_read.h"
 #include "unity.h"

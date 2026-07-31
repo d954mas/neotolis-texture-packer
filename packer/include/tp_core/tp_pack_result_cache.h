@@ -2,8 +2,7 @@
 #define TP_CORE_TP_PACK_RESULT_CACHE_H
 
 /* Memory-only pack-result store keyed by pack_input_hash, with a COMPRESSED COLD
- * TIER (master spec §10.3-10.4, §59 items 21/25, decision 0004, packets F3-03
- * T4/T5, S18, S28).
+ * TIER (docs/architecture/jobs-pack-and-cache.md).
  *
  * MODEL. Each completed Pack result is stored under its `pack_input_hash` behind
  * an opaque, already-refcounted OWNER the store must not dismantle (the session
@@ -78,7 +77,7 @@
  * are the one exception: they stay HOT, and the store does not try to compress
  * them again.
  *
- * THREAD OWNERSHIP CONTRACT (packet S28). The store is a SINGLE-THREADED object:
+ * THREAD OWNERSHIP CONTRACT. The store is a SINGLE-THREADED object:
  * every function here must be called from the one thread that owns it (the UI
  * thread in the GUI). The background encoder never touches the store:
  *
@@ -98,7 +97,7 @@
  *   - The only lock in the design is the mutex/condvar pair INSIDE the job queue.
  *     No cache structure is ever locked.
  *
- * SELECTION (§10.3, decision 0004). The authoritative result is the entry with
+ * SELECTION. The authoritative result is the entry with
  * the latest completion SEQUENCE, unless an explicit selection points at a
  * specific cached hash (Undo/Redo and manual selection choose by hash, never by
  * wall-clock). Selection is deterministic: two completions that arrive in either
@@ -148,7 +147,7 @@ typedef struct tp_pack_result_cache tp_pack_result_cache;
 /* `byte_budget` bounds the total retained bytes of INACTIVE entries (the pinned
  * active entry is never counted). 0 is legal: every demoted entry is evicted
  * immediately EXCEPT the highest-sequence entry, which stays resolvable no matter
- * the budget (store contract, decision 0004) -- so the active entry and the
+ * the budget (store contract) -- so the active entry and the
  * max-sequence entry survive, and inactive_bytes may exceed the budget by at most
  * that one entry. Returns NULL on OOM.
  *
@@ -183,7 +182,7 @@ void tp_pack_result_cache_destroy(tp_pack_result_cache *cache);
  * Pack REQUEST in strictly increasing order and hands it back at completion.
  * Selecting by this sequence -- not by store/wall-clock order -- is what lets an
  * earlier-requested job that finishes LATE (lower sequence, stored later) never
- * overwrite a newer preview (§10.3, decision 0004).
+ * overwrite a newer preview.
  *
  * The previously-active entry becomes inactive: it is queued for background
  * compression if it is HOT, or gives up its decompressed pixels immediately if it
@@ -233,7 +232,7 @@ const struct tp_result *tp_pack_result_cache_peek(
  * Absent hash: no-op. */
 void tp_pack_result_cache_forget(tp_pack_result_cache *cache, tp_id128 hash);
 
-/* Explicit selection by hash (decision 0004). If `hash` is present, subsequent
+/* Explicit selection by hash. If `hash` is present, subsequent
  * authoritative resolution returns it; a nil hash or an absent hash clears the
  * selection and authoritative reverts to the latest completion sequence. */
 void tp_pack_result_cache_select(tp_pack_result_cache *cache, tp_id128 hash);

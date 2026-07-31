@@ -1,4 +1,4 @@
-/* Packet S27 phase-1 premise gate: is a serialized `.ntpack` blob materially
+/* Premise gate: is a serialized `.ntpack` blob materially
  * smaller than the raw RGBA8 page bytes it inflates into?
  *
  * The serialized pack-result cache lifecycle only pays for itself if an INACTIVE
@@ -22,7 +22,7 @@
  *   tp_bench_pack_blob <scratch_dir> [iterations] [bench_assets_root]
  *
  * ---------------------------------------------------------------------------
- * Packet S27 phase-2 codec sweep (appended below the phase-1 lines)
+ * Codec sweep (appended below the premise lines)
  *
  * The owner wants a compressed COLD tier for the pack-result cache: inactive
  * atlases held as compressed pixel blobs in RAM, compressed in the background on
@@ -77,7 +77,7 @@
  * 4. Recommendation: miniz raw deflate, level 6. See the S27 packet notes.
  *
  * ---------------------------------------------------------------------------
- * Packet S28 phase-3: the WIRED cold tier (`coldtier` rows)
+ * The wired cold tier (`coldtier` rows)
  *
  * Phase 2 measured codecs in isolation. Phase 3 drives the shipped
  * tp_pack_result_cache: store a result, switch away (background encode), settle,
@@ -120,7 +120,7 @@
 #include "tp_bench_support.h"
 
 #include "tp_core/tp_arena.h"
-#include "tp_core/tp_model.h"
+#include "tp_core/tp_pack_result.h"
 #include "tp_core/tp_pack.h"
 #include "tp_core/tp_pack_result_cache.h"
 #include "tp_build_driver_internal.h"

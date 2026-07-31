@@ -6,6 +6,9 @@ compile_commands.json
 tmp/
 examples/projects/out/
 
+# Per-machine Claude permissions; never commit local authority or paths.
+/.claude/settings.local.json
+
 # Local working area of the lead agent (draw-hash baselines, verification
 # screenshots, one-off probe scripts) — machine-local, never committed.
 /scratchpad/
@@ -16,6 +19,9 @@ examples/projects/out/
 
 # Local Serena project metadata — machine-local tooling, never committed.
 /.serena/
+
+# Ephemeral state for one active agent task; never commit plans or review logs.
+/.context/
 
 # Defold editor artifacts in the demo project
 examples/defold-demo/.internal/

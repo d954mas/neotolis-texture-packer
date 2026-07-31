@@ -39,16 +39,16 @@ void test_status_id_tokens(void) {
     TEST_ASSERT_EQUAL_STRING("invalid_utf8", tp_status_id(TP_STATUS_INVALID_UTF8));
     TEST_ASSERT_EQUAL_STRING("key_absolute", tp_status_id(TP_STATUS_KEY_ABSOLUTE));
     TEST_ASSERT_EQUAL_STRING("key_traversal", tp_status_id(TP_STATUS_KEY_TRAVERSAL));
-    /* F1-03 selector-resolution faults (master spec §5.4). */
+    /* Selector-resolution faults. */
     TEST_ASSERT_EQUAL_STRING("not_found", tp_status_id(TP_STATUS_NOT_FOUND));
     TEST_ASSERT_EQUAL_STRING("ambiguous_selector", tp_status_id(TP_STATUS_AMBIGUOUS_SELECTOR));
-    /* F2-01 typed operation-engine faults (master spec §6-6.2, §7). */
+    /* Typed operation-engine faults. */
     TEST_ASSERT_EQUAL_STRING("unknown_op", tp_status_id(TP_STATUS_UNKNOWN_OP));
     TEST_ASSERT_EQUAL_STRING("out_of_range", tp_status_id(TP_STATUS_OUT_OF_RANGE));
-    /* F2-02 transaction concurrency faults (master spec §8). */
+    /* Transaction concurrency faults. */
     TEST_ASSERT_EQUAL_STRING("revision_conflict", tp_status_id(TP_STATUS_REVISION_CONFLICT));
     TEST_ASSERT_EQUAL_STRING("invalid_revision", tp_status_id(TP_STATUS_INVALID_REVISION));
-    /* F2-04 recovery-journal durability fault (master spec §7.1, §22.3). */
+    /* Recovery-journal durability fault. */
     TEST_ASSERT_EQUAL_STRING("journal_failed", tp_status_id(TP_STATUS_JOURNAL_FAILED));
     TEST_ASSERT_EQUAL_STRING("file_changed_externally", tp_status_id(TP_STATUS_FILE_CHANGED_EXTERNALLY));
     TEST_ASSERT_EQUAL_STRING("recovery_cleanup_failed", tp_status_id(TP_STATUS_RECOVERY_CLEANUP_FAILED));
@@ -61,7 +61,7 @@ void test_status_id_tokens(void) {
                              tp_status_id(TP_STATUS_FILE_DURABILITY_UNCERTAIN));
     TEST_ASSERT_EQUAL_STRING("file_io_failed",
                              tp_status_id(TP_STATUS_FILE_IO_FAILED));
-    /* H0.3 fallible builder containment fault (decision 0018). */
+    /* Fallible builder containment fault. */
     TEST_ASSERT_EQUAL_STRING("builder_crashed",
                              tp_status_id(TP_STATUS_BUILDER_CRASHED));
     /* U-02 cooperative cancellation. */

@@ -1,3 +1,4 @@
+#define NTPACKER_GUI_PACK_IMPLEMENTATION
 #include "gui_pack_internal.h"
 
 #include <stdio.h>
@@ -47,9 +48,7 @@ uint64_t gui_pack_preview_diff_rebuilds(void) {
 #endif
 
 bool gui_pack_preview_publish(tp_session_job_result *job_result,
-                              int atlas_index, double elapsed_ms,
-                              gui_pack_result_info *out) {
-    (void)atlas_index;
+                              double elapsed_ms, gui_pack_result_info *out) {
     if (!job_result || job_result->kind != TP_SESSION_JOB_PACK ||
         !job_result->_owner || !job_result->pack.result) {
         if (out) {
@@ -60,6 +59,10 @@ bool gui_pack_preview_publish(tp_session_job_result *job_result,
         }
         return false;
     }
+    /* Preview pins the receipt beyond this poll exactly like the native result
+     * cache. Retain only the arena-backed Pack result, not the exited worker,
+     * serialized request, and request paths. */
+    tp_session_job_result_compact(job_result);
     tp_session_pack_job_result *pack = &job_result->pack;
     if (s_preview.result_owner) {
         tp_session_job_result owned = {0};
@@ -88,26 +91,15 @@ bool gui_pack_preview_publish(tp_session_job_result *job_result,
     return true;
 }
 
-bool gui_pack_preview_belongs_to(int atlas_index) {
-    const tp_session_snapshot *snapshot =
-        gui_project_snapshot();
-    const tp_snapshot_atlas *atlas =
-        snapshot
-            ? tp_session_snapshot_atlas_at(
-                  snapshot, atlas_index)
-            : NULL;
-    return s_preview.valid && atlas &&
-           tp_id128_eq(
-               s_preview.atlas_id, atlas->id);
+bool gui_pack_preview_belongs_to(tp_id128 atlas_id) {
+    return s_preview.valid &&
+           tp_id128_eq(s_preview.atlas_id, atlas_id);
 }
 
-const tp_result *gui_pack_preview_result(int atlas_index) {
-    const tp_session_snapshot *snapshot = gui_project_snapshot();
-    const tp_snapshot_atlas *atlas =
-        snapshot ? tp_session_snapshot_atlas_at(snapshot, atlas_index) : NULL;
+const tp_result *gui_pack_preview_result(tp_id128 atlas_id) {
     tp_session_input_token current_input = {0};
-    if (!s_preview.valid || !atlas ||
-        !tp_id128_eq(s_preview.atlas_id, atlas->id) ||
+    if (!s_preview.valid ||
+        !tp_id128_eq(s_preview.atlas_id, atlas_id) ||
         !gui_project_observed_input_token(&current_input) ||
         !tp_session_input_token_equal(
             current_input, s_preview.input_token)) {
@@ -116,8 +108,8 @@ const tp_result *gui_pack_preview_result(int atlas_index) {
     return s_preview.result;
 }
 
-uint64_t gui_pack_preview_result_version(int atlas_index) {
-    return gui_pack_preview_result(atlas_index) ? s_preview.version : 0U;
+uint64_t gui_pack_preview_result_version(tp_id128 atlas_id) {
+    return gui_pack_preview_result(atlas_id) ? s_preview.version : 0U;
 }
 
 void gui_pack_preview_clear(void) {
@@ -159,7 +151,7 @@ static bool preview_field_phrases(int field_id, const char **short_tok,
     }
 }
 
-int gui_pack_preview_diff(int atlas_index, const char *exporter_id, char *chip,
+int gui_pack_preview_diff(tp_id128 atlas_id, const char *exporter_id, char *chip,
                           size_t chip_cap, char *tip, size_t tip_cap) {
     if (chip && chip_cap) {
         chip[0] = '\0';
@@ -173,7 +165,7 @@ int gui_pack_preview_diff(int atlas_index, const char *exporter_id, char *chip,
     }
     const tp_session_snapshot *snapshot = gui_project_snapshot();
     const tp_snapshot_atlas *atlas =
-        snapshot ? tp_session_snapshot_atlas_at(snapshot, atlas_index) : NULL;
+        snapshot ? tp_session_snapshot_atlas_by_id(snapshot, atlas_id) : NULL;
     if (!atlas) {
         return 0;
     }

@@ -1,0 +1,143 @@
+# Engine and client boundaries
+
+**Status:** Current architecture.
+
+## Engine boundary
+
+The project uses public neotolis-engine builder, hashing, UI, filesystem, and
+shared binary-format APIs. `external/neotolis-engine` is read-only.
+
+Packer-specific behavior lives above the engine:
+
+- canonical project and operation model;
+- source identity and validation;
+- capability-based effective settings;
+- worker-process containment;
+- `.ntpack` parse-back into the canonical result;
+- exporter normalization and publication;
+- session/history/recovery/client semantics.
+
+If a defect originates in the engine, the durable fix belongs in an upstream
+engine issue and PR. Local guards may validate inputs or contain failures but
+must not fork a private engine implementation.
+
+The builder is fallible and is treated as such even where engine internals use
+assertions. Production job boundaries convert malformed input, worker crash,
+timeout, protocol error, and invalid binary output into `tp_status` diagnostics.
+
+## Shared exporter boundary
+
+Current exporter descriptors declare:
+
+- stable exporter ID and display name;
+- primary extension;
+- capability flags;
+- write callback;
+- optional output-list callback.
+
+Settings clamping, loss notices, normalization, and safe publication are shared
+export-layer behavior around the descriptor. The current descriptor does not
+carry format-version metadata.
+
+Built-in `json-neotolis` and `defold` descriptors and runtime-registered C
+exporters use the same export orchestration. This is not yet the target unified
+package descriptor or Import/Export IR.
+
+## Client shapes
+
+The core names product client shapes independently of transport:
+
+| Capability | File CLI | Native GUI | In-process live headless |
+|---|---|---|---|
+| Transaction | not applicable | available | available |
+| Persistence | available | available | available |
+| Events | not applicable | available | available |
+| History | not applicable | available | available |
+| Recovery | not applicable | available | available |
+| Pack job | not applicable | available | available |
+| Export command | available | available | available |
+| Source Refresh job | not applicable | available | available |
+| Async inspect job | not applicable | not implemented | not implemented |
+| Async validate job | not applicable | not implemented | not implemented |
+
+The table describes the typed core capability matrix, not deployed transports.
+There is no current MCP or Dev API server.
+
+## File CLI
+
+Ordinary CLI commands are one-shot saved-file workflows. Inspect and validate
+load immutable snapshots without taking the writer lease. Mutations open a
+short-lived writable session, submit the same typed operations, and save through
+the same persistence contract. Pack/export remain synchronous commands with
+versioned machine payloads, but construct and drain the same immutable build
+job used behind live session execution; there is no second CLI pack/export
+orchestrator.
+
+The CLI is not a back door into an already-open GUI session. A conflicting live
+writer produces `project_live`.
+
+## Native GUI
+
+The GUI owns one small session host. Views only declare drafts or call typed
+`gui_request_*` ingress from `gui_actions.h`. The host alone includes
+`gui_actions_driver.h` and calls `gui_actions_step` once between frames; that
+one function drains intents, advances the internal project FSM, consumes typed
+task/lifecycle terminals, and reconciles presentation against the newly
+borrowed view. Dev/test blocking adapters are isolated in `gui_actions_dev.h`
+and also drive this actions step. Cancel is a deferred request, not a direct
+view-to-session mutation.
+
+Intent drain is observation-aware: the first mutable session call closes the
+borrowed cut and ends that drain pass. Remaining inputs stay owned by the
+actions controller, `gui_project_step` publishes the next cut, and a later
+controller tick resumes them. This sequencing is internal state, not knowledge
+required from views, dev tooling, or other callers.
+
+The New/Open/Exit confirmation flow is a tagged FSM owned by the actions
+controller: `idle`, `resolve-draft`, `resolve-dirty`, and `open-dialog`. The
+view receives a passive state value and returns one typed choice (`accept`,
+`discard`, or `cancel`) only for a resolve phase. The synchronous OS picker is
+the terminal input for `open-dialog`; that tagged phase retains exclusive
+controller ownership from the Open request through picker selection or cancel.
+Startup recovery is a second typed modal FSM (`idle`, `choose`,
+`resolving`) with passive row access and one typed recovery choice. Neither flow
+has public continuation, modal, or mailbox flags. Host bootstrap, shutdown, and
+blocking dev/test operations use action-controller helpers, so they do not
+reproduce the begin/step/consume sequence.
+
+An active or pending lifecycle flow owns the whole action-controller tick, not
+only its dialog phase. Edit drafts, semantic intents, history requests, file
+dialogs, and jobs remain queued until the typed lifecycle choice reaches a
+terminal and its resulting observation cut is published. Blocking adapters
+likewise wait for a controller step that both enters and leaves with the task
+slot idle; an automatic Refresh queued behind another task is admitted first,
+and either admission or terminal failure is propagated rather than treated as
+quiescence.
+
+`gui_project_step` is an internal host primitive and the sole live-session
+update driver. The project host owns `tp_session_update`, task completion, and
+active/candidate lifecycle cutover. Its explicit states are closed, active,
+intent-specific draining, and ready-to-cutover. A caller never assembles
+apply/pump/poll/end phases and never reconstructs lifecycle state from pointer
+and flag combinations. Architecture gates keep the project step callable only
+by the actions controller, session update/admission out of other GUI modules,
+and both host-driving headers out of views.
+
+The thin mutation adapter still submits one typed operation batch. Source rows
+are rendered from the session-owned immutable runtime projection; the GUI does
+not scan or fingerprint source files. There is no in-process transport/client
+mirror.
+
+GUI presentation state—selection, filter, scroll, modal state, draft text,
+preview playback, GPU resources—is not persisted unless explicitly represented
+by the project schema.
+
+## Live headless shape
+
+The in-process live-headless shape uses the same session, events, history,
+recovery, pack, and export APIs as the GUI. It exists so future transports can
+adapt those contracts without moving business rules into RPC handlers.
+
+Transport discovery, authentication, ownership transfer, consent, method
+schemas, and MCP resources are target work described in
+[`../spec/automation.md`](../spec/automation.md).

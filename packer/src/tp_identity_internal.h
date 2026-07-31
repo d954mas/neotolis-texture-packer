@@ -36,7 +36,7 @@ typedef enum tp_host {
 tp_host tp_host_native(void);
 
 /* Lexically canonicalize an ABSOLUTE project path under `host` (touches no
- * filesystem). Implements master spec §5.1 and decision 0006; tp_status errors:
+ * filesystem). See docs/architecture/persistence-and-recovery.md; tp_status errors:
  *   - not absolute        -> TP_STATUS_PATH_NOT_ABSOLUTE
  *   - Windows "C:foo"     -> TP_STATUS_PATH_DRIVE_RELATIVE
  *   - malformed UNC       -> TP_STATUS_PATH_BAD_UNC

@@ -2,7 +2,7 @@
 #define TP_CORE_TP_EXPORT_RUN_H
 
 /*
- * Per-target packing orchestration (SUMMARY.md §5h, ROADMAP Phase 2). Lives in
+ * Per-target packing orchestration (docs/architecture/jobs-pack-and-cache.md). Lives in
  * tp_build because it drives nt_builder (via tp_pack); tp_core's pure export
  * layer (tp_export.h) stays GUI-linkable. For each ENABLED target of an atlas:
  *   1. resolve its exporter by id (unknown id -> hard error listing known ids);

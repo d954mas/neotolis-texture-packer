@@ -2,7 +2,7 @@
 #define TP_FIXTURES_H
 
 /* Procedural fixture library for the fixture-driven golden round-trip test
- * (plan §3.1/§3.2, task 6). Links against nt_builder + tp_core; lives in the
+ * Links against nt_builder + tp_core; lives in the
  * test tree, NOT in the tp_core lib.
  *
  * Each fixture CASE is one atlas built into its own .ntpack via nt_builder,
@@ -113,7 +113,7 @@ typedef struct {
     int sprite_count;
 } tp_fixture_case;
 
-/* Returns the shared, lazily-built fixture case table (plan §3.1). */
+/* Returns the shared, lazily-built fixture case table. */
 const tp_fixture_case *tp_fixtures_all(int *out_count);
 
 /* Builds one case to "<out_dir>/<case.name>.ntpack" via nt_builder using the §5

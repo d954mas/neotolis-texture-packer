@@ -9,7 +9,7 @@
 
 #include "core/nt_assert.h"
 #include "tp_core/tp_arena.h"
-#include "tp_core/tp_model.h"
+#include "tp_core/tp_pack_result.h"
 
 /* Bytes of one page fed to the deflator between cancellation checks. This is the
  * ONLY thing that bounds how long the owning thread waits when it has to join an
@@ -770,7 +770,7 @@ static void remove_entry(tp_pack_result_cache *cache, cache_entry *entry) {
 }
 
 /* The entry holding the maximum completion sequence -- the one authoritative()
- * resolves to absent an explicit selection (decision 0004). Ties keep the
+ * resolves to absent an explicit selection. Ties keep the
  * earliest-stored entry, exactly as resolve_target() does. */
 static cache_entry *max_sequence_entry(const tp_pack_result_cache *cache) {
     cache_entry *best = NULL;
@@ -785,7 +785,7 @@ static cache_entry *max_sequence_entry(const tp_pack_result_cache *cache) {
 
 static void evict_over_budget(tp_pack_result_cache *cache) {
     /* The highest-sequence entry must stay resolvable regardless of budget size
-     * (store contract, decision 0004): an out-of-order store can demote it to
+     * (store contract): an out-of-order store can demote it to
      * inactive, but authoritative() must still return it, never a stale lower
      * sequence. So it is exempt from eviction unconditionally, the same way the
      * pinned active entry is -- even at budget 0. Its bytes stay counted in

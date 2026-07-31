@@ -2,7 +2,7 @@
 #define TP_CORE_TP_PACK_H
 
 /* Runs one atlas through nt_builder from a minimal settings input and returns an
- * owned tp_result (plan §4 task 9, ROADMAP 1b).
+ * owned tp_result (docs/architecture/jobs-pack-and-cache.md).
  *
  * Flow: drive nt_builder (start_pack -> begin_atlas -> add sprites -> end_atlas
  * -> finish_pack) using the §5 export-friendly profile, writing a session
@@ -160,9 +160,9 @@ typedef struct tp_pack_sprite_desc {
 /* Minimal pack settings. `atlas_name` must be normalization-invariant (no `\\`,
  * `./`, `..`, `//`, no leading/trailing `/`) -- otherwise the atlas blob's raw
  * "<atlas>/texN" hash diverges from the normalized entry-table hash and every
- * page lookup misses (plan §5/R2). `work_dir` is required: tp_core has no
+ * page lookup misses. `work_dir` is required: tp_core has no
  * temp-dir opinions, so the caller says where the session .ntpack goes. The
- * packing knobs are caller-driven (plan §5); the straight-alpha export profile
+ * packing knobs are caller-driven; the straight-alpha export profile
  * (premultiplied=false, compress=NULL, gen_mipmaps=false, RGBA8, no debug PNG)
  * is applied by tp_pack and is not tunable here. */
 typedef struct tp_pack_settings {

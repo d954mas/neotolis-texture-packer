@@ -3,8 +3,8 @@
 
 #include "tp_core/tp_error.h"
 
-/* Process exit codes -- a stable contract (ai-first.md item 3, plan "CLI v1
- * contract"). Agents branch on these, so the numbers are frozen; 9+ is reserved
+/* Process exit codes -- a stable contract (docs/formats/cli-report.md).
+ * Agents branch on these, so the numbers are frozen; 9+ is reserved
  * for future distinct failures. Every enumerator's WHY is the condition that
  * MUST map to it. */
 typedef enum cli_exit {

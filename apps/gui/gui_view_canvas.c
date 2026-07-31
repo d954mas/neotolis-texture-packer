@@ -28,7 +28,7 @@
 
 /* Approximate page fill: sum of placed AABB areas (transform-swapped where diagonal) over sum of
  * page areas. Labeled "filled" -- an approximation (ignores padding/margin), good enough for the E'
- * stats line (ux.md §2.1). */
+ * stats line. */
 static float atlas_fill_pct(const tp_result *r) {
     if (!r || r->page_count == 0) {
         return 0.0F;
@@ -54,7 +54,7 @@ static float atlas_fill_pct(const tp_result *r) {
  * icon-only button gets a tooltip in declare_tooltips (mouse-complete). `h` = the row height. --- */
 static void strip_group_actions(nt_ui_context_t *ctx, bool accent, bool labels, float h) {
     if (gui_pack_async_busy()) {
-        /* Busy: a disabled elapsed/progress label + a Cancel affordance (ux.md §3 worker thread). The
+        /* Busy: a disabled elapsed/progress label + a Cancel affordance. The
          * status label always carries text (even in the icon-only tier) so it stays honest. */
         char busy[48];
         if (gui_pack_async_active_kind() == GUI_PACK_ASYNC_EXPORT) {
@@ -72,17 +72,7 @@ static void strip_group_actions(nt_ui_context_t *ctx, bool accent, bool labels, 
         (void)ui_icon_btn(ctx, s_id_btn_pack, &s_ic_refresh, 16.0F, busy, &g_btn_primary, false, 0.0F, h, &g_onaccent);
         if (ui_icon_btn(ctx, s_id_btn_export, &s_ic_x, 16.0F, labels ? "Cancel" : NULL, &g_btn,
                         !gui_pack_async_cancelling(), 0.0F, h, &g_body)) {
-            tp_error error = {{0}};
-            const tp_status status =
-                gui_pack_async_cancel(&error);
-            if (status != TP_STATUS_OK) {
-                set_statusf_ex(
-                    STATUS_ERROR,
-                    "Cancel rejected: %s",
-                    error.msg[0]
-                        ? error.msg
-                        : tp_status_str(status));
-            }
+            gui_request_cancel();
         }
         if (ui_icon_btn(ctx, s_id_btn_refresh, &s_ic_refresh, 16.0F, NULL, &g_btn_ghost, true, 0.0F, h, &g_caption)) {
             gui_request_refresh();
@@ -214,7 +204,7 @@ static bool strip_preview_chip(nt_ui_context_t *ctx, float h) {
     char chip[96];
     char tip[224];
     const int nd = gui_pack_preview_diff(
-        gui_view_atlas_index(gui_project_snapshot()),
+        gui_view_atlas_id(),
         e->id, chip, sizeof chip, tip, sizeof tip);
     if (nd <= 0) {
         return false; /* format holds everything -> no degradation chip (canvas simply shows the preview) */
@@ -338,7 +328,7 @@ static void declare_canvas_strip(nt_ui_context_t *ctx, bool atlas) {
     }
 }
 
-/* Animation preview player in the canvas area (ux.md §3.7b): a control strip (play/pause, frame step,
+/* Animation preview player in the canvas area: a control strip (play/pause, frame step,
  * "cur/total", Close) over the ANIM-mode custom element, or a "Pack to preview" hint without a result. */
 static void declare_canvas_preview(nt_ui_context_t *ctx) {
     const tp_snapshot_animation *an = preview_animation();
@@ -398,8 +388,7 @@ static void declare_canvas_preview(nt_ui_context_t *ctx) {
                 nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), "This animation has no frames yet.", &g_canvas_hint);
             } else if (
                 an &&
-                gui_pack_result(gui_view_atlas_index(
-                    gui_project_snapshot())) == NULL) {
+                gui_pack_result(gui_view_atlas_id()) == NULL) {
                 nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), "Pack to preview \xE2\x80\x94 press Pack (Ctrl+P).", &g_canvas_hint);
             } else {
                 nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), "No frames resolve to packed regions \xE2\x80\x94 repack (Ctrl+P).", &g_canvas_hint);
@@ -447,14 +436,16 @@ void declare_canvas(nt_ui_context_t *ctx) {
                 tv += r->sprites[i].vert_count;
             }
             const char *sep = "  \xC2\xB7  "; /* U+00B7 middle dot (now baked) */
+            const gui_last_pack_view last_pack =
+                gui_actions_last_pack_view();
             if (tp_id128_eq(
-                    s_last_pack_atlas_id,
+                    last_pack.atlas_id,
                     gui_view_atlas_id()) &&
-                s_last_pack_ms > 0.0) {
+                last_pack.duration_ms > 0.0) {
                 (void)snprintf(label, sizeof label,
                                "%d sprites%s%d pages%s%dx%d%s%.0f%% filled%s%d verts%spacked %.0f ms", r->sprite_count,
                                sep, r->page_count, sep, pw, ph, sep, (double)atlas_fill_pct(r), sep, tv, sep,
-                               s_last_pack_ms);
+                               last_pack.duration_ms);
             } else {
                 (void)snprintf(label, sizeof label, "%d sprites%s%d pages%s%dx%d%s%.0f%% filled%s%d verts",
                                r->sprite_count, sep, r->page_count, sep, pw, ph, sep, (double)atlas_fill_pct(r), sep,
@@ -614,7 +605,7 @@ static nt_atlas_region_ref_t *status_sev_icon(status_sev_t sev) {
  * bottom-left of the canvas, replacing the permanent status-bar row. A new message replaces the old
  * (set_status* clears the dismiss bit); the pill exists only while there is a message and it has not been
  * clicked away. No timers -- errors/warnings and success/info alike persist until replaced or dismissed
- * (render-pure; immediate mode). Keeps declare_statusbar's severity language (icon + text tint). ux.md
+ * (render-pure; immediate mode). Keeps declare_statusbar's severity language (icon + text tint).
  * region H (the future notices PANEL) is not built here -- this is the interim single-message surface.
  * Declared as a child of the canvas clip box (s_id_canvas); floating -> escapes the clip and does not
  * disturb sibling layout. */

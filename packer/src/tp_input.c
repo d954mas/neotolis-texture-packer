@@ -50,7 +50,7 @@ tp_status tp_pack_input_format_sprite_name(tp_id128 source_id,
 /* Appends one sprite: raw name (ext kept) + decode path, with per-sprite overrides
  * mapped from the atlas by the STRIPPED export key and encoded onto the desc
  * (engine encoding, +1 shape). Returns a precise status. Ports gui_pack.c desc_add
- * 1:1 (arch review §3.1); the effective-shape rule now lives in tp_project. */
+ * 1:1; the effective-shape rule now lives in tp_project. */
 static tp_status export_key_dup(const char *raw, char **out, tp_error *err) {
     *out = NULL;
     if (!raw) {

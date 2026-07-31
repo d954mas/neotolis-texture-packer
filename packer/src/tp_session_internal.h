@@ -67,15 +67,6 @@ size_t tp_session__test_snapshot_allocation_bytes(void);
 void tp_session__test_fail_snapshot_allocation_after(size_t successful);
 void tp_session__test_fail_next_generation_owner_allocation(void);
 
-typedef void (*tp_session_test_observe_after_cut_fn)(void *context);
-/* One-shot thread-local seam invoked after the observation has fixed its cut
- * but before retained state is materialized. Tests use it to inject the commit
- * that could previously split events_after() from snapshot_create(). Compiled
- * out of every build that does not define TP_ENABLE_TEST_SEAMS, so a consumer
- * must recompile tp_session_observation.c with the define (see the
- * tp_test_session_observation target). */
-void tp_session__test_set_observe_after_cut(
-    tp_session_test_observe_after_cut_fn hook, void *context);
 #endif
 
 /* Recovery orchestration uses this only to complete the ownership transfer on

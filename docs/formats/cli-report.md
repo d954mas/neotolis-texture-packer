@@ -1,36 +1,64 @@
-# ntpacker CLI — machine payloads (`--json`)
+# CLI machine payloads
 
-**Status:** active as-built CLI schema contract. Exact future operation, Dev API,
-MCP, Import/Export IR, and format-manifest schemas remain open contracts in
-[`../ntpacker-master-spec.md`](../ntpacker-master-spec.md) §60. Existing fields
-must not be renamed before the matching code, schema version, and golden tests
-migrate together.
+**Status:** Current contract.
 
-Conventions (master spec §4 and §14.2, the AI-first CLI ruling): every payload is a single JSON
-object on **stdout** (stderr carries diagnostics only), field names are
-**snake_case**, and every payload carries a per-verb `"schema": N` (independent
-of the project-file and export-format schema versions — those are reported by
-`version --json`). Field additions are non-breaking; removals/renames bump the
-verb's schema. Floats are dot-decimal always (`LC_NUMERIC` pinned to `C`).
-Errors with `--json` are also stdout payloads:
-`{"schema":1,"error":{"id":"<tp_status_id>","message":"..."}}`; the exit code
-is the authoritative machine signal (see `cli_exit.h`: 0 ok · 1 internal ·
-2 usage · 3 project load/parse · 4 pack failure · 5 export failure · 6 partial ·
-7 validate --strict findings · 8 typed pre-publication file I/O failure ·
-9+ reserved).
+Every saved-file CLI capability supports versioned JSON. With `--json`, stdout
+contains exactly one JSON object and stderr is reserved for diagnostics.
+Field names are `snake_case`, floats are dot-decimal under the `C` locale, and
+the process exit code is the authoritative success signal.
 
-`help --json` and `--help --json` emit the same schema-1 object. Its `commands`
-and `global_options` arrays are the machine-readable command catalog, and its
-`exit_codes` object freezes the symbolic mapping above. The options catalog
-includes `--dry-run`; it previews `pack` and mutation commands, while read-only
-queries such as `anim list` reject it with structured `usage` and exit 2.
+The exact executable contracts live in `apps/cli/` and its golden/contract
+tests. Payload schema numbers are independent of
+[project schema v5](project-v5.md) and exporter format versions.
 
-`version --json` emits manifest schema 2. Query verbs map directly to their
-payload schema number. Each mutation family maps to a variant object:
-`{"apply":1,"dry_run":2}`. `anim` additionally advertises `"list":4` because
-`anim list` is a query sharing the inspect schema, not a mutation response.
+## Exit codes
 
-## `pack` report (schema 1)
+| Code | Meaning |
+|---:|---|
+| 0 | Requested work completed successfully. |
+| 1 | Unexpected internal failure. |
+| 2 | Invalid invocation or arguments. |
+| 3 | Project load, parse, or model error. |
+| 4 | Pack or normalization failure. |
+| 5 | All requested exports failed. |
+| 6 | Partial success. |
+| 7 | `validate --strict` found one or more error-severity findings. |
+| 8 | Typed project-file failure before publication. |
+
+Values 9 and above are reserved.
+
+JSON errors have the stable envelope:
+
+```json
+{
+  "schema": 1,
+  "error": {
+    "id": "bad_project",
+    "message": "..."
+  }
+}
+```
+
+`error.id` uses stable machine tokens. Most are from the append-only
+`tp_status` vocabulary; CLI-owned failures such as usage errors add their own
+stable tokens. File I/O errors may also include `phase`, `path`, and
+`native_code`.
+
+## Schema manifest
+
+`version --json` uses manifest schema 2 and advertises the project format,
+export formats, and every CLI payload schema. Query verbs map directly to a
+number. Mutation families advertise separate variants:
+
+```json
+{ "apply": 1, "dry_run": 2 }
+```
+
+`anim list` advertises query schema 4 because it shares the inspect shape.
+`help --json` and `--help --json` return the same schema-1 command catalog,
+global options, and exit-code mapping.
+
+## Pack report: schema 1
 
 ```json
 {
@@ -41,126 +69,119 @@ payload schema number. Each mutation family maps to a variant object:
     "sprite_count": 60,
     "missing_sources": 0,
     "pack_runs": 1,
-    "pages": [{"index": 0, "w": 1024, "h": 512, "occupancy_pct": 87.3}],
+    "pages": [{
+      "index": 0,
+      "w": 1024,
+      "h": 512,
+      "occupancy_pct": 87.3
+    }],
     "targets": [{
       "exporter_id": "json-neotolis",
-      "out_path": "C:/.../out/animals",
+      "out_path": "C:/project/out/animals",
       "status": "ok",
-      "written_files": ["C:/.../out/animals.json", "C:/.../out/animals-0.png"],
-      "notices": [{"field": "pivot", "reason": "caps_unsupported",
-                   "sprite": "round/elephant", "message": "..."}]
+      "pack_run": 0,
+      "written_files": [
+        "C:/project/out/animals.json",
+        "C:/project/out/animals-0.png"
+      ],
+      "notices": []
     }]
   }],
-  "totals": {"targets_ok": 1, "targets_failed": 0, "files_written": 2},
-  "timings_ms": {"total": 812.4}
+  "totals": {
+    "targets_ok": 1,
+    "targets_failed": 0,
+    "files_written": 2
+  },
+  "timings_ms": { "total": 812.4 }
 }
 ```
 
-- `dry_run` — `true` when the report came from `pack --dry-run`; then NO files were
-  written (`written_files` is empty on every target and `files_written` is 0), each
-  ok target instead carries a `would_write` array (the paths it WOULD produce), and
-  its `notices` are the PREDICTED degradations (`tp_export_predict_loss` with the
-  packed prep — full axes incl. alias/multipage) rather than writer-emitted ones.
-  A dry run creates no directories either.
+`occupancy_pct` counts original placed frame area; aliases do not double-count
+shared pixels. Targets with identical effective settings reuse a pack run.
+Timings are intentionally environment-dependent; the rest of the report is
+deterministic.
 
-```json
-    "targets": [{
-      "exporter_id": "json-neotolis",
-      "out_path": "C:/.../out/animals",
-      "status": "ok",
-      "written_files": [],
-      "would_write": ["C:/.../out/animals.json", "C:/.../out/animals-0.png"],
-      "notices": [ ... predicted losses ... ]
-    }]
+A failed target has `status: "failed"` and `error`; other targets continue.
+After all requested atlases are processed, any success combined with any
+failure exits 6. With no successful target, pack/normalization failure exits 4;
+otherwise an all-export-failed run exits 5.
+
+Skipped atlases retain a human `note` and structured atlas notice. Stable skip
+IDs are `no_usable_images` and `no_enabled_targets`; both are successful.
+Input failures remain typed errors and are not collapsed into these skips.
+
+### Dry run
+
+`pack --dry-run --json` uses the same schema with `dry_run: true`.
+It creates or changes no published project/export output path. Pack may use and
+clean up its private scratch request directory and temporary `.ntpack`:
+
+- `written_files` is empty;
+- `files_written` is zero;
+- successful targets include `would_write`;
+- notices are predicted capability losses.
+
+`--atlas` selects one atlas. `--target` filters by exporter ID; filtering all
+targets away is a successful empty result. `--out-dir` re-roots relative target
+paths under the supplied directory while leaving absolute paths unchanged.
+
+## Inspect: schema 4
+
+`inspect --json` reports the canonical v5 graph, including structural IDs,
+tagged sources, `{source,key}` sprite/frame identity, animations, and per-atlas
+targets. `project.schema_version` reports the project wire version separately
+from the payload schema.
+
+`anim list --json` shares the animation shape and schema 4. It is read-only and
+rejects `--dry-run` as usage error 2.
+
+## Validate: schema 2
+
+Each materialized validation finding returns exact, non-truncated context
+strings:
+
+```text
+severity, code, message,
+atlas?, atlas_id?, source?, source_id?, sprite?,
+anim?, animation_id?, frame?, target?, target_id?
 ```
 
-- `occupancy_pct` — sum of placed ORIGINAL frame areas (aliases share their
-  original's pixels, not double-counted) / page area × 100; deterministic,
-  in (0,100] for a non-empty page.
-- `pages` are grouped per shared pack run; targets whose effective settings
-  coincide reuse one run (`pack_runs`).
-- A failed target reports `"status": "failed"` + `"error"`; the run continues
-  to remaining targets (exit 6 when some succeeded, 5 when none did). A pack/
-  normalize failure aborts the atlas before any target writes (exit 4).
-- `timings_ms` values are environment-dependent and are **masked in golden
-  tests** — never assert them; everything else in the report is deterministic.
-- `out_path` is the resolved absolute output **base**: each exporter appends
-  its own extension(s) (`<base>.json`, `<base>-<page>.png`, Defold
-  `<base>.tpinfo` + sibling `.tpatlas`).
-- A successfully skipped atlas retains the human-readable `note` and adds a
-  structured atlas-level `notices` entry with `{id, atlas, message}`. Stable
-  skip ids are `no_usable_images` and `no_enabled_targets`; both exit 0.
-- An atlas-level input failure adds
-  `"error":{"id":"<tp_status_id>","atlas":"<name>","message":"..."}`.
-  Missing/unreadable sources therefore remain distinct from the typed
-  `no_usable_images` skip and produce a non-zero exit without losing source
-  context.
+Counts are reported as `counts.error` and `counts.warning`. Finding codes are
+the append-only `TP_VALIDATION_CODE_*` tokens from
+[`tp_validate.h`](../../packer/include/tp_core/tp_validate.h).
+The materialized report is bounded to 2048 findings and 4 MiB. When findings
+are omitted, a synthetic `validation_truncated` finding records that fact while
+the error/warning counts continue to include omitted findings.
 
-## `pack` flags
+Findings normally remain in the payload with exit 0. With `--strict`, one or
+more error-severity findings change the exit to 7; warnings alone still exit 0.
 
-- `--atlas <name>` — only that atlas (unknown name = usage error, exit 2).
-- `--target <id>` — only targets with that exporter id; filtering everything
-  away is OK-with-warning (exit 0, empty targets) so preview-only projects
-  don't fail agent pipelines.
-- `--out-dir <dir>` — RELATIVE target out_paths are re-rooted under `<dir>`
-  (resolved against the CWD) instead of the project dir; absolute out_paths
-  are untouched. Parent directories are created.
-- `--dry-run` (B3b) — same report, no files written, predicted degradations
-  included.
-
-## `inspect` (schema 4) / `validate` (schema 2)
-
-Schema 4 reports a canonical-v5 project: tagged source objects carry stable
-structural IDs, sprite overrides and animation frames use `{source,key}`
-identity, and each animation carries both opaque structural `id` and human
-`name`. The `anim list --json` query shares this schema and animation shape. An
-operator branches on the payload `schema` number; project-file schema is
-reported separately as `project.schema_version`. Because `anim list` is a
-read-only query, `--dry-run` is not valid for it and yields a structured
-`usage` error with exit 2.
-
-See `apps/cli/cli_inspect.c` / `cli_validate.c` headers. Validate schema 2 keeps
-exact (non-truncated) contexts and adds stable structural identities:
-`{severity, code, message, atlas?, atlas_id?, source?, source_id?, sprite?,
-anim?, animation_id?, frame?, target?, target_id?}` with
-`counts:{error,warning}`. Examples of stable finding codes:
-`missing_source, empty_atlas, dangling_anim_frame, duplicate_export_key,
-export_name_collision, unknown_exporter, setting_out_of_range,
-input_build_failed`. The complete append-only vocabulary is defined by
-`TP_VALIDATION_CODE_*` in `packer/include/tp_core/tp_validate.h`; adapters emit
-those tokens verbatim.
-
-## Mutation success (schema 1)
-
-Normal success is
-`{"schema":1,"ok":true,"verb":"<verb>","count":N}`. A successful
-mutation may additionally contain `notices`. In particular:
+## Mutation apply: schema 1
 
 ```json
 {
   "schema": 1,
   "ok": true,
   "verb": "set",
-  "count": 1,
-  "notices": [{
-    "id": "file_durability_uncertain",
-    "message": "project file was published, but storage durability could not be confirmed",
-    "status": "file_durability_uncertain"
-  }]
+  "count": 1
 }
 ```
 
-This is not a failed or absent write: the canonical project bytes were
-published and are authoritative. Clients must surface the notice and must not
-retry as if no write occurred. `recovery_degraded` is likewise a successful
-Save notice about local crash-recovery authority, not project-file publication.
+Successful mutations may include notices. `file_durability_uncertain` means the
+canonical bytes were published but storage durability could not be confirmed;
+clients must surface it and must not retry as if publication failed.
+`recovery_degraded` similarly reports local crash-recovery authority without
+reversing a successful project save.
 
-Mutation `--dry-run --json` uses schema 2 instead of the apply schema above. It
-reports `command`, `dry_run`, `would_change`, `operation_count`,
-`revision_before`, `revision_after`, `affected_ids`, `generated_ids`, and
-structured `notices`. Machine clients select this decoder from the mutation
-verb's `dry_run` entry in `version --json`.
+## Mutation dry run: schema 2
 
-For `new --dry-run`, `generated_ids` is empty and the append-only field
-`generated_ids_semantics` is `"assigned_on_apply"`. The preview therefore does
-not expose candidate IDs that a later apply cannot reuse.
+Mutation dry runs report `command`, `dry_run`, `would_change`,
+`operation_count`, `revision_before`, `revision_after`, `affected_ids`,
+`generated_ids`, and structured `notices`. They do not save or publish.
+
+For `new --dry-run`, `generated_ids` is empty and
+`generated_ids_semantics` is `assigned_on_apply`; previews never expose IDs
+that a later apply cannot reuse.
+
+Removals or field renames require the corresponding payload schema bump.
+Additive optional fields keep the current version.

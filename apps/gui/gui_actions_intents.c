@@ -39,11 +39,12 @@ static const struct {
 } k_intent_phase_range[] = {
     [GUI_INTENT_PHASE_EDIT] = {GUI_INTENT_ANIM_FRAME_REMOVE,
                                GUI_INTENT_TARGET_EXPORTER},
-    [GUI_INTENT_PHASE_DIALOG] = {GUI_INTENT_OPEN, GUI_INTENT_ADD_FOLDER},
+    [GUI_INTENT_PHASE_DIALOG] = {GUI_INTENT_SAVE, GUI_INTENT_ADD_FOLDER},
     [GUI_INTENT_PHASE_STRUCTURAL] = {GUI_INTENT_ADD_ATLAS,
                                      GUI_INTENT_OPEN_PREVIEW},
     [GUI_INTENT_PHASE_REFRESH] = {GUI_INTENT_REFRESH, GUI_INTENT_REFRESH},
-    [GUI_INTENT_PHASE_PACK] = {GUI_INTENT_PACK, GUI_INTENT_PREVIEW_TARGET},
+    [GUI_INTENT_PHASE_PACK] = {GUI_INTENT_CANCEL,
+                               GUI_INTENT_PREVIEW_TARGET},
 };
 
 /* The two edit families append (a click each); every other kind was one
@@ -78,7 +79,6 @@ static void intent_payload_dispose(gui_intent *intent) {
             break;
         case GUI_INTENT_TARGET_ENABLED:
         case GUI_INTENT_TARGET_EXPORTER:
-        case GUI_INTENT_OPEN:
         case GUI_INTENT_SAVE:
         case GUI_INTENT_SAVE_AS:
         case GUI_INTENT_ADD_FILES:
@@ -93,6 +93,7 @@ static void intent_payload_dispose(gui_intent *intent) {
         case GUI_INTENT_REMOVE_ANIMATION:
         case GUI_INTENT_OPEN_PREVIEW:
         case GUI_INTENT_REFRESH:
+        case GUI_INTENT_CANCEL:
         case GUI_INTENT_PACK:
         case GUI_INTENT_EXPORT:
         case GUI_INTENT_PREVIEW_TARGET:
@@ -158,6 +159,12 @@ void gui_actions__intent_shutdown(void) {
     s_actions.intents = NULL;
     s_actions.intent_count = 0;
     s_actions.intent_cap = 0;
+    s_actions.pending_frame_selection.present = false;
+    s_actions.pending_added_atlas_status_id =
+        tp_id128_nil();
+    s_actions.pending_created_animation.present = false;
+    s_actions.pending_history_reconcile.present = false;
+    s_actions.pending_view_reconcile = false;
 }
 
 /* Drops every queued intent whose kind is in [first,last], destroying payloads. */
@@ -174,6 +181,125 @@ static void intent_clear_range(gui_intent_kind first, gui_intent_kind last) {
     s_actions.intent_count = kept;
 }
 
+void gui_actions__reconcile_observation(void) {
+    const tp_session_snapshot *snapshot =
+        gui_project_snapshot();
+    if (s_actions.pending_history_reconcile.present) {
+        gui_view_reconcile_observation(snapshot);
+        if (tp_id128_is_nil(
+                s_actions.pending_history_reconcile
+                    .animation_id) ||
+            gui_view_animation_index(snapshot) < 0) {
+            gui_view_select_animation(tp_id128_nil());
+        }
+        s_actions.pending_history_reconcile.present =
+            false;
+    } else if (s_actions.pending_view_reconcile) {
+        gui_view_reconcile_observation(snapshot);
+    }
+    s_actions.pending_view_reconcile = false;
+
+    if (s_actions.pending_frame_selection.present) {
+        const tp_id128 atlas_id =
+            s_actions.pending_frame_selection.atlas_id;
+        const tp_id128 animation_id =
+            s_actions.pending_frame_selection.animation_id;
+        const int frame_index =
+            s_actions.pending_frame_selection.frame_index;
+        const tp_snapshot_animation *animation =
+            snapshot
+                ? tp_session_snapshot_animation_by_id(
+                      snapshot, atlas_id, animation_id)
+                : NULL;
+        if (tp_id128_eq(
+                gui_view_atlas_id(), atlas_id) &&
+            tp_id128_eq(
+                gui_view_animation_id(),
+                animation_id)) {
+            gui_view_select_animation_frame(
+                snapshot,
+                animation &&
+                        frame_index >= 0 &&
+                        frame_index <
+                            animation->frame_count
+                    ? frame_index
+                    : -1);
+        }
+        s_actions.pending_frame_selection.present =
+            false;
+    }
+
+    if (!tp_id128_is_nil(
+            s_actions.pending_added_atlas_status_id)) {
+        const tp_snapshot_atlas *added =
+            snapshot
+                ? tp_session_snapshot_atlas_by_id(
+                      snapshot,
+                      s_actions
+                          .pending_added_atlas_status_id)
+                : NULL;
+        if (added) {
+            set_statusf(
+                "Added atlas '%s'", added->name);
+        } else {
+            set_status_ex(
+                STATUS_ERROR,
+                "The added atlas was not present after publication.");
+        }
+        s_actions.pending_added_atlas_status_id =
+            tp_id128_nil();
+    }
+
+    if (s_actions.pending_created_animation.present) {
+        const tp_snapshot_animation *animation =
+            snapshot
+                ? tp_session_snapshot_animation_by_id(
+                      snapshot,
+                      s_actions.pending_created_animation
+                          .atlas_id,
+                      s_actions.pending_created_animation
+                          .animation_id)
+                : NULL;
+        if (!animation) {
+            set_status_ex(
+                STATUS_ERROR,
+                "The created animation was not present after publication.");
+        } else if (
+            s_actions.pending_created_animation
+                .with_frames) {
+            set_statusf(
+                "Created animation '%s' with %d frame(s) (Ctrl+Z to undo).",
+                animation->name,
+                s_actions.pending_created_animation
+                    .frame_count);
+        } else {
+            set_statusf(
+                "Added animation '%s' (Ctrl+Z to undo).",
+                animation->name);
+        }
+        s_actions.pending_created_animation.present =
+            false;
+    }
+
+}
+
+void gui_actions__record_created_animation(
+    tp_id128 atlas_id, tp_id128 animation_id,
+    int frame_count, bool with_frames) {
+    if (tp_id128_eq(gui_view_atlas_id(), atlas_id)) {
+        gui_view_select_animation(animation_id);
+    }
+    s_actions.pending_created_animation.atlas_id =
+        atlas_id;
+    s_actions.pending_created_animation.animation_id =
+        animation_id;
+    s_actions.pending_created_animation.frame_count =
+        frame_count;
+    s_actions.pending_created_animation.with_frames =
+        with_frames;
+    s_actions.pending_created_animation.present = true;
+}
+
 /* --- executors ----------------------------------------------------------- */
 
 static void intent_add_atlas(void) {
@@ -188,41 +314,12 @@ static void intent_add_atlas(void) {
      * Without this the player stayed armed on the previous atlas and kept reading
      * a result the canvas is no longer bound to. */
     preview_stop();
-    const tp_snapshot_atlas *added =
-        !tp_id128_is_nil(created.created_id)
-            ? tp_session_snapshot_atlas_by_id(gui_project_snapshot(),
-                                              created.created_id)
-            : NULL;
-    set_statusf("Added atlas '%s'", added ? added->name : "?");
+    s_actions.pending_added_atlas_status_id =
+        created.created_id;
 }
 
 /* One created animation reports itself the same way whether it came from the
  * "add animation" command or from a multi-selection. */
-static void intent_report_created_animation(tp_id128 atlas_id,
-                                            tp_id128 animation_id,
-                                            int frame_count,
-                                            bool with_frames) {
-    const tp_session_snapshot *after_snapshot = gui_project_snapshot();
-    const tp_snapshot_atlas *after_atlas =
-        after_snapshot
-            ? tp_session_snapshot_atlas_by_id(after_snapshot, atlas_id)
-            : NULL;
-    const tp_snapshot_animation *animation =
-        after_atlas ? tp_session_snapshot_animation_by_id(
-                          after_snapshot, after_atlas->id, animation_id)
-                    : NULL;
-    if (tp_id128_eq(gui_view_atlas_id(), atlas_id)) {
-        gui_view_select_animation(animation_id);
-    }
-    if (with_frames) {
-        set_statusf("Created animation '%s' with %d frame(s) (Ctrl+Z to undo).",
-                    animation ? animation->name : "?", frame_count);
-    } else {
-        set_statusf("Added animation '%s' (Ctrl+Z to undo).",
-                    animation ? animation->name : "?");
-    }
-}
-
 static void intent_remove_animation(const gui_animation_ref *ref) {
     /* preview_stop + selection reset + success text run only after a real
      * removal. On any operation rejection the animation remains, so we must not
@@ -262,14 +359,19 @@ static void intent_anim_frame_remove(const gui_intent *intent) {
         tp_id128_eq(gui_view_atlas_id(), ref->atlas_id) &&
         tp_id128_eq(gui_view_animation_id(), ref->animation_id);
     if (gui_project_anim_remove_frame(ref, frame_index) && removes_selection) {
-        gui_view_select_animation_frame(gui_project_snapshot(), -1);
+        s_actions.pending_frame_selection.atlas_id =
+            ref->atlas_id;
+        s_actions.pending_frame_selection.animation_id =
+            ref->animation_id;
+        s_actions.pending_frame_selection.frame_index =
+            -1;
+        s_actions.pending_frame_selection.present = true;
     }
 }
 
 /* The one drain switch. Default-less: every deferred intent the GUI has must
- * name its executor here, and a new kind cannot be added without one. Returns
- * true when the intent started a project lifecycle transition. */
-static bool intent_execute(const gui_intent *intent) {
+ * name its executor here, and a new kind cannot be added without one. */
+static void intent_execute(const gui_intent *intent) {
     switch (intent->kind) {
         case GUI_INTENT_ANIM_FRAME_REMOVE:
             intent_anim_frame_remove(intent);
@@ -280,10 +382,14 @@ static bool intent_execute(const gui_intent *intent) {
                     intent->payload.animation_edit.first,
                     intent->payload.animation_edit.second) &&
                 intent->payload.animation_edit.follow_selection) {
-                gui_view_select_animation_frame(
-                    gui_project_snapshot(),
+                s_actions.pending_frame_selection.atlas_id =
+                    intent->payload.animation_edit.animation.atlas_id;
+                s_actions.pending_frame_selection.animation_id =
+                    intent->payload.animation_edit.animation.animation_id;
+                s_actions.pending_frame_selection.frame_index =
                     intent->payload.animation_edit.first +
-                        intent->payload.animation_edit.second);
+                    intent->payload.animation_edit.second;
+                s_actions.pending_frame_selection.present = true;
             }
             break;
         case GUI_INTENT_ANIM_ADD_FRAMES:
@@ -304,13 +410,14 @@ static bool intent_execute(const gui_intent *intent) {
                 &target, intent->payload.target_edit.exporter_id);
             break;
         }
-        case GUI_INTENT_OPEN:
-            return gui_actions__open_dialog();
         case GUI_INTENT_SAVE:
             (void)gui_actions__save();
             break;
         case GUI_INTENT_SAVE_AS:
-            (void)gui_actions__save_as();
+            (void)gui_actions__save_as(
+                intent->payload.save_as.prepared
+                    ? &intent->payload.save_as.plan
+                    : NULL);
             break;
         case GUI_INTENT_ADD_FILES:
             gui_actions__add_files();
@@ -335,7 +442,7 @@ static bool intent_execute(const gui_intent *intent) {
             if (gui_project_remove_atlas(
                     intent->payload.scope.atlas_id,
                     intent->payload.scope.expected_revision)) {
-                gui_view_reconcile_observation(gui_project_snapshot());
+                s_actions.pending_view_reconcile = true;
                 set_status("Removed atlas (Ctrl+Z to undo).");
             }
             break;
@@ -359,8 +466,9 @@ static bool intent_execute(const gui_intent *intent) {
                 intent->payload.scope.atlas_id,
                 intent->payload.scope.expected_revision, NULL, NULL, 0);
             if (created.committed) {
-                intent_report_created_animation(intent->payload.scope.atlas_id,
-                                                created.created_id, 0, false);
+                gui_actions__record_created_animation(
+                    intent->payload.scope.atlas_id,
+                    created.created_id, 0, false);
             }
             break;
         }
@@ -374,7 +482,7 @@ static bool intent_execute(const gui_intent *intent) {
                 intent->payload.create_animation.frames,
                 intent->payload.create_animation.frame_count);
             if (created.committed) {
-                intent_report_created_animation(
+                gui_actions__record_created_animation(
                     intent->payload.create_animation.atlas_id,
                     created.created_id,
                     intent->payload.create_animation.frame_count, true);
@@ -390,6 +498,9 @@ static bool intent_execute(const gui_intent *intent) {
         case GUI_INTENT_REFRESH:
             gui_actions__refresh();
             break;
+        case GUI_INTENT_CANCEL:
+            gui_actions__cancel();
+            break;
         case GUI_INTENT_PACK:
             do_pack();
             break;
@@ -400,13 +511,14 @@ static bool intent_execute(const gui_intent *intent) {
             gui_actions__preview_target_start(intent->payload.exporter_slot);
             break;
     }
-    return false;
 }
 
-bool gui_actions__intent_drain(gui_intent_phase phase) {
+void gui_actions__intent_drain(gui_intent_phase phase) {
+    if (!gui_project_observation_is_valid()) {
+        return;
+    }
     const int first = intent_step(k_intent_phase_range[phase].first);
     const int last = intent_step(k_intent_phase_range[phase].last);
-    bool lifecycle_started = false;
     for (int step = first; step <= last; ++step) {
         for (int i = 0; i < s_actions.intent_count; ++i) {
             if (intent_step(s_actions.intents[i].kind) != step) {
@@ -420,13 +532,25 @@ bool gui_actions__intent_drain(gui_intent_phase phase) {
                         sizeof *s_actions.intents);
             s_actions.intent_count--;
             i--;
-            if (intent_execute(&entry)) {
-                lifecycle_started = true;
+            const int64_t revision_before =
+                gui_project_committed_revision();
+            intent_execute(&entry);
+            const int64_t revision_after =
+                gui_project_committed_revision();
+            if (revision_before >= 0 &&
+                revision_after >= 0) {
+                /* A view may enqueue several edits from one published cut.
+                 * Once the first edit commits, the controller—not its caller—
+                 * advances remaining edits to the exact next revision. */
+                gui_actions__rebase_deferred_edits(
+                    revision_before, revision_after);
             }
             intent_payload_dispose(&entry);
+            if (!gui_project_observation_is_valid()) {
+                return;
+            }
         }
     }
-    return lifecycle_started;
 }
 
 /* Discrete commands captured in the same frame as a successful draft submit
@@ -482,7 +606,7 @@ void gui_actions__discard_deferred_edits(void) {
 void gui_actions__clear_pending(void) {
     gui_actions__clear_history_request();
     s_actions.pending_lifecycle_request = GUI_LIFECYCLE_REQUEST_NONE;
-    intent_clear_range(GUI_INTENT_OPEN, GUI_INTENT_PREVIEW_TARGET);
+    intent_clear_range(GUI_INTENT_SAVE, GUI_INTENT_PREVIEW_TARGET);
 }
 
 /* --- payload-free view ingress ------------------------------------------- */
@@ -492,13 +616,13 @@ static void intent_request(gui_intent_kind kind) {
     (void)gui_actions__intent_push(&intent);
 }
 
-void gui_actions__request_open_dialog(void) { intent_request(GUI_INTENT_OPEN); }
 void gui_request_save(void) { intent_request(GUI_INTENT_SAVE); }
 void gui_request_save_as(void) { intent_request(GUI_INTENT_SAVE_AS); }
 void gui_request_add_files(void) { intent_request(GUI_INTENT_ADD_FILES); }
 void gui_request_add_folder(void) { intent_request(GUI_INTENT_ADD_FOLDER); }
 void gui_request_add_atlas(void) { intent_request(GUI_INTENT_ADD_ATLAS); }
 void gui_request_refresh(void) { intent_request(GUI_INTENT_REFRESH); }
+void gui_request_cancel(void) { intent_request(GUI_INTENT_CANCEL); }
 void gui_request_pack(void) { intent_request(GUI_INTENT_PACK); }
 void gui_request_export(void) { intent_request(GUI_INTENT_EXPORT); }
 

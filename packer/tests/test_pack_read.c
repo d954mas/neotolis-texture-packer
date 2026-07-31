@@ -1,4 +1,4 @@
-/* Fixture-driven golden round-trip for tp_pack_read (plan §3.2, task 7).
+/* Fixture-driven golden round-trip for tp_pack_read.
  *
  * For every fixture case (tp_fixtures.h, §3.1): build a .ntpack via nt_builder
  * into the scratch dir (argv[1]), parse it back with tp_pack_read_file, then
@@ -26,7 +26,7 @@
 #include <string.h>
 
 #include "tp_core/tp_arena.h"
-#include "tp_core/tp_model.h"
+#include "tp_core/tp_pack_result.h"
 #include "tp_name_map.h"
 #include "tp_pack_read.h"
 #include "../src/tp_fs_internal.h"

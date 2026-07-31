@@ -71,7 +71,7 @@ static int cmp_sprite_final(const void *a, const void *b) {
 /* animation assembly (EXPLICIT project animations only)                    */
 /* ======================================================================== */
 
-/* Owner's standing ruling (docs/design/ux.md 3.7b): animations are assembled
+/* Product contract (docs/formats/json-neotolis.md): animations are assembled
  * EXPLICITLY from the project -- there is NO numeric-suffix auto-grouping. bob
  * still auto-promotes every atlas sprite to a 1-frame animation on the engine
  * side; that is independent of this list. */
@@ -88,7 +88,7 @@ static int cmp_anim_id(const void *a, const void *b) {
  * FINAL export name through the packed sprite set, so a rename flows into the
  * frames automatically (the prepared sprite's final_name already reflects it).
  * A frame that matches no packed sprite is a dangling frame -> hard error naming
- * the animation + frame (arch review 3.2 / plan L-4). */
+ * the animation + frame. */
 static tp_status build_animations(const tp_export_prepared *prep, const tp_normalize_opts *o, tp_arena *arena,
                                   tp_export_anim **out_anims, int *out_count, tp_error *err) {
     int total = o->animation_count;
@@ -200,7 +200,7 @@ tp_status tp_normalize(const tp_result *result, const tp_normalize_opts *opts, t
         sprites[i].alias_of = -1;
     }
 
-    /* Determinism: sort by final export name (ROADMAP sort key). */
+    /* Determinism: sort by final export name. */
     qsort(sprites, (size_t)n, sizeof(tp_export_sprite), cmp_sprite_final);
 
     /* Collision: two entries munged/renamed to the same final name cannot both

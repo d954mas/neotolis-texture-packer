@@ -5,10 +5,10 @@
  * through typed session jobs, render the real packed page on the center canvas with
  * zoom/pan + region overlays + selection sync, and export target files through the same boundary.
  * The session is the single mutable source of truth; the GUI reads owned snapshots as a thin editor
- * (AGENTS tool-parity). The Pack button surfaces the "preview stale" state per ux.md §3.3b.
+ * (AGENTS tool-parity). The Pack button surfaces the explicit stale-preview state.
  *
- * Module split: gui_project (state + dirty bits + load/save), gui_scan (display-only folder
- * enumeration), gui_pack (typed job adapter + presentation slots), gui_canvas (dual-mode
+ * Module split: gui_project (session host), gui_pack (typed task adapter +
+ * presentation slots), gui_canvas (dual-mode
  * source-image / atlas-page custom nt_ui element). main.c is init/frame/shutdown + layout +
  * the OS file dialogs (tinyfiledialogs).
  *
@@ -59,9 +59,10 @@
 
 #include "clay.h"
 
-#include "tp_core/tp_build_worker.h" /* private build-worker re-exec dispatch (decision 0018) */
+#include "tp_core/tp_build_worker.h" /* private build-worker re-exec dispatch */
 #include "tp_core/tp_export.h"
 #include "tp_core/tp_names.h" /* tp_sprite_export_key (slice9 frame-sync key) */
+#include "tp_core/tp_scan.h"
 
 #include "gui_canvas.h"
 #include "gui_bootstrap.h"
@@ -69,10 +70,10 @@
 #include "gui_state.h"
 #include "gui_widgets.h"
 #include "gui_actions.h"
+#include "gui_actions_driver.h"
 #include "gui_rows.h"
 #include "gui_pack.h"
 #include "gui_project.h"
-#include "gui_scan.h"
 #include "gui_shell.h"    /* shell-owned surface the dev seams read (UI pool caps) */
 #include "gui_paths.h"    /* app-data root + exe-dir resolver (canonical home for s_exe_dir) */
 #include "gui_log_file.h" /* rotating app-side log file (nt_log sink); no-op under headless */
@@ -141,8 +142,8 @@ static const nt_ui_events_cfg_t s_canvas_dbl_cfg = {
 };
 #define CANVAS_DRAG_THRESHOLD 4.0F
 
-/* The deferred-intent queue (enqueued through gui_request_*), the new/open/exit confirm-flow flags (s_after_confirm/
- * s_confirm_open/s_modal_action) and the last-pack timing (s_last_pack_*) live in gui_actions. The
+/* The deferred-intent queue and typed new/open/exit lifecycle FSM live in
+ * gui_actions. The last-pack timing (s_last_pack_*) lives there too. The
  * modal open flags (s_about_open / s_export_open) live in gui_state (shared with the selftest); so
  * does s_blur_inputs -- set here by frame(), read by the settings-panel field widgets in the view TU. */
 
@@ -233,8 +234,8 @@ static void handle_canvas_input(void) {
      * the blur-request block before nt_ui_begin). */
     const bool transient_owner =
         gui_canvas_get_mode(&s_canvas) != GUI_CANVAS_ATLAS ||
-        !gui_canvas_has_atlas(&s_canvas) || s_confirm_open || s_about_open ||
-        s_export_open || s_recovery_open ||
+        !gui_canvas_has_atlas(&s_canvas) || gui_actions_lifecycle_active() || s_about_open ||
+        s_export_open || gui_actions_recovery_active() ||
         gui_draft_phase() != GUI_EDIT_IDLE;
     if (gui_canvas_input_blocked(&s_canvas_input,
                                  gui_view_chrome_any_menu_open(),
@@ -329,8 +330,8 @@ static void handle_canvas_input(void) {
 static void handle_canvas_double_click(void) {
     const bool transient_owner =
         gui_canvas_get_mode(&s_canvas) != GUI_CANVAS_ATLAS ||
-        !gui_canvas_has_atlas(&s_canvas) || s_confirm_open || s_about_open ||
-        s_export_open || s_recovery_open ||
+        !gui_canvas_has_atlas(&s_canvas) || gui_actions_lifecycle_active() || s_about_open ||
+        s_export_open || gui_actions_recovery_active() ||
         gui_draft_phase() != GUI_EDIT_IDLE;
     if (gui_canvas_input_blocked(&s_canvas_input,
                                  gui_view_chrome_any_menu_open(),
@@ -362,7 +363,7 @@ static void handle_canvas_double_click(void) {
 /* atlas_fill_pct, strip_group_actions/pages/zoom, declare_canvas_strip, declare_canvas_preview,
  * declare_canvas, status_sev_color/status_sev_icon, and declare_status_pill live in
  * gui_view_canvas.c. handle_canvas_input above stays here per the P-2 lead ruling
- * (docs/plans/gui-decomposition.md §2). */
+ * (the canvas view owns its declaration path). */
 // #endregion
 
 // #region status bar + menus + tooltips
@@ -377,7 +378,7 @@ static void handle_canvas_double_click(void) {
  * gui_view_settings.c/h -- declare_right_panel is called from frame() below; the header exposes
  * only that entry point. */
 
-// #region keyboard shortcuts (ux.md §3.3d)
+// #region keyboard shortcuts
 /* Global shortcuts routed through the SAME actions as the menus. Text-input focus swallows
  * them first (no accidental global actions while typing); an open modal blocks them too. */
 static void handle_shortcuts(void) {
@@ -385,7 +386,7 @@ static void handle_shortcuts(void) {
         return; /* headless capture/probe: the user's live typing must not trigger hotkeys mid-run */
     }
     if (nt_ui_input_any_focused(s_ctx) || gui_view_chrome_any_menu_open() ||
-        s_confirm_open || s_about_open || s_export_open || s_recovery_open) {
+        gui_actions_lifecycle_active() || s_about_open || s_export_open || gui_actions_recovery_active()) {
         return;
     }
     /* Preview + editor accelerators (each also a button; §3.3e). */
@@ -442,7 +443,7 @@ static void handle_shortcuts(void) {
     }
 }
 
-/* Sprite-list keyboard navigation (ux.md §3.3d). Runs after build_view() so it acts on the
+/* Sprite-list keyboard navigation. Runs after build_view() so it acts on the
  * fresh filtered/sorted view. Same gating as handle_shortcuts: no field focus, no modal, not headless,
  * and Ctrl is reserved for the global shortcuts above. Arrows/Home/End/Enter/F2 drive the list focus. */
 static void handle_list_nav(void) {
@@ -450,7 +451,7 @@ static void handle_list_nav(void) {
         return;
     }
     if (nt_ui_input_any_focused(s_ctx) || gui_view_chrome_any_menu_open() ||
-        s_confirm_open || s_about_open || s_export_open || s_recovery_open ||
+        gui_actions_lifecycle_active() || s_about_open || s_export_open || gui_actions_recovery_active() ||
         gui_draft_phase() != GUI_EDIT_IDLE) {
         return;
     }
@@ -485,13 +486,17 @@ static void handle_list_nav(void) {
  * Dev seam: compiled out (with its argv branch) unless NTPACKER_GUI_DEV_SEAMS is on. */
 static bool s_auto_pack;
 static int s_auto_pack_frame;
+static bool s_auto_pack_requested;
 static bool s_auto_pack_started;
-static void auto_pack_tick(void) {
+static int s_auto_pack_exit_code;
+static void auto_pack_tick(
+    const gui_actions_step_result *step) {
     if (!s_auto_pack) {
         return;
     }
     s_auto_pack_frame++;
-    if (!s_auto_pack_started && s_auto_pack_frame == 8) {
+    if (!s_auto_pack_requested &&
+        s_auto_pack_frame == 8) {
         const tp_session_snapshot *snapshot =
             gui_project_snapshot();
         const tp_snapshot_atlas *first =
@@ -501,15 +506,41 @@ static void auto_pack_tick(void) {
                 : NULL;
         gui_view_select_atlas(
             first ? first->id : tp_id128_nil());
-        do_pack(); /* async */
+        gui_request_pack();
+        s_auto_pack_requested = true;
+    }
+    for (int i = 0;
+         step && i < step->job_receipt_count;
+         ++i) {
+        const gui_job_request_receipt *receipt =
+            &step->job_receipts[i];
+        if (receipt->kind !=
+            GUI_JOB_REQUEST_PACK) {
+            continue;
+        }
+        if (!receipt->admitted) {
+            nt_log_error(
+                "AUTO-PACK: request rejected: %s",
+                receipt->detail[0]
+                    ? receipt->detail
+                    : "no detail");
+            s_auto_pack_exit_code = 1;
+            nt_app_quit();
+            return;
+        }
         s_auto_pack_started = true;
-    } else if (s_auto_pack_started && s_auto_pack_frame > 8 && !gui_pack_async_busy()) {
+    }
+    if (s_auto_pack_started &&
+        !gui_pack_async_busy()) {
         nt_log_info("AUTO-PACK: async pack landed, quitting");
         nt_app_quit();
     }
 }
 #else
-static inline void auto_pack_tick(void) {}
+static inline void auto_pack_tick(
+    const gui_actions_step_result *step) {
+    (void)step;
+}
 #endif /* NTPACKER_GUI_DEV_SEAMS */
 
 static void frame(void) {
@@ -523,8 +554,6 @@ static void frame(void) {
     selftest_pre_frame();
 #endif
 
-    /* dialogs + model mutations queued last frame run here, cleanly between frames */
-    apply_pending();
     /* The benchmark model suite intentionally performs edit/Undo/Redo probes.
      * Run it at the same between-frame semantic ingress boundary, never after
      * the immutable observation has been pinned for declaration. */
@@ -534,24 +563,24 @@ static void frame(void) {
      * gated on RENDERED frames (gui_shot_note_rendered), not on this counter. */
     gui_shot_pre_pin_tick();
 
-    gui_actions_pump_lifecycle();
+    tp_error observation_error = {{0}};
+    gui_actions_step_result step = {0};
+    const tp_status observation_status =
+        gui_actions_step(
+            &step, &observation_error);
+    if (observation_status != TP_STATUS_OK) {
+        set_statusf_ex(
+            STATUS_ERROR,
+            "Presentation step failed: %s",
+            observation_error.msg[0]
+                ? observation_error.msg
+                : tp_status_str(
+                      observation_status));
+    }
     if (gui_project_lifecycle_state_query() ==
         GUI_PROJECT_LIFECYCLE_CLOSED) {
         return;
     }
-
-    tp_error observation_error = {{0}};
-    const tp_status observation_status =
-        gui_project_frame_begin(&observation_error);
-    if (observation_status != TP_STATUS_OK) {
-        set_statusf_ex(
-            STATUS_ERROR,
-            "Presentation observation failed: %s",
-            observation_error.msg[0]
-                ? observation_error.msg
-                : tp_status_str(observation_status));
-    }
-    gui_actions_poll_host_completion();
 
     /* Heartbeat: the frame loop keeps ticking while a pack/export runs in the owned process, so a slow
      * concave pack never freezes the window. Throttled to ~2 Hz; the frames-since count shows the rate. */
@@ -568,7 +597,7 @@ static void frame(void) {
             s_hb_frames = 0;
         }
     }
-    auto_pack_tick(); /* dev (--auto-pack): drive a headless async pack for the heartbeat proof */
+    auto_pack_tick(&step); /* dev (--auto-pack): drive a headless async pack for the heartbeat proof */
 
     if (nt_input_key_is_pressed(NT_KEY_ESCAPE)) {
         if (gui_view_chrome_consume_escape()) {
@@ -582,12 +611,10 @@ static void frame(void) {
             s_export_open = false;
         } else if (s_about_open) {
             s_about_open = false;
-        } else if (s_recovery_open) {
-            s_recovery_open = false; /* Esc = "Later": leave every orphan on disk, no data loss */
-        } else if (s_confirm_open) {
-            s_confirm_open = false;
-            s_confirm_draft = false;
-            s_after_confirm = GUI_LIFECYCLE_REQUEST_NONE;
+        } else if (gui_actions_recovery_active()) {
+            gui_actions_recovery_dismiss();
+        } else if (gui_actions_lifecycle_active()) {
+            gui_actions_lifecycle_dismiss();
         } else if (s_filter_active || gui_rows_filter_active()) {
             gui_rows_set_filter(""); /* Esc clears the sprite-tree speed-search. */
             s_filter_active = false;
@@ -874,9 +901,6 @@ static void frame(void) {
     gui_bench_post_draw(); /* perf-probe mode: accrue frame-time samples, write output, then quit */
 
     nt_window_swap_buffers();
-    if (gui_project_frame_is_pinned()) {
-        gui_project_frame_end();
-    }
 }
 // #endregion
 
@@ -884,7 +908,7 @@ static void frame(void) {
 
 // #region main + init/shutdown
 static int gui_main_utf8(int argc, char *argv[]) {
-    /* Private build-worker re-exec (decision 0018): a pack re-execs this exe with
+    /* Private build-worker re-exec: a pack re-execs this exe with
      * argv[1] == "__build-worker". Service it FIRST -- before engine init, the
      * window, recovery, or any UI -- and return; never open a window as a worker. */
     if (tp_build_is_worker_invocation(argc, argv)) {
@@ -1090,8 +1114,9 @@ static int gui_main_utf8(int argc, char *argv[]) {
      * status clobbers a recovery warning already up (recovery_warn_shown). A genuine open ERROR still shows. */
     if (proj_arg != NULL) {
         char err[256];
-        const bool recovery_pending = s_recovery_open;
-        switch (gui_startup_decide(true, gui_scan_exists(proj_arg), recovery_pending)) {
+        const bool recovery_pending =
+            gui_actions_recovery_active();
+        switch (gui_startup_decide(true, tp_scan_exists(proj_arg), recovery_pending)) {
         case GUI_STARTUP_DEFER:
             /* The startup recovery modal is up and can Save-to-original the very file named on the CLI.
              * Opening it into the live editor now would load the STALE pre-crash copy behind the modal, so a
@@ -1107,25 +1132,16 @@ static int gui_main_utf8(int argc, char *argv[]) {
             break;
         case GUI_STARTUP_OPEN: { /* block scope: a label may not be followed by a declaration (C17) */
             tp_error open_error = {{0}};
-            gui_project_lifecycle_kind
-                open_completed =
-                    GUI_PROJECT_LIFECYCLE_NONE;
             tp_status open_status =
-                gui_project_lifecycle_begin_open(
+                gui_actions_host_open(
                     proj_arg, &open_error);
-            if (open_status == TP_STATUS_OK) {
-                open_status =
-                    gui_project_lifecycle_pump(
-                        &open_completed,
-                        &open_error);
-            }
             if (open_status == TP_STATUS_OK &&
-                open_completed ==
-                    GUI_PROJECT_LIFECYCLE_OPEN) {
+                gui_project_lifecycle_state_query() ==
+                    GUI_PROJECT_LIFECYCLE_ACTIVE) {
                 if (!recovery_warn_shown) { /* routine confirmation must not clobber the recovery warning */
                     set_statusf("Opened %s", gui_project_display_name());
                 }
-            } else {
+            } else if (open_status != TP_STATUS_OK) {
                 /* A genuine open FAILURE is surfaced even over a recovery warning: it is a concrete,
                  * user-initiated failure the user is actively waiting on (they asked to open THIS file), it
                  * is higher severity (STATUS_ERROR > STATUS_WARNING), and it is rare. Present actionable
@@ -1180,64 +1196,21 @@ static int gui_main_utf8(int argc, char *argv[]) {
          * DRAINING spin with no budget. */
         bool iteration_failed = false;
         nt_window_poll();
-        if (gui_project_lifecycle_state_query() ==
-            GUI_PROJECT_LIFECYCLE_OPEN_IDLE) {
-            const tp_status begin_status =
-                gui_project_lifecycle_begin_shutdown(
-                    false, &shutdown_error);
-            if (begin_status != TP_STATUS_OK) {
-                iteration_failed = true;
-                if (shutdown_failures %
-                        k_shutdown_log_every ==
-                    0) {
-                    nt_log_error(
-                        "GUI host shutdown request failed: %s",
-                        shutdown_error.msg[0]
-                            ? shutdown_error.msg
-                            : tp_status_str(
-                                  begin_status));
-                }
-            }
-        } else {
-            const tp_status pump_status =
-                gui_project_lifecycle_pump(
-                    NULL, &shutdown_error);
-            if (pump_status != TP_STATUS_OK) {
-                iteration_failed = true;
-                if (shutdown_failures %
-                        k_shutdown_log_every ==
-                    0) {
-                    nt_log_error(
-                        "GUI host shutdown pump failed: %s",
-                        shutdown_error.msg[0]
-                            ? shutdown_error.msg
-                            : tp_status_str(
-                                  pump_status));
-                }
-            } else if (
-                gui_project_lifecycle_state_query() ==
-                GUI_PROJECT_LIFECYCLE_DRAINING) {
-                const tp_status observe_status =
-                    gui_project_frame_begin(
-                        &shutdown_error);
-                if (observe_status == TP_STATUS_OK) {
-                    gui_actions_poll_host_completion();
-                } else {
-                    iteration_failed = true;
-                    if (shutdown_failures %
-                            k_shutdown_log_every ==
-                        0) {
-                        nt_log_error(
-                            "GUI shutdown observation failed: %s",
-                            shutdown_error.msg[0]
-                                ? shutdown_error.msg
-                                : tp_status_str(
-                                      observe_status));
-                    }
-                }
-                if (gui_project_frame_is_pinned()) {
-                    gui_project_frame_end();
-                }
+        bool closed = false;
+        const tp_status shutdown_status =
+            gui_actions_host_shutdown_step(
+                &closed, &shutdown_error);
+        if (shutdown_status != TP_STATUS_OK) {
+            iteration_failed = true;
+            if (shutdown_failures %
+                    k_shutdown_log_every ==
+                0) {
+                nt_log_error(
+                    "GUI host shutdown step failed: %s",
+                    shutdown_error.msg[0]
+                        ? shutdown_error.msg
+                        : tp_status_str(
+                              shutdown_status));
             }
         }
         if (!iteration_failed) {
@@ -1270,7 +1243,6 @@ static int gui_main_utf8(int argc, char *argv[]) {
     gui_canvas_shutdown(&s_canvas);
     gui_pack_shutdown();
     gui_rows_shutdown();
-    gui_scan_shutdown();
     gui_project_shutdown();
     nt_ui_destroy_context(s_ctx);
     nt_ui_module_shutdown();
@@ -1296,7 +1268,14 @@ static int gui_main_utf8(int argc, char *argv[]) {
     gui_crash_clear_marker();
     /* 0 for a normal run; --bench-perf returns non-zero iff an invariant assert or a hard fixture-load
      * failure fired (advisory timings never fail the run). */
-    return gui_bench_exit_code();
+    const int bench_exit_code =
+        gui_bench_exit_code();
+#ifdef NTPACKER_GUI_DEV_SEAMS
+    if (s_auto_pack_exit_code != 0) {
+        return s_auto_pack_exit_code;
+    }
+#endif
+    return bench_exit_code;
 }
 // #endregion
 

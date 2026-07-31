@@ -1,4 +1,4 @@
-/* Phase 3 project model + .ntpacker_project load/save (ROADMAP Phase 3).
+/* Project model + .ntpacker_project load/save.
  *
  * Covers: programmatic round-trip (deep-equal + byte-identical re-save),
  * sparse storage (defaults absent from the text), determinism (same model ->

@@ -14,14 +14,13 @@ extern "C" {
 #endif
 
 typedef struct tp_session tp_session;
-typedef struct tp_session_observation tp_session_observation;
 typedef struct tp_session_job_result tp_session_job_result;
 typedef struct tp_txn_request tp_txn_request;
 typedef struct tp_txn_result tp_txn_result;
 typedef struct tp_project tp_project;
 typedef struct tp_journal tp_journal;
 
-/* ---- shared visible History (F3, master spec §8-§9.5) -------------------- *
+/* ---- shared visible History (docs/architecture/model-operations-and-session.md) *
  * One session-owned enumerable History surface shared by every view (GUI/MCP/Dev
  * API). It is a pull model: a client counts rows and copies each out; there are no
  * push callbacks, so the F3-01 "subscriber disconnect / callback reentrancy" faults
@@ -109,7 +108,8 @@ typedef struct tp_session_event {
 typedef enum tp_session_job_kind {
     TP_SESSION_JOB_NONE = 0,
     TP_SESSION_JOB_PACK,
-    TP_SESSION_JOB_EXPORT
+    TP_SESSION_JOB_EXPORT,
+    TP_SESSION_JOB_REFRESH
 } tp_session_job_kind;
 
 typedef enum tp_session_job_state {
@@ -130,6 +130,7 @@ typedef enum tp_session_job_rejection {
     TP_SESSION_JOB_REJECTION_NONE = 0,
     TP_SESSION_JOB_REJECTION_CANCELLED,
     TP_SESSION_JOB_REJECTION_TARGET_DELETED,
+    TP_SESSION_JOB_REJECTION_INPUT_CHANGED,
     TP_SESSION_JOB_REJECTION_OLD_INSTANCE,
     TP_SESSION_JOB_REJECTION_SESSION_CLOSED
 } tp_session_job_rejection;
@@ -145,9 +146,8 @@ typedef struct tp_session_job_target {
     tp_id128 id;
 } tp_session_job_target;
 
-/* Immutable latest-value projection. `target_ids` is borrowed from the owning
- * observation and remains valid for that observation lifetime. Running elapsed
- * time is presentation-derived; it does not create a per-frame generation. */
+/* Immutable latest-value projection. Running elapsed time is
+ * presentation-derived; it does not create a per-frame generation. */
 typedef struct tp_session_job_observed_state {
     bool present;
     uint64_t session_instance_generation;
@@ -161,70 +161,33 @@ typedef struct tp_session_job_observed_state {
     bool result_accepted;
     tp_session_job_rejection rejection;
     tp_session_input_token base_input_token;
-    const tp_session_job_target *targets;
-    size_t target_count;
     tp_status terminal_status;
     tp_error terminal_error;
 } tp_session_job_observed_state;
 
-/* Immutable accepted-result slot. Its envelope identity is independent from
- * the currently running job, so an observer can always match a retained
- * payload to the request that produced it. `targets` and `result` are borrowed
- * from the owning observation and remain valid for that observation lifetime. */
-typedef struct tp_session_job_observed_result {
-    bool present;
-    uint64_t session_instance_generation;
-    uint64_t request_id;
-    tp_session_job_kind kind;
-    tp_session_input_token base_input_token;
-    const tp_session_job_target *targets;
-    size_t target_count;
-    const tp_session_job_result *result;
-} tp_session_job_observed_result;
+/* Borrowed current cut of one live session. The pointer and every value it
+ * references remain valid until the next non-const call on that session.
+ * `snapshot` is replaced only when authored/source/identity state changes;
+ * task progress and recovery health update without rebuilding it. */
+struct tp_session_view {
+    uint64_t generation;
+    uint64_t snapshot_generation;
+    const tp_session_snapshot *snapshot;
+    const struct tp_source_runtime_projection *sources;
+    tp_session_recovery_health recovery_health;
+    tp_session_job_observed_state task;
+};
 
-/* One linearizable session cut across event/model/source/recovery and the
- * coalesced job/result owners. A NULL `after` requests an initial complete
- * resync. */
-typedef struct tp_session_observation_token {
-    uint64_t event_sequence;
-    uint64_t source_runtime_generation;
-    uint64_t recovery_health_generation;
-    uint64_t recovery_owner_generation;
-    uint64_t job_state_generation;
-    uint64_t result_generation;
-} tp_session_observation_token;
-
-#define TP_SESSION_OBSERVATION_EVENT_CAPACITY 64U
-
-bool tp_session_observation_token_equal(
-    tp_session_observation_token left,
-    tp_session_observation_token right);
-/* Read-only. The host admits commands/job progress before observing; this call
- * never pumps transport or mutates session authority. */
-tp_status tp_session_observe(
-    const tp_session *session,
-    const tp_session_observation_token *after,
-    tp_session_observation **out,
+/* Sole host-thread admission step for transient worker progress/completion and
+ * the current borrowed view. A terminal completion is transferred exactly once
+ * through `optional_owned_completion`; NULL deliberately drops its payload
+ * after retaining terminal metadata in the view. */
+tp_status tp_session_update(
+    tp_session *session,
+    tp_session_job_result *optional_owned_completion,
     tp_error *err);
-void tp_session_observation_destroy(tp_session_observation *observation);
-tp_session_observation_token tp_session_observation_token_query(
-    const tp_session_observation *observation);
-bool tp_session_observation_resync_required(
-    const tp_session_observation *observation);
-size_t tp_session_observation_event_count(
-    const tp_session_observation *observation);
-const tp_session_event *tp_session_observation_event_at(
-    const tp_session_observation *observation, size_t index);
-tp_session_recovery_health tp_session_observation_recovery_health(
-    const tp_session_observation *observation);
-tp_session_job_observed_state tp_session_observation_job_state(
-    const tp_session_observation *observation);
-/* Borrowed accepted-result envelope; valid only while `observation` is alive. */
-const tp_session_job_observed_result *tp_session_observation_job_result(
-    const tp_session_observation *observation);
-/* Borrowed and possibly NULL for a source/runtime/recovery-only delta. */
-const tp_session_snapshot *tp_session_observation_snapshot(
-    const tp_session_observation *observation);
+const struct tp_session_view *tp_session_view(
+    const tp_session *session);
 
 typedef struct tp_session_save_result {
     bool saved;
@@ -271,7 +234,6 @@ tp_status tp_session_save_as(tp_session *session, const char *path,
 tp_status tp_session_save_new(tp_session *session, const char *path,
                               tp_session_save_result *result, tp_error *err);
 tp_status tp_session_discard(tp_session *session, tp_error *err);
-tp_status tp_session_invalidate_sources(tp_session *session, tp_error *err);
 /* Declares recovery expected for this live host so availability/reporting can
  * expose missing or degraded recovery. Model commands remain available when
  * recovery is unavailable. */
@@ -302,7 +264,7 @@ uint64_t tp_session_event_sequence(const tp_session *session);
  *
  * PULL MODEL (F3-01 W4): events are pulled here (events_after) with snapshot resync
  * on window overflow -- there is no client push callback to register. So that
- * packet's "event subscriber disconnect" and "callback reentrancy rejection" faults
+ * "event subscriber disconnect" and "callback reentrancy rejection" faults
  * are N/A by design: nothing to disconnect, and no re-entrant callback can occur. */
 tp_status tp_session_events_after(const tp_session *session, uint64_t after_sequence,
                                   tp_session_event *out, size_t capacity,

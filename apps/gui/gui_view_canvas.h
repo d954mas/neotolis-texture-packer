@@ -1,12 +1,12 @@
 #ifndef NTPACKER_GUI_VIEW_CANVAS_H
 #define NTPACKER_GUI_VIEW_CANVAS_H
 
-/* Center canvas view (ux.md region E): the dual-mode atlas/source canvas card, its action strip
+/* Center canvas view: the dual-mode atlas/source canvas card, its action strip
  * (Pack/Export/Refresh + pages + zoom + stale chip), the animation preview player, the floating
  * message pill, the stale-page overlay, and the empty/no-sources hero state. Declare-only: exposes
  * the one entry point frame() calls.
  *
- * P-2 lead ruling (recorded in docs/plans/gui-decomposition.md §2): handle_canvas_input (the
+ * Input ownership ruling: handle_canvas_input (the
  * wheel/pan/click-select mouse state machine) + its mouse statics (s_lmb_armed, s_lmb_panning,
  * s_mmb_panning, s_press_x/y, s_pan_last_x/y) stay in the SHELL (main.c) permanently -- it reads
  * nt_ui_get_bbox(s_id_status_pill) so a click on the pill doesn't also drive canvas select/pan,

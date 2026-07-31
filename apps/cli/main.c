@@ -1,7 +1,6 @@
-/* ntpacker -- AI-first CLI frontend over tp_core (plan docs/plans/op-layer-and-cli.md,
- * step B1). Thin client: hand-rolled args, verb dispatch, versioned --json payloads,
- * contract exit codes, structured errors. B1 ships `version` + `help`; the pack/
- * inspect/validate/new verbs land in B2-B4 over this same dispatch. */
+/* ntpacker -- saved-file CLI frontend over tp_core. Thin client: hand-rolled
+ * args, verb dispatch, versioned --json payloads, contract exit codes, and
+ * structured errors (docs/formats/cli-report.md). */
 #include <locale.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -543,7 +542,7 @@ static bool narrow_argv_has_flag(int argc, char **argv, const char *flag) {
 }
 
 int main(int argc, char **argv) {
-    /* Private build-worker re-exec (decision 0018): argv[1] == "__build-worker".
+    /* Private build-worker re-exec: argv[1] == "__build-worker".
      * FIRST thing, before UTF-16 conversion, engine, or arg parsing -- a pack
      * re-execs this exe as the worker; ASCII arg, so the narrow argv is enough. */
     if (tp_build_is_worker_invocation(argc, argv)) {

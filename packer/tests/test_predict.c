@@ -1,4 +1,4 @@
-/* Degradation-prediction consistency (A5, review §3.4). Proves tp_export_predict_loss
+/* Degradation-prediction consistency. Proves tp_export_predict_loss
  * is the single source of truth the GUI chip and CLI dry-run both read:
  *   - project-knowable axes (transform/polygon/slice9/pivot) are enumerated from the
  *     project with a NULL prep;
@@ -15,7 +15,7 @@
 #include "tp_core/tp_arena.h"
 #include "tp_core/tp_export.h"
 #include "tp_core/tp_export_run.h"
-#include "tp_core/tp_model.h"
+#include "tp_core/tp_pack_result.h"
 #include "tp_core/tp_pack.h"
 #include "tp_core/tp_project.h"
 #include "tp_core/tp_build_worker.h"

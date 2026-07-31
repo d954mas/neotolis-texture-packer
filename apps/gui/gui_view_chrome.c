@@ -641,17 +641,30 @@ void declare_export_modal(nt_ui_context_t *ctx) {
 }
 
 void declare_confirm_modal(nt_ui_context_t *ctx) {
-    if (nt_ui_modal_visible(ctx, s_id_modal, &s_modal_style, &s_confirm_open)) {
+    const gui_lifecycle_view lifecycle =
+        gui_actions_lifecycle_view();
+    const bool confirm_draft =
+        lifecycle.phase ==
+        GUI_LIFECYCLE_RESOLVE_DRAFT;
+    const bool confirm_phase =
+        confirm_draft ||
+        lifecycle.phase ==
+            GUI_LIFECYCLE_RESOLVE_DIRTY;
+    bool confirm_open =
+        confirm_phase;
+    if (nt_ui_modal_visible(
+            ctx, s_id_modal, &s_modal_style,
+            &confirm_open)) {
         const gui_edit_phase draft_phase =
             gui_draft_phase();
         const bool apply_enabled =
-            !s_confirm_draft ||
+            !confirm_draft ||
             draft_phase == GUI_EDIT_EDITING ||
             (draft_phase == GUI_EDIT_CONFLICTED &&
              gui_draft_can_apply());
         CLAY({.layout = {.sizing = {
                              CLAY_SIZING_FIXED(
-                                 S(s_confirm_draft ? 520 : 460)),
+                                 S(confirm_draft ? 520 : 460)),
                              CLAY_SIZING_FIT(0)},
                          .padding = {Su(22), Su(22), Su(22), Su(22)},
                          .layoutDirection = CLAY_TOP_TO_BOTTOM,
@@ -661,49 +674,66 @@ void declare_confirm_modal(nt_ui_context_t *ctx) {
               .border = {.color = C_BORDER, .width = {Su(1), Su(1), Su(1), Su(1), 0}}}) {
             nt_ui_label(
                 ctx, NT_UI_DATA_LAYER(LAYER_TEXT),
-                s_confirm_draft
+                confirm_draft
                     ? "Uncommitted edit"
                     : "Unsaved changes",
                 &g_body);
             nt_ui_label(
                 ctx, NT_UI_DATA_LAYER(LAYER_TEXT),
-                s_confirm_draft
+                confirm_draft
                     ? "Apply this edit before continuing?"
                     : "Save changes before continuing?",
                 &g_caption);
             CLAY({.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT, .childGap = Su(12), .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
                 if (ui_btn(ctx, nt_ui_id("ntpacker/modal_save"),
-                           s_confirm_draft ? "Apply & Continue" : "Save",
+                           confirm_draft ? "Apply & Continue" : "Save",
                            &g_btn_primary, apply_enabled,
-                           s_confirm_draft ? 150.0F : 100.0F, 34.0F, &g_onaccent)) {
-                    s_modal_action = MODAL_SAVE;
+                           confirm_draft ? 150.0F : 100.0F, 34.0F, &g_onaccent)) {
+                    gui_actions_lifecycle_choose(
+                        GUI_LIFECYCLE_CHOICE_ACCEPT);
                 }
                 if (ui_btn(ctx, nt_ui_id("ntpacker/modal_discard"),
-                           s_confirm_draft ? "Discard & Continue" : "Discard",
+                           confirm_draft ? "Discard & Continue" : "Discard",
                            &g_btn, true,
-                           s_confirm_draft ? 165.0F : 100.0F, 34.0F, &g_body)) {
-                    s_modal_action = MODAL_DISCARD;
+                           confirm_draft ? 165.0F : 100.0F, 34.0F, &g_body)) {
+                    gui_actions_lifecycle_choose(
+                        GUI_LIFECYCLE_CHOICE_DISCARD);
                 }
                 if (ui_btn(ctx, nt_ui_id("ntpacker/modal_cancel"), "Cancel", &g_btn, true, 100.0F, 34.0F, &g_body)) {
-                    s_modal_action = MODAL_CANCEL;
+                    gui_actions_lifecycle_choose(
+                        GUI_LIFECYCLE_CHOICE_CANCEL);
                 }
             }
         }
         nt_ui_modal_end(ctx);
+    } else if (!confirm_open &&
+               confirm_phase &&
+               gui_actions_lifecycle_active()) {
+        gui_actions_lifecycle_dismiss();
     }
 }
 
 /* R6b startup crash-recovery modal: one row per recovered crash-orphan; each row resolves via the R6a
  * layer (Discard always; Save-to-original + Save As only for a genuinely recoverable orphan -- an
  * old-format entry is Discard-only, marked "(old format)"). Actions are requested through gui_actions
- * (deferred to apply_pending, which runs the Save-As dialog + disk save outside begin/end). "Later"
+ * (deferred to gui_actions_step, which runs the Save-As dialog + disk save outside begin/end). "Later"
  * leaves every orphan on disk for next launch. Mirrors declare_export_modal's scrolled per-row list +
- * unique per-row button IDs. Dormant when s_recovery_open is false (as in the whole selftest build). */
+ * unique per-row button IDs. Dormant while the typed recovery flow is idle. */
 void declare_recovery_modal(nt_ui_context_t *ctx) {
-    if (!nt_ui_modal_visible(ctx, s_id_recovery, &s_modal_style, &s_recovery_open)) {
+    const gui_recovery_view recovery =
+        gui_actions_recovery_view();
+    bool recovery_open =
+        recovery.phase != GUI_RECOVERY_IDLE;
+    if (!nt_ui_modal_visible(
+            ctx, s_id_recovery, &s_modal_style,
+            &recovery_open)) {
+        if (!recovery_open &&
+            gui_actions_recovery_active()) {
+            gui_actions_recovery_dismiss();
+        }
         return;
     }
-    const int n = gui_actions_recovery_count();
+    const int n = recovery.count;
     float list_h = (float)n * S(62.0F) + S(6.0F);
     const float list_cap = S(320.0F);
     if (list_h > list_cap) {
@@ -719,7 +749,7 @@ void declare_recovery_modal(nt_ui_context_t *ctx) {
         nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), "Recover unsaved work", &g_body);
         nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT),
                     "A previous session ended with unsaved changes. Choose what to do with each project.", &g_caption);
-        if (gui_actions_recovery_has_more()) {
+        if (recovery.has_more) {
             nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT),
                         "More recovery sessions remain on disk. Resolve these, then restart to see the rest.",
                         &g_caption);
@@ -790,7 +820,7 @@ void declare_recovery_modal(nt_ui_context_t *ctx) {
         CLAY({.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT, .childGap = Su(12),
                          .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
             if (ui_btn(ctx, nt_ui_id("ntpacker/recovery_later"), "Later", &g_btn, true, 100.0F, 34.0F, &g_body)) {
-                s_recovery_open = false; /* orphans stay on disk; offered again next launch */
+                gui_actions_recovery_dismiss();
             }
         }
     }

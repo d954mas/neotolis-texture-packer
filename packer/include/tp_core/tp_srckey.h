@@ -2,8 +2,8 @@
 #define TP_CORE_TP_SRCKEY_H
 
 /*
- * Persistent source-local key normalization + portability validation (master spec
- * §5.3, §5.6, §59 item 8).
+ * Persistent source-local key normalization + portability validation
+ * (docs/architecture/sources-and-raster.md).
  *
  * A source key addresses a sprite within a source root. Canonical form is:
  *   - UTF-8, Unicode NFC;

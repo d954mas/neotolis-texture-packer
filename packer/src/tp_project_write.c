@@ -17,7 +17,7 @@
 #include "tp_project_path_internal.h"
 
 /* ======================================================================== */
-/* deterministic writer (ux.md principle 7)                                 */
+/* deterministic canonical-v5 writer (docs/formats/project-v5.md)           */
 /* ======================================================================== */
 
 /* Checkpoint mode rewrites each source path to its absolute lexical form; the

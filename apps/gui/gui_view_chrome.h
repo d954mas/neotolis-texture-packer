@@ -31,7 +31,7 @@ void declare_menubar(nt_ui_context_t *ctx);
 /* The File/Edit/Atlas/View/Help drop-down menus (declared every frame; items no-op while closed). */
 void declare_menus(nt_ui_context_t *ctx);
 
-/* Row/canvas right-click context menu (ux.md §3.3e): items depend on which row armed it. */
+/* Row/canvas right-click context menu: items depend on which row armed it. */
 void declare_context_menu(nt_ui_context_t *ctx);
 
 /* Hover tooltips (full text) for this frame's truncated rows, recorded via record_row_tip. */
@@ -45,7 +45,8 @@ void declare_tooltips(nt_ui_context_t *ctx);
 void declare_confirm_modal(nt_ui_context_t *ctx);
 
 /* R6b startup crash-recovery modal: lists every recovered crash-orphan and resolves each one via the
- * R6a layer (Discard / Save to original / Save As). Dormant while s_recovery_open is false. */
+ * R6a layer (Discard / Save to original / Save As). Dormant while the typed
+ * recovery flow is idle. */
 void declare_recovery_modal(nt_ui_context_t *ctx);
 
 /* About modal (version / engine / repo link). */

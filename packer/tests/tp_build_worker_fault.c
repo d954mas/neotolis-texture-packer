@@ -1,5 +1,5 @@
 /* Fault-injecting build-worker binaries for the H0.3-b / H0.5 outcome tests
- * (decision 0018). Built as one target per TP_WORKER_FAULT_* mode set by a
+ * Built as one target per TP_WORKER_FAULT_* mode set by a
  * compile definition -- the same test-only-compile-def pattern as the CLI's
  * NTPACKER_CLI_*_FAULT_SEAM binaries. Regardless of argv, each acts as a
  * misbehaving __build-worker child: it drains stdin so the parent's write-all

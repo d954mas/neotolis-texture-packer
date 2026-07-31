@@ -9,7 +9,7 @@
 
 #include "tp_core/tp_arena.h"
 #include "tp_core/tp_image.h"
-#include "tp_core/tp_model.h"
+#include "tp_core/tp_pack_result.h"
 #include "tp_name_map.h"
 #include "tp_pack_read.h"
 #include "tp_core/tp_scan.h"
@@ -18,14 +18,14 @@
 #include "tp_pack_priv.h"
 #include "tp_build_worker_internal.h"
 
-/* nt_builder is confined to the driver TU (tp_build_driver.c), which now runs in
- * a private child process behind tp_build_worker_run (decision 0018, ROADMAP
- * H0.3-b): tp_pack keeps validate/preflight/name-map/read-back and hands decoded
+/* nt_builder is confined to the driver TU (tp_build_driver.c), which runs in
+ * a private child process behind tp_build_worker_run: tp_pack keeps
+ * validate/preflight/name-map/read-back and hands decoded
  * pixels to the worker, so a builder abort/allocation/codec/write failure cannot
  * terminate the host. */
 
 // #region validation
-/* Normalization-invariant per plan §5: reject anything nt_builder_normalize_path
+/* Normalization invariant: reject anything nt_builder_normalize_path
  * would rewrite, since that would desync the atlas blob's raw "<atlas>/texN"
  * hash from the normalized entry-table hash and miss every page lookup (R2). */
 static tp_status validate_atlas_name(const char *name, tp_error *err) {
@@ -226,7 +226,7 @@ static tp_status validate_settings(const tp_pack_settings *s, tp_error *err) {
  * model needs it and the GUI links tp_core without the builder (#282). */
 
 /* Build the reverse map the reader needs to resolve region name_hash -> name
- * (plan §2.8): atlas display name + every sprite name. Distinct names that hash
+ * atlas display name + every sprite name. Distinct names that hash
  * equal surface as TP_STATUS_HASH_COLLISION. Caller owns/destroys the map. */
 static tp_status build_name_map(const tp_pack_settings *s, tp_name_map **out_map, tp_error *err) {
     *out_map = NULL;

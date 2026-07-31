@@ -137,8 +137,7 @@ static inline void tp_sb_size(tp_sb *sb, size_t v) {
 
 /* 64-bit integral emit via PRId64 (not "%ld") so a value like 5000000000 is
  * byte-identical on 32-bit-long Windows and 64-bit-long Linux/macOS -- the
- * cross-OS determinism pin the transaction JSON contract needs
- * (decision 0011 §7). */
+ * cross-OS determinism pin the transaction JSON contract needs. */
 static inline void tp_sb_i64(tp_sb *sb, int64_t v) {
     char tmp[32];
     (void)snprintf(tmp, sizeof tmp, "%" PRId64, v);

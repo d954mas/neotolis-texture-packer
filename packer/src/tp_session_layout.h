@@ -4,18 +4,13 @@
 #include "tp_session_internal.h"
 
 /* struct tp_session stores its owner thread by value, so the session family's
- * layout header carries the thread-identity type. Only the session writer,
- * snapshot, job-observation, and atomic-observation TUs read the layout; other
- * includers keep tp_session opaque. */
+ * layout header carries the thread-identity type. */
 #include "tinycthread.h"
 
 typedef struct tp_project_lease tp_project_lease;
 typedef struct tp_session_owned_job tp_session_owned_job;
 
 #define TP_SESSION_EVENT_CAPACITY 64U
-_Static_assert(TP_SESSION_EVENT_CAPACITY ==
-                   TP_SESSION_OBSERVATION_EVENT_CAPACITY,
-               "public observation capacity must match the retained ring");
 
 /* Fixed FIFO cap on session-side visible-History markers (Save checkpoints /
  * runtime refreshes). Bounds the memory unconditionally; markers are also evicted
@@ -34,22 +29,21 @@ typedef struct tp_session_history_marker {
     char *path;                     /* checkpoint: owned canonical path; NULL for refresh */
 } tp_session_history_marker;
 
-/* Single-owner-thread session layout, shared by the writer TU and the snapshot,
- * job-observation, and atomic-observation TUs that sample committed fields on
- * that same thread. It stays private to the session family: no frontend or
+/* Single-owner-thread session layout, shared by the writer and immutable
+ * snapshot/query TUs. It stays private to the session family: no frontend or
  * protocol adapter includes this header. */
 struct tp_session {
     /* The thread that created the session owns it for its whole lifetime; every
-     * entry point asserts against this (master spec 4.8). */
+     * entry point asserts against this ownership rule. */
     thrd_t owner_thread;
     tp_model *model;
     tp_recovery_live *recovery_live;
     tp_project_lease *project_lease;
     tp_session_owned_job *active_job;
-    tp_session_owned_job *observed_job_owner;
-    tp_session_owned_job *observed_result_owner;
+    tp_session_snapshot *view_snapshot;
+    struct tp_source_runtime_projection *source_projection;
+    struct tp_session_view view;
     tp_session_job_observed_state observed_job_state;
-    tp_session_job_observed_result observed_job_result;
     tp_session_identity identity;
     tp_id128 saved_file_fingerprint;
     tp_id128 recovery_token;
@@ -63,8 +57,6 @@ struct tp_session {
     uint64_t model_generation;
     uint64_t source_generation;
     uint64_t recovery_owner_generation;
-    uint64_t job_state_generation;
-    uint64_t result_generation;
     uint64_t next_job_request_id;
     uint64_t event_sequence;
     tp_session_event events[TP_SESSION_EVENT_CAPACITY];

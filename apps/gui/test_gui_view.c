@@ -24,6 +24,7 @@
 #endif
 
 #include "gui_actions.h"
+#include "gui_actions_dev.h"
 #include "gui_canvas.h"
 #include "gui_canvas_internal.h"
 #include "gui_left_layout.h"
@@ -31,7 +32,6 @@
 #include "gui_project.h"
 #include "gui_project_test_driver.h"
 #include "gui_rows.h"
-#include "gui_scan.h"
 #include "gui_state.h"
 
 #include "tp_core/tp_build_worker.h"
@@ -57,10 +57,80 @@ static char s_gamma[512];
 static char s_solo[512];
 static uint64_t s_test_submit_id;
 
+static void publish_project_frame(void) {
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_actions_step(NULL, &error));
+}
+
+static void settle_project_observation(void) {
+    publish_project_frame();
+    for (int attempt = 0;
+         attempt < 5000 &&
+         gui_project_job_busy();
+         ++attempt) {
+        nt_time_sleep(0.001);
+        publish_project_frame();
+    }
+    TEST_ASSERT_FALSE(gui_project_job_busy());
+}
+
+static gui_project_create_result add_atlas_observed(void) {
+    gui_project_create_result created =
+        gui_project_add_atlas();
+    if (!created.committed) {
+        return created;
+    }
+    publish_project_frame();
+    const tp_session_snapshot *snapshot =
+        gui_project_snapshot();
+    const int count =
+        tp_session_snapshot_atlas_count(snapshot);
+    created.visible_index = -1;
+    for (int index = 0; index < count; ++index) {
+        const tp_snapshot_atlas *atlas =
+            tp_session_snapshot_atlas_at(
+                snapshot, index);
+        if (atlas &&
+            tp_id128_eq(
+                atlas->id, created.created_id)) {
+            created.visible_index = index;
+            break;
+        }
+    }
+    created.observation_pending = false;
+    return created;
+}
+
+static bool remove_atlas_observed(
+    tp_id128 atlas_id, int64_t expected_revision) {
+    const bool removed =
+        gui_project_remove_atlas(
+            atlas_id, expected_revision);
+    if (removed) {
+        settle_project_observation();
+    }
+    return removed;
+}
+
+static bool remove_source_observed(
+    tp_id128 atlas_id, tp_id128 source_id,
+    int64_t expected_revision) {
+    const bool removed =
+        gui_project_remove_source(
+            atlas_id, source_id,
+            expected_revision);
+    if (removed) {
+        settle_project_observation();
+    }
+    return removed;
+}
+
 static bool test_submit_sprite_name(
     const gui_sprite_ref *sprite,
     const char *name) {
-    gui_session_submit_identity identity = {0};
+    gui_project_operation_submit_identity identity = {0};
     identity.origin_view_id.bytes[0] = 1U;
     ++s_test_submit_id;
     identity.draft_instance_id.bytes[0] = 2U;
@@ -72,16 +142,21 @@ static bool test_submit_sprite_name(
         transaction_id, sizeof transaction_id,
         "%016llx%016llx", 1ULL,
         (unsigned long long)s_test_submit_id);
-    gui_session_submit_terminal terminal = {0};
+    gui_project_operation_submit_terminal terminal = {0};
     tp_error error = {{0}};
     const gui_text_ref ref = {
         sprite->atlas_id, tp_id128_nil(),
         sprite->source_id, sprite->source_key,
         sprite->expected_revision};
-    return gui_project_submit_text(
-               TP_OP_SPRITE_NAME_SET, &ref, name, identity,
-               transaction_id, &terminal, &error) ==
-           TP_STATUS_OK;
+    const bool committed =
+        gui_project_submit_text(
+            TP_OP_SPRITE_NAME_SET, &ref, name, identity,
+            transaction_id, &terminal, &error) ==
+        TP_STATUS_OK;
+    if (committed) {
+        publish_project_frame();
+    }
+    return committed;
 }
 
 static void remove_fixture_files(void) {
@@ -171,7 +246,7 @@ static void select_atlas_index(int index) {
 
 /* Adds the folder source (index 0) then the file source (index 1) to the
  * default atlas, rescans, and builds the row model. build_rows classifies by
- * DISK state (gui_scan_is_dir), so pack/ expands to its three children and
+ * source-runtime state, so pack/ expands to its three children and
  * solo.png is a single leaf source row. */
 static void add_sources_and_build(tp_id128 *folder_id, tp_id128 *file_id) {
     const tp_session_snapshot *snapshot = gui_project_snapshot();
@@ -184,14 +259,17 @@ static void add_sources_and_build(tp_id128 *folder_id, tp_id128 *file_id) {
         gui_project_add_source_kind(atlas_id,
                                     tp_session_snapshot_revision(snapshot),
                                     s_pack_dir, TP_SOURCE_KIND_FOLDER));
+    settle_project_observation();
     snapshot = gui_project_snapshot();
     TEST_ASSERT_EQUAL_INT(
         GUI_ADD_ADDED,
         gui_project_add_source_kind(atlas_id,
                                     tp_session_snapshot_revision(snapshot),
                                     s_solo, TP_SOURCE_KIND_FILE));
+    settle_project_observation();
 
-    gui_project_invalidate_sources();
+    gui_project_refresh_sources();
+    settle_project_observation();
     gui_view_select_atlas(atlas_id);
     build_rows();
 
@@ -225,14 +303,17 @@ static void add_sources_reversed_and_build(tp_id128 *folder_id,
         gui_project_add_source_kind(atlas_id,
                                     tp_session_snapshot_revision(snapshot),
                                     s_solo, TP_SOURCE_KIND_FILE));
+    settle_project_observation();
     snapshot = gui_project_snapshot();
     TEST_ASSERT_EQUAL_INT(
         GUI_ADD_ADDED,
         gui_project_add_source_kind(atlas_id,
                                     tp_session_snapshot_revision(snapshot),
                                     s_pack_dir, TP_SOURCE_KIND_FOLDER));
+    settle_project_observation();
 
-    gui_project_invalidate_sources();
+    gui_project_refresh_sources();
+    settle_project_observation();
     gui_view_select_atlas(atlas_id);
     build_rows();
 
@@ -287,7 +368,6 @@ void tearDown(void) {
     gui_pack_shutdown();
     gui_rows_shutdown();
     gui_project_test_shutdown(true);
-    gui_scan_shutdown();
     remove_fixture_files();
 }
 
@@ -399,7 +479,8 @@ void test_view_warn_first_pins_missing_regardless_of_direction(void) {
     add_sources_and_build(NULL, NULL);
 
     TEST_ASSERT_EQUAL_INT(0, remove(s_solo)); /* solo.png -> gone from disk */
-    gui_project_invalidate_sources();
+    gui_project_refresh_sources();
+    settle_project_observation();
     build_rows();
     TEST_ASSERT_EQUAL_INT(5, s_row_count);
 
@@ -481,7 +562,8 @@ void test_view_reconcile_preserves_primary_and_prunes_multi(void) {
 
     /* beta vanishes from disk; alpha survives. */
     TEST_ASSERT_EQUAL_INT(0, remove(s_beta));
-    gui_project_invalidate_sources();
+    gui_project_refresh_sources();
+    settle_project_observation();
     build_rows();
     build_view();
     TEST_ASSERT_EQUAL_INT(-1, find_row_by_name("beta"));
@@ -525,7 +607,8 @@ void test_view_reconcile_clears_removed_primary(void) {
     gui_rows_set_anchor_view_index(beta_view);
 
     TEST_ASSERT_EQUAL_INT(0, remove(s_beta)); /* the primary's backing file is gone */
-    gui_project_invalidate_sources();
+    gui_project_refresh_sources();
+    settle_project_observation();
     build_rows();
     build_view();
     TEST_ASSERT_EQUAL_INT(-1, find_row_by_name("beta"));
@@ -545,7 +628,7 @@ void test_view_reconcile_clears_removed_primary(void) {
  *     invisible in the index alone -- the assertion is on the stable id. */
 void test_view_reconcile_clears_removed_selected_atlas(void) {
     TEST_ASSERT_EQUAL_INT(
-        1, gui_project_add_atlas().visible_index);
+        1, add_atlas_observed().visible_index);
     const tp_session_snapshot *snapshot = gui_project_snapshot();
     const tp_snapshot_atlas *survivor =
         tp_session_snapshot_atlas_at(snapshot, 0);
@@ -560,7 +643,7 @@ void test_view_reconcile_clears_removed_selected_atlas(void) {
     TEST_ASSERT_EQUAL_INT(1, gui_view_atlas_index(gui_project_snapshot()));
 
     /* The removal is foreign to the view: nothing tells it the selection died. */
-    TEST_ASSERT_TRUE(gui_project_remove_atlas(
+    TEST_ASSERT_TRUE(remove_atlas_observed(
         selected_id, tp_session_snapshot_revision(gui_project_snapshot())));
     gui_view_reconcile_observation(gui_project_snapshot());
 
@@ -591,7 +674,8 @@ void test_view_reconcile_resolves_focus_after_row_shift(void) {
 
     /* a child AHEAD of gamma (beta) disappears -> gamma's row + view index both move up by one. */
     TEST_ASSERT_EQUAL_INT(0, remove(s_beta));
-    gui_project_invalidate_sources();
+    gui_project_refresh_sources();
+    settle_project_observation();
     build_rows();
     build_view();
 
@@ -645,10 +729,11 @@ void test_view_reconcile_folder_primary_follows_stable_id(void) {
     const tp_snapshot_atlas *atlas =
         tp_session_snapshot_atlas_at(gui_project_snapshot(), 0);
     TEST_ASSERT_NOT_NULL(atlas);
-    TEST_ASSERT_TRUE(gui_project_remove_source(
+    TEST_ASSERT_TRUE(remove_source_observed(
         atlas->id, file_id,
         tp_session_snapshot_revision(gui_project_snapshot())));
-    gui_project_invalidate_sources();
+    gui_project_refresh_sources();
+    settle_project_observation();
     build_rows();
     build_view();
 
@@ -722,10 +807,11 @@ void test_view_collapse_pruned_when_folder_source_removed(void) {
     const tp_snapshot_atlas *atlas =
         tp_session_snapshot_atlas_at(gui_project_snapshot(), 0);
     TEST_ASSERT_NOT_NULL(atlas);
-    TEST_ASSERT_TRUE(gui_project_remove_source(
+    TEST_ASSERT_TRUE(remove_source_observed(
         atlas->id, folder_id,
         tp_session_snapshot_revision(gui_project_snapshot())));
-    gui_project_invalidate_sources();
+    gui_project_refresh_sources();
+    settle_project_observation();
     build_rows();
     build_view();
 
@@ -744,7 +830,8 @@ void test_view_reconcile_keeps_missing_source_primary(void) {
     add_sources_and_build(NULL, NULL);
 
     TEST_ASSERT_EQUAL_INT(0, remove(s_solo)); /* solo.png gone -> its file source goes missing */
-    gui_project_invalidate_sources();
+    gui_project_refresh_sources();
+    settle_project_observation();
     build_rows();
     build_view();
 
@@ -762,7 +849,8 @@ void test_view_reconcile_keeps_missing_source_primary(void) {
     gui_rows_select_primary(&s_rows[mi]);
     TEST_ASSERT_TRUE(gui_rows_primary_matches(missing_id, "", true));
 
-    gui_project_invalidate_sources();
+    gui_project_refresh_sources();
+    settle_project_observation();
     build_rows();
     build_view();
     const sprite_row *primary = gui_rows_primary();
@@ -826,7 +914,7 @@ void test_view_collapse_survives_atlas_switch(void) {
     add_sources_and_build(&folder0, NULL); /* A0: folder @ src 0, solo @ src 1 */
 
     TEST_ASSERT_EQUAL_INT(
-        1, gui_project_add_atlas().visible_index); /* A1 at index 1 */
+        1, add_atlas_observed().visible_index); /* A1 at index 1 */
     /* Snapshot rows are borrowed from the observation that owns them; the very
      * next mutation publishes a new observation and frees this one. Copy the
      * stable id out NOW -- a `tp_snapshot_atlas *` must never outlive the pump. */
@@ -842,7 +930,9 @@ void test_view_collapse_survives_atlas_switch(void) {
                                         tp_session_snapshot_revision(snap),
                                         s_pack_dir, TP_SOURCE_KIND_FOLDER));
     }
-    gui_project_invalidate_sources();
+    settle_project_observation();
+    gui_project_refresh_sources();
+    settle_project_observation();
     /* The add republished the observation: `snap`/`a1` are gone, the id is not. */
     TEST_ASSERT_NOT_NULL(
         tp_session_snapshot_atlas_by_id(gui_project_snapshot(), a1_id));
@@ -884,9 +974,10 @@ void test_undo_preserves_selected_atlas_by_stable_id(void) {
         GUI_ADD_ADDED,
         gui_project_add_source_kind(a0_id, tp_session_snapshot_revision(snap),
                                     s_pack_dir, TP_SOURCE_KIND_FOLDER));
+    settle_project_observation();
 
     TEST_ASSERT_EQUAL_INT(
-        1, gui_project_add_atlas().visible_index); /* A1 at index 1 */
+        1, add_atlas_observed().visible_index); /* A1 at index 1 */
     snap = gui_project_snapshot();
     const tp_snapshot_atlas *a1 = tp_session_snapshot_atlas_at(snap, 1);
     TEST_ASSERT_NOT_NULL(a1);
@@ -895,7 +986,9 @@ void test_undo_preserves_selected_atlas_by_stable_id(void) {
         GUI_ADD_ADDED,
         gui_project_add_source_kind(a1_id, tp_session_snapshot_revision(snap),
                                     s_pack_dir, TP_SOURCE_KIND_FOLDER));
-    gui_project_invalidate_sources();
+    settle_project_observation();
+    gui_project_refresh_sources();
+    settle_project_observation();
 
     /* View A1 (index 1); select the beta leaf in it. */
     gui_view_select_atlas(a1_id);
@@ -908,7 +1001,7 @@ void test_undo_preserves_selected_atlas_by_stable_id(void) {
     /* Remove A0 (the op we will undo): A1 shifts index 1 -> 0. */
     snap = gui_project_snapshot();
     TEST_ASSERT_TRUE(
-        gui_project_remove_atlas(a0_id, tp_session_snapshot_revision(snap)));
+        remove_atlas_observed(a0_id, tp_session_snapshot_revision(snap)));
     TEST_ASSERT_TRUE(tp_id128_eq(
         tp_session_snapshot_atlas_at(gui_project_snapshot(), 0)->id, a1_id));
     /* Re-establish a clean selection while viewing A1 at its new index 0. */
@@ -921,6 +1014,7 @@ void test_undo_preserves_selected_atlas_by_stable_id(void) {
 
     /* Undo the removal: A0 re-inserted at 0, A1 shifts back to 1. */
     do_undo();
+    settle_project_observation();
     /* Complete the frame loop that follows an undo. */
     build_rows();
     build_view();
@@ -1403,7 +1497,8 @@ void test_row_projection_oom_preserves_selection_until_retry(void) {
     multi_sel_add_ref(beta_id, beta_key);
     TEST_ASSERT_EQUAL_INT(2, s_multi_sel_count);
 
-    gui_project_invalidate_sources();
+    gui_project_refresh_sources();
+    settle_project_observation();
     gui_rows_test_fail_rows_strdup_after(0);
     build_rows();
     build_view();
@@ -1618,7 +1713,7 @@ void test_view_collapse_prunes_sources_owned_by_deleted_atlas(void) {
     TEST_ASSERT_TRUE(gui_rows_is_collapsed(deleted_folder_id));
 
     TEST_ASSERT_EQUAL_INT(
-        1, gui_project_add_atlas().visible_index);
+        1, add_atlas_observed().visible_index);
     const tp_session_snapshot *snapshot = gui_project_snapshot();
     const tp_snapshot_atlas *kept_atlas =
         tp_session_snapshot_atlas_at(snapshot, 1);
@@ -1632,7 +1727,7 @@ void test_view_collapse_prunes_sources_owned_by_deleted_atlas(void) {
     const tp_snapshot_atlas *deleted_atlas =
         tp_session_snapshot_atlas_at(snapshot, 0);
     TEST_ASSERT_NOT_NULL(deleted_atlas);
-    TEST_ASSERT_TRUE(gui_project_remove_atlas(
+    TEST_ASSERT_TRUE(remove_atlas_observed(
         deleted_atlas->id, tp_session_snapshot_revision(snapshot)));
     TEST_ASSERT_TRUE(tp_id128_eq(
         tp_session_snapshot_atlas_at(gui_project_snapshot(), 0)->id,
@@ -1862,38 +1957,6 @@ void test_filter_casefold_matches_realistic_non_ascii_pairs(void) {
         "\xD0\x94\xD1\x83\xD0\xB1"));          /* Дуб */
 }
 
-void test_folder_scan_failure_keeps_other_rows_and_typed_status(void) {
-    const tp_session_snapshot *snapshot = gui_project_snapshot();
-    const tp_snapshot_atlas *atlas =
-        tp_session_snapshot_atlas_at(snapshot, 0);
-    TEST_ASSERT_NOT_NULL(atlas);
-    const tp_id128 atlas_id = atlas->id;
-
-    TEST_ASSERT_EQUAL_INT(
-        GUI_ADD_ADDED,
-        gui_project_add_source_kind(
-            atlas_id, tp_session_snapshot_revision(snapshot), s_pack_dir,
-            TP_SOURCE_KIND_FOLDER));
-    snapshot = gui_project_snapshot();
-    TEST_ASSERT_EQUAL_INT(
-        GUI_ADD_ADDED,
-        gui_project_add_source_kind(
-            atlas_id, tp_session_snapshot_revision(snapshot), s_solo,
-            TP_SOURCE_KIND_FILE));
-
-    gui_project_invalidate_sources();
-    tp_scan__test_set_alloc_fail(0);
-    build_rows();
-    tp_scan__test_set_alloc_fail(-1);
-
-    TEST_ASSERT_EQUAL_INT(2, s_row_count);
-    TEST_ASSERT_TRUE(s_rows[0].is_source);
-    TEST_ASSERT_TRUE(s_rows[0].is_folder);
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OOM, s_rows[0].runtime_status);
-    TEST_ASSERT_TRUE(s_rows[1].is_source);
-    TEST_ASSERT_EQUAL_STRING("solo", s_rows[1].sprite_name);
-}
-
 void test_source_probe_failure_is_typed_warning_not_missing(void) {
     const tp_session_snapshot *snapshot = gui_project_snapshot();
     const tp_snapshot_atlas *atlas =
@@ -1906,17 +1969,20 @@ void test_source_probe_failure_is_typed_warning_not_missing(void) {
         gui_project_add_source_kind(
             atlas_id, tp_session_snapshot_revision(snapshot), s_pack_dir,
             TP_SOURCE_KIND_FOLDER));
+    settle_project_observation();
     snapshot = gui_project_snapshot();
     TEST_ASSERT_EQUAL_INT(
         GUI_ADD_ADDED,
         gui_project_add_source_kind(
             atlas_id, tp_session_snapshot_revision(snapshot), s_solo,
             TP_SOURCE_KIND_FILE));
+    settle_project_observation();
 
-    gui_project_invalidate_sources();
     tp_scan__test_set_stat_error(EACCES);
-    build_rows();
+    gui_project_refresh_sources();
+    settle_project_observation();
     tp_scan__test_set_stat_error(0);
+    build_rows();
 
     TEST_ASSERT_EQUAL_INT(2, s_row_count);
     TEST_ASSERT_TRUE(s_rows[0].is_folder);
@@ -1927,6 +1993,8 @@ void test_source_probe_failure_is_typed_warning_not_missing(void) {
     TEST_ASSERT_EQUAL_INT(TP_STATUS_PATH_RESOLVE_FAILED,
                           s_rows[1].runtime_status);
     TEST_ASSERT_EQUAL_INT(STATUS_WARNING, s_status_sev);
+    TEST_ASSERT_NOT_NULL(
+        strstr(s_status, "directory scan could not stat"));
 }
 
 void test_missing_folder_retains_folder_kind_and_missing_state(void) {
@@ -1944,8 +2012,10 @@ void test_missing_folder_retains_folder_kind_and_missing_state(void) {
         gui_project_add_source_kind(
             atlas->id, tp_session_snapshot_revision(snapshot), s_pack_dir,
             TP_SOURCE_KIND_FOLDER));
+    settle_project_observation();
 
-    gui_project_invalidate_sources();
+    gui_project_refresh_sources();
+    settle_project_observation();
     build_rows();
 
     TEST_ASSERT_EQUAL_INT(1, s_row_count);
@@ -2081,7 +2151,6 @@ int main(int argc, char **argv) {
     RUN_TEST(test_canvas_zoom_to_sprite_centers_transformed_region);
     RUN_TEST(test_recycled_click_identity_rejects_remapped_rows);
     RUN_TEST(test_filter_casefold_matches_realistic_non_ascii_pairs);
-    RUN_TEST(test_folder_scan_failure_keeps_other_rows_and_typed_status);
     RUN_TEST(test_source_probe_failure_is_typed_warning_not_missing);
     RUN_TEST(test_missing_folder_retains_folder_kind_and_missing_state);
     RUN_TEST(test_canvas_menu_owner_cancels_raw_gesture_and_double_click);

@@ -6,6 +6,11 @@ tp_add_test(NAME name_map LIBS tp_core unity PRIVATE_SRC)
 # enum value so a rename can't slip through without failing here.
 tp_add_test(NAME status_id LIBS tp_core unity)
 
+# Current client capability rows are executable typed contracts. In particular,
+# live Source Refresh is available to GUI/headless sessions and deliberately
+# not applicable to the one-shot saved-file CLI.
+tp_add_test(NAME client_capability LIBS tp_core unity)
+
 # F1-00 project identity: 128-bit runtime ID + injectable RNG seam (deterministic).
 # PRIVATE_SRC: tp_hex.h (shared drift-guard encoder).
 tp_add_test(NAME identity_id LIBS tp_core unity PRIVATE_SRC)
@@ -15,7 +20,7 @@ tp_add_test(NAME identity_id LIBS tp_core unity PRIVATE_SRC)
 tp_add_test(NAME id LIBS tp_core unity PRIVATE_SRC)
 
 # F1-02: source-key normalization / case-fold collision / portability validation
-# against the production tp_status model and master spec §5.3.
+# against the production tp_status and source-key contracts.
 tp_add_test(NAME srckey LIBS tp_core unity)
 
 tp_add_test(NAME source_path_text LIBS tp_core unity PRIVATE_SRC)
@@ -63,30 +68,10 @@ tp_add_test(NAME transaction
 tp_add_test(NAME session
     SOURCES test_session.c ../src/tp_session_snapshot.c
         ../src/tp_project_generation.c ../src/tp_project_save.c
-        ../src/tp_project_clone.c
-    LIBS tp_core tinycthread unity PRIVATE_SRC SEAMS
+        ../src/tp_project_clone.c ../src/tp_scan.c
+    LIBS tp_build tinycthread unity PRIVATE_SRC SEAMS
     MAKE_DIRS "${CMAKE_BINARY_DIR}/tp_session_test"
     ARGS "${CMAKE_BINARY_DIR}/tp_session_test")
-
-# The observe-after-cut hook is compiled out of the shipped library, so this
-# target recompiles its TU with TP_ENABLE_TEST_SEAMS (same pattern as
-# tp_test_job_input_token recompiling tp_job.c).
-# tinycthread: tp_session_layout.h stores the owner thread, and tp_core links
-# tinycthread PRIVATE, so a target recompiling a session TU needs its headers.
-tp_add_test(NAME session_observation
-    SOURCES test_session_observation.c ../src/tp_session_observation.c
-        ../src/tp_session_snapshot.c ../src/tp_project_generation.c
-    LIBS tp_core tinycthread unity PRIVATE_SRC SEAMS)
-
-# USA-07 reverse/superseded admission needs a second live observed owner, which
-# tp_session_job_start_internal refuses to create. The coverage runs against
-# tp_session_job_observation_begin_internal, a seam compiled out of the shipped
-# library, so this target recompiles its TU with TP_ENABLE_TEST_SEAMS (same
-# pattern as tp_test_session_observation recompiling tp_session_observation.c).
-tp_add_test(NAME session_job_observation
-    SOURCES test_session_job_observation.c ../src/tp_session_job_observation.c
-        ../src/tp_session_snapshot.c ../src/tp_project_generation.c
-    LIBS tp_core tinycthread unity PRIVATE_SRC SEAMS)
 
 # Owner refcount invariants must remain executable in Release, where libc
 # assert() would compile away. The parent probe succeeds only when its child
@@ -267,7 +252,7 @@ tp_add_test(NAME input
     MAKE_DIRS "${CMAKE_BINARY_DIR}/tp_input_test"
     ARGS "${CMAKE_BINARY_DIR}/tp_input_test")
 
-# Synthetic D4 transform-decode test (plan §3.6). Includes the private helper
+# Synthetic D4 transform-decode test. Includes the private helper
 # header from src/ directly -- no public API pollution.
 tp_add_test(NAME transform_decode LIBS tp_core unity PRIVATE_SRC)
 
@@ -280,11 +265,11 @@ tp_add_test(NAME pack_read
     MAKE_DIRS "${CMAKE_BINARY_DIR}/tp_test"
     ARGS "${CMAKE_BINARY_DIR}/tp_test")
 
-# UV recovery property test (plan §3.3): pure functions, no builder. Includes
+# UV recovery property test: pure functions, no builder. Includes
 # the private helper header from src/ directly.
 tp_add_test(NAME uv_property LIBS tp_core unity PRIVATE_SRC)
 
-# Phase 1b tp_pack invariants + determinism (plan §3.4): drives nt_builder
+# tp_pack invariants + determinism: drives nt_builder
 # (transitive through tp_core) then parses back. Needs a scratch dir for the
 # session .ntpack files. tp_build: drives nt_builder.
 tp_add_test(NAME pack LIBS tp_build unity PRIVATE_SRC
@@ -315,7 +300,7 @@ tp_add_test(NAME pack_result_cache
     MAKE_DIRS "${CMAKE_BINARY_DIR}/tp_pack_result_cache_test"
     ARGS "${CMAKE_BINARY_DIR}/tp_pack_result_cache_test")
 
-# H0.3-a: versioned build-worker protocol codec (decision 0018). Encode/decode
+# Versioned build-worker protocol codec. Encode/decode
 # round-trip across representative inputs plus the fail-closed matrix (truncated,
 # oversized declared length, wrong magic, unsupported version, corrupt payload).
 # tp_build owns the worker/protocol seam.
@@ -328,7 +313,7 @@ tp_add_test(NAME build_driver_oracle LIBS tp_build unity PRIVATE_SRC
     MAKE_DIRS "${CMAKE_BINARY_DIR}/tp_build_driver_oracle_test"
     ARGS "${CMAKE_BINARY_DIR}/tp_build_driver_oracle_test")
 
-# H0.3-b: private build-worker process boundary (decision 0018). Fault-injecting
+# Private build-worker process boundary. Fault-injecting
 # worker binaries -- one per mode via a test-only compile def, the same pattern as
 # the CLI NTPACKER_CLI_*_FAULT_SEAM binaries (production exes have no such mode) --
 # drive the crash / malformed-reply / non-zero-exit outcome mapping. The test exe
@@ -485,16 +470,15 @@ tp_add_test(NAME export_defold
 # directly (links tp_build), mutates+frees the caller buffer immediately after the
 # add, packs, and asserts the packed page is unaffected -> the builder deep-copies
 # (nt_builder_atlas.c:771-775). Pins a lifetime the public header does not promise
-# (see docs/research/neotolis-engine-raw-rgba-lifetime.md). Needs a scratch dir.
+# (see docs/architecture/sources-and-raster.md). Needs a scratch dir.
 tp_add_test(NAME raw_ownership LIBS tp_build unity PRIVATE_SRC
     MAKE_DIRS "${CMAKE_BINARY_DIR}/tp_raw_ownership_test"
     ARGS "${CMAKE_BINARY_DIR}/tp_raw_ownership_test")
 
-# Dev driver / smoke tool (NOT a ctest): load a `.ntpacker_project`, assemble each
-# atlas's sprites through the shared op layer (tp_pack_input_build), and run every
-# enabled target -> the project's out_paths. Regenerates the Defold demo's ntpacker
-# exports deterministically and serves as the CLI parity oracle (byte-identical to
-# `ntpacker pack`). Input assembly + decode live in tp_core now (no stb here).
+# Live-session Export dev driver / smoke tool (NOT a ctest): open one saved
+# project, start the public session Export command, and drain its typed receipt.
+# It serves as the live-headless half of CLI parity without owning mutable
+# project, source-expansion, packing, or export orchestration.
 #   tp_demo_export <project.ntpacker_project> [work_dir]
 tp_add_test(NAME demo_export TARGET tp_demo_export
     SOURCES tp_demo_export.c
@@ -525,7 +509,7 @@ tp_add_test(NAME bench_foundation TARGET tp_bench_foundation
     DEFINES _CRT_SECURE_NO_WARNINGS
     NO_CTEST)
 
-# Packet S27 premise gate: serialized `.ntpack` blob bytes vs the raw RGBA8 page
+# Premise gate: serialized `.ntpack` blob bytes vs the raw RGBA8 page
 # bytes they inflate into, plus the inflate cost, at 1024/2048/4096 synthetic
 # page scales and one 4096 atlas built from the real Kenney bench assets. NOT a
 # ctest: it drives the real nt_builder and allocates hundreds of MiB.

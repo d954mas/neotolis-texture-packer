@@ -38,6 +38,15 @@ static int fill_rng(void *ctx, uint8_t *out, size_t len) {
 
 static void fake_cancel(tp_session_owned_job *owner) { (void)owner; }
 
+static bool fake_request_cancel(tp_session_owned_job *owner) {
+    (void)owner;
+    return true;
+}
+
+static void fake_compact(tp_session_owned_job *owner) {
+    (void)owner;
+}
+
 static void fake_destroy(tp_session_owned_job *owner) {
     fake_job *job = (fake_job *)owner;
     atomic_fetch_add_explicit(&job->destroyed, 1, memory_order_relaxed);
@@ -60,7 +69,7 @@ static tp_status fail_process_start(void *context, tp_error *error) {
 }
 
 /* The worker receives an already-acquired pin. It never touches the session:
- * one host thread owns that (master spec 4.8), and the refcount -- not the
+ * one host thread owns that, and the refcount -- not the
  * session -- is what a worker is allowed to hold across a detach. */
 static int pinned_worker(void *context) {
     worker_args *args = context;
@@ -166,6 +175,8 @@ void test_process_spawn_failure_is_unpublished_but_has_reserved_identity(void) {
     tp_session_owned_job_init(&job.owner, fake_cancel, fake_destroy);
     const tp_session_job_descriptor descriptor = {
         .kind = TP_SESSION_JOB_PACK,
+        .request_cancel = fake_request_cancel,
+        .compact = fake_compact,
     };
     tp_session_owned_job_configure_observation(
         &job.owner, &descriptor, fake_observe);
@@ -178,14 +189,14 @@ void test_process_spawn_failure_is_unpublished_but_has_reserved_identity(void) {
     TEST_ASSERT_TRUE(probe.request_id_seen > 0U);
     TEST_ASSERT_NULL(tp_session_job_acquire_internal(session));
 
-    tp_session_observation *observation = NULL;
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
-        tp_session_observe(session, NULL, &observation, &error));
-    TEST_ASSERT_NOT_NULL(observation);
+        tp_session_update(session, NULL, &error));
+    const struct tp_session_view *view =
+        tp_session_view(session);
+    TEST_ASSERT_NOT_NULL(view);
     TEST_ASSERT_FALSE(
-        tp_session_observation_job_state(observation).present);
-    tp_session_observation_destroy(observation);
+        view->task.present);
 
     tp_session_job_release_internal(&job.owner);
     TEST_ASSERT_EQUAL_INT(

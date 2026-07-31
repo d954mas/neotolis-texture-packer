@@ -156,7 +156,7 @@ tp_status tp_op_validate_animation_family(
             }
             /* Reject a collision with ANOTHER animation in the atlas; renaming to the same name
              * (self) is allowed (a no-op) -- mirrors atlas.rename's uniqueness check. This is the
-             * policy the GUI enforced client-side (decision 0015); it now lives here so
+             * policy the GUI previously enforced client-side; it now lives here so
              * every frontend reuses the one structured reject (invalid_argument + field). */
             for (int i = 0; i < a->animation_count; i++) {
                 const tp_project_anim *other = &a->animations[i];

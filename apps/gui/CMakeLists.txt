@@ -1,4 +1,4 @@
-# ntpacker-gui: native GUI shell (roadmap Phase 6 grows this). Skeleton only.
+# ntpacker-gui: native GUI frontend over the shared session/core contracts.
 # Native-only: the root CMakeLists fatal-errors on EMSCRIPTEN, but guard anyway so
 # this file is self-contained if ever pulled into a wasm-configured tree.
 if(NOT EMSCRIPTEN)
@@ -21,7 +21,7 @@ set(_tp_gui_introspect_defines
     NT_INTROSPECT_WRITE_ENABLED=$<BOOL:${NT_INTROSPECT_WRITE_ENABLED}>)
 
 # tinyfiledialogs (vendored in-repo, apps/gui/deps, zlib licence) -- OS-native open/save/
-# folder dialogs (ux.md gap 3). Its own small static lib compiled -w so our -Werror never
+# folder dialogs. Its own small static lib compiled -w so our -Werror never
 # applies to third-party code; default CRT (matches the GUI). Windows needs comdlg32/ole32/
 # shell32 for the native dialogs.
 add_library(tinyfiledialogs STATIC deps/tinyfiledialogs/tinyfiledialogs.c)
@@ -32,7 +32,7 @@ if(WIN32)
     target_link_libraries(tinyfiledialogs PUBLIC comdlg32 ole32 shell32 user32)
 endif()
 
-add_executable(ntpacker-gui main.c gui_state.c gui_widgets.c gui_actions.c gui_actions_dialogs.c gui_actions_edits.c gui_actions_intents.c gui_actions_pack.c gui_actions_preview.c gui_actions_recovery.c gui_rows.c gui_selftest.c gui_startup.c gui_paths.c gui_log_file.c gui_crash.c gui_bootstrap.c gui_project.c gui_project_file.c gui_project_mutations.c gui_project_recovery.c gui_session_adapter.c gui_session_client.c gui_edit_state.c gui_host_queue.c gui_host_binding.c gui_scan.c gui_canvas.c gui_canvas_resources.c gui_pack.c gui_pack_jobs.c gui_pack_preview.c gui_view_settings.c gui_view_lists.c gui_view_canvas.c gui_view_chrome.c
+add_executable(ntpacker-gui main.c gui_state.c gui_widgets.c gui_actions.c gui_actions_dialogs.c gui_actions_edits.c gui_actions_intents.c gui_actions_pack.c gui_actions_preview.c gui_actions_recovery.c gui_rows.c gui_selftest.c gui_startup.c gui_paths.c gui_log_file.c gui_crash.c gui_bootstrap.c gui_project.c gui_project_file.c gui_project_mutations.c gui_project_recovery.c gui_project_operations.c gui_edit_state.c gui_canvas.c gui_canvas_resources.c gui_pack.c gui_pack_jobs.c gui_pack_preview.c gui_view_settings.c gui_view_lists.c gui_view_canvas.c gui_view_chrome.c
     "${CMAKE_SOURCE_DIR}/apps/common/nt_utf8_fs.c"
     "${CMAKE_SOURCE_DIR}/apps/common/app_scratch.c")
 if(WIN32)
@@ -150,74 +150,11 @@ if(WIN32 AND CMAKE_BUILD_TYPE STREQUAL "Release")
     target_link_options(ntpacker-gui PRIVATE "LINKER:/entry:mainCRTStartup")
 endif()
 
-# GUI row rebuild benchmark. It compiles the production gui_rows/gui_scan
-# sources with narrow stubs; no window, renderer, pack job, or event loop.
-# CTest enforces only correctness/count/complexity. Absolute timing is advisory.
-add_executable(tp_bench_gui_rows tp_bench_gui_rows.c gui_rows.c gui_scan.c)
-target_link_libraries(tp_bench_gui_rows PRIVATE tp_core nt_time nt_ui)
-target_include_directories(tp_bench_gui_rows PRIVATE
-    "${CMAKE_SOURCE_DIR}/packer/tests"
-    "${CMAKE_SOURCE_DIR}/packer/src")
-target_compile_definitions(tp_bench_gui_rows PRIVATE
-    NTPACKER_GUI_BENCH=1
-    _CRT_SECURE_NO_WARNINGS
-    ${_tp_gui_introspect_defines}
-)
-nt_set_warning_flags(tp_bench_gui_rows)
-nt_set_sanitizer_flags(tp_bench_gui_rows)
-set_target_properties(tp_bench_gui_rows PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${GUI_OUTPUT_DIR}")
-add_test(NAME tp_gui_rows_complexity
-    COMMAND tp_bench_gui_rows "${CMAKE_CURRENT_BINARY_DIR}/tp_gui_rows_ctest" 1)
-set_tests_properties(tp_gui_rows_complexity PROPERTIES
-    TIMEOUT 180
-    LABELS "benchmark;gui")
-
-# Contract probe: the production GUI atlas-rename adapter must admit the
-# canonical transaction through tp_session and read the result from one owned
-# snapshot. Headless: no window, renderer, dialogs, or GUI globals.
-tp_add_gui_test(NAME gui_session_adapter
-    SOURCES
-        test_gui_session_adapter.c
-        gui_session_adapter.c
-        gui_session_client.c
-    LIBS tp_core unity)
-
-tp_add_gui_test(NAME gui_session_client
-    SOURCES
-        test_gui_session_client.c
-        gui_session_client.c
-    LIBS tp_core unity
-    SEAMS
-    DEFINES TP_GUI_SESSION_CLIENT_TEST_DIR="${CMAKE_CURRENT_BINARY_DIR}")
-
 tp_add_gui_test(NAME gui_edit_state
     SOURCES
         test_gui_edit_state.c
         gui_edit_state.c
     LIBS tp_core unity)
-
-tp_add_gui_test(NAME gui_host_queue
-    SOURCES
-        test_gui_host_queue.c
-        gui_host_queue.c
-    LIBS tp_build tp_core unity
-    SEAMS
-    DEFINES TP_GUI_HOST_QUEUE_TEST_DIR="${CMAKE_CURRENT_BINARY_DIR}")
-
-tp_add_gui_test(NAME gui_host_binding
-    SOURCES
-        test_gui_host_binding.c
-        gui_host_binding.c
-        gui_host_queue.c
-        gui_session_client.c
-        "${CMAKE_SOURCE_DIR}/packer/src/tp_job_worker_main.c"
-    LIBS tp_build tp_core unity
-    INCLUDE_DIRS "${CMAKE_SOURCE_DIR}/packer/src"
-    SEAMS
-    DEFINES
-        _CRT_SECURE_NO_WARNINGS
-        TP_GUI_HOST_BINDING_TEST_DIR="${CMAKE_CURRENT_BINARY_DIR}"
-    TIMEOUT 30)
 
 # Windows resolves argv through the shared UTF-8 process ingress, which the path
 # helpers under test read back.
@@ -254,12 +191,8 @@ set(_tp_gui_headless_sources
     gui_project_file.c
     gui_project_mutations.c
     gui_project_recovery.c
-    gui_session_adapter.c
-    gui_session_client.c
+    gui_project_operations.c
     gui_edit_state.c
-    gui_host_queue.c
-    gui_host_binding.c
-    gui_scan.c
     gui_canvas.c
     gui_canvas_resources.c
     gui_pack.c
@@ -338,6 +271,17 @@ tp_add_gui_test(NAME gui_view
 # cases create and delete real files under it, and `ctest -j` runs the three
 # binaries concurrently.
 foreach(_trace_area draft refresh job)
+    set(_trace_area_sources)
+    if(_trace_area STREQUAL "refresh")
+        list(APPEND _trace_area_sources
+            "${CMAKE_SOURCE_DIR}/packer/src/tp_refresh_job.c")
+    elseif(_trace_area STREQUAL "job")
+        # The job trace re-execs itself as the outer worker. Compile the worker
+        # service into this seam-enabled target so worker-side timing gates are
+        # real test seams instead of depending on scheduler timing.
+        list(APPEND _trace_area_sources
+            "${CMAKE_SOURCE_DIR}/packer/src/tp_job_worker_main.c")
+    endif()
     tp_add_gui_test(NAME gui_action_trace_${_trace_area}
         SOURCES
             test_gui_action_trace_${_trace_area}.c
@@ -346,6 +290,7 @@ foreach(_trace_area draft refresh job)
             "${CMAKE_SOURCE_DIR}/packer/src/tp_job.c"
             "${CMAKE_SOURCE_DIR}/packer/src/tp_job_worker.c"
             "${CMAKE_SOURCE_DIR}/packer/src/tp_job_worker_proto.c"
+            ${_trace_area_sources}
             ${_tp_gui_headless_sources}
         LIBS ${_tp_gui_headless_libs}
         INCLUDE_DIRS ${_tp_gui_headless_includes}
@@ -356,30 +301,15 @@ foreach(_trace_area draft refresh job)
             ${_tp_gui_introspect_defines})
 endforeach()
 
-# Capability/parity corpus. The second adapter is intentionally test-only:
-# it calls tp_session directly and proves the future transport host needs no
-# duplicate mutable session wrapper.
-tp_add_gui_test(NAME client_parity
-    SOURCES
-        test_client_parity.c
-        client_parity_manifest.c
-        gui_session_adapter.c
-        gui_session_client.c
-    LIBS tp_build unity
-    DEFINES
-        TP_TEST_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
-        TP_TEST_BINARY_DIR="${CMAKE_CURRENT_BINARY_DIR}/tp_client_parity_tmp"
-    TIMEOUT 180)
-
 # The replay binary is driven by the tp_client_parity_real ctest below, which is a
 # cmake -P script (it runs the CLI and the replay exe against each other), so the
 # executable registers no test of its own.
 tp_add_gui_test(NAME client_parity_replay TARGET tp_client_parity_replay
     SOURCES
         client_parity_replay.c
-        gui_session_adapter.c
-        gui_session_client.c
+        gui_project_operations.c
     LIBS tp_build
+    SEAMS
     NO_CTEST)
 
 add_test(NAME tp_client_parity_real COMMAND ${CMAKE_COMMAND}

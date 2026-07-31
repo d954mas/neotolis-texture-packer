@@ -27,7 +27,8 @@
 #include "tp_core/tp_session_snapshot_query.h"
 #include "tp_core/tp_utf8.h"     /* tp_utf8_is_valid_c_string (validate --bench-perf=path) */
 
-#include "gui_actions.h" /* do_pack_blocking */
+#include "gui_actions.h"
+#include "gui_actions_dev.h" /* host-driving benchmark adapter */
 #include "gui_pack.h"    /* gui_pack_result / gui_pack_async_start / gui_pack_worker_active + GUI_PACK_ASYNC_* */
 #include "gui_project.h" /* gui_project_* (snapshot / edit / undo / redo / refresh / dirty) */
 #include "gui_rows.h"    /* build_rows / select_row_for_region */
@@ -256,11 +257,10 @@ static void bench_run_probes(void) {
     const tp_snapshot_atlas *first_atlas =
         tp_session_snapshot_atlas_at(snap, 0);
     gui_view_select_atlas(first_atlas->id);
-    int atlas_index = gui_view_atlas_index(snap);
     build_rows();
     do_pack_blocking();
     const tp_result *packed =
-        gui_pack_result(atlas_index);
+        gui_pack_result(first_atlas->id);
     build_rows(); /* row cache still keyed to atlas 0; ensure rows are present for the scan */
     build_view();
     const int regions = packed ? packed->sprite_count : 0;
@@ -308,25 +308,36 @@ static void bench_run_probes(void) {
             a0->id, rev, GUI_ATLAS_PADDING,
             newpad, 0.0F);
         gui_request_gesture_commit();
-        apply_pending();
+        tp_error step_error = {{0}};
+        const bool step_ok =
+            gui_actions_step(
+                NULL, &step_error) == TP_STATUS_OK;
         snap = gui_project_snapshot();
         a0 = snap
                  ? tp_session_snapshot_atlas_at(
                        snap, 0)
                  : NULL;
         const bool edit_ok =
-            a0 && a0->padding == newpad;
+            step_ok && a0 && a0->padding == newpad;
         const double e1 = bench_now_ms();
         bench_samples_record(&edit, edit_ok, e1 - e0);
         if (!edit_ok) {
             continue;
         }
         const double u0 = bench_now_ms();
-        const bool undo_ok = gui_project_undo();
+        gui_request_undo();
+        tp_error undo_error = {{0}};
+        const bool undo_ok =
+            gui_actions_step(
+                NULL, &undo_error) == TP_STATUS_OK;
         const double u1 = bench_now_ms();
         bench_samples_record(&undo, undo_ok, u1 - u0);
         const double r0 = bench_now_ms();
-        const bool redo_ok = gui_project_redo();
+        gui_request_redo();
+        tp_error redo_error = {{0}};
+        const bool redo_ok =
+            gui_actions_step(
+                NULL, &redo_error) == TP_STATUS_OK;
         const double r1 = bench_now_ms();
         bench_samples_record(&redo, redo_ok, r1 - r0);
     }
@@ -352,7 +363,7 @@ static void bench_run_probes(void) {
          * near-free invalidate the earlier probe measured. The headless seam omits the UI/status/canvas
          * side effects, so the refresh semantic-purity invariant asserted below still holds. */
         const bool refresh_ok = gui_actions_refresh_diff_headless(
-            &r_added, &r_removed, &r_changed);
+            &r_added, &r_removed, &r_changed, NULL);
         const double t1 = bench_now_ms();
         bench_samples_record(&refresh, refresh_ok, t1 - t0);
     }
@@ -382,14 +393,13 @@ static void bench_run_probes(void) {
         return;
     }
     gui_view_select_atlas(first_atlas->id);
-    atlas_index = gui_view_atlas_index(snap);
     const uint64_t pack_ver_before =
-        gui_pack_result_version(atlas_index);
+        gui_pack_result_version(first_atlas->id);
     char err[256] = {0};
     const double p0 = bench_now_ms();
     const bool started =
         gui_pack_async_start(
-            atlas_index, err, sizeof err);
+            first_atlas->id, err, sizeof err);
     const double p1 = bench_now_ms();
     const bool worker = gui_pack_worker_active() || gui_pack_async_busy();
     /* A genuinely async start hands off to the worker WITHOUT producing+publishing a result
@@ -397,7 +407,7 @@ static void bench_run_probes(void) {
      * A synchronous pack -- the UI-blocking regression this guards -- would have bumped it here.
      * (worker_active alone can't tell "still running" from "finished but not yet taken".) */
     const bool no_sync_publish =
-        gui_pack_result_version(atlas_index) ==
+        gui_pack_result_version(first_atlas->id) ==
         pack_ver_before;
     const bool pack_ok = started && worker && no_sync_publish;
     if (pack_ok) {
@@ -413,7 +423,7 @@ static void bench_run_probes(void) {
         s_bench_fail = true;
     }
     if (started) {
-        (void)gui_pack_async_cancel(NULL);
+        gui_request_cancel();
     }
 }
 

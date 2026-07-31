@@ -12,7 +12,7 @@
 #include <stdint.h>
 
 #include "tp_core/tp_id.h"
-#include "tp_core/tp_model.h"
+#include "tp_core/tp_pack_result.h"
 #include "tp_core/tp_operation.h"
 #include "tp_core/tp_scan.h"
 #include "tp_core/tp_session_snapshot_query.h"
@@ -27,7 +27,7 @@ void normalize_slashes(char *s);
 /* Returns the basename (past the last / or \) of `p`. */
 const char *path_last(const char *p);
 
-/* --- canonical multi-select set (ux.md §3.7b selection gesture) --- */
+/* --- canonical multi-select set --- */
 typedef struct gui_selected_sprite {
     tp_id128 source_id;
     char *source_key;
@@ -79,7 +79,7 @@ typedef struct sprite_row {
     char *abs;                /* malloc-owned exact resolved decode path */
     /* --- sort inputs (§61.1); populated per-atlas by build_rows, read by the view comparator --- */
     long long size;           /* packed area (frame w*h) from this atlas's pack result; 0 if unpacked/no region */
-    long long mtime;          /* live file mtime (scan entry / gui_scan_stat); 0 if missing/unstattable/folder */
+    long long mtime;          /* source-runtime projection mtime; 0 if missing/unstattable/folder */
     int added_at;             /* source insertion index -- the order the source was added to the project */
 } sprite_row;
 extern sprite_row *s_rows;

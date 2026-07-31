@@ -1,6 +1,7 @@
 # Bench assets — attribution
 
-These sprites drive the **U-01 owner-scale bench fixture** (`docs/plans/master-spec-implementation-plan.md` §U-01).
+These sprites drive the owner-scale bench fixture documented by the target
+scale in `docs/spec/ux.md`.
 They are real game assets — not synthetic — so decode, hashing, packing, thumbnail,
 and cache behaviour are measured against realistic pixel data and a realistic size
 distribution (16 px tiles → 1024 px backgrounds).

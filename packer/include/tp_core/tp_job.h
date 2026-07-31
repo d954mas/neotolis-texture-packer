@@ -5,9 +5,10 @@
 
 #include "tp_core/tp_arena.h"
 #include "tp_core/tp_export.h"
-#include "tp_core/tp_model.h"
+#include "tp_core/tp_pack_result.h"
 #include "tp_core/tp_pack.h"
 #include "tp_core/tp_session.h"
+#include "tp_core/tp_source_runtime.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -40,13 +41,10 @@ typedef struct tp_export_command_request {
     tp_id128 atlas_id;
 } tp_export_command_request;
 
-typedef struct tp_session_job_progress {
-    tp_session_job_kind kind;
-    tp_session_job_state state;
-    int current;
-    int total;
-    double elapsed_ms;
-} tp_session_job_progress;
+typedef struct tp_refresh_job_request {
+    uint64_t session_instance_generation;
+    uint64_t request_id;
+} tp_refresh_job_request;
 
 struct tp_pack_image_hash_cache;
 
@@ -70,7 +68,7 @@ typedef struct tp_session_pack_job_result {
     int missing_sources;
     tp_session_input_token input_token_at_start;
     /* Canonical semantic pack_input_hash of the job's immutable start inputs
-     * (master spec §10.2, decision 0004). Freshness is `result_hash ==
+     * (docs/architecture/jobs-pack-and-cache.md). Freshness is `result_hash ==
      * current_pack_input_hash`; the memory cache is keyed by it. Nil only if the
      * hash could not be computed (e.g. an unreadable source) -- a nil hash reads
      * as "always stale" and never matches a current hash. */
@@ -106,22 +104,34 @@ typedef struct tp_session_export_job_result {
     bool publication_uncertain;
 } tp_session_export_job_result;
 
+typedef struct tp_session_refresh_job_result {
+    int added;
+    int removed;
+    int changed;
+    int unavailable;
+    /* Session adopts this immutable replacement before publishing the
+     * terminal completion to a client; client receipts observe NULL. */
+    tp_source_runtime_projection *projection;
+} tp_session_refresh_job_result;
+
 struct tp_session_job_result {
     tp_session_job_kind kind;
     tp_session_job_state state;
+    tp_session_job_rejection rejection;
     tp_status status;
     tp_error error;
     double elapsed_ms;
     union {
         tp_session_pack_job_result pack;
         tp_session_export_job_result export_result;
+        tp_session_refresh_job_result refresh;
     };
     /* Private refcounted owner for this result receipt. Callers must treat it
      * as opaque and release through result_destroy. */
     tp_session_job_result_handle *_owner;
 };
 
-/* One concrete derived job may be active per session. The session owns its
+/* One concrete task may be active per session. The session owns its
  * handle/lifetime; algorithms and worker implementation stay in tp_build. */
 tp_status tp_session_pack_job_start(tp_session *session,
                                     const tp_pack_job_request *request,
@@ -129,22 +139,16 @@ tp_status tp_session_pack_job_start(tp_session *session,
 tp_status tp_session_export_start(tp_session *session,
                                   const tp_export_command_request *request,
                                   tp_error *err);
+tp_status tp_session_refresh_start(tp_session *session,
+                                   const tp_refresh_job_request *request,
+                                   tp_error *err);
 bool tp_session_job_active(const tp_session *session);
-/* Host-thread admission step: pumps the owned process and publishes its latest
- * typed progress/terminal projection into session-observed state. */
-tp_status tp_session_job_poll(tp_session *session,
-                              tp_session_job_progress *out, tp_error *err);
-/* Accepts cancellation only before the terminal-boundary claim. Export
- * linearizes that claim immediately after its final eligible writer returns;
- * a request accepted before the claim may own the outcome even if that writer
- * just returned. Repeated requests and requests after the claim are rejected. */
+/* Accepts cancellation only before the terminal-boundary claim. Export's
+ * worker emits that claim immediately after its final eligible writer returns;
+ * the host linearizes it when the next tp_session_update admits the typed
+ * boundary event. A cancellation already accepted by the host keeps ownership;
+ * repeated requests and requests after admission are rejected. */
 tp_status tp_session_job_cancel(tp_session *session, tp_error *err);
-/* Succeeds only after poll reports a terminal state. Returns an owned receipt
- * that pins any successful Pack arena/result, then releases the session's
- * active-job handle. */
-tp_status tp_session_job_take_result(tp_session *session,
-                                     tp_session_job_result *out,
-                                     tp_error *err);
 void tp_session_job_result_destroy(tp_session_job_result *result);
 /* Shrinks a TAKEN result's receipt to what it actually has to retain: the
  * arena behind `pack.result`. Frees the request-side buffers the live job was
@@ -155,7 +159,7 @@ void tp_session_job_result_destroy(tp_session_job_result *result);
  * context, which is value-owned precisely so destroying the response frame
  * cannot dangle it -- stays valid, and
  * tp_session_job_result_destroy remains the single, exactly-once release.
- * Only a result returned by tp_session_job_take_result may be compacted (an
+ * Only a result returned by tp_session_update may be compacted (an
  * owner-less result is a no-op); a caller that keeps the receipt alive long
  * term (e.g. pinning it in a result cache) MUST compact first, or the pin
  * silently retains the whole request. Idempotent. */
@@ -170,8 +174,9 @@ tp_pack_freshness tp_session_pack_result_freshness(
     tp_pack_freshness_reason *out_reason);
 
 /* Recomputes the CURRENT pack_input_hash for `atlas_id` from the live session's
- * immutable snapshot, WITHOUT starting a job (master spec §10.2-10.3, decision
- * 0004). This is the freshness/selection primitive: compare it against a
+ * immutable snapshot, WITHOUT starting a job
+ * (docs/architecture/jobs-pack-and-cache.md). This is the freshness/selection
+ * primitive: compare it against a
  * completed result's hash to decide current-vs-stale, and probe the memory cache
  * with it after Undo/Redo. `cache` may be NULL (decode every call) or a
  * session-lifetime tp_pack_image_hash_cache for cheap repeats; caching never

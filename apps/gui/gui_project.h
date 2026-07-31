@@ -14,8 +14,8 @@
  *
  * Every mutation becomes typed operation intent and commits atomically through tp_session;
  * one accepted transaction captures one semantic diff and one undo step. Undo/Redo also
- * run through tp_session. One gui_session_client atomically observes and frame-pins the
- * immutable state consumed by presentation.
+ * run through tp_session. One small host updates the session and borrows its
+ * immutable current view once per frame.
  * Value edits use one view-local draft reducer and build a narrow typed
  * operation only at submit.
  *
@@ -34,8 +34,6 @@
 #include "tp_core/tp_job.h"
 #include "tp_core/tp_session_snapshot_query.h"
 #include "gui_project_view.h"
-#include "gui_session_client.h"
-#include "gui_host_queue.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -53,8 +51,13 @@ typedef enum gui_project_lifecycle_kind {
 
 typedef enum gui_project_lifecycle_state {
     GUI_PROJECT_LIFECYCLE_CLOSED = 0,
-    GUI_PROJECT_LIFECYCLE_OPEN_IDLE,
-    GUI_PROJECT_LIFECYCLE_DRAINING
+    GUI_PROJECT_LIFECYCLE_ACTIVE,
+    GUI_PROJECT_LIFECYCLE_NEW_DRAINING,
+    GUI_PROJECT_LIFECYCLE_NEW_READY,
+    GUI_PROJECT_LIFECYCLE_OPEN_DRAINING,
+    GUI_PROJECT_LIFECYCLE_OPEN_READY,
+    GUI_PROJECT_LIFECYCLE_SHUTDOWN_DRAINING,
+    GUI_PROJECT_LIFECYCLE_SHUTDOWN_READY
 } gui_project_lifecycle_state;
 
 typedef bool (*gui_project_controller_attached_fn)(
@@ -64,6 +67,20 @@ typedef struct gui_project_controller_status_port {
     gui_project_controller_attached_fn attached;
     void *context;
 } gui_project_controller_status_port;
+
+typedef struct gui_project_operation_submit_identity {
+    tp_id128 origin_view_id;
+    tp_id128 draft_instance_id;
+} gui_project_operation_submit_identity;
+
+typedef struct gui_project_operation_submit_terminal {
+    char transaction_id[33];
+    gui_project_operation_submit_identity identity;
+    tp_status status;
+    bool committed;
+    bool no_change;
+    int64_t revision;
+} gui_project_operation_submit_terminal;
 
 /* Creates the initial fresh in-memory project (one default atlas, no path, clean). Crash recovery is
  * collected and resolved separately through the R6 APIs below; startup never adopts an orphan live. */
@@ -106,8 +123,11 @@ tp_status gui_recovery_resolve_entry(const gui_recovery_entry *entry, gui_recove
                                      const char *target_path, char *err_out, size_t err_cap);
 
 /* --- accessors --- */
-/* Immutable read view owned and frame-pinned by gui_session_client. */
+/* Immutable read view borrowed from the active session. Any mutable session
+ * call ends this observation cut; accessors return unavailable until the sole
+ * gui_actions_step/gui_project_step boundary publishes the next cut. */
 const tp_session_snapshot *gui_project_snapshot(void);
+const tp_source_runtime_projection *gui_project_sources(void);
 /* Changes whenever the client publishes or releases a model snapshot.
  * Borrowing GUI caches include this token in their lifetime key. */
 uint64_t gui_project_snapshot_lifetime_generation(void);
@@ -119,17 +139,10 @@ uint64_t gui_project_source_runtime_generation(void);
  * typed source-runtime token. */
 bool gui_project_observed_input_token(
     tp_session_input_token *out);
-/* Host-frame observation seam. begin atomically observes/reduces and pins the
- * immutable snapshot; end releases the pin after render/present. */
-tp_status gui_project_frame_begin(tp_error *err);
-void gui_project_frame_end(void);
-bool gui_project_frame_is_pinned(void);
-tp_status gui_project_register_observation_reducer(
-    gui_session_client_reducer_fn reduce, void *context, tp_error *err);
-bool gui_project_submit_receipt_query(
-    const char transaction_id[33],
-    gui_session_submit_identity identity,
-    gui_session_submit_terminal *out);
+/* Sole active-session/lifecycle driver. Admits coalesced Refresh, advances the
+ * core session once, transfers an ACTIVE completion, discards a superseded
+ * completion while draining, completes any ready cutover, and publishes the
+ * borrowed view consumed until the next step. */
 /* Host-thread admission facade. Request payloads are copied on enqueue; the
  * queue never exposes or retains the mutable session. */
 tp_status gui_project_job_enqueue_pack(
@@ -137,15 +150,13 @@ tp_status gui_project_job_enqueue_pack(
     const char *preview_exporter_id, tp_error *err);
 tp_status gui_project_job_enqueue_export(
     tp_id128 atlas_id, const char *work_dir, tp_error *err);
+tp_status gui_project_job_enqueue_refresh(tp_error *err);
 tp_status gui_project_job_enqueue_cancel(tp_error *err);
 tp_status gui_project_lifecycle_begin_new(tp_error *err);
 tp_status gui_project_lifecycle_begin_open(
     const char *path, tp_error *err);
 tp_status gui_project_lifecycle_begin_shutdown(
     bool discard_recovery, tp_error *err);
-tp_status gui_project_lifecycle_pump(
-    gui_project_lifecycle_kind *completed,
-    tp_error *err);
 /* Non-fallible forced teardown for the host's exhausted shutdown budget: the
  * negotiated shutdown is bounded, so the exit path needs a terminal answer that
  * cannot itself fail. It discards the host owner's leases and staged work, kills
@@ -155,15 +166,14 @@ tp_status gui_project_lifecycle_pump(
 void gui_project_lifecycle_force_close(void);
 gui_project_lifecycle_state
 gui_project_lifecycle_state_query(void);
-/* Host-owner ingress for the one staged job completion. The queue's typed
- * completion IS the contract; the caller destroys it with
- * gui_host_completion_destroy. */
-bool gui_project_host_take_completion(
-    gui_host_completion *out);
 bool gui_project_job_busy(void);
 tp_session_job_kind gui_project_job_active_kind(void);
 tp_session_job_observed_state gui_project_job_observed_state(void);
 uint64_t gui_project_session_instance_generation(void);
+/* Admission/control revision from the live session. Presentation still reads
+ * the frame-pinned snapshot; this scalar only sequences same-boundary intents
+ * after a synchronous operation terminal. */
+int64_t gui_project_committed_revision(void);
 uint64_t gui_project_snapshot_model_generation(void);
 tp_status gui_project_snapshot_serialize(char **out, size_t *out_len,
                                          tp_error *err);
@@ -172,9 +182,12 @@ const char *gui_project_display_name(void); /* file basename, or "untitled" */
 bool gui_project_has_path(void);
 bool gui_project_is_dirty(void);
 bool gui_project_is_stale(void);
-/* Single owner for external source-runtime invalidation: drops the scan cache,
- * advances the session source generation/event, and invalidates the GUI view. */
-void gui_project_invalidate_sources(void);
+/* Coalesces one automatic source Refresh request. Membership edits, Undo/Redo,
+ * and New/Open use this path so an occupied task slot cannot lose the request.
+ * Admission is retried only at the common frame boundary. Explicit user
+ * Refresh continues to use gui_project_job_enqueue_refresh and receives its
+ * typed admission result immediately. */
+void gui_project_refresh_sources(void);
 
 /* --- dirty/stale projection --- */
 /* Clears preview_stale after a successful pack (unused this round; #282). */
@@ -237,9 +250,9 @@ typedef struct gui_text_ref {
  * clear -- callers that mean "clear" pass "". */
 tp_status gui_project_submit_text(
     tp_op_kind kind, const gui_text_ref *ref,
-    const char *value, gui_session_submit_identity identity,
+    const char *value, gui_project_operation_submit_identity identity,
     const char transaction_id[33],
-    gui_session_submit_terminal *terminal, tp_error *err);
+    gui_project_operation_submit_terminal *terminal, tp_error *err);
 
 /* Sets atlas knobs via an atlas.settings.set transaction. The caller supplies the
  * built payload + presence mask; value RANGES are core's (the op validates) and the
@@ -247,34 +260,34 @@ tp_status gui_project_submit_text(
 tp_status gui_project_submit_atlas_settings(
     tp_id128 atlas_id, int64_t expected_revision,
     const tp_op_atlas_settings *settings,
-    gui_session_submit_identity identity,
+    gui_project_operation_submit_identity identity,
     const char transaction_id[33],
-    gui_session_submit_terminal *out_terminal,
+    gui_project_operation_submit_terminal *out_terminal,
     tp_error *err);
 
 /* --- region-panel per-sprite overrides (sparse: a clear that leaves only defaults
  * drops the override entry, keeping byte-identical saves) --- */
 tp_status gui_project_submit_sprite_origin(
     const gui_sprite_ref *sprite, int axis, float value,
-    gui_session_submit_identity identity,
+    gui_project_operation_submit_identity identity,
     const char transaction_id[33],
-    gui_session_submit_terminal *terminal, tp_error *err);
+    gui_project_operation_submit_terminal *terminal, tp_error *err);
 tp_status gui_project_submit_sprite_slice9(
     const gui_sprite_ref *sprite, int component, int value,
-    gui_session_submit_identity identity,
+    gui_project_operation_submit_identity identity,
     const char transaction_id[33],
-    gui_session_submit_terminal *terminal, tp_error *err);
+    gui_project_operation_submit_terminal *terminal, tp_error *err);
 /* Sprite payload submit: the caller supplies the built sprite.settings.set
  * payload + presence mask. Origin/slice9 keep their own entry points because the
  * untouched sibling components are read from the LIVE snapshot here. */
 tp_status gui_project_submit_sprite_settings(
     const gui_sprite_ref *sprite,
     const tp_op_sprite_set *settings,
-    gui_session_submit_identity identity,
+    gui_project_operation_submit_identity identity,
     const char transaction_id[33],
-    gui_session_submit_terminal *terminal, tp_error *err);
+    gui_project_operation_submit_terminal *terminal, tp_error *err);
 
-/* --- animations (ux.md §3.7b: explicit manual assembly only) --- */
+/* --- animations (explicit project assembly only) --- */
 /* Appends an animation and fills it with `frames` (in the given order) as ONE undo entry. The id is
  * the first free of {base, base"2", base"3", ...}; a NULL/empty base auto-names "anim1"/"anim2"/...
  * `frames` may be NULL/0 for an empty animation. */
@@ -287,9 +300,9 @@ bool gui_project_remove_animation(const gui_animation_ref *animation);
 tp_status gui_project_submit_animation_settings(
     const gui_animation_ref *animation,
     const tp_op_anim_settings *settings,
-    gui_session_submit_identity identity,
+    gui_project_operation_submit_identity identity,
     const char transaction_id[33],
-    gui_session_submit_terminal *terminal, tp_error *err);
+    gui_project_operation_submit_terminal *terminal, tp_error *err);
 /* Appends `frames` (in order) to animation `anim_index` as ONE undo entry. */
 bool gui_project_anim_add_frames(const gui_animation_ref *animation,
                                  const tp_op_sprite_ref *frames, int count);
@@ -321,10 +334,21 @@ bool gui_project_redo(void);
 /* --- file operations (paths explicit; dialogs live in the UI layer) --- */
 /* Saves to the current path (must exist). Clears project_dirty. */
 tp_status gui_project_save(char *err_out, size_t err_cap);
-/* Read-only Save As feasibility check. Canonicalizes the destination, refreshes
- * the observed session identity, and rejects an identity change while the
- * host-owned controller status port reports an attached controller. It never
- * submits or flushes a draft and performs no file write. */
+typedef struct gui_project_save_as_plan {
+    char canonical_path[TP_IDENTITY_PATH_MAX];
+    uint64_t instance_generation;
+} gui_project_save_as_plan;
+/* Read-only Save As preparation. It resolves every view-dependent decision
+ * before a draft can mutate the session. Execution revalidates the controller
+ * guard and requires the same live session instance. */
+tp_status gui_project_save_as_prepare(
+    const char *path, gui_project_save_as_plan *out,
+    char *err_out, size_t err_cap);
+tp_status gui_project_save_as_execute(
+    const gui_project_save_as_plan *plan,
+    char *err_out, size_t err_cap);
+/* Compatibility convenience for callers that do not cross another session
+ * boundary between preparation and execution. */
 tp_status gui_project_save_as_preflight(
     const char *path, char *err_out, size_t err_cap);
 /* Saves to `path`, remembers it, clears project_dirty. Promotes structural ids FIRST
@@ -345,10 +369,8 @@ bool gui_project_take_op_error(char *out, size_t cap);
 tp_session *gui_project__test_session(void);
 #endif
 #ifdef TP_ENABLE_TEST_SEAMS
-void gui_project__test_fail_next_observe(void);
-void gui_project__test_fail_observes(unsigned int count);
-bool gui_project__test_host_has_staged_completion(void);
 uint64_t gui_project__test_open_call_count(void);
+void gui_project__test_set_drain_grace_ms(int grace_ms);
 #endif
 
 #ifdef __cplusplus

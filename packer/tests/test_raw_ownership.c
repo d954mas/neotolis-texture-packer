@@ -4,8 +4,8 @@
  * (external/neotolis-engine/tools/builder/nt_builder_atlas.c:771-775: malloc +
  * memcpy, then sprite->rgba = the copy). The PUBLIC header (nt_builder.h:424)
  * does NOT promise this lifetime -- so this test pins the observed behaviour as
- * an executable regression, and docs/research/neotolis-engine-raw-rgba-lifetime.md
- * asks the engine to document the contract in the public header.
+ * an executable regression; docs/architecture/sources-and-raster.md records the
+ * remaining public engine-contract gap.
  *
  * Because the copy is CONFIRMED in the source we read, exercising it is safe (no
  * UB): we fill an RGBA buffer, add_raw it, then MUTATE AND FREE that caller
@@ -30,7 +30,7 @@
 #include "unity.h"
 
 #include "tp_core/tp_arena.h"
-#include "tp_core/tp_model.h"
+#include "tp_core/tp_pack_result.h"
 #include "tp_name_map.h"
 #include "tp_pack_read.h"
 

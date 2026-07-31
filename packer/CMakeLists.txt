@@ -35,9 +35,10 @@ add_library(tp_core STATIC
     src/tp_op_catalog.c src/tp_op_validate.c src/tp_op_validate_atlas.c src/tp_op_validate_source_sprite.c src/tp_op_validate_animation.c src/tp_op_validate_target.c src/tp_op_apply.c src/tp_op_encode.c src/tp_op_build.c
     # Transaction ID retention, clone/apply/publish, semantic dirty, and JSON.
     src/tp_idset.c
-    src/tp_project_clone.c src/tp_semantic.c src/tp_txn_idset.c src/tp_model.c src/tp_model_journal.c src/tp_txn_result.c src/tp_txn_apply.c
+    src/tp_project_clone.c src/tp_project_owned.c src/tp_semantic.c src/tp_txn_idset.c src/tp_model.c src/tp_model_journal.c src/tp_txn_result.c src/tp_txn_apply.c
     # Synchronous orchestration and the owned immutable snapshot boundary.
-    src/tp_session.c src/tp_session_observation.c src/tp_session_job_observation.c src/tp_session_snapshot.c src/tp_session_snapshot_query.c src/tp_project_generation.c
+    src/tp_session.c src/tp_session_snapshot.c src/tp_session_snapshot_query.c src/tp_project_generation.c
+    src/tp_source_runtime.c
     src/tp_txn_parse.c src/tp_txn_lower.c src/tp_txn_encode.c
     # Semantic diff, exact inverse/redo, and bounded in-memory history.
     src/tp_diff_entity.c src/tp_diff_capture.c src/tp_diff_apply.c src/tp_history_codec.c src/tp_history_codec_read.c src/tp_history.c
@@ -76,7 +77,7 @@ target_link_libraries(tp_core PUBLIC nt_shared nt_hash nt_log PRIVATE Threads::T
 # tp_srckey.h never exposes utf8proc types; its allocations are freed in-TU.
 target_link_libraries(tp_core PRIVATE cjson stb_image stb_image_write utf8proc)
 # miniz + tinycthread (both engine-vendored, no basisu, no nt_builder) power the
-# pack-result store's compressed cold tier (packet S28): raw deflate for the page
+# pack-result store's compressed cold tier: raw deflate for the page
 # blobs, C11 threads for the one background encoder and the fork-join promote.
 # PRIVATE: tp_pack_result_cache.h exposes neither, and every buffer either library
 # touches is allocated and freed inside tp_pack_result_cache.c.
@@ -96,12 +97,12 @@ nt_set_sanitizer_flags(tp_core)
 # Isolated so ONLY pack-time consumers (GUI, CLI, smoke, pack tests) pull
 # nt_builder -> nt_basisu_encoder. Since #283 the GUI links tp_build directly.
 # tp_build_worker.c + tp_build_worker_main.c + the per-OS tp_proc backend add the
-# private child-process Pack boundary (decision 0018, H0.3-b): the production
+# private child-process Pack boundary: the production
 # pack re-execs the host in a hidden __build-worker mode so an nt_builder
 # abort/alloc/codec/write failure lands in a child, not the host.
 add_library(tp_build STATIC src/tp_pack.c src/tp_build_driver.c src/tp_build_proto.c
     src/tp_build_worker.c src/tp_build_worker_main.c src/tp_export_run.c
-    src/tp_job.c src/tp_job_worker.c src/tp_job_worker_main.c
+    src/tp_job.c src/tp_refresh_job.c src/tp_job_worker.c src/tp_job_worker_main.c
     src/tp_job_worker_proto.c)
 if(WIN32)
     target_sources(tp_build PRIVATE src/tp_proc_win32.c)
@@ -136,21 +137,12 @@ find_program(TP_BASH NAMES bash)
 if(TP_BASH)
     add_test(NAME tp_boundaries_grep
         COMMAND "${TP_BASH}" "${CMAKE_SOURCE_DIR}/scripts/check_boundaries.sh")
-    # The script is a POSIX shell program: it needs grep/sed/awk/find/xargs/
-    # mktemp, not just an interpreter. A non-login bash inherits the caller's
-    # PATH verbatim, so on a plain Windows shell the gate either dies on
-    # "grep: command not found" or, worse, resolves Windows' System32 find.exe
-    # instead of GNU find. The toolbox always ships in the same directory as
-    # the bash we just located (Git for Windows usr/bin, /usr/bin or /bin on
-    # POSIX), so prepend exactly that directory -- no login shell (whose
-    # profile may cd elsewhere and defeat WORKING_DIRECTORY), no PATH probing,
-    # and no cost at run time. A genuinely missing bash still lands in the
-    # fail-closed stand-in below.
-    get_filename_component(TP_BASH_TOOL_DIR "${TP_BASH}" DIRECTORY)
+    # Keep the invocation non-login: a login profile may cd elsewhere and
+    # defeat WORKING_DIRECTORY. The script establishes Bash's own executable
+    # directory in its POSIX PATH before invoking Unix tools.
     set_tests_properties(tp_boundaries_grep PROPERTIES
         WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
-        LABELS "architecture"
-        ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${TP_BASH_TOOL_DIR}")
+        LABELS "architecture")
 else()
     # The stand-in prints the reason and FAIL_REGULAR_EXPRESSION turns that
     # output into a test failure (cmake -E echo itself exits 0), keeping the
@@ -180,8 +172,7 @@ foreach(TP_ARCH_RULE IN ITEMS
         VIEW_PLATFORM
         VIEW_MODEL_POLICY
         CORE_FRONTEND
-        ASYNC_RAW_SESSION
-        HOST_QUEUE_RAW_SESSION_STORAGE)
+        ASYNC_RAW_SESSION)
     string(TOLOWER "${TP_ARCH_RULE}" TP_ARCH_FIXTURE)
     add_test(NAME "tp_architecture_negative_${TP_ARCH_FIXTURE}"
         COMMAND "${CMAKE_COMMAND}"
@@ -225,7 +216,6 @@ foreach(TP_ARCH_ALL_FIXTURE IN ITEMS
         "core_frontend_second_call|CORE_FRONTEND"
         # declarators
         "async_raw_session_second_declaration|ASYNC_RAW_SESSION"
-        "host_queue_second_member|HOST_QUEUE_RAW_SESSION_STORAGE"
         # the lexical layer the scans above read: comments and literals must be
         # removed in ONE pass, or a `'"'` character literal / a `//` inside a
         # string silently blanks real code and every scan under-reports

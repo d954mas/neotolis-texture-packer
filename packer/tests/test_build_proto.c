@@ -1,4 +1,4 @@
-/* Versioned build-worker protocol codec (decision 0018, ROADMAP H0.3).
+/* Versioned build-worker protocol codec.
  *
  * Pins the request/response wire: encode->decode round-trips EXACTLY across a
  * rich multi-sprite atlas (a request carries one atlas by design; multi-atlas

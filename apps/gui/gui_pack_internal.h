@@ -8,14 +8,12 @@
 
 /* Direct handoff from the session-job adapter to the preview result owner. */
 bool gui_pack_publish_native(tp_session_job_result *job_result,
-                             int atlas_index, double elapsed_ms,
-                             gui_pack_result_info *out);
+                             double elapsed_ms, gui_pack_result_info *out);
 bool gui_pack_preview_publish(tp_session_job_result *job_result,
-                              int atlas_index, double elapsed_ms,
-                              gui_pack_result_info *out);
-bool gui_pack_preview_belongs_to(int atlas_index);
+                              double elapsed_ms, gui_pack_result_info *out);
+bool gui_pack_preview_belongs_to(tp_id128 atlas_id);
 
-/* Frame tick for the result store's background page compression (packet S28),
+/* Frame tick for the result store's background page compression,
  * called once per frame from the pack-job poll. Not a test seam: it is how the
  * cold tier lands at all. */
 void gui_pack__cold_pump(void);
@@ -35,7 +33,8 @@ void gui_pack__test_result_cache_stats(tp_pack_result_cache_stats *out);
 void gui_pack__test_result_cache_settle(void);
 /* Test-only: shrink the store's byte budget so an eviction is reachable without
  * packing hundreds of megabytes. Rebuilds an EMPTY store, so every previously
- * published result is released first; callers treat it as gui_pack_clear(-1).
+ * published result is released first; callers treat it as
+ * gui_pack_clear(tp_id128_nil()).
  * 0 restores the shipped budget, which gui_pack_shutdown does on every teardown
  * so an override can never outlive the case that asked for it. */
 void gui_pack__test_set_result_budget(uint64_t byte_budget);

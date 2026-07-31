@@ -1,6 +1,6 @@
 /*
  * Minimum recovery journal -- a PURE durable log over the tp_journal_io seam
- * (master spec §7.1-7.2, §22.3). It deals in opaque project-snapshot blobs + 32-hex
+ * (docs/architecture/persistence-and-recovery.md). It deals in opaque project-snapshot blobs + 32-hex
  * transaction ids and knows nothing about tp_project; the model<->journal glue lives
  * in tp_model_journal.c.
  *

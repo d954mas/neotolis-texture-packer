@@ -2,6 +2,10 @@
 #define NTPACKER_GUI_ACTIONS_INTERNAL_H
 
 #include "gui_actions.h"
+#include "gui_actions_dev.h"
+#include "gui_actions_driver.h"
+#include "gui_project.h"
+#include "gui_project_driver.h"
 
 #include "tp_core/tp_export.h"
 #include "tp_core/tp_srckey.h"
@@ -14,10 +18,10 @@
  *
  *   step 0   the animation_edit_intent[] loop     (enqueue order across kinds)
  *   step 1   the target_edit_intent[] loop        (enqueue order across kinds)
- *   steps 2-6    gui_actions__apply_file_dialogs' if-sequence
- *   steps 7-16   gui_actions__apply_structural_edits' if-sequence
- *   step 17      do_refresh
- *   steps 18-20  gui_actions__apply_pack_requests' if-sequence
+ *   steps 2-5    gui_actions__apply_file_dialogs' if-sequence
+ *   steps 6-15   gui_actions__apply_structural_edits' if-sequence
+ *   step 16      do_refresh
+ *   steps 17-19  gui_actions__apply_pack_requests' if-sequence
  *
  * The two families that were arrays (ANIM_*, TARGET_*) share one step each,
  * because inside those arrays the legacy drain ran in ENQUEUE order across
@@ -30,7 +34,6 @@ typedef enum gui_intent_kind {
     GUI_INTENT_ANIM_ADD_FRAMES,
     GUI_INTENT_TARGET_ENABLED,
     GUI_INTENT_TARGET_EXPORTER,
-    GUI_INTENT_OPEN,
     GUI_INTENT_SAVE,
     GUI_INTENT_SAVE_AS,
     GUI_INTENT_ADD_FILES,
@@ -46,13 +49,14 @@ typedef enum gui_intent_kind {
     GUI_INTENT_REMOVE_ANIMATION,
     GUI_INTENT_OPEN_PREVIEW,
     GUI_INTENT_REFRESH,
+    GUI_INTENT_CANCEL,
     GUI_INTENT_PACK,
     GUI_INTENT_EXPORT,
     GUI_INTENT_PREVIEW_TARGET
 } gui_intent_kind;
 
 /* Contiguous kind ranges of the one queue, named after the boundary each one
- * runs at inside apply_pending(). A phase is drained on its own because the
+ * runs inside gui_actions_step. A phase is drained on its own because the
  * lifecycle/confirm/recovery owners sit BETWEEN them and may abort the frame. */
 typedef enum gui_intent_phase {
     GUI_INTENT_PHASE_EDIT = 0,   /* after the draft prerequisite settles */
@@ -97,6 +101,11 @@ typedef struct gui_intent {
         gui_target_ref target;
         /* GUI_INTENT_REMOVE_ANIMATION, OPEN_PREVIEW */
         gui_animation_ref animation;
+        /* GUI_INTENT_SAVE_AS: prepared before a draft closes the current cut. */
+        struct {
+            gui_project_save_as_plan plan;
+            bool prepared;
+        } save_as;
         /* GUI_INTENT_CREATE_ANIMATION */
         struct {
             tp_id128 atlas_id;
@@ -172,15 +181,29 @@ typedef struct gui_draft_owner {
     } animation;
 } gui_draft_owner;
 
+typedef struct gui_lifecycle_flow {
+    gui_lifecycle_phase phase;
+    gui_lifecycle_request request;
+    gui_lifecycle_choice choice;
+} gui_lifecycle_flow;
+
+typedef struct gui_recovery_flow {
+    gui_recovery_phase phase;
+    gui_recovery_list list;
+    int pending_row;
+    gui_recovery_action pending_action;
+} gui_recovery_flow;
+
 typedef struct gui_actions_state {
     /* Modal/dialog state, NOT queue intents: each is owned by a modal FSM that
      * consumes and re-arms it (the unsaved-changes confirm flow and the R6b
      * startup recovery modal), and each carries its own NONE/-1 sentinel. */
     gui_lifecycle_request pending_lifecycle_request;
-    gui_recovery_list recovery_list;
-    int recovery_pending_row;
-    int recovery_pending_action;
+    gui_lifecycle_flow lifecycle;
+    gui_recovery_flow recovery;
 
+    double last_pack_ms;
+    tp_id128 last_pack_atlas_id;
     gui_animation_ref preview_animation_ref;
     /* The player has resolved at least one real pack result since it was armed.
      * It is what separates "this atlas was never packed" (show the hint) from
@@ -192,16 +215,38 @@ typedef struct gui_actions_state {
 #endif
     gui_draft_owner draft;
     bool draft_initialized;
-    bool draft_reducer_registered;
     bool draft_apply_mine;
     bool gesture_commit;
 
+    struct {
+        tp_id128 atlas_id;
+        tp_id128 animation_id;
+        int frame_index;
+        bool present;
+    } pending_frame_selection;
+    tp_id128 pending_added_atlas_status_id;
+    struct {
+        tp_id128 atlas_id;
+        tp_id128 animation_id;
+        int frame_count;
+        bool with_frames;
+        bool present;
+    } pending_created_animation;
+    struct {
+        tp_id128 animation_id;
+        bool present;
+    } pending_history_reconcile;
+    bool pending_view_reconcile;
     gui_intent *intents;
     int intent_count;
     int intent_cap;
+    gui_actions_step_result *active_step_result;
 } gui_actions_state;
 
 extern gui_actions_state s_actions;
+
+/* Internal executor reached only from the typed intent drain. */
+void do_pack(void);
 
 char *gui_actions__strdup(const char *text);
 void gui_actions__frame_refs_dispose(tp_op_sprite_ref *frames, int count);
@@ -215,9 +260,9 @@ tp_op_sprite_ref *gui_actions__frame_refs_copy(const tp_op_sprite_ref *frames,
  * of nothing -- an owned payload in `intent` is destroyed on failure. */
 bool gui_actions__intent_push(const gui_intent *intent);
 /* Runs every queued intent of `phase` in the drain order documented on
- * gui_intent_kind. Returns true when an intent started a project lifecycle
- * transition (only GUI_INTENT_OPEN can). */
-bool gui_actions__intent_drain(gui_intent_phase phase);
+ * gui_intent_kind. Project replacement belongs to the lifecycle FSM, not this
+ * ordinary semantic-intent queue. */
+void gui_actions__intent_drain(gui_intent_phase phase);
 bool gui_actions__intent_queued(gui_intent_kind kind);
 /* Exit-time release of what each owner grew: the undrained queue with its owned
  * payloads, and the grow-only preview frame map. Called only by
@@ -229,23 +274,43 @@ void gui_actions__rebase_deferred_edits(
     int64_t revision_after);
 void gui_actions__discard_deferred_edits(void);
 void gui_actions__discard_edits(void);
+void gui_actions__reconcile_observation(void);
+void gui_actions__record_created_animation(
+    tp_id128 atlas_id, tp_id128 animation_id,
+    int frame_count, bool with_frames);
 bool gui_actions__submit_draft(void);
 bool gui_actions__apply_draft_mine(void);
 void gui_actions__apply_confirm(void);
 bool gui_actions__apply_lifecycle_request(void);
-void gui_actions__request_open_dialog(void);
+void gui_actions__run_open_lifecycle_dialog(void);
 /* Intent executors that live in their owning TU (dialogs, refresh, pack). The
  * one drain switch calls them; nothing else does. */
 bool gui_actions__open_dialog(void);
 bool gui_actions__save(void);
-bool gui_actions__save_as(void);
+bool gui_actions__save_as(
+    const gui_project_save_as_plan *prepared);
 void gui_actions__add_files(void);
 void gui_actions__add_folder(void);
 void gui_actions__browse_target(const gui_target_ref *target);
 void gui_actions__refresh(void);
+void gui_actions__cancel(void);
 void gui_actions__export(void);
 void gui_actions__preview_target_start(int combo_index);
-void gui_actions__poll_pack(void);
+gui_pack_done gui_actions__consume_completion(
+    tp_session_job_result *completion,
+    gui_pack_result_info *out);
+void gui_actions__complete_lifecycle(
+    gui_project_lifecycle_kind completed);
+void gui_actions__record_job_request(
+    gui_job_request_kind kind, bool admitted,
+    const char *detail);
+#ifdef TP_ENABLE_TEST_SEAMS
+/* Copies only value fields from the already-consumed Refresh terminal. These
+ * seams never poll, retain a job owner, or influence scheduling. */
+void gui_actions__test_reset_refresh_completion(void);
+bool gui_actions__test_take_refresh_completion(
+    gui_pack_done *out_done, gui_pack_result_info *out_info);
+#endif
 void gui_actions__apply_recovery(void);
 void gui_actions__clear_pending(void);
 void gui_actions__clear_history_request(void);

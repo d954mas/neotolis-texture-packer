@@ -69,7 +69,7 @@ jobs:
       - name: Build
         run: cmake --build --preset native-release
 
-      # This also runs both boundary gates (see git history: docs/plans/op-layer-and-cli.md §A6,
+      # This also runs both boundary gates (see git history for the original A6 rationale,
       # removed 2026-07-20). They have no step of their own any more: tp_boundaries_grep launches
       # scripts/check_boundaries.sh and tp_architecture* the CMake checker, so both run on every
       # leg and the shell script's own detector self-tests still get exercised under each

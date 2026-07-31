@@ -1,0 +1,99 @@
+# Architecture overview
+
+**Status:** Current architecture.
+
+Neotolis Texture Packer is one native application with a shared core and thin
+clients:
+
+```text
+saved project / live operator
+              |
+      CLI or native GUI
+              |
+     typed operations + session
+              |
+ project model / history / recovery
+              |
+ source scan + pack/export jobs
+              |
+       neotolis-engine builder
+```
+
+## Ownership layers
+
+- `packer/tp_core` owns the project model, canonical identity, validation,
+  operation catalog, transactions, session, snapshots, persistence, history,
+  recovery, source scanning, exporter descriptors, and pack-result metadata.
+- `packer/tp_build` owns fallible builder execution, worker-process transport,
+  packing, parse-back, and export orchestration.
+- `apps/cli` parses saved-file commands and renders human or versioned JSON
+  responses. It does not own live-session policy.
+- `apps/gui` owns native presentation, drafts, intent scheduling, and the
+  process host around one shared session. It does not implement a second project
+  mutation engine.
+- `external/neotolis-engine` is a read-only dependency. The packer uses public
+  engine APIs and shared format headers.
+
+Clients never bypass core validation, canonical naming, transaction,
+revision/dirty, persistence, or Undo rules.
+
+The native GUI has one explicit control loop:
+
+```text
+view request / typed draft
+          |
+   gui_actions_step
+          |
+ internal gui_project_step
+          |
+ tp_session_update + FSM transition
+          |
+ newly borrowed session view + typed receipts
+```
+
+Views never pump the session, poll jobs, cancel a job directly, or assemble
+lifecycle phases. `gui_actions.h` contains only typed input and passive state;
+the host-only `gui_actions_driver.h` exposes the one between-frame actions
+step, and `gui_actions_dev.h` isolates blocking test/dev adapters. The project
+step is an internal primitive callable only by the actions controller, enforced
+by architecture gates.
+New/Open/Exit confirmation is one tagged actions state (`idle`,
+`resolve-draft`, `resolve-dirty`, or `open-dialog`) plus a typed user choice
+for resolve phases. The Open file picker is the terminal input of its own
+exclusive phase, so ordinary queued inputs cannot run between confirmation and
+the selected/cancelled dialog terminal. Views read passive state and submit a
+choice; they do not coordinate modal flags or carry the continuation
+themselves. Startup recovery likewise exposes
+one passive `idle`/`choose`/`resolving` state and typed choices, not a public
+modal flag or mailbox. Startup, shutdown, and blocking test/dev adapters enter
+through action-controller helpers and use the same step, rather than driving a
+second host loop.
+Any mutable session call closes the current borrowed observation cut. The
+controller retains unconsumed typed inputs, publishes a fresh cut through the
+project step, and resumes them on a later tick; callers still use only
+`request -> gui_actions_step -> view`.
+
+## Current and target boundaries
+
+The current product has a file-oriented CLI, a native live GUI, and an
+in-process live-headless session capability shape. MCP and Dev API transports
+are not implemented. Their target contract is in
+[`../spec/automation.md`](../spec/automation.md).
+
+Current format support is two built-in exporters plus runtime C exporter
+registration. The unified package registry, Import/Export IR, linked atlas
+sources, templates, and sandboxed Lua are target architecture, documented in
+[`../spec/format-ecosystem.md`](../spec/format-ecosystem.md).
+
+## Primary durable contracts
+
+- [Project format v5](../formats/project-v5.md)
+- [Model, operations, and session](model-operations-and-session.md)
+- [Persistence and recovery](persistence-and-recovery.md)
+- [Jobs, pack results, and cache](jobs-pack-and-cache.md)
+- [Sources and raster ingress](sources-and-raster.md)
+- [Engine and client boundaries](engine-and-client-boundaries.md)
+
+Plans, research logs, review history, and old implementation decisions are not
+runtime authority. Code and executable tests prove the implemented state; the
+current and target product specs define intended behavior.

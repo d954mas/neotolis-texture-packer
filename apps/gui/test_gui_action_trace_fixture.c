@@ -14,16 +14,65 @@ char s_save_path[1024];
 void gui_shell_reset_shown_result(void) {}
 
 void pump_action_frame(void) {
-    apply_pending();
+    publish_project_frame();
+}
+
+void publish_project_frame(void) {
     tp_error error = {{0}};
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
-        gui_project_lifecycle_pump(NULL, &error));
-    TEST_ASSERT_EQUAL_INT(
-        TP_STATUS_OK,
-        gui_project_frame_begin(&error));
-    gui_actions_poll_host_completion();
-    gui_project_frame_end();
+        gui_actions_step(NULL, &error));
+}
+
+void settle_project_job(void) {
+    /* Automatic Refresh is admitted only at gui_actions_step. Cross that boundary
+     * once before waiting so a pending membership refresh becomes observable. */
+    publish_project_frame();
+    for (int attempt = 0;
+         attempt < 5000 && gui_project_job_busy();
+         ++attempt) {
+        publish_project_frame();
+        if (gui_project_job_busy()) {
+            nt_time_sleep(0.001);
+        }
+    }
+    TEST_ASSERT_FALSE(gui_project_job_busy());
+}
+
+gui_project_create_result create_animation_observed(
+    tp_id128 atlas_id, int64_t expected_revision,
+    const char *name, const tp_op_sprite_ref *frames,
+    int frame_count) {
+    gui_project_create_result created =
+        gui_project_create_animation(
+            atlas_id, expected_revision, name,
+            frames, frame_count);
+    if (!created.committed) {
+        return created;
+    }
+    publish_project_frame();
+    const tp_session_snapshot *snapshot =
+        gui_project_snapshot();
+    const tp_snapshot_atlas *atlas =
+        tp_session_snapshot_atlas_by_id(
+            snapshot, atlas_id);
+    created.visible_index = -1;
+    for (int index = 0;
+         atlas && index < atlas->animation_count;
+         ++index) {
+        const tp_snapshot_animation *animation =
+            tp_session_snapshot_animation_at(
+                snapshot, atlas_id, index);
+        if (animation &&
+            tp_id128_eq(
+                animation->id,
+                created.created_id)) {
+            created.visible_index = index;
+            break;
+        }
+    }
+    created.observation_pending = false;
+    return created;
 }
 
 const tp_snapshot_atlas *atlas_at(int index) {
@@ -88,6 +137,7 @@ gui_sprite_ref add_test_sprite_ref(const char *source_path,
         gui_project_add_source_kind(
             atlas_id, tp_session_snapshot_revision(snapshot),
             source_path, TP_SOURCE_KIND_FILE));
+    settle_project_job();
     snapshot = gui_project_snapshot();
     const tp_snapshot_source *source =
         tp_session_snapshot_source_at(snapshot, atlas_id, 0);
@@ -124,8 +174,7 @@ void apply_foreign_operation(tp_operation *operation,
     tp_txn_result_free(&result);
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
-        gui_project_frame_begin(&error));
-    gui_project_frame_end();
+        gui_actions_step(NULL, &error));
 }
 
 void reset_public_action_state(void) {
@@ -133,16 +182,15 @@ void reset_public_action_state(void) {
         GUI_LIFECYCLE_REQUEST_NONE;
     gui_actions__clear_pending();
     gui_actions__discard_deferred_edits();
-    s_after_confirm = GUI_LIFECYCLE_REQUEST_NONE;
-    s_confirm_open = false;
-    s_confirm_draft = false;
-    s_modal_action = MODAL_NONE;
+    s_actions.lifecycle =
+        (gui_lifecycle_flow){0};
 }
 
 void setUp(void) {
     tp_scan__test_reset_all();
     tp_job__test_reset_all();
-    gui_actions_refresh_fingerprint_reset();
+    gui_project__test_set_drain_grace_ms(-1);
+    gui_actions__test_reset_refresh_completion();
     (void)snprintf(s_save_path, sizeof s_save_path,
                    "%s/action-trace.ntpacker_project",
                    TP_GUI_TRACE_TEST_DIR);
@@ -161,13 +209,13 @@ void setUp(void) {
 }
 
 void tearDown(void) {
-    tp_scan__test_reset_all();
-    tp_job__test_reset_all();
-    gui_actions_refresh_fingerprint_reset();
+    gui_actions__test_reset_refresh_completion();
     multi_sel_clear();
     gui_pack_shutdown();
     gui_project_test_shutdown(true);
-    gui_scan_shutdown();
+    gui_project__test_set_drain_grace_ms(-1);
+    tp_scan__test_reset_all();
+    tp_job__test_reset_all();
     (void)remove(s_save_path);
     (void)test_rmdir(TP_GUI_TRACE_TEST_DIR);
 }

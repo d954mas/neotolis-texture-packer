@@ -87,7 +87,7 @@ typedef enum tp_status {
     TP_STATUS_KEY_ABSOLUTE,        /* source key/path must be source-root-relative, not absolute (tp_srckey) */
     TP_STATUS_KEY_TRAVERSAL,       /* a '..' component would escape the source root (tp_srckey) */
 
-    /* --- selector resolution faults (master spec §5.4) ---
+    /* --- selector resolution faults (model/operation contract) ---
      * Append-only: new values go at the END. A human selector must resolve to
      * EXACTLY ONE id before it is used; zero and >1 matches are distinct faults a
      * client acts on differently (NOT_FOUND surfaces "no such entity", AMBIGUOUS
@@ -96,7 +96,7 @@ typedef enum tp_status {
     TP_STATUS_NOT_FOUND,           /* a selector matched no entity (tp_selector) */
     TP_STATUS_AMBIGUOUS_SELECTOR,  /* a selector matched more than one entity; a candidate list is returned */
 
-    /* --- typed operation-engine faults (master spec §6-6.2, §7) ---
+    /* --- typed operation-engine faults ---
      * Append-only: new values go at the END. Distinct faults a client acts on
      * differently from the generic INVALID_ARGUMENT: UNKNOWN_OP -> the op kind is
      * not in the catalog (fix the verb/wire); OUT_OF_RANGE -> a payload VALUE is
@@ -108,19 +108,19 @@ typedef enum tp_status {
     TP_STATUS_UNKNOWN_OP,          /* the operation kind/wire is not in the append-only catalog (tp_operation) */
     TP_STATUS_OUT_OF_RANGE,        /* a payload value is outside its allowed range (tp_op_validate) */
 
-    /* --- transaction concurrency faults (master spec §8) ---
+    /* --- transaction concurrency faults ---
      * Append-only: new values go at the END. A transaction carries an
      * expected_revision optimistic-concurrency precondition; the two mismatch
      * directions are distinct faults a client acts on differently. CONFLICT (stale:
      * expected < current) -> the caller rebuilds against the new state and retries;
      * INVALID (expected > current, a revision that never existed) -> a client bug,
-     * not a retry. No CRDT / auto-merge in v1 (§8, plan §420). Idempotency reuses
+     * not a retry. No CRDT / auto-merge in v1. Idempotency reuses
      * the existing DUPLICATE_ID token ("duplicate_id"): a re-submitted transaction
      * id is a duplicate the message distinguishes from a structural-id collision. */
     TP_STATUS_REVISION_CONFLICT,   /* expected_revision < current: stale; rebuild and retry (tp_transaction) */
     TP_STATUS_INVALID_REVISION,    /* expected_revision > current: a revision that never existed (tp_transaction) */
 
-    /* --- recovery-journal durability fault (master spec §7.1, §22.3) ---
+    /* --- recovery-journal durability fault ---
      * Append-only: new value at the END. This status reports that a recovery
      * record was not durably established. At the model/session boundary that
      * failure degrades recovery but does not roll back an already-published live
@@ -142,7 +142,7 @@ typedef enum tp_status {
      * session baseline are unchanged; file_io carries phase/path/cause. */
     TP_STATUS_FILE_IO_FAILED,
 
-    /* --- fallible builder containment fault (decision 0018, master spec §10.6) ---
+    /* --- fallible builder containment fault ---
      * Append-only: new value at the END. A PROCESS-LEVEL abnormal outcome of the
      * private build worker: it aborted, crashed on a signal, timed out, exited
      * non-zero with no valid reply, reported success but staged no readable
@@ -161,7 +161,10 @@ typedef enum tp_status {
      * output left empty, and the async pack job surfaces this as
      * TP_SESSION_JOB_CANCELLED. Distinct from the generic faults so a caller can tell
      * "you asked me to stop" apart from "the input was bad". */
-    TP_STATUS_CANCELLED
+    TP_STATUS_CANCELLED,
+
+    /* A session already owns one transient Refresh, Pack, or Export task. */
+    TP_STATUS_BUSY
 } tp_status;
 
 /* No heap and no borrowed pointers, so a plain struct copy of a tp_error stays
@@ -338,7 +341,8 @@ static inline const char *tp_file_io_phase_id(tp_file_io_phase phase) {
       "file_durability_uncertain")                                                 \
     X(FILE_IO_FAILED, "project file I/O failed", "file_io_failed")                 \
     X(BUILDER_CRASHED, "builder crashed", "builder_crashed")                       \
-    X(CANCELLED, "cancelled", "cancelled")
+    X(CANCELLED, "cancelled", "cancelled")                                          \
+    X(BUSY, "session task is busy", "busy")
 
 static inline const char *tp_status_str(tp_status status) {
     switch (status) {

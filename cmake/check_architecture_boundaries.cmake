@@ -26,8 +26,7 @@ set(_arch_rules
     VIEW_PLATFORM
     VIEW_MODEL_POLICY
     CORE_FRONTEND
-    ASYNC_RAW_SESSION
-    HOST_QUEUE_RAW_SESSION_STORAGE)
+    ASYNC_RAW_SESSION)
 
 foreach(_rule IN LISTS _arch_rules)
     set_property(GLOBAL PROPERTY "ARCH_HITS_${_rule}" "")
@@ -59,7 +58,28 @@ set(_arch_view_files
 # guarded path as a checker bug (fail-closed) unless the path is registered
 # here, and a registered path that comes back is a deletion regression.
 set(_arch_deleted_files
-    apps/gui/gui_project_pending.c)
+    apps/gui/gui_project_pending.c
+    apps/gui/gui_scan.c
+    apps/gui/gui_scan.h
+    apps/gui/tp_bench_gui_rows.c
+    apps/gui/client_parity_manifest.c
+    apps/gui/client_parity_manifest.h
+    apps/gui/gui_host_binding.c
+    apps/gui/gui_host_binding.h
+    apps/gui/gui_host_queue.c
+    apps/gui/gui_host_queue.h
+    apps/gui/gui_session_client.c
+    apps/gui/gui_session_client.h
+    apps/gui/test_client_parity.c
+    apps/gui/test_gui_host_binding.c
+    apps/gui/test_gui_host_queue.c
+    apps/gui/test_gui_session_adapter.c
+    apps/gui/test_gui_session_client.c
+    packer/src/tp_session_job_observation.c
+    packer/src/tp_session_job_observation_internal.h
+    packer/src/tp_session_observation.c
+    packer/tests/test_session_job_observation.c
+    packer/tests/test_session_observation.c)
 
 if(NOT DEFINED ARCH_EXPECT_RULE)
     foreach(_view IN LISTS _arch_view_files)
@@ -172,14 +192,7 @@ foreach(_source IN LISTS _arch_sources)
     # The async family is code that runs off the host/UI thread: job workers,
     # transports, and out-of-process clients. Its rule forbids retaining or
     # calling a raw `tp_session *`, because that session belongs to another
-    # thread. gui_host_queue is deliberately NOT in this family: it runs ON
-    # the host thread and legitimately passes `tp_session *` through its
-    # drain/admission functions, which is why the old `host_queue` token had
-    # to be exempted line-for-line the moment it was added. The two things
-    # that must actually be true of the queue are expressed directly instead:
-    # HOST_QUEUE_RAW_SESSION_STORAGE (it never RETAINS a session) and the
-    # gui_host_queue_* containment sweep below (its symbols never leak past
-    # the host owner).
+    # thread.
     set(_is_async false)
     if(_relative MATCHES "(^|/)[^/]*(worker|transport|dev[_-]?api|mcp)[^/]*\\.(c|h)$")
         set(_is_async true)
@@ -298,7 +311,7 @@ foreach(_source IN LISTS _arch_sources)
                       "#include:${CMAKE_MATCH_1}")
         endif()
         if(_is_view
-           AND _directive MATCHES "[<\"](tp_core/tp_(model|project|operation|validate|client_capability|export)\\.h)[>\"]")
+           AND _directive MATCHES "[<\"](tp_core/tp_(pack_result|project|operation|validate|client_capability|export)\\.h)[>\"]")
             _arch_hit(VIEW_MODEL_POLICY "${_relative}" "0"
                       "#include:${CMAKE_MATCH_1}")
         endif()
@@ -335,17 +348,6 @@ foreach(_source IN LISTS _arch_sources)
         _arch_scan_all(ASYNC_RAW_SESSION "${_relative}" "${_symbols}"
             "(^|[^A-Za-z0-9_])((const[ \t\r\n]+)?tp_session)[ \t\r\n]*\\*[ \t\r\n]*([A-Za-z_][A-Za-z0-9_]*)"
             4 "tp_session-pointer:")
-    endif()
-    # The struct BODY is extracted first and its members scanned separately.
-    # One pattern spanning both steps let the greedy body wildcard swallow every
-    # member but the last, so a queue retaining two sessions reported one hit no
-    # matter which scan mode the member match ran in.
-    if(_relative MATCHES "^apps/gui/gui_host_queue\\.(c|h)$"
-       AND _symbols MATCHES "typedef[ \t\r\n]+struct[ \t\r\n]+gui_host_queue[ \t\r\n]*\\{([^}]*)\\}")
-        _arch_scan_all(HOST_QUEUE_RAW_SESSION_STORAGE "${_relative}"
-            "${CMAKE_MATCH_1}"
-            "(^|[^A-Za-z0-9_])((const[ \t\r\n]+)?tp_session)[ \t\r\n]*\\*[ \t\r\n]*([A-Za-z_][A-Za-z0-9_]*)[ \t\r\n]*@"
-            4 "retained-tp_session-member:")
     endif()
 endforeach()
 
@@ -585,9 +587,21 @@ _arch_report_debt(VIEW_MODEL_POLICY "PV-settings/RESULT-INDEX"
                   "apps/gui/gui_view_settings\\.c|#include:tp_core/tp_export.h,#include:tp_core/tp_validate.h,tp_exporter_count,tp_exporter_at,tp_validate_session_snapshot_target,tp_project_sprite_effective_shape,gui_pack_result,gui_pack_find_sprite_ref")
 _arch_assert_rule(CORE_FRONTEND "A1a/A1b")
 _arch_assert_rule(ASYNC_RAW_SESSION "A1c/A2b")
-_arch_assert_rule(
-    HOST_QUEUE_RAW_SESSION_STORAGE
-    "A2b no retained raw session")
+
+# The zero-only guards and their embedded negative fixtures share this token
+# matcher. The fixtures use header includes because a forbidden driver reached
+# through a header is exactly as callable as one included by a .c file.
+function(_arch_source_contains source symbol out_contains)
+    set(_source "${source}")
+    string(REGEX REPLACE "/\\*([^*]|\\*+[^*/])*\\*+/" " " _source "${_source}")
+    string(REGEX REPLACE "//[^\r\n]*" " " _source "${_source}")
+    if(_source MATCHES
+       "(^|[^A-Za-z0-9_])${symbol}([^A-Za-z0-9_]|$)")
+        set(${out_contains} true PARENT_SCOPE)
+    else()
+        set(${out_contains} false PARENT_SCOPE)
+    endif()
+endfunction()
 
 # Zero-only deletion guard. Behavioral tests prove presence and sequencing;
 # this gate only prevents a removed path from returning.
@@ -607,14 +621,43 @@ function(_arch_assert_absent relative_path symbol remove_in)
             "_arch_deleted_files if the deletion is intentional.")
     endif()
     file(READ "${_path}" _source)
-    string(REGEX REPLACE "/\\*([^*]|\\*+[^*/])*\\*+/" " " _source "${_source}")
-    string(REGEX REPLACE "//[^\r\n]*" " " _source "${_source}")
-    if(_source MATCHES
-       "(^|[^A-Za-z0-9_])${symbol}([^A-Za-z0-9_]|$)")
+    _arch_source_contains("${_source}" "${symbol}" _contains)
+    if(_contains)
         message(FATAL_ERROR
             "${remove_in} deletion regressed: ${relative_path} contains ${symbol}")
     endif()
 endfunction()
+
+# Local negative fixtures for the two transitive-header holes guarded below.
+# Keep them in this checker: no production fixture file should need to carry a
+# deliberately forbidden include merely to prove the boundary walker sees it.
+_arch_source_contains(
+    "#include \"gui_actions_driver.h\"\n"
+    "gui_actions_driver[.]h" _seed_view_driver)
+if(NOT _seed_view_driver)
+    message(FATAL_ERROR
+        "A7-selftest: view-header fixture escaped gui_actions_driver.h detection")
+endif()
+string(CONCAT _arch_seed_project_driver_source
+    "#include \"gui_project_test_driver.h\"\n"
+    "static bool second_driver(void) { return gui_project_test_new() }\n")
+_arch_source_contains(
+    "${_arch_seed_project_driver_source}"
+    "gui_project_test_driver[.]h" _seed_project_driver)
+if(NOT _seed_project_driver)
+    message(FATAL_ERROR
+        "A2d-selftest: wrapper-based project-driver fixture escaped detection")
+endif()
+string(CONCAT _arch_seed_project_fixture_source
+    "#include \"test_gui_action_trace_fixture.h\"\n"
+    "static bool second_driver(void) { return gui_project_test_new() }\n")
+_arch_source_contains(
+    "${_arch_seed_project_fixture_source}"
+    "test_gui_[A-Za-z0-9_]*[.]h" _seed_project_fixture)
+if(NOT _seed_project_fixture)
+    message(FATAL_ERROR
+        "A2d-selftest: transitive GUI test-fixture include escaped detection")
+endif()
 
 # Completed A1c/A2b worker and host-admission cuts.
 foreach(_entry IN ITEMS
@@ -647,18 +690,16 @@ _arch_assert_absent("apps/gui/gui_actions.c"
                     "s_refresh_fingerprint_session" "A2b")
 _arch_assert_absent("apps/gui/main.c" "gui_pack_worker_active" "A2b")
 _arch_assert_absent("apps/gui/main.c" "gui_pack_poll" "A2b")
-_arch_assert_absent(
-    "apps/gui/gui_host_queue.h"
-    "tp_session[ \t]*\\*[ \t]*[A-Za-z_][A-Za-z0-9_]*[ \t]*;"
-    "A2b no retained raw session")
-
 file(GLOB _gui_shipping_sources LIST_DIRECTORIES false
     "${_arch_root}/apps/gui/gui*.c"
     "${_arch_root}/apps/gui/main.c")
+file(GLOB _gui_shipping_headers LIST_DIRECTORIES false
+    "${_arch_root}/apps/gui/*.h")
 
 foreach(_source IN LISTS _gui_shipping_sources)
     cmake_path(GET _source FILENAME _filename)
-    if(_filename STREQUAL "gui_host_queue.c"
+    if(_filename STREQUAL "gui_project.c"
+       OR _filename STREQUAL "gui_project_file.c"
        OR _filename STREQUAL "gui_selftest.c")
         continue()
     endif()
@@ -667,15 +708,21 @@ foreach(_source IN LISTS _gui_shipping_sources)
     foreach(_symbol IN ITEMS
             tp_session_pack_job_start
             tp_session_export_start
+            tp_session_refresh_start
             tp_session_job_active
             tp_session_job_poll
             tp_session_job_take_result
-            tp_session_job_cancel)
+            tp_session_job_cancel
+            tp_session_update)
         _arch_assert_absent(
             "${_relative}" "${_symbol}"
             "A2b single GUI host admission owner")
     endforeach()
 endforeach()
+_arch_assert_absent(
+    "apps/gui/gui_project_file.c"
+    "tp_session_refresh_start"
+    "A2b Refresh admission belongs to gui_project.c")
 
 # Completed A2a observation ownership. Recovery may take a temporary immutable
 # snapshot for candidate preflight and post-Save-As metadata; it never observes.
@@ -685,7 +732,6 @@ foreach(_entry IN ITEMS
         "apps/gui/gui_project.c|tp_session_observe"
         "apps/gui/gui_project_file.c|tp_session_observe"
         "apps/gui/gui_project_internal.h|tp_session_snapshot[ \t]*\\*[ \t]*snapshot"
-        "apps/gui/gui_project_internal.h|snapshot_lifetime_generation"
         "apps/gui/gui_rows.c|tp_session_snapshot_source_generation"
         "apps/gui/gui_project_file.c|recompute_name")
     string(REPLACE "|" ";" _parts "${_entry}")
@@ -702,7 +748,7 @@ foreach(_source IN LISTS _gui_observation_sources)
                OUTPUT_VARIABLE _relative)
     cmake_path(CONVERT "${_relative}" TO_CMAKE_PATH_LIST _relative NORMALIZE)
     if(_relative MATCHES
-       "^apps/gui/(gui_session_client|gui_selftest|tp_bench_[^/]*|test_[^/]*|client_parity_[^/]*)\\.(c|h)$")
+       "^apps/gui/(gui_selftest|tp_bench_[^/]*|test_[^/]*|client_parity_[^/]*)\\.(c|h)$")
         continue()
     endif()
     foreach(_symbol IN ITEMS tp_session_observe
@@ -721,10 +767,9 @@ foreach(_source IN LISTS _gui_observation_sources)
     endif()
 endforeach()
 
-# Completed A2c mutation cut.
-_arch_assert_absent("apps/gui/gui_session_adapter.c" "tp_session_apply" "A2c")
-_arch_assert_absent("apps/gui/gui_session_adapter.c" "\"project\\.edit\"" "A2c")
-_arch_assert_absent("apps/gui/gui_session_adapter.h" "tp_session[ \t]*\\*" "A2c")
+# Completed A2c mutation cut. The explicit operation-lowering module is the
+# sole GUI operation-batch ingress and therefore calls the session directly.
+_arch_assert_absent("apps/gui/gui_project_operations.c" "\"project\\.edit\"" "A2c")
 foreach(_path IN ITEMS apps/gui/gui_project.c
                        apps/gui/gui_project_mutations.c)
     _arch_assert_absent(
@@ -743,7 +788,7 @@ _arch_assert_absent("apps/gui/main.c"
 
 foreach(_source IN LISTS _gui_shipping_sources)
     cmake_path(GET _source FILENAME _filename)
-    if(_filename STREQUAL "gui_session_client.c"
+    if(_filename STREQUAL "gui_project_operations.c"
        OR _filename STREQUAL "gui_selftest.c")
         continue()
     endif()
@@ -752,8 +797,7 @@ foreach(_source IN LISTS _gui_shipping_sources)
     _arch_assert_absent(
         "${_relative}" "tp_session_apply"
         "A2c single GUI mutation owner")
-    if(NOT _filename STREQUAL "gui_session_adapter.c"
-       AND NOT _filename STREQUAL "gui_session_client.c")
+    if(NOT _filename STREQUAL "gui_project_operations.c")
         _arch_assert_absent(
             "${_relative}" "gui_session_client_submit"
             "A5 single GUI submit owner")
@@ -765,6 +809,118 @@ endforeach()
 
 # Completed A2d lifecycle cut.
 _arch_assert_absent("apps/gui/gui_project_file.c" "install_session" "A2d")
+foreach(_symbol IN ITEMS
+        gui_project_step
+        gui_project_step_result)
+    _arch_assert_absent(
+        "apps/gui/gui_project.h" "${_symbol}"
+        "A2d project FSM driver is internal")
+endforeach()
+foreach(_source IN LISTS _gui_shipping_sources)
+    cmake_path(GET _source FILENAME _filename)
+    cmake_path(RELATIVE_PATH _source BASE_DIRECTORY "${_arch_root}"
+               OUTPUT_VARIABLE _relative)
+    if(NOT _filename STREQUAL "gui_project.c"
+       AND NOT _filename STREQUAL "gui_actions.c")
+        _arch_assert_absent(
+            "${_relative}" "gui_project_step"
+            "A2d one internal project FSM driver")
+    endif()
+    if(NOT _filename STREQUAL "gui_selftest.c")
+        _arch_assert_absent(
+            "${_relative}" "gui_project_test_driver[.]h"
+            "A2d shipping sources cannot import the test project driver")
+        _arch_assert_absent(
+            "${_relative}" "test_gui_[A-Za-z0-9_]*[.]h"
+            "A2d shipping sources cannot import GUI test fixtures")
+    endif()
+    if(_filename MATCHES "^gui_view_.*\\.c$")
+        _arch_assert_absent(
+            "${_relative}" "gui_actions_step"
+            "A7 views submit requests and never drive the host")
+    endif()
+    if(NOT _filename STREQUAL "gui_actions.c"
+       AND NOT _filename STREQUAL "gui_selftest.c")
+        _arch_assert_absent(
+            "${_relative}" "gui_actions__test_drain_intents"
+            "A7 half-step remains test-only")
+    endif()
+    foreach(_legacy IN ITEMS
+            apply_pending
+            gui_project_frame_begin
+            gui_project_frame_end
+            gui_project_take_completion
+            gui_project_lifecycle_pump
+            gui_actions_poll_host_completion
+            gui_actions_pump_lifecycle
+            gui_pack_poll)
+        _arch_assert_absent(
+            "${_relative}" "${_legacy}"
+            "A2d/A7 deleted manual lifecycle protocol")
+    endforeach()
+endforeach()
+
+# A view header is part of the view's compile-time surface: including a driver
+# there exposes it transitively to every implementing TU. Scan the complete,
+# explicitly declared view role (both .c and .h), not only shipping .c files.
+foreach(_view IN LISTS _arch_view_files)
+    _arch_assert_absent(
+        "${_view}" "gui_actions_driver[.]h"
+        "A7 views cannot include the actions FSM driver")
+    _arch_assert_absent(
+        "${_view}" "gui_actions_dev[.]h"
+        "A7 views cannot include dev host adapters")
+endforeach()
+
+# Header-transitive project drivers are equally real drivers. The four owners
+# below are explicit: the project driver declares the primitive, the actions
+# and project internals expose it only to their implementations, and the test
+# driver is a test-only inline harness. Every other production GUI header is
+# forbidden from naming the primitive or importing either driver header.
+set(_gui_project_driver_header_owners
+    gui_actions_internal.h
+    gui_project_driver.h
+    gui_project_internal.h
+    gui_project_test_driver.h)
+foreach(_header IN LISTS _gui_shipping_headers)
+    cmake_path(GET _header FILENAME _filename)
+    if(_filename MATCHES "^test_.*[.]h$")
+        continue()
+    endif()
+    if(_filename IN_LIST _gui_project_driver_header_owners)
+        continue()
+    endif()
+    cmake_path(RELATIVE_PATH _header BASE_DIRECTORY "${_arch_root}"
+               OUTPUT_VARIABLE _relative)
+    _arch_assert_absent(
+        "${_relative}" "gui_project_step"
+        "A2d production headers cannot introduce a second project FSM driver")
+    _arch_assert_absent(
+        "${_relative}" "gui_project_driver[.]h"
+        "A2d production headers cannot import the project FSM driver")
+    _arch_assert_absent(
+        "${_relative}" "gui_project_test_driver[.]h"
+        "A2d production headers cannot import the test project driver")
+    _arch_assert_absent(
+        "${_relative}" "test_gui_[A-Za-z0-9_]*[.]h"
+        "A2d production headers cannot import GUI test fixtures")
+endforeach()
+foreach(_symbol IN ITEMS
+        gui_actions_step
+        gui_actions_host_open
+        gui_actions_host_shutdown_step
+        gui_actions_shutdown
+        do_pack_blocking
+        do_undo
+        do_redo
+        gui_actions_refresh_diff_headless)
+    _arch_assert_absent(
+        "apps/gui/gui_actions.h" "${_symbol}"
+        "A7 view ingress cannot expose FSM drivers or direct executors")
+endforeach()
+_arch_assert_absent(
+    "apps/gui/gui_pack_jobs.c" "gui_project_driver[.]h"
+    "A7 blocking adapters drive the actions FSM, never the project FSM")
 foreach(_symbol IN ITEMS
         gui_project__session_client
         gui_project__host_queue)
@@ -788,22 +944,6 @@ foreach(_path IN ITEMS
             "${_path}" "${_symbol}" "A2d")
     endforeach()
 endforeach()
-foreach(_symbol IN ITEMS
-        gui_host_binding_receipt
-        gui_host_command_kind
-        has_pending_start
-        drain_cancel_pending)
-    _arch_assert_absent(
-        "apps/gui/gui_host_queue.h"
-        "${_symbol}" "A2d")
-    _arch_assert_absent(
-        "apps/gui/gui_host_binding.h"
-        "${_symbol}" "A2d")
-endforeach()
-_arch_assert_absent(
-    "apps/gui/gui_project_internal.h"
-    "tp_session[ \t\r\n]*\\*[ \t\r\n]*session[ \t\r\n]*;"
-    "A2d single session storage")
 _arch_assert_absent(
     "apps/gui/gui_project_internal.h"
     "gui_session_client[ \t\r\n]+client[ \t\r\n]*;"
@@ -813,8 +953,6 @@ _arch_assert_absent(
     "gui_host_queue[ \t\r\n]+host_queue[ \t\r\n]*;"
     "A2d single host queue storage")
 foreach(_path IN ITEMS
-        apps/gui/gui_host_queue.c
-        apps/gui/gui_host_queue.h
         apps/gui/gui_project.c
         apps/gui/gui_project.h)
     foreach(_symbol IN ITEMS
@@ -824,21 +962,16 @@ foreach(_path IN ITEMS
             "${_path}" "${_symbol}" "A2d")
     endforeach()
 endforeach()
-_arch_assert_absent("apps/gui/gui_project_file.c" "tp_session_discard" "A2d")
 _arch_assert_absent("apps/gui/gui_actions_dialogs.c" "gui_project_new" "A2d")
 _arch_assert_absent("apps/gui/gui_actions_dialogs.c" "gui_project_open" "A2d")
 _arch_assert_absent("apps/gui/main.c" "gui_project_open" "A2d")
 _arch_assert_absent("apps/gui/gui_pack_jobs.c"
                     "gui_project_lifecycle_begin_shutdown" "A2d")
-foreach(_path IN ITEMS apps/gui/gui_host_queue.c apps/gui/gui_host_queue.h)
-    _arch_assert_absent("${_path}" "gui_host_queue_can_replace" "A2d")
-endforeach()
-
 foreach(_source IN LISTS _gui_shipping_sources)
     cmake_path(RELATIVE_PATH _source BASE_DIRECTORY "${_arch_root}"
                OUTPUT_VARIABLE _relative)
     if(_relative MATCHES
-       "^apps/gui/(gui_host_binding|gui_host_queue|gui_session_client|gui_selftest)\\.c$")
+       "^apps/gui/gui_selftest\\.c$")
         continue()
     endif()
     foreach(_symbol IN ITEMS
@@ -854,14 +987,14 @@ foreach(_source IN LISTS _gui_shipping_sources)
     endforeach()
 endforeach()
 
-# P5: history, identity, and source-runtime commands belong to the host owner
-# (spec 6.1), not to whichever file happens to hold a borrowed session. The
-# binding owns the sole active-session pointer, so these session entry points
-# may appear only there; every other GUI TU goes through
-# gui_host_binding_undo/redo/save/save_as/invalidate_sources.
+# History, identity, and source-runtime commands belong to the small project
+# host, not to whichever file happens to hold a borrowed view. The host owns the
+# sole active-session pointer, so these session entry points may appear only in
+# gui_project.c/gui_project_file.c.
 foreach(_source IN LISTS _gui_shipping_sources)
     cmake_path(GET _source FILENAME _filename)
-    if(_filename STREQUAL "gui_host_binding.c")
+    if(_filename STREQUAL "gui_project.c"
+       OR _filename STREQUAL "gui_project_file.c")
         continue()
     endif()
     cmake_path(RELATIVE_PATH _source BASE_DIRECTORY "${_arch_root}"
@@ -882,25 +1015,8 @@ foreach(_source IN LISTS _gui_shipping_sources)
     endforeach()
 endforeach()
 
-# The host queue is the host owner's private ingress, not a GUI-wide API.
-# This containment sweep replaces the old async-family carve-out: instead of
-# pretending the queue is async and then exempting it, the queue keeps its
-# host-thread session calls and its symbols stay inside the owner set.
-# P5 closed the last bypass: gui_project.c's direct queue calls (enqueue,
-# take_completion, busy, active_kind, the staged-completion test seam) are now
-# gui_host_binding_* ingress functions, so the binding pair IS the owner set.
-set(_arch_host_queue_owners
-    apps/gui/gui_host_queue.c
-    apps/gui/gui_host_queue.h
-    apps/gui/gui_host_binding.c
-    apps/gui/gui_host_binding.h)
-
-# The active session is borrowed, never held. P5 shrank this list: the
-# lifecycle/file owner and the mutation owner ask the host binding (commands)
-# or gui_session_client_is_attached (liveness) instead of borrowing.
-# gui_project.c keeps the accessor itself, gui_project_internal.h its
-# declaration, and gui_project_recovery.c the borrow the session-scoped core
-# recovery API genuinely needs.
+# The active session is stored by the small project host. Other GUI modules may
+# borrow it only through the narrow internal accessor.
 set(_arch_borrow_session_owners
     apps/gui/gui_project.c
     apps/gui/gui_project_internal.h
@@ -915,11 +1031,15 @@ foreach(_source IN LISTS _gui_observation_sources)
        "^apps/gui/(test_[^/]*|tp_bench_[^/]*|client_parity_[^/]*)\\.(c|h)$")
         continue()
     endif()
-    if(NOT "${_relative}" IN_LIST _arch_host_queue_owners)
-        _arch_assert_absent(
-            "${_relative}" "gui_host_queue_[A-Za-z0-9_]*"
-            "A2d host queue stays inside the host owner")
-    endif()
+    _arch_assert_absent(
+        "${_relative}" "gui_host_queue_[A-Za-z0-9_]*"
+        "A2d deleted host queue does not return")
+    _arch_assert_absent(
+        "${_relative}" "gui_host_binding_[A-Za-z0-9_]*"
+        "A2d deleted host binding does not return")
+    _arch_assert_absent(
+        "${_relative}" "gui_session_client_[A-Za-z0-9_]*"
+        "A2d deleted pseudo-client does not return")
     if(NOT "${_relative}" IN_LIST _arch_borrow_session_owners)
         _arch_assert_absent(
             "${_relative}" "gui_project__borrow_active_session"
@@ -1050,7 +1170,7 @@ _arch_assert_absent(
     "TP_TF_OUT_PATH"
     "A5 target path uses the narrow identified endpoint")
 _arch_assert_absent(
-    "apps/gui/gui_session_adapter.c"
+    "apps/gui/gui_project_operations.c"
     "gui_session_client_snapshot"
     "A5 submit receipts have one owner")
 _arch_assert_absent(
@@ -1078,15 +1198,9 @@ _arch_assert_absent(
     "tp_arena_destroy[ \t\r\n]*\\([ \t\r\n]*result[ \t\r\n]*->[ \t\r\n]*pack[ \t\r\n]*\\.[ \t\r\n]*arena"
     "A5 job result lifetime has one retained owner")
 
-# A6 job-owner test seams. Two internal entry points exist ONLY for tests:
-# tp_session_job_attach_internal (adopts the active-job lease for a job it did
-# not start) and tp_session_job_observation_begin_internal (publishes a second
-# live observed owner). Production has no route to either -- the sole production
-# start path, tp_session_job_start_internal, spawns fail-atomically and rejects a
-# second live owner -- but the USA-07 reverse/superseded admission table is only
-# reachable through them, so they are kept and fenced instead of deleted. Both
-# declaration and definition sit behind TP_ENABLE_TEST_SEAMS; this rule is what
-# makes the fence load-bearing.
+# A6 job-owner test seam. tp_session_job_attach_internal adopts the active-job
+# lease for a test-owned job. Production has no route to it; the sole
+# production start path spawns fail-atomically and rejects a second live owner.
 #
 # Two halves, because either one alone can be satisfied trivially:
 # 1. the guarded SYMBOL is inside a TP_ENABLE_TEST_SEAMS conditional in each of
@@ -1100,13 +1214,6 @@ foreach(_path IN ITEMS packer/src/tp_session.c
         "${_path}" "tp_session_job_attach_internal"
         "A6 job-owner seams stay compiled out of shipping")
 endforeach()
-foreach(_path IN ITEMS packer/src/tp_session_job_observation.c
-                       packer/src/tp_session_job_observation_internal.h)
-    _arch_assert_seam_fenced(
-        "${_path}" "tp_session_job_observation_begin_internal"
-        "A6 job-owner seams stay compiled out of shipping")
-endforeach()
-
 file(GLOB_RECURSE _job_seam_sources LIST_DIRECTORIES false
     "${_arch_root}/apps/*.c"
     "${_arch_root}/apps/*.h"
@@ -1127,13 +1234,9 @@ foreach(_source IN LISTS _job_seam_sources)
             "${_relative}" "tp_session_job_attach_internal"
             "A6 job attach is a test seam, not a production entry point")
     endif()
-    if(NOT _relative STREQUAL "packer/src/tp_session_job_observation.c"
-       AND NOT _relative STREQUAL
-               "packer/src/tp_session_job_observation_internal.h")
-        _arch_assert_absent(
-            "${_relative}" "tp_session_job_observation_begin_internal"
-            "A6 job observation begin is a test seam, not a production entry point")
-    endif()
+    _arch_assert_absent(
+        "${_relative}" "tp_session_job_observation_begin_internal"
+        "A6 deleted job observation seam does not return")
 endforeach()
 
 message(STATUS "architecture boundaries hold")

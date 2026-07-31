@@ -25,13 +25,14 @@
 #include "core/nt_assert.h"     /* NT_ASSERT */
 #include "graphics/nt_gfx.h"    /* nt_gfx_read_pixels (overlay pixel probe) */
 #include "log/nt_log.h"         /* nt_log_info (SELFTEST-* logging) */
+#include "time/nt_time.h"
 #include "ui/nt_ui.h"           /* nt_ui_get_bbox / nt_ui_id / nt_ui_bbox_t */
 #include "window/nt_window.h"   /* g_nt_window (phase-driven framebuffer dims) */
 
 #include "tp_core/tp_error.h"   /* tp_status_str / tp_error */
 #include "tp_core/tp_export.h"  /* tp_exporter_count/at (preview-target selector index) */
 #include "tp_core/tp_id.h"      /* stable structural-ID assertions */
-#include "tp_core/tp_model.h"   /* tp_result */
+#include "tp_core/tp_pack_result.h"   /* tp_result */
 #include "tp_core/tp_names.h"   /* tp_sprite_export_key (region -> override key) */
 #include "tp_core/tp_journal.h" /* in-memory recovery fixture */
 #include "tp_core/tp_scan.h"    /* tp_mkdirs (portable temp-dir creation for the CI stress dirs) */
@@ -40,15 +41,15 @@
 #include "tp_session_internal.h" /* recovery attach fixture */
 #include "nt_utf8_fs.h" /* UTF-8 fixture filenames on Windows */
 
-#include "gui_actions.h"  /* do_pack_blocking / reset_selection / preview_stop / anim ops + gui_request_gesture_commit */
+#include "gui_actions.h"  /* reset_selection / preview_stop / anim ops + gui_request_gesture_commit */
+#include "gui_actions_dev.h" /* explicit host-driving self-test seams */
 #include "gui_actions_internal.h" /* focused reducer submit prerequisite */
 #include "gui_canvas.h"   /* s_canvas ops + GUI_CANVAS_ATLAS */
 #include "gui_pack.h"     /* gui_pack_* + GUI_PACK_ASYNC_* */
 #include "gui_project.h"  /* gui_project_* + GUI_SPRITE_OV_SHAPE / GUI_ADD_DUPLICATE */
 #include "gui_project_test_driver.h"
-#include "gui_session_adapter.h" /* snapshot-read helpers behind the deleted forwarders */
+#include "gui_project_operations.h" /* snapshot-read helpers behind the deleted forwarders */
 #include "gui_rows.h"     /* build_rows / multi_sel_* / select_row_for_region */
-#include "gui_scan.h"     /* gui_scan_* */
 #include "gui_shell.h"    /* UI_STATE_SLOTS / UI_STATE_PROBE_MAX / UI_ROW_ID_RING */
 #include "gui_startup.h"  /* H/P1-8: gui_startup_decide + GUI_STARTUP_* (J14 truth table) */
 #include "gui_state.h"    /* s_canvas / disclosures / modals / s_ctx / shared UI ids */
@@ -146,11 +147,46 @@ static void selftest_clear_animation_selection(void) {
 }
 
 static void selftest_observe_session(void) {
-    tp_error error = {{0}};
+    for (int attempt = 0; attempt < 32; ++attempt) {
+        tp_error error = {{0}};
+        NT_ASSERT(
+            gui_actions_step(NULL, &error) ==
+            TP_STATUS_OK);
+        if (gui_project_snapshot() &&
+            s_actions.intent_count == 0 &&
+            s_actions.pending_lifecycle_request ==
+                GUI_LIFECYCLE_REQUEST_NONE) {
+            return;
+        }
+    }
     NT_ASSERT(
-        gui_project_frame_begin(&error) ==
-        TP_STATUS_OK);
-    gui_project_frame_end();
+        gui_project_snapshot() &&
+        s_actions.intent_count == 0 &&
+        s_actions.pending_lifecycle_request ==
+            GUI_LIFECYCLE_REQUEST_NONE &&
+        "self-test action queue must reach a quiescent published observation cut");
+}
+
+/* Membership edits coalesce an automatic Refresh. A synchronous self-test
+ * adapter settles only the Refresh it caused; it must never drain a Pack or
+ * Export that was already active for a lifecycle/concurrency probe. */
+static void selftest_settle_new_refresh(
+    bool job_was_busy) {
+    for (int attempt = 0;
+         !job_was_busy &&
+         attempt < 5000 &&
+         gui_project_job_busy() &&
+         gui_project_job_active_kind() ==
+             TP_SESSION_JOB_REFRESH;
+         ++attempt) {
+        nt_time_sleep(0.001);
+        selftest_observe_session();
+    }
+    NT_ASSERT(
+        job_was_busy ||
+        !gui_project_job_busy() ||
+        gui_project_job_active_kind() !=
+            TP_SESSION_JOB_REFRESH);
 }
 
 static const tp_snapshot_animation *selftest_animation_at(int atlas_index,
@@ -276,9 +312,10 @@ static bool selftest_set_atlas_name_at(int index, const char *name) {
         return false;
     }
     gui_request_gesture_commit();
-    apply_pending();
+    gui_actions__selftest_drain_intents();
     const bool committed =
         gui_draft_phase() == GUI_EDIT_IDLE;
+    selftest_observe_session();
     if (!committed) {
         gui_draft_discard();
     }
@@ -288,14 +325,27 @@ static bool selftest_set_atlas_name_at(int index, const char *name) {
 static bool selftest_remove_atlas_at(int index) {
     const tp_session_snapshot *snapshot = NULL;
     const tp_snapshot_atlas *atlas = selftest_atlas_at(index, &snapshot);
-    return atlas && gui_project_remove_atlas(
-                        atlas->id, tp_session_snapshot_revision(snapshot));
+    if (!atlas) {
+        return false;
+    }
+    const bool removed = gui_project_remove_atlas(
+        atlas->id, tp_session_snapshot_revision(snapshot));
+    selftest_observe_session();
+    return removed;
+}
+
+static bool selftest_remove_atlas_ref(tp_id128 atlas_id,
+                                      int64_t expected_revision) {
+    const bool removed = gui_project_remove_atlas(
+        atlas_id, expected_revision);
+    selftest_observe_session();
+    return removed;
 }
 
 static tp_status selftest_copy_atlas_name_at(int index, char *out, size_t capacity,
                                              tp_error *err) {
     const tp_snapshot_atlas *atlas = selftest_atlas_at(index, NULL);
-    return atlas ? gui_session_copy_atlas_name(gui_project_snapshot(), atlas->id,
+    return atlas ? gui_project_operation_copy_atlas_name(gui_project_snapshot(), atlas->id,
                                               out, capacity, err)
                  : tp_error_set(err, TP_STATUS_NOT_FOUND, "atlas index was not found");
 }
@@ -303,10 +353,18 @@ static tp_status selftest_copy_atlas_name_at(int index, char *out, size_t capaci
 static gui_add_status selftest_add_source_at(int index, const char *path) {
     const tp_session_snapshot *snapshot = NULL;
     const tp_snapshot_atlas *atlas = selftest_atlas_at(index, &snapshot);
-    return atlas ? gui_project_add_source_kind(
-                       atlas->id, tp_session_snapshot_revision(snapshot), path,
-                       TP_SOURCE_KIND_FOLDER)
-                 : GUI_ADD_FAILED;
+    if (!atlas) {
+        return GUI_ADD_FAILED;
+    }
+    const bool job_was_busy =
+        gui_project_job_busy();
+    const gui_add_status status = gui_project_add_source_kind(
+        atlas->id, tp_session_snapshot_revision(snapshot), path,
+        TP_SOURCE_KIND_FOLDER);
+    selftest_observe_session();
+    selftest_settle_new_refresh(
+        job_was_busy);
+    return status;
 }
 
 static bool selftest_add_sources_at(int index, const char *const *paths,
@@ -314,9 +372,18 @@ static bool selftest_add_sources_at(int index, const char *const *paths,
                                     int *added, int *duplicate) {
     const tp_session_snapshot *snapshot = NULL;
     const tp_snapshot_atlas *atlas = selftest_atlas_at(index, &snapshot);
-    return atlas && gui_project_add_sources(
-                        atlas->id, tp_session_snapshot_revision(snapshot), paths,
-                        path_count, kind, added, duplicate);
+    if (!atlas) {
+        return false;
+    }
+    const bool job_was_busy =
+        gui_project_job_busy();
+    const bool committed = gui_project_add_sources(
+        atlas->id, tp_session_snapshot_revision(snapshot), paths,
+        path_count, kind, added, duplicate);
+    selftest_observe_session();
+    selftest_settle_new_refresh(
+        job_was_busy);
+    return committed;
 }
 
 static bool selftest_sprite_ref_at(int atlas_index, const char *source_key,
@@ -332,12 +399,17 @@ static bool selftest_sprite_ref_at(int atlas_index, const char *source_key,
      * source through the same public operation path before constructing the ref.
      * The path need not exist: these tests exercise project mutation, not scan. */
     if (atlas && !source) {
+        const bool job_was_busy =
+            gui_project_job_busy();
         if (gui_project_add_source_kind(
                 atlas->id, tp_session_snapshot_revision(snapshot),
                 "__ntpacker_selftest_sprite_source__.png", TP_SOURCE_KIND_FILE) !=
             GUI_ADD_ADDED) {
             return false;
         }
+        selftest_observe_session();
+        selftest_settle_new_refresh(
+            job_was_busy);
         atlas = selftest_atlas_at(atlas_index, &snapshot);
         source = atlas ? tp_session_snapshot_source_at(snapshot, atlas->id, 0) : NULL;
     }
@@ -360,9 +432,10 @@ static bool selftest_set_sprite_rename_at(int atlas_index, const char *source_ke
         return false;
     }
     gui_request_gesture_commit();
-    apply_pending();
+    gui_actions__selftest_drain_intents();
     const bool committed =
         gui_draft_phase() == GUI_EDIT_IDLE;
+    selftest_observe_session();
     if (!committed) {
         gui_draft_discard();
     }
@@ -407,9 +480,10 @@ static bool selftest_rename_animation_frame_at(int atlas_index,
         return false;
     }
     gui_request_gesture_commit();
-    apply_pending();
+    gui_actions__selftest_drain_intents();
     const bool committed =
         gui_draft_phase() == GUI_EDIT_IDLE;
+    selftest_observe_session();
     if (!committed) {
         gui_draft_discard();
     }
@@ -425,8 +499,11 @@ static bool selftest_set_sprite_origin_at(int atlas_index, const char *source_ke
     }
     gui_edit_sprite_origin(&sprite, axis, value);
     gui_request_gesture_commit();
-    apply_pending();
-    return gui_draft_phase() == GUI_EDIT_IDLE;
+    gui_actions__selftest_drain_intents();
+    const bool committed =
+        gui_draft_phase() == GUI_EDIT_IDLE;
+    selftest_observe_session();
+    return committed;
 }
 
 static bool selftest_set_sprite_slice9_at(int atlas_index, const char *source_key,
@@ -438,8 +515,11 @@ static bool selftest_set_sprite_slice9_at(int atlas_index, const char *source_ke
     }
     gui_edit_sprite_slice9(&sprite, component, value);
     gui_request_gesture_commit();
-    apply_pending();
-    return gui_draft_phase() == GUI_EDIT_IDLE;
+    gui_actions__selftest_drain_intents();
+    const bool committed =
+        gui_draft_phase() == GUI_EDIT_IDLE;
+    selftest_observe_session();
+    return committed;
 }
 
 static bool selftest_set_sprite_override_at(int atlas_index, const char *source_key,
@@ -451,8 +531,11 @@ static bool selftest_set_sprite_override_at(int atlas_index, const char *source_
     }
     gui_edit_sprite_override(&sprite, which, value);
     gui_request_gesture_commit();
-    apply_pending();
-    return gui_draft_phase() == GUI_EDIT_IDLE;
+    gui_actions__selftest_drain_intents();
+    const bool committed =
+        gui_draft_phase() == GUI_EDIT_IDLE;
+    selftest_observe_session();
+    return committed;
 }
 
 static int selftest_create_animation_at(int atlas_index, const char *base,
@@ -462,6 +545,7 @@ static int selftest_create_animation_at(int atlas_index, const char *base,
     if (!atlas || frame_count < 0 || (frame_count > 0 && !frames)) {
         return -1;
     }
+    const tp_id128 atlas_id = atlas->id;
     tp_op_sprite_ref *refs = frame_count > 0
         ? calloc((size_t)frame_count, sizeof *refs)
         : NULL;
@@ -486,15 +570,35 @@ static int selftest_create_animation_at(int atlas_index, const char *base,
         }
         refs[i].src_key = keys[i];
     }
-    const int result =
+    const gui_project_create_result created =
         gui_project_create_animation(
-            atlas->id,
+            atlas_id,
             tp_session_snapshot_revision(snapshot),
-            base, refs, frame_count)
-            .visible_index;
+            base, refs, frame_count);
     free(refs);
     free(keys);
-    return result;
+    if (!created.committed) {
+        selftest_observe_session();
+        return -1;
+    }
+    selftest_observe_session();
+    snapshot = gui_project_snapshot();
+    atlas = tp_session_snapshot_atlas_by_id(
+        snapshot, atlas_id);
+    for (int index = 0;
+         atlas && index < atlas->animation_count;
+         ++index) {
+        const tp_snapshot_animation *animation =
+            tp_session_snapshot_animation_at(
+                snapshot, atlas->id, index);
+        if (animation &&
+            tp_id128_eq(
+                animation->id,
+                created.created_id)) {
+            return index;
+        }
+    }
+    return -1;
 }
 
 static bool selftest_set_anim_id_at(int atlas_index, int animation_index,
@@ -509,9 +613,10 @@ static bool selftest_set_anim_id_at(int atlas_index, int animation_index,
         return false;
     }
     gui_request_gesture_commit();
-    apply_pending();
+    gui_actions__selftest_drain_intents();
     const bool committed =
         gui_draft_phase() == GUI_EDIT_IDLE;
+    selftest_observe_session();
     if (!committed) {
         gui_draft_discard();
     }
@@ -527,8 +632,11 @@ static bool selftest_set_anim_fps_at(int atlas_index, int animation_index,
     }
     gui_edit_anim_fps(&animation, fps);
     gui_request_gesture_commit();
-    apply_pending();
-    return gui_draft_phase() == GUI_EDIT_IDLE;
+    gui_actions__selftest_drain_intents();
+    const bool committed =
+        gui_draft_phase() == GUI_EDIT_IDLE;
+    selftest_observe_session();
+    return committed;
 }
 
 static bool selftest_set_anim_playback_at(int atlas_index, int animation_index,
@@ -540,8 +648,11 @@ static bool selftest_set_anim_playback_at(int atlas_index, int animation_index,
     }
     gui_edit_anim_playback(&animation, playback);
     gui_request_gesture_commit();
-    apply_pending();
-    return gui_draft_phase() == GUI_EDIT_IDLE;
+    gui_actions__selftest_drain_intents();
+    const bool committed =
+        gui_draft_phase() == GUI_EDIT_IDLE;
+    selftest_observe_session();
+    return committed;
 }
 
 static bool selftest_set_anim_flip_at(int atlas_index, int animation_index,
@@ -553,29 +664,47 @@ static bool selftest_set_anim_flip_at(int atlas_index, int animation_index,
     }
     gui_edit_anim_flip(&animation, 0, flip_h);
     gui_request_gesture_commit();
-    apply_pending();
+    gui_actions__selftest_drain_intents();
+    selftest_observe_session();
     if (!selftest_animation_ref_at(
             atlas_index, animation_index, &animation)) {
         return false;
     }
     gui_edit_anim_flip(&animation, 1, flip_v);
     gui_request_gesture_commit();
-    apply_pending();
-    return gui_draft_phase() == GUI_EDIT_IDLE;
+    gui_actions__selftest_drain_intents();
+    const bool committed =
+        gui_draft_phase() == GUI_EDIT_IDLE;
+    selftest_observe_session();
+    return committed;
 }
 
 static bool selftest_anim_remove_frame_at(int atlas_index, int animation_index,
                                           int frame_index) {
     gui_animation_ref animation;
-    return selftest_animation_ref_at(atlas_index, animation_index, &animation) &&
-           gui_project_anim_remove_frame(&animation, frame_index);
+    if (!selftest_animation_ref_at(
+            atlas_index, animation_index, &animation)) {
+        return false;
+    }
+    const bool removed =
+        gui_project_anim_remove_frame(
+            &animation, frame_index);
+    selftest_observe_session();
+    return removed;
 }
 
 static bool selftest_anim_move_frame_at(int atlas_index, int animation_index,
                                         int frame_index, int delta) {
     gui_animation_ref animation;
-    return selftest_animation_ref_at(atlas_index, animation_index, &animation) &&
-           gui_project_anim_move_frame(&animation, frame_index, delta);
+    if (!selftest_animation_ref_at(
+            atlas_index, animation_index, &animation)) {
+        return false;
+    }
+    const bool moved =
+        gui_project_anim_move_frame(
+            &animation, frame_index, delta);
+    selftest_observe_session();
+    return moved;
 }
 
 static bool selftest_remove_animation_named_at(int atlas_index, const char *name) {
@@ -589,7 +718,11 @@ static bool selftest_remove_animation_named_at(int atlas_index, const char *name
             const gui_animation_ref animation = {
                 atlas->id, candidate->id,
                 tp_session_snapshot_revision(snapshot)};
-            return gui_project_remove_animation(&animation);
+            const bool removed =
+                gui_project_remove_animation(
+                    &animation);
+            selftest_observe_session();
+            return removed;
         }
     }
     return false;
@@ -622,8 +755,13 @@ static bool selftest_set_target_at(int atlas_index, int target_index,
         out_path_copy, out_path,
         strlen(out_path) + 1U);
     if (!selftest_set_target_path_at(
-            atlas_index, target_index, out_path_copy) ||
-        !gui_actions__submit_draft()) {
+            atlas_index, target_index, out_path_copy)) {
+        return false;
+    }
+    const bool path_committed =
+        gui_actions__submit_draft();
+    selftest_observe_session();
+    if (!path_committed) {
         return false;
     }
     gui_target_ref target;
@@ -633,13 +771,15 @@ static bool selftest_set_target_at(int atlas_index, int target_index,
     }
     gui_edit_target_exporter(
         &target, exporter_copy);
-    apply_pending();
+    gui_actions__selftest_drain_intents();
+    selftest_observe_session();
     if (!selftest_target_ref_at(
             atlas_index, target_index, &target)) {
         return false;
     }
     gui_edit_target_enabled(&target, enabled);
-    apply_pending();
+    gui_actions__selftest_drain_intents();
+    selftest_observe_session();
     const tp_snapshot_target *result =
         selftest_target_at(atlas_index, target_index);
     return result &&
@@ -666,6 +806,69 @@ static bool selftest_set_target_path_at(int atlas_index, int target_index,
     return gui_text_edit_update(out_path);
 }
 
+static gui_project_create_result
+selftest_add_atlas_observed(void) {
+    gui_project_create_result created =
+        gui_project_add_atlas();
+    if (!created.committed) {
+        selftest_observe_session();
+        return created;
+    }
+    selftest_observe_session();
+    const tp_session_snapshot *snapshot =
+        gui_project_snapshot();
+    const int count =
+        tp_session_snapshot_atlas_count(snapshot);
+    created.visible_index = -1;
+    for (int index = 0; index < count; ++index) {
+        const tp_snapshot_atlas *atlas =
+            tp_session_snapshot_atlas_at(
+                snapshot, index);
+        if (atlas &&
+            tp_id128_eq(
+                atlas->id, created.created_id)) {
+            created.visible_index = index;
+            break;
+        }
+    }
+    created.observation_pending = false;
+    return created;
+}
+
+static tp_status selftest_project_save(
+    char *err_out, size_t err_cap) {
+    const tp_status status =
+        gui_project_save(err_out, err_cap);
+    selftest_observe_session();
+    return status;
+}
+
+static tp_status selftest_project_save_as(
+    const char *path, char *err_out,
+    size_t err_cap) {
+    const tp_status status =
+        gui_project_save_as(
+            path, err_out, err_cap);
+    selftest_observe_session();
+    return status;
+}
+
+static bool selftest_project_undo(void) {
+    const bool changed =
+        gui_project_undo();
+    selftest_observe_session();
+    return changed;
+}
+
+static bool selftest_project_redo(void) {
+    const bool changed =
+        gui_project_redo();
+    selftest_observe_session();
+    return changed;
+}
+
+#define gui_project_add_atlas() \
+    selftest_add_atlas_observed()
 #define gui_project_remove_atlas(index) selftest_remove_atlas_at((index))
 #define gui_project_copy_atlas_name(index, out, capacity, err) \
     selftest_copy_atlas_name_at((index), (out), (capacity), (err))
@@ -680,6 +883,12 @@ static bool selftest_set_target_path_at(int atlas_index, int target_index,
     selftest_anim_move_frame_at((index), (animation), (frame), (delta))
 #define gui_project_remove_animation(index, name) \
     selftest_remove_animation_named_at((index), (name))
+#define gui_project_save(err_out, err_cap) \
+    selftest_project_save((err_out), (err_cap))
+#define gui_project_save_as(path, err_out, err_cap) \
+    selftest_project_save_as((path), (err_out), (err_cap))
+#define gui_project_undo() selftest_project_undo()
+#define gui_project_redo() selftest_project_redo()
 static void to_abs(const char *rel, char *out, size_t cap) {
 #ifdef _WIN32
     if (GetFullPathNameA(rel, (DWORD)cap, out, NULL) == 0) {
@@ -976,7 +1185,7 @@ void run_selftest(void) {
     NT_ASSERT(st == TP_STATUS_OK && nsrc == 2 &&
               "Save As round-trip requires releasing the prior writer before Open");
 
-    /* Master spec 14.2: live Save must not overwrite an external rewrite after Open. The exact
+    /* Live Save must not overwrite an external rewrite after Open. The exact
      * sentinel remains on disk; a deliberate Save As to another identity is still allowed. */
     static const char external_sentinel[] = "external-edit-sentinel";
     { FILE *xf = fopen(save_path, "wb"); NT_ASSERT(xf); (void)fwrite(external_sentinel, 1, sizeof external_sentinel, xf); (void)fclose(xf); }
@@ -1035,17 +1244,14 @@ void run_selftest(void) {
                                                           folder_source_id, folder_abs,
                                                           sizeof folder_abs,
                                                           &folder_error) == TP_STATUS_OK) {
-        const gui_scan_result *sc = NULL;
-        if (gui_scan_get(folder_abs, &sc, &folder_error) != TP_STATUS_OK) {
-            sc = NULL;
-        }
-        if (!sc) {
+        tp_scan_result sc = {0};
+        if (tp_scan_dir(folder_abs, &sc, &folder_error) != TP_STATUS_OK) {
             nt_log_error("SELFTEST: folder scan failed: %s", folder_error.msg);
         } else {
-            nt_log_info("SELFTEST: folder scan found %d image(s)", sc->count);
-            if (sc->count > 0) {
+            nt_log_info("SELFTEST: folder scan found %d image(s)", sc.count);
+            if (sc.count > 0) {
                 char sprite[192];
-                (void)snprintf(sprite, sizeof sprite, "%s", sc->entries[0].rel);
+                (void)snprintf(sprite, sizeof sprite, "%s", sc.entries[0].rel);
                 char *dot = strrchr(sprite, '.');
                 if (dot) {
                     *dot = '\0';
@@ -1056,6 +1262,7 @@ void run_selftest(void) {
                 nt_log_info("SELFTEST: rename region '%s' -> override='%s'", sprite, (ov && ov->rename) ? ov->rename : "(none)");
             }
         }
+        tp_scan_free(&sc);
     }
 
     /* --- save_buffer / load_buffer round-trip in-app --- */
@@ -1086,20 +1293,17 @@ void run_selftest(void) {
         (void)fputs("PNGDATA", tf);
         (void)fclose(tf);
     }
-    gui_scan_invalidate_all();
-    const gui_scan_result *refresh_scan = NULL;
+    tp_scan_result refresh_scan = {0};
     tp_error refresh_error = {0};
-    const int before_n =
-        gui_scan_get(rdir, &refresh_scan, &refresh_error) == TP_STATUS_OK
-            ? refresh_scan->count
-            : -1;
+    const int before_n = tp_scan_dir(rdir, &refresh_scan, &refresh_error) == TP_STATUS_OK
+                             ? refresh_scan.count
+                             : -1;
+    tp_scan_free(&refresh_scan);
     (void)remove(rfile);
-    gui_scan_invalidate_all();
-    refresh_scan = NULL;
-    const int after_n =
-        gui_scan_get(rdir, &refresh_scan, &refresh_error) == TP_STATUS_OK
-            ? refresh_scan->count
-            : -1;
+    const int after_n = tp_scan_dir(rdir, &refresh_scan, &refresh_error) == TP_STATUS_OK
+                            ? refresh_scan.count
+                            : -1;
+    tp_scan_free(&refresh_scan);
     nt_log_info("SELFTEST: refresh cycle temp png before=%d after=%d (removed=%d)", before_n, after_n, before_n - after_n);
 #ifdef _WIN32
     (void)RemoveDirectoryA(rdir);
@@ -1123,7 +1327,6 @@ void run_selftest(void) {
                     i_basic = i;
                 }
             }
-            gui_scan_invalidate_all();
             double ms_r = 0.0;
             double ms_b = 0.0;
             char pe[256] = {0};
@@ -1277,7 +1480,6 @@ void run_selftest(void) {
             gui_project_add_atlas().visible_index;
         if (sidx >= 0) {
             (void)gui_project_add_source(sidx, sdir);
-            gui_scan_invalidate_all();
             double sms = 0.0;
             char serr[256] = {0};
             char snote[128] = {0};
@@ -1453,7 +1655,6 @@ void run_selftest(void) {
             write_tga_2x2(fp);
         }
         (void)gui_project_add_source(0, pdir);
-        gui_scan_invalidate_all();
         double cms = 0.0;
         char cerr[256] = {0};
         char cnote[128] = {0};
@@ -1605,7 +1806,6 @@ void run_selftest(void) {
         char afolder[512];
         to_abs("examples/defold-demo/examples/anim_trim/anims", afolder, sizeof afolder);
         (void)gui_project_add_source(0, afolder);
-        gui_scan_invalidate_all();
 
         gui_project_mark_packed(); /* pretend current, then a setting change must set stale */
         const tp_session_snapshot *setting_snapshot = NULL;
@@ -1617,9 +1817,10 @@ void run_selftest(void) {
             tp_session_snapshot_revision(setting_snapshot),
             GUI_ATLAS_PADDING, 7, 0.0F);
         gui_request_gesture_commit();
-        apply_pending();
+        gui_actions__selftest_drain_intents();
         NT_ASSERT(gui_draft_phase() == GUI_EDIT_IDLE &&
                   "padding draft submits before continuing");
+        selftest_observe_session();
         nt_log_info("SELFTEST: setting change stale=%d (expect 1)", gui_project_is_stale());
         NT_ASSERT(gui_project_is_stale() && "a setting change sets preview stale");
 
@@ -1631,9 +1832,10 @@ void run_selftest(void) {
             tp_session_snapshot_revision(setting_snapshot),
             GUI_ATLAS_SHAPE, 2, 0.0F);
         gui_request_gesture_commit();
-        apply_pending();
+        gui_actions__selftest_drain_intents();
         NT_ASSERT(gui_draft_phase() == GUI_EDIT_IDLE &&
                   "shape draft submits before continuing");
+        selftest_observe_session();
         double pms = 0.0;
         char perr[256] = {0};
         char pnote[128] = {0};
@@ -1654,13 +1856,13 @@ void run_selftest(void) {
         if (source0 && tp_session_snapshot_resolve_path(source_snapshot, source_atlas->id,
                                                         source0->id, afabs, sizeof afabs,
                                                         &source_error) == TP_STATUS_OK) {
-            const gui_scan_result *sc = NULL;
-            if (gui_scan_get(afabs, &sc, &source_error) == TP_STATUS_OK &&
-                sc->count > 0) {
+            tp_scan_result sc = {0};
+            if (tp_scan_dir(afabs, &sc, &source_error) == TP_STATUS_OK &&
+                sc.count > 0) {
                 char source_key[TP_SRCKEY_MAX];
                 char spn[192];
-                (void)snprintf(source_key, sizeof source_key, "%s", sc->entries[0].rel);
-                (void)snprintf(spn, sizeof spn, "%s", sc->entries[0].rel);
+                (void)snprintf(source_key, sizeof source_key, "%s", sc.entries[0].rel);
+                (void)snprintf(spn, sizeof spn, "%s", sc.entries[0].rel);
                 char *dot = strrchr(spn, '.');
                 if (dot) {
                     *dot = '\0';
@@ -1692,6 +1894,7 @@ void run_selftest(void) {
                 nt_log_info("SELFTEST: sprite '%s' RECT override -> vert_count=%d (expect 4)", spn, vc);
                 NT_ASSERT(vc == 4 && "RECT per-sprite override packs a 4-vert rect");
             }
+            tp_scan_free(&sc);
         }
 
         /* save + export a fresh GUI project -> the seeded target writes files (audit I1) */
@@ -1731,7 +1934,7 @@ void run_selftest(void) {
         (void)remove(fpath);
     }
 
-    /* --- animations (ux.md §3.7b): pure playback map, create-from-selection natural sort, reorder,
+    /* --- animations: pure playback map, create-from-selection natural sort, reorder,
      *     round-trip preserves frames order + playback + flips, remove-frame path --- */
     {
         bool fin = false;
@@ -1759,7 +1962,6 @@ void run_selftest(void) {
         }
         NT_ASSERT(gui_project_add_source(aidx, anim_source_dir) == GUI_ADD_ADDED &&
                   "animation selector fixture adds one real source");
-        gui_scan_invalidate_all();
         multi_sel_clear();
         multi_sel_add("walk_10"); /* deliberately out of natural order */
         multi_sel_add("walk_2");
@@ -1848,7 +2050,7 @@ void run_selftest(void) {
         gui_request_open_preview(&preview_ref);
         NT_ASSERT(selftest_remove_animation_named_at(aidx, "shift_first") &&
                   "M2: shift the animation collection before preview drain");
-        apply_pending();
+        gui_actions__selftest_drain_intents();
         const tp_session_snapshot *shift_snapshot = gui_project_snapshot();
         const tp_snapshot_atlas *shift_atlas = selftest_atlas_at(aidx, NULL);
         const int shift_selection =
@@ -1872,9 +2074,10 @@ void run_selftest(void) {
         gui_request_remove_animation_ref(&remove_preview_ref);
         (void)selftest_select_animation_at(
             aidx, 0); /* another stable selection must not define preview ownership */
-        apply_pending();
+        gui_actions__selftest_drain_intents();
         NT_ASSERT(!s_preview_active &&
                   "M2: removing the previewed animation compares stable IDs, not queued indices");
+        selftest_observe_session();
 
         NT_ASSERT(selftest_select_atlas(aidx));
         multi_sel_clear();
@@ -1889,7 +2092,8 @@ void run_selftest(void) {
             0)); /* redirect the live UI after intent capture */
         multi_sel_clear();
         multi_sel_add("wrong_selection");
-        apply_pending();
+        gui_actions__selftest_drain_intents();
+        selftest_observe_session();
         shift_snapshot = gui_project_snapshot();
         shift_atlas = selftest_atlas_at(aidx, NULL);
         const tp_snapshot_animation *queued = shift_atlas
@@ -1953,7 +2157,7 @@ void run_selftest(void) {
 
         /* (3) F1: "Add frames" is DEFERRED (was a synchronous commit -> UAF while declare_animation_editor
          *     held a live `an` it kept dereferencing). The enqueue captures COPIED keys, so the frames land
-         *     only on the apply_pending drain AND clearing the live selection between enqueue and drain does
+         *     only on the test intent drain AND clearing the live selection between enqueue and drain does
          *     NOT change what lands. If someone reverts to a synchronous commit, fc_mid becomes 2 and this
          *     assertion fails HERE -- the UAF cannot regress silently. */
         gui_project_test_new();
@@ -1971,7 +2175,6 @@ void run_selftest(void) {
         }
         NT_ASSERT(gui_project_add_source(0, add_frames_dir) == GUI_ADD_ADDED &&
                   "deferred add-frames fixture adds one real source");
-        gui_scan_invalidate_all();
         const int f1anim = gui_project_create_animation(0, "addf", NULL, 0); /* empty animation */
         NT_ASSERT(selftest_select_animation_at(0, f1anim));
         multi_sel_clear();
@@ -1986,7 +2189,8 @@ void run_selftest(void) {
         const tp_snapshot_animation *f1a = selftest_animation_at(0, f1anim);
         const int fc_mid = f1a ? f1a->frame_count : -1;
         multi_sel_clear();                    /* mutate the selection AFTER the enqueue: copied keys stand */
-        apply_pending();                      /* drains -> gui_project_anim_add_frames replays the copies */
+        gui_actions__selftest_drain_intents();                      /* drains -> gui_project_anim_add_frames replays the copies */
+        selftest_observe_session();
         f1a = selftest_animation_at(0, f1anim);
         const int fc_after = f1a ? f1a->frame_count : -1;
         const tp_snapshot_frame *f1f0 = selftest_frame_at(0, f1anim, 0);
@@ -2031,7 +2235,8 @@ void run_selftest(void) {
         gui_target_ref f2ref;
         NT_ASSERT(selftest_target_ref_at(0, 0, &f2ref));
         gui_edit_target_enabled(&f2ref, !en_was);
-        apply_pending();
+        gui_actions__selftest_drain_intents();
+        selftest_observe_session();
         f2t = selftest_target_at(0, 0);
         nt_log_info("SELFTEST: F2 out_path len=%zu after toggle enabled %d->%d (match=%d)", strlen(f2t->out_path),
                     en_was, f2t->enabled, strcmp(f2t->out_path, longp) == 0);
@@ -2079,6 +2284,7 @@ void run_selftest(void) {
                   "#11: in-flight path text exists only in the draft");
         NT_ASSERT(gui_actions__submit_draft() &&
                   "#11: gesture submits the active path draft");
+        selftest_observe_session();
         const int t11_u1 = gui_project_undo_depth();
         const tp_snapshot_target *t11b = selftest_target_at(0, 0);
         nt_log_info("SELFTEST: #11 path draft: 4 changes undo %d->%d path='%s' exporter='%s' enabled=%d", t11_u0,
@@ -2099,6 +2305,7 @@ void run_selftest(void) {
         (void)selftest_set_target_path_at(0, 0, "out/scratch");
         (void)selftest_set_target_path_at(0, 0, "out/final.json");
         NT_ASSERT(gui_actions__submit_draft());
+        selftest_observe_session();
         NT_ASSERT(gui_project_undo_depth() == t11_unz &&
                   gui_project_is_stale() == t11_stale_before &&
                   strcmp(selftest_target_at(0, 0)->out_path, "out/final.json") == 0 &&
@@ -2109,7 +2316,8 @@ void run_selftest(void) {
         (void)selftest_set_target_path_at(0, 0, "out/typed.json");
         gui_edit_target_enabled(&t11_ref, !t11_en);
         gui_request_gesture_commit();
-        apply_pending();
+        gui_actions__selftest_drain_intents();
+        selftest_observe_session();
         const tp_snapshot_target *t11i = selftest_target_at(0, 0);
         NT_ASSERT(strcmp(t11i->out_path, "out/typed.json") == 0 &&
                   t11i->enabled == !t11_en &&
@@ -2120,7 +2328,8 @@ void run_selftest(void) {
         NT_ASSERT(selftest_target_ref_at(0, 0, &t11_ref));
         gui_edit_target_enabled(&t11_ref, !t11_en1);
         gui_request_gesture_commit();
-        apply_pending();
+        gui_actions__selftest_drain_intents();
+        selftest_observe_session();
         t11i = selftest_target_at(0, 0);
         NT_ASSERT(gui_draft_phase() == GUI_EDIT_EDITING &&
                   t11i->enabled == t11_en1 &&
@@ -2137,7 +2346,6 @@ void run_selftest(void) {
         char pfolder[512];
         to_abs("examples/defold-demo/examples/anim_trim/anims", pfolder, sizeof pfolder);
         (void)gui_project_add_source(0, pfolder);
-        gui_scan_invalidate_all();
     }
 
     /* --- H/P2-14: Add Atlas auto-name must SCAN for a free atlasN, not blindly use atlas_count+1 (which
@@ -2337,6 +2545,7 @@ void run_selftest(void) {
         gui_project__test_fail_next_recovery_writes(1);
         NT_ASSERT(gui_actions__submit_draft() &&
                   "J6: draft submit remains successful when recovery degrades");
+        selftest_observe_session();
         const bool j6ret = selftest_set_atlas_name_at(0, "structural_should_abort");
         gui_recovery_notice j6notice = {0};
         const bool j6surfaced = gui_project__test_recovery_notice(
@@ -2361,7 +2570,6 @@ void run_selftest(void) {
         char j7folder[512];
         to_abs("examples/defold-demo/examples/anim_trim/anims", j7folder, sizeof j7folder);
         (void)gui_project_add_source(0, j7folder);
-        gui_scan_invalidate_all();
         (void)gui_project_take_op_error(NULL, 0);
         NT_ASSERT(gui_project__test_attach_memory_recovery() && "J7: memory journal attached");
         gui_pack_clear(-1); /* no prior result */
@@ -2412,23 +2620,35 @@ void run_selftest(void) {
                   !gui_project__test_recovery_notice(
                       TP_STATUS_JOURNAL_FAILED, NULL) &&
                   "J8: view-facing New only enqueues before the between-frame drain");
-        apply_pending();
+        gui_actions__selftest_drain_intents();
         const bool j8kept = gui_project_has_path();
+        gui_lifecycle_view lifecycle =
+            gui_actions_lifecycle_view();
         nt_log_info("SELFTEST: J8 draft-gate has_path=%d confirm=%d draft=%d",
-                    (int)j8kept, (int)s_confirm_open,
-                    (int)s_confirm_draft);
-        NT_ASSERT(j8kept && s_confirm_open && s_confirm_draft &&
-                  s_after_confirm == GUI_LIFECYCLE_REQUEST_NEW &&
+                    (int)j8kept,
+                    (int)gui_actions_lifecycle_active(),
+                    (int)(lifecycle.phase ==
+                          GUI_LIFECYCLE_RESOLVE_DRAFT));
+        NT_ASSERT(j8kept &&
+                  lifecycle.phase ==
+                      GUI_LIFECYCLE_RESOLVE_DRAFT &&
+                  lifecycle.request ==
+                      GUI_LIFECYCLE_REQUEST_NEW &&
                   gui_draft_phase() == GUI_EDIT_EDITING &&
                   "J8: New presents the explicit active-draft choice");
         NT_ASSERT(!gui_project__test_recovery_notice(
                        TP_STATUS_JOURNAL_FAILED, NULL) &&
                   "J8: opening the draft choice does not submit it");
-        s_modal_action = MODAL_SAVE; /* Apply & Continue */
-        apply_pending();
+        gui_actions_lifecycle_choose(
+            GUI_LIFECYCLE_CHOICE_ACCEPT);
+        gui_actions__selftest_drain_intents();
+        selftest_observe_session();
+        lifecycle = gui_actions_lifecycle_view();
         NT_ASSERT(gui_draft_phase() == GUI_EDIT_IDLE &&
-                  s_confirm_open && !s_confirm_draft &&
-                  s_after_confirm == GUI_LIFECYCLE_REQUEST_NEW &&
+                  lifecycle.phase ==
+                      GUI_LIFECYCLE_RESOLVE_DIRTY &&
+                  lifecycle.request ==
+                      GUI_LIFECYCLE_REQUEST_NEW &&
                   gui_project_is_dirty() &&
                   selftest_atlas_at(0, NULL)->padding == j8pad + 4 &&
                   "J8: Apply submits the draft, then continues to the dirty-project choice");
@@ -2436,10 +2656,14 @@ void run_selftest(void) {
                       TP_STATUS_JOURNAL_FAILED, NULL) &&
                       !gui_project_take_op_error(NULL, 0) &&
                   "J8: draft submit preserves the persistent recovery warning");
-        s_modal_action = MODAL_CANCEL;
-        apply_pending();
-        NT_ASSERT(!s_confirm_open && !s_confirm_draft &&
-                  s_after_confirm == GUI_LIFECYCLE_REQUEST_NONE &&
+        gui_actions_lifecycle_choose(
+            GUI_LIFECYCLE_CHOICE_CANCEL);
+        gui_actions__selftest_drain_intents();
+        lifecycle = gui_actions_lifecycle_view();
+        NT_ASSERT(lifecycle.phase ==
+                      GUI_LIFECYCLE_IDLE &&
+                  lifecycle.request ==
+                      GUI_LIFECYCLE_REQUEST_NONE &&
                   gui_project_has_path() &&
                   "J8: Cancel keeps the current project after Apply");
         (void)remove(j8path);
@@ -2465,6 +2689,7 @@ void run_selftest(void) {
         gui_project__test_fail_next_recovery_writes(1);
         NT_ASSERT(gui_actions__submit_draft() &&
                   "J9: prerequisite draft submit succeeds");
+        selftest_observe_session();
         const bool j9ret_fail = gui_project_remove_atlas(j9added);
         const int j9count1 = tp_session_snapshot_atlas_count(gui_project_snapshot());
         nt_log_info("SELFTEST: J9 remove-after-degrade ret=%d count %d->%d (want 1, -1)", (int)j9ret_fail, j9count0, j9count1);
@@ -2506,6 +2731,7 @@ void run_selftest(void) {
         gui_project__test_fail_next_recovery_writes(1);
         NT_ASSERT(gui_actions__submit_draft() &&
                   "J10: prerequisite draft submit succeeds");
+        selftest_observe_session();
         const bool j10_flush_ret = selftest_set_anim_id_at(0, j10b, "totally_unique_name");
         gui_recovery_notice j10_notice = {0};
         const bool j10_fsurfaced = gui_project__test_recovery_notice(
@@ -2554,6 +2780,7 @@ void run_selftest(void) {
         NT_ASSERT(j11_submit && j11_fsurfaced &&
                    !gui_project_take_op_error(NULL, 0) &&
                    "J11: recovery-degraded draft submit still commits successfully");
+        selftest_observe_session();
 
         /* (J11b) A core-rejected atlas rename preserves the draft until the
          * user explicitly corrects or discards it. */
@@ -2567,7 +2794,8 @@ void run_selftest(void) {
             j11b_atlas->id, j11b_revision);
         NT_ASSERT(gui_text_edit_update(""));
         gui_request_gesture_commit();
-        apply_pending();
+        gui_actions__selftest_drain_intents();
+        selftest_observe_session();
         nt_log_info("SELFTEST: J11b invalid atlas Enter phase=%d revision=%lld (want EDITING, unchanged)",
                     (int)gui_draft_phase(), (long long)tp_session_snapshot_revision(gui_project_snapshot()));
         NT_ASSERT(gui_draft_phase() == GUI_EDIT_EDITING &&
@@ -2613,7 +2841,8 @@ void run_selftest(void) {
                        TP_STATUS_JOURNAL_FAILED, NULL) &&
                   "J12: blocked Undo does not consume the pending recovery failure");
         gui_request_gesture_commit();
-        apply_pending();
+        gui_actions__selftest_drain_intents();
+        selftest_observe_session();
         NT_ASSERT(gui_project__test_recovery_notice(
                       TP_STATUS_JOURNAL_FAILED, NULL) &&
                   gui_draft_phase() == GUI_EDIT_IDLE &&
@@ -2621,6 +2850,7 @@ void run_selftest(void) {
                   !gui_project_take_op_error(NULL, 0) &&
                   "J12: explicit Apply commits and surfaces recovery degradation");
         do_undo();
+        selftest_observe_session();
         NT_ASSERT(strncmp(s_status, "Undo", 4) == 0 &&
                   selftest_atlas_at(0, NULL)->padding == j12pad &&
                   "J12: Undo resumes after the draft reaches a terminal state");
@@ -2709,13 +2939,16 @@ void run_selftest(void) {
         j15list->has_more = true;
         gui_actions_open_recovery(j15list);
         j15list->count = 0; /* prove gui_actions owns a value copy */
-        NT_ASSERT(s_recovery_open && gui_actions_recovery_count() == 1 &&
-                  gui_actions_recovery_has_more() &&
+        const gui_recovery_view j15view =
+            gui_actions_recovery_view();
+        NT_ASSERT(j15view.phase == GUI_RECOVERY_CHOOSE &&
+                  j15view.count == 1 &&
+                  j15view.has_more &&
                   gui_actions_recovery_at(0) != NULL &&
                   gui_actions_recovery_at(-1) == NULL &&
                   gui_actions_recovery_at(1) == NULL &&
                   "J15: recovery modal owns the typed bounded list");
-        s_recovery_open = false; /* Later: leave the candidate on disk */
+        gui_actions_recovery_dismiss();
         NT_ASSERT(gui_recovery_collect(j15list) == 1 &&
                   "J15: Later preserves recovery for the next launch");
 
@@ -2828,7 +3061,6 @@ void run_selftest(void) {
         char rfolder[512];
         to_abs("examples/defold-demo/examples/anim_trim/anims", rfolder, sizeof rfolder);
         (void)gui_project_add_source(0, rfolder);
-        gui_scan_invalidate_all();
     }
 
     /* --- About modal: open it so the auto-quit frames render it (OK/Esc close it interactively) --- */
@@ -2887,13 +3119,10 @@ void run_selftest(void) {
                   "SELFTEST: async pack must start");
         const clock_t async_deadline = clock() + (clock_t)(60 * CLOCKS_PER_SEC);
         while (gui_pack_async_busy()) {
-            /* Same order the frame loop uses: drain the host queue (which pumps
-             * the worker process), observe, then land the receipt. */
+            /* Same explicit boundary the frame loop uses. */
             tp_error pump_error = {{0}};
-            NT_ASSERT(gui_project_lifecycle_pump(NULL, &pump_error) ==
+            NT_ASSERT(gui_actions_step(NULL, &pump_error) ==
                       TP_STATUS_OK);
-            selftest_observe_session();
-            gui_actions_poll_host_completion();
             NT_ASSERT(clock() < async_deadline &&
                       "SELFTEST: async pack did not finish within 60s");
         }
@@ -3089,11 +3318,12 @@ void selftest_pre_frame(void) {
         }
         s_about_open = false;
         s_export_open = false; /* close the Export dialog exercised during warmup before the pixel probe */
-        s_confirm_open = false; /* a logical phase (J8: request_new on a dirty project, per the PR#3
+        gui_actions_lifecycle_dismiss(); /* a logical phase (J8: request_new on a dirty project, per the PR#3
                                  * recovery-degradation semantics) leaves the unsaved-changes confirm
                                  * modal open; it dims the canvas behind it AND its blue Save button
                                  * reads as static "cyan", masking the outline delta. Dismiss it before
                                  * the visual probe (like about/export). */
+        gui_actions__selftest_drain_intents();
         preview_stop();
         int found = -1;
         const int atlas_count = tp_session_snapshot_atlas_count(gui_project_snapshot());
@@ -3265,7 +3495,7 @@ void selftest_pre_frame(void) {
                     GUI_ATLAS_MAX_SIZE, 256, 0.0F);
                 NT_ASSERT(gui_actions__submit_draft() &&
                           "SELFTEST: stale-scene max-size draft submits");
-                gui_scan_invalidate_all();
+                selftest_observe_session();
             }
             double pms = 0.0;
             char perr[256] = {0};
@@ -3304,7 +3534,7 @@ void selftest_pre_frame(void) {
         }
     } else if (s_st_phase == 9) {
         /* Async-path equivalence (req 4): start an async pack, spin until it lands (poll_async in
-         * apply_pending swaps it in), then a blocking reference pack of the same project must match --
+         * gui_actions_step swaps it in), then a blocking reference pack of the same project must match --
          * determinism holds because only WHERE the pack ran changed. */
         g_ui_scale = 1.0F;
         g_nt_window.fb_width = 1280;
@@ -3388,7 +3618,7 @@ void selftest_pre_frame(void) {
                     GUI_ATLAS_ALLOW_TRANSFORM, 1, 0.0F);
                 NT_ASSERT(gui_actions__submit_draft() &&
                           "SELFTEST preview: allow-transform draft submits");
-                gui_scan_invalidate_all();
+                selftest_observe_session();
             }
             double nms = 0.0;
             char nerr[256] = {0};
@@ -3483,7 +3713,7 @@ void selftest_pre_frame(void) {
     } else if (s_st_phase == 12) {
         /* Async EXPORT (req 4a): mirror phase 9's async==blocking pattern for the export path. Start an
          * async export of a fresh single-atlas project whose seeded target points at an isolated tmp base
-         * under the build dir, spin until it lands (poll_async in apply_pending reads the report + frees the
+         * under the build dir, spin until it lands (gui_actions_step reads the report + frees the
          * job), then assert the on-disk json + page png exist -- the export_worker / save_buffer clone /
          * mkdirs path is otherwise untested (only the blocking gui_pack_export was exercised). */
         g_ui_scale = 1.0F;
@@ -3497,7 +3727,6 @@ void selftest_pre_frame(void) {
             char afolder[512];
             to_abs("examples/defold-demo/examples/anim_trim/anims", afolder, sizeof afolder);
             (void)gui_project_add_source(0, afolder);
-            gui_scan_invalidate_all();
             char base[600];
             (void)snprintf(base, sizeof base, "%s/selftest_async_export/at0", s_exe_dir); /* ABSOLUTE -> resolves w/o a saved dir */
             selftest_set_target_at(0, 0, "json-neotolis", base, true);
@@ -3535,7 +3764,7 @@ void selftest_pre_frame(void) {
         }
     } else if (s_st_phase == 13) {
         /* Cancel mid-pack (req 4b): start an async pack over a CLEARED slot with stale set, cancel it
-         * immediately, spin until it lands. gui_pack_poll must DISCARD the worker's result (no slot swap)
+         * immediately, spin until it lands. gui_actions_step must DISCARD the worker's result (no slot swap)
          * and poll_async must NOT clear stale -- the cancel-discard path (gui_pack.c) is otherwise never
          * hit (phase 9 waits for !busy first). */
         g_ui_scale = 1.0F;
@@ -3549,7 +3778,6 @@ void selftest_pre_frame(void) {
             char afolder[512];
             to_abs("examples/defold-demo/examples/anim_trim/anims", afolder, sizeof afolder);
             (void)gui_project_add_source(0, afolder);
-            gui_scan_invalidate_all();
             gui_project_mark_stale();
             char aerr[256] = {0};
             const bool started = gui_pack_async_start(0, aerr, sizeof aerr);
@@ -3571,8 +3799,9 @@ void selftest_pre_frame(void) {
         /* Stable publication identity (req 4d): pack atlas index 1, then remove the
          * earlier atlas while the worker flies.  The survivor shifts to index 0;
          * completion must resolve its captured atlas ID instead of publishing into
-         * stale slot 1. Removing a different atlas does not change the survivor's
-         * canonical pack_input_hash, so the landed result remains current. */
+         * stale slot 1. The model-generation token changed, so the adopted receipt
+         * remains explicitly stale even though its semantic pack hash still names
+         * the survivor's result. */
         g_ui_scale = 1.0F;
         g_nt_window.fb_width = 1280;
         g_nt_window.fb_height = 800;
@@ -3588,11 +3817,23 @@ void selftest_pre_frame(void) {
             char afolder[512];
             to_abs("examples/defold-demo/examples/anim_trim/anims", afolder, sizeof afolder);
             (void)gui_project_add_source(1, afolder);
-            gui_scan_invalidate_all();
+            const tp_session_snapshot *remove_snapshot =
+                gui_project_snapshot();
+            const tp_snapshot_atlas *earlier_atlas =
+                tp_session_snapshot_atlas_at(
+                    remove_snapshot, 0);
+            NT_ASSERT(earlier_atlas);
+            const tp_id128 earlier_atlas_id =
+                earlier_atlas->id;
+            const int64_t remove_revision =
+                tp_session_snapshot_revision(
+                    remove_snapshot);
             char aerr[256] = {0};
             const bool started = gui_pack_async_start(1, aerr, sizeof aerr);
             NT_ASSERT(started && "SELFTEST: stable-publication pack must start");
-            NT_ASSERT(gui_project_remove_atlas(0) &&
+            NT_ASSERT(selftest_remove_atlas_ref(
+                          earlier_atlas_id,
+                          remove_revision) &&
                       "SELFTEST: removing the earlier atlas must commit while pack runs");
         } else if (gui_pack_async_busy()) {
             NT_ASSERT(s_st_pf < 3000 && "SELFTEST: stable-publication pack did not land");
@@ -3602,9 +3843,9 @@ void selftest_pre_frame(void) {
                           strcmp(survivor_result->atlas_name, "survivor") == 0 &&
                           gui_pack_result(1) == NULL &&
                       "SELFTEST: async result must follow the survivor atlas ID to index 0");
-            NT_ASSERT(!gui_project_is_stale() &&
-                      "SELFTEST: unrelated atlas removal must not stale the survivor result");
-            nt_log_info("SELFTEST: async result followed stable atlas id after index shift");
+            NT_ASSERT(gui_project_is_stale() &&
+                      "SELFTEST: a newer model token keeps the adopted survivor result stale");
+            nt_log_info("SELFTEST: async result followed stable atlas id after index shift and stayed stale");
             s_st_phase = 15;
             s_st_pf = 0;
         }
@@ -3623,7 +3864,6 @@ void selftest_pre_frame(void) {
             char afolder[512];
             to_abs("examples/defold-demo/examples/anim_trim/anims", afolder, sizeof afolder);
             (void)gui_project_add_source(0, afolder);
-            gui_scan_invalidate_all();
             double pms = 0.0;
             char perr[256] = {0};
             char pnote[128] = {0};
@@ -3699,7 +3939,6 @@ void selftest_pre_frame(void) {
             char afolder[512];
             to_abs("examples/defold-demo/examples/anim_trim/anims", afolder, sizeof afolder);
             (void)gui_project_add_source(0, afolder);
-            gui_scan_invalidate_all();
             char aerr[256] = {0};
             const bool started = gui_pack_async_start(0, aerr, sizeof aerr);
             NT_ASSERT(started && gui_pack_async_busy() &&
@@ -3713,7 +3952,7 @@ void selftest_pre_frame(void) {
             gui_pack_shutdown();
             NT_ASSERT(
                 gui_project_lifecycle_state_query() ==
-                    GUI_PROJECT_LIFECYCLE_OPEN_IDLE &&
+                    GUI_PROJECT_LIFECYCLE_ACTIVE &&
                 gui_pack_async_busy() &&
                 "SELFTEST: pack cleanup must not own session drain");
             tp_error replacement_error = {{0}};
@@ -3727,14 +3966,14 @@ void selftest_pre_frame(void) {
         NT_ASSERT(
             s_st_pf < 3000 &&
             "SELFTEST: shutdown drain exceeded the frame cap");
-        if (gui_project_lifecycle_state_query() ==
-                GUI_PROJECT_LIFECYCLE_DRAINING ||
+        if (gui_project_lifecycle_state_query() !=
+                GUI_PROJECT_LIFECYCLE_ACTIVE ||
             gui_pack_async_busy()) {
             return;
         }
         NT_ASSERT(
             gui_project_lifecycle_state_query() ==
-            GUI_PROJECT_LIFECYCLE_OPEN_IDLE);
+            GUI_PROJECT_LIFECYCLE_ACTIVE);
         gui_shell_reset_shown_result();
         NT_ASSERT(!gui_canvas_has_atlas(&s_canvas) &&
                   gui_canvas_get_mode(&s_canvas) == GUI_CANVAS_SOURCE &&

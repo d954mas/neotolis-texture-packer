@@ -1,6 +1,7 @@
-/* Normalization pass unit tests (ROADMAP Phase 2): ext/folder strip, per-sprite
+/* Normalization pass unit tests: ext/folder strip, per-sprite
  * export-name override (rename), EXPLICIT animation assembly (no auto-grouping,
- * ux.md 3.7b), munge collision, alias entries, final-name sort, scale. Pure
+ * docs/formats/json-neotolis.md), munge collision, alias entries, final-name
+ * sort, scale. Pure
  * tp_core -- synthetic tp_results, NO builder. */
 
 #define _CRT_SECURE_NO_WARNINGS
@@ -10,7 +11,7 @@
 
 #include "tp_core/tp_arena.h"
 #include "tp_core/tp_export.h"
-#include "tp_core/tp_model.h"
+#include "tp_core/tp_pack_result.h"
 #include "unity.h"
 
 void setUp(void) {}
@@ -227,7 +228,7 @@ void test_explicit_animation(void) {
 void test_frame_follows_rename(void) {
     /* A4: a renamed sprite. Frames are stored in override-KEY space and must
      * resolve to the FINAL name -- the rename -- in the exported frame list
-     * (arch review 3.2). An un-renamed frame keeps its key. */
+     * An un-renamed frame keeps its key. */
     tp_arena *ar = tp_arena_create(0);
     tp_sprite s[2] = {mk("hero.png", -1), mk("gem.png", -1)};
     tp_result r = mk_result(s, 2);
@@ -328,7 +329,7 @@ void test_dangling_frame(void) {
 
 void test_no_auto_grouping(void) {
     /* Numeric-suffix sprites with NO explicit animation produce ZERO animations
-     * (auto-grouping was removed, ux.md 3.7b -- bob still auto-promotes each
+     * (docs/formats/json-neotolis.md; bob still auto-promotes each
      * sprite to a 1-frame anim on the engine side, independent of this list). */
     tp_arena *ar = tp_arena_create(0);
     tp_sprite s[3] = {mk("walk_10", -1), mk("walk_1", -1), mk("walk_2", -1)};

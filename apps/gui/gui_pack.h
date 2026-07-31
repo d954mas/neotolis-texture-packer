@@ -1,7 +1,7 @@
 #ifndef NTPACKER_GUI_PACK_H
 #define NTPACKER_GUI_PACK_H
 
-/* Thin GUI adapter over session-owned typed Pack/Export jobs (ux.md §3.2/§3.3b).
+/* Thin GUI adapter over session-owned typed Pack jobs and Export commands.
  * It owns only presentation result slots; input assembly, algorithms, and worker
  * lifetime remain below the frontend boundary.
  *
@@ -12,7 +12,7 @@
  * gui_pack_atlas/gui_pack_export are synchronous adapters used by selftest/shot; they drain the
  * same session-owned typed jobs as interactive use.
  *
- * RESULT RESIDENCY (packets S18/S28, master spec §10.4). Native results are not
+ * RESULT RESIDENCY (docs/architecture/jobs-pack-and-cache.md). Native results are not
  * held one-per-atlas forever. They live in a session-lifetime
  * `tp_pack_result_cache` behind this adapter: the atlas the presentation reads is
  * the store's PINNED active result, and every other packed atlas is an INACTIVE
@@ -24,7 +24,7 @@
  *
  * That cold tier is the reason a demoted atlas can stay resident at all: the
  * store compresses its pages in the BACKGROUND (one low-priority thread, applied
- * on the per-frame pump inside gui_pack_poll) and decompresses them in parallel
+ * on the per-frame pump inside gui_actions_step) and decompresses them in parallel
  * when the atlas is switched back to. The only thing a caller of the functions
  * below can observe about it is that switching to a long-untouched atlas costs a
  * decode (tens of milliseconds for a big atlas) instead of nothing.
@@ -40,7 +40,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#include "tp_core/tp_model.h" /* tp_result */
+#include "tp_core/tp_pack_result.h" /* tp_result */
 #include "tp_core/tp_id.h"
 #include "tp_core/tp_session.h"
 
@@ -55,21 +55,22 @@ extern "C" {
  * gets its own `req-` directory UNDER this one, created by the job worker. */
 bool gui_pack_init(const char *work_dir);
 
-/* Packs atlas `atlas_index` through a typed session job and stores the returned
+/* Packs stable `atlas_id` through a typed session job and stores the returned
  * result in the atlas presentation slot (the previous slot is destroyed first).
  *
  * On success returns true, writes the wall-clock pack time to *out_ms (nullable), and appends any
  * skipped-missing-file count to `notice` (nullable, cap notice_cap). On failure returns false and
  * fills `err` (nullable). An atlas with zero usable sprites is a failure (nothing to show). */
-bool gui_pack_atlas(int atlas_index, double *out_ms, char *err, size_t err_cap, char *notice, size_t notice_cap);
+bool gui_pack_atlas(tp_id128 atlas_id, double *out_ms, char *err,
+                    size_t err_cap, char *notice, size_t notice_cap);
 
-/* The last successful result for `atlas_index`, or NULL if it was never packed
+/* The last successful result for `atlas_id`, or NULL if it was never packed
  * or its cached entry has been evicted. A failed Pack leaves it intact;
  * gui_project reports freshness separately -- restoring a demoted result is
  * freshness-neutral by construction, because nothing on the freshness path
  * (input tokens, pack_input_hash, the stale bit) is touched by residency.
  *
- * This read MUTATES residency: it makes `atlas_index` the resident atlas, which
+ * This read MUTATES residency: it makes `atlas_id` the resident atlas, which
  * demotes the previously resident one into the byte-budget LRU and may evict it.
  * Two atlases are therefore never resident at once, and the returned pointer is
  * valid only until the next residency change -- a gui_pack_result for a DIFFERENT
@@ -78,7 +79,7 @@ bool gui_pack_atlas(int atlas_index, double *out_ms, char *err, size_t err_cap, 
  * never hold two atlases' results at once. A caller that must read a SECOND
  * atlas' result without taking the pin away from the one on screen uses
  * gui_pack_result_peek below. */
-const tp_result *gui_pack_result(int atlas_index);
+const tp_result *gui_pack_result(tp_id128 atlas_id);
 /* The same result, read WITHOUT changing residency: no reside, no demotion, no
  * LRU touch, no eviction, no decompression. This is the read for a consumer that
  * is not the one driving what the canvas shows (the animation preview player), so
@@ -101,16 +102,16 @@ const tp_result *gui_pack_result(int atlas_index);
  *
  * The pointer carries the SAME lifetime rule as gui_pack_result's: it survives
  * only until the next residency change, so it is a within-operation borrow. */
-const tp_result *gui_pack_result_peek(int atlas_index);
+const tp_result *gui_pack_result_peek(tp_id128 atlas_id);
 /* Changes whenever a successful Pack publishes a new result into this atlas slot. */
-uint64_t gui_pack_result_version(int atlas_index);
+uint64_t gui_pack_result_version(tp_id128 atlas_id);
 
 /* Canonical lookup used by rows and animation frames. Project-built pack inputs
  * use a collision-free internal name derived from {source_id, source_key}; display
  * names are never authoritative here. */
-int gui_pack_find_sprite_ref(int atlas_index, tp_id128 source_id,
+int gui_pack_find_sprite_ref(tp_id128 atlas_id, tp_id128 source_id,
                              const char *source_key);
-bool gui_pack_sprite_matches_ref(int atlas_index, int sprite_index,
+bool gui_pack_sprite_matches_ref(tp_id128 atlas_id, int sprite_index,
                                  tp_id128 source_id,
                                  const char *source_key);
 /* Canonical lookup against the exact result a consumer is displaying. This is
@@ -133,16 +134,16 @@ void gui_pack_preview_diff_work_reset(void);
 uint64_t gui_pack_preview_diff_rebuilds(void);
 #endif
 
-/* Exports every ENABLED target of atlas `atlas_index` through a typed session job. Returns true on success
+/* Exports every ENABLED target of atlas `atlas_id` through a typed session job. Returns true on success
  * and writes the enabled-target count to *out_targets and the metadata-loss notice count to
  * *out_notices (both nullable); a joined notice summary goes to `notice`. On failure returns false and
  * fills `err` (e.g. unsaved project with relative output paths). */
-bool gui_pack_export(int atlas_index, int *out_targets, int *out_notices, char *err, size_t err_cap, char *notice,
+bool gui_pack_export(tp_id128 atlas_id, int *out_targets, int *out_notices, char *err, size_t err_cap, char *notice,
                      size_t notice_cap);
 
-/* Drops the stored result for one atlas (or the whole store with index < 0) and
+/* Drops the stored result for one atlas (or the whole store with a nil ID) and
  * releases its retained session-job result owner. Call on project new/open. */
-void gui_pack_clear(int atlas_index);
+void gui_pack_clear(tp_id128 atlas_id);
 
 /* --- export-target preview (packet EXP-PREVIEW) --------------------------------------------------
  * A view-only "what would exporter <id> produce from the CURRENT settings" pack, kept in ONE arena-
@@ -153,27 +154,29 @@ void gui_pack_clear(int atlas_index);
 
 /* Synchronous preview adapter for selftest/shot-preview; drains the same typed
  * session Pack job and lands its result in the preview slot. */
-bool gui_pack_preview_blocking(int atlas_index, const char *exporter_id, char *err, size_t err_cap);
+bool gui_pack_preview_blocking(tp_id128 atlas_id, const char *exporter_id,
+                               char *err, size_t err_cap);
 
 /* Async preview pack (interactive): uses the session-owned Pack handle; result lands in the preview
- * slot at a frame boundary (gui_pack_poll -> GUI_PACK_DONE_PREVIEW_*). false (fills err) if busy. */
-bool gui_pack_preview_async_start(int atlas_index, const char *exporter_id, char *err, size_t err_cap);
+ * slot at a step boundary (gui_actions_step -> GUI_PACK_DONE_PREVIEW_*). false (fills err) if busy. */
+bool gui_pack_preview_async_start(tp_id128 atlas_id, const char *exporter_id,
+                                  char *err, size_t err_cap);
 
-/* The stored preview result IF it belongs to `atlas_index`, else NULL (coherent binding: a stale slot
+/* The stored preview result IF it belongs to `atlas_id`, else NULL (coherent binding: a stale slot
  * from another atlas never shows). */
-const tp_result *gui_pack_preview_result(int atlas_index);
+const tp_result *gui_pack_preview_result(tp_id128 atlas_id);
 /* Changes whenever a successful export preview publishes a new result. */
-uint64_t gui_pack_preview_result_version(int atlas_index);
+uint64_t gui_pack_preview_result_version(tp_id128 atlas_id);
 
 /* Drops the preview slot and releases its retained session-job result owner.
  * Call on back-to-Native / atlas switch / model edit. */
 void gui_pack_preview_clear(void);
 
-/* Degradation summary for `exporter_id` on `atlas_index`: diffs the native session settings
+/* Degradation summary for `exporter_id` on `atlas_id`: diffs the native session settings
  * against the caps-clamped effective settings, plus the caps-vs-usage metadata drops (slice9/pivot).
  * Writes a SHORT chip caption to `chip` (empty when the format expresses everything) and a longer
  * field-by-field breakdown to `tip` (nullable). Returns the number of degradations found. */
-int gui_pack_preview_diff(int atlas_index, const char *exporter_id, char *chip, size_t chip_cap, char *tip,
+int gui_pack_preview_diff(tp_id128 atlas_id, const char *exporter_id, char *chip, size_t chip_cap, char *tip,
                           size_t tip_cap);
 
 /* --- async packing (interactive; owned worker process) -----------------------------------------
@@ -183,7 +186,8 @@ int gui_pack_preview_diff(int atlas_index, const char *exporter_id, char *chip, 
 typedef enum {
     GUI_PACK_ASYNC_NONE = 0,
     GUI_PACK_ASYNC_PACK,
-    GUI_PACK_ASYNC_EXPORT
+    GUI_PACK_ASYNC_EXPORT,
+    GUI_PACK_ASYNC_REFRESH
 } gui_pack_async_kind;
 
 typedef enum {
@@ -194,6 +198,9 @@ typedef enum {
     GUI_PACK_DONE_EXPORT_OK,
     GUI_PACK_DONE_EXPORT_FAIL,
     GUI_PACK_DONE_EXPORT_CANCELLED,
+    GUI_PACK_DONE_REFRESH_OK,
+    GUI_PACK_DONE_REFRESH_FAIL,
+    GUI_PACK_DONE_REFRESH_CANCELLED,
     /* Export-target PREVIEW pack (EXP-PREVIEW): lands in the SEPARATE preview slot, never the session
      * slot; the native pack/export/stale state is untouched. */
     GUI_PACK_DONE_PREVIEW_OK,
@@ -205,7 +212,6 @@ typedef struct {
     gui_pack_done kind;
     tp_session_job_rejection rejection;
     tp_status status;
-    int atlas_index;    /* pack: which atlas landed */
     tp_id128 atlas_id;  /* stable owner of the landed pack */
     double ms;          /* pack: wall-clock pack time */
     bool input_changed; /* pack: model/source token differs -> keep preview stale */
@@ -218,6 +224,10 @@ typedef struct {
     int atlases_skipped; /* export: atlases skipped for no usable input */
     bool partial_publication; /* cancelled export left committed outputs */
     bool publication_uncertain; /* failed writer may have published artifacts */
+    int added;
+    int removed;
+    int changed;
+    int unavailable;
     char err[256];      /* failure / first-error text */
     char note[128];     /* pack: notice text */
 } gui_pack_result_info;
@@ -231,14 +241,20 @@ bool gui_pack_format_export_cancelled(const gui_pack_result_info *info,
 bool gui_pack_format_export_failed(const gui_pack_result_info *info,
                                    char *out, size_t cap);
 
-/* Starts an async pack of `atlas_index`. false (fills err) if busy or the input can't assemble. */
-bool gui_pack_async_start(int atlas_index, char *err, size_t err_cap);
+/* Starts an async pack of `atlas_id`. false (fills err) if busy or the input can't assemble. */
+bool gui_pack_async_start(tp_id128 atlas_id, char *err, size_t err_cap);
 /* Starts an async export of every exporting atlas. false (fills err) if busy / nothing to export /
  * relative out-paths need a saved project. */
 bool gui_pack_export_async_start(char *err, size_t err_cap);
+bool gui_refresh_async_start(char *err, size_t err_cap);
 /* Consumes one completion only after host drain + atomic observation classified
  * its envelope. Applies a Pack slot swap only for an accepted result. */
-gui_pack_done gui_pack_poll(gui_pack_result_info *out);
+/* Classifies and consumes one owned result transferred by gui_project_step.
+ * Always destroys/zeros `completion`; NONE still advances the cold-result
+ * store's once-per-step maintenance. */
+gui_pack_done gui_pack_consume_completion(
+    tp_session_job_result *completion,
+    gui_pack_result_info *out);
 bool gui_pack_async_busy(void);
 /* True for real queued/admitted/staged host work; excludes screenshot-only
  * synthetic busy presentation. */
@@ -254,6 +270,78 @@ bool gui_pack_async_cancelling(void);
  * Dev seam: declared and defined only under NTPACKER_GUI_DEV_SEAMS. */
 #ifdef NTPACKER_GUI_DEV_SEAMS
 void gui_pack_debug_force_busy(gui_pack_async_kind kind);
+#endif
+
+#if (defined(TP_ENABLE_TEST_SEAMS) || \
+     defined(NTPACKER_GUI_SELFTEST)) && \
+    !defined(NTPACKER_GUI_PACK_IMPLEMENTATION)
+/* Tests may address fixture atlases by frame-local index. Production entry
+ * points remain stable-ID-only; these adapters resolve immediately and never
+ * store the index. */
+bool gui_pack_atlas_at_index(int, double *, char *, size_t,
+                             char *, size_t);
+const tp_result *gui_pack_result_at_index(int);
+const tp_result *gui_pack_result_peek_at_index(int);
+uint64_t gui_pack_result_version_at_index(int);
+int gui_pack_find_sprite_ref_at_index(
+    int, tp_id128, const char *);
+bool gui_pack_sprite_matches_ref_at_index(
+    int, int, tp_id128, const char *);
+bool gui_pack_export_at_index(
+    int, int *, int *, char *, size_t, char *, size_t);
+void gui_pack_clear_at_index(int);
+bool gui_pack_preview_blocking_at_index(
+    int, const char *, char *, size_t);
+bool gui_pack_preview_async_start_at_index(
+    int, const char *, char *, size_t);
+const tp_result *gui_pack_preview_result_at_index(int);
+uint64_t gui_pack_preview_result_version_at_index(int);
+int gui_pack_preview_diff_at_index(
+    int, const char *, char *, size_t, char *, size_t);
+bool gui_pack_async_start_at_index(int, char *, size_t);
+
+#define gui_pack_atlas(owner, ...) \
+    _Generic((owner), tp_id128: gui_pack_atlas, \
+             default: gui_pack_atlas_at_index)(owner, __VA_ARGS__)
+#define gui_pack_result(owner) \
+    _Generic((owner), tp_id128: gui_pack_result, \
+             default: gui_pack_result_at_index)(owner)
+#define gui_pack_result_peek(owner) \
+    _Generic((owner), tp_id128: gui_pack_result_peek, \
+             default: gui_pack_result_peek_at_index)(owner)
+#define gui_pack_result_version(owner) \
+    _Generic((owner), tp_id128: gui_pack_result_version, \
+             default: gui_pack_result_version_at_index)(owner)
+#define gui_pack_find_sprite_ref(owner, ...) \
+    _Generic((owner), tp_id128: gui_pack_find_sprite_ref, \
+             default: gui_pack_find_sprite_ref_at_index)(owner, __VA_ARGS__)
+#define gui_pack_sprite_matches_ref(owner, ...) \
+    _Generic((owner), tp_id128: gui_pack_sprite_matches_ref, \
+             default: gui_pack_sprite_matches_ref_at_index)(owner, __VA_ARGS__)
+#define gui_pack_export(owner, ...) \
+    _Generic((owner), tp_id128: gui_pack_export, \
+             default: gui_pack_export_at_index)(owner, __VA_ARGS__)
+#define gui_pack_clear(owner) \
+    _Generic((owner), tp_id128: gui_pack_clear, \
+             default: gui_pack_clear_at_index)(owner)
+#define gui_pack_preview_blocking(owner, ...) \
+    _Generic((owner), tp_id128: gui_pack_preview_blocking, \
+             default: gui_pack_preview_blocking_at_index)(owner, __VA_ARGS__)
+#define gui_pack_preview_async_start(owner, ...) \
+    _Generic((owner), tp_id128: gui_pack_preview_async_start, \
+             default: gui_pack_preview_async_start_at_index)(owner, __VA_ARGS__)
+#define gui_pack_preview_result(owner) \
+    _Generic((owner), tp_id128: gui_pack_preview_result, \
+             default: gui_pack_preview_result_at_index)(owner)
+#define gui_pack_preview_result_version(owner) \
+    _Generic((owner), tp_id128: gui_pack_preview_result_version, \
+             default: gui_pack_preview_result_version_at_index)(owner)
+#define gui_pack_preview_diff(owner, ...) \
+    _Generic((owner), tp_id128: gui_pack_preview_diff, \
+             default: gui_pack_preview_diff_at_index)(owner, __VA_ARGS__)
+#define gui_pack_async_start(owner, ...) \
+    _Generic((owner), tp_id128: gui_pack_async_start, \
+             default: gui_pack_async_start_at_index)(owner, __VA_ARGS__)
 #endif
 
 /* Non-blocking: stops host ingress and releases presentation-owned results.

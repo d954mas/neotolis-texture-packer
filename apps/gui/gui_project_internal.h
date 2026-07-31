@@ -1,17 +1,27 @@
 #ifndef NTPACKER_GUI_PROJECT_INTERNAL_H
 #define NTPACKER_GUI_PROJECT_INTERNAL_H
 
-#include "gui_project.h"
-#include "gui_host_binding.h"
+#include "gui_project_driver.h"
 
-/* Private storage shared only by the physical gui_project implementation files.
- * This is the existing adapter state gathered in one place, not a second model. */
+/* Small active/candidate host plus presentation-only state. */
 typedef struct gui_project_state {
-    gui_host_binding binding;
-    gui_project_lifecycle_kind lifecycle_kind;
-    uint64_t observed_instance_generation;
+    tp_session *session;
+    tp_session *candidate;
+    const struct tp_session_view *view;
+    gui_project_lifecycle_state lifecycle_state;
+    uint64_t instance_generation;
+    uint64_t reduced_instance_generation;
+    uint64_t snapshot_lifetime_generation;
+    uint64_t published_instance_generation;
+    uint64_t published_snapshot_generation;
+    uint64_t observed_source_generation;
     int64_t observed_revision;
-    bool binding_initialized;
+    bool snapshot_published;
+    bool observation_valid;
+    bool refresh_pending;
+    bool discard_retired_session;
+    double drain_started_at;
+    bool drain_deadline_expired;
     gui_project_controller_status_port
         controller_status;
     bool preview_stale;
@@ -31,7 +41,6 @@ typedef struct gui_project_state {
 
 extern gui_project_state s_project;
 
-tp_status gui_project__client_init(tp_error *err);
 tp_session *gui_project__borrow_active_session(void);
 void gui_project__note_session_reject(tp_status status, const tp_error *err);
 void gui_project__note_recovery_degraded(tp_status status);
@@ -40,5 +49,14 @@ void gui_project__attach_recovery_live(void);
 tp_status gui_project__prepare_candidate_recovery(
     tp_session *session, tp_error *err);
 bool gui_project__ingress_is_open(void);
+tp_session *gui_project__mutation_session(void);
+void gui_project__invalidate_observation(void);
+void gui_project__assert_lifecycle_invariants(void);
+tp_status gui_project__advance_lifecycle(
+    gui_project_lifecycle_kind *completed,
+    tp_error *err);
+void gui_project__publish_view(
+    const struct tp_session_view *view);
+void gui_project__reduce_view(void);
 
 #endif /* NTPACKER_GUI_PROJECT_INTERNAL_H */

@@ -1,4 +1,5 @@
 #include "tp_job_worker_internal.h"
+#include "tp_export_job_internal.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -207,6 +208,48 @@ static bool publish_progress(uint64_t request_id, int current, int total,
         status == TP_STATUS_OK && write_frame(bytes, length);
     free(bytes);
     return wrote;
+}
+
+typedef struct export_terminal_context {
+    uint64_t request_id;
+    int current;
+    int eligible;
+    bool claimed;
+} export_terminal_context;
+
+static bool publish_export_terminal_boundary_now(
+    export_terminal_context *context) {
+    if (!context || context->claimed) {
+        return false;
+    }
+    context->claimed = true;
+    (void)publish_progress(
+        context->request_id, context->current, context->eligible,
+        TP_JOB_WORKER_PHASE_EXPORT_TERMINAL_BOUNDARY);
+#ifdef TP_ENABLE_TEST_SEAMS
+    const char *marker =
+        getenv("TP_TEST_JOB_WORKER_EXPORT_BOUNDARY_MARKER");
+    if (marker && marker[0]) {
+        FILE *file = tp_fs_fopen(marker, "wb");
+        if (file) {
+            (void)fwrite("claimed", 1U, 7U, file);
+            (void)fclose(file);
+        }
+    }
+    const unsigned long milliseconds = test_block_ms(
+        "TP_TEST_JOB_WORKER_BLOCK_AFTER_EXPORT_BOUNDARY_MS");
+    if (milliseconds > 0UL) {
+        worker_sleep_ms(milliseconds);
+    }
+#endif
+    return true;
+}
+
+static bool publish_export_terminal_boundary(void *opaque) {
+    export_terminal_context *context = opaque;
+    return context &&
+           context->current == context->eligible &&
+           publish_export_terminal_boundary_now(context);
 }
 
 static void collect_image_hash(void *context, int sprite_index,
@@ -567,37 +610,12 @@ static tp_status run_pack(const tp_job_worker_proto_request *request,
 static tp_status run_export(const tp_job_worker_proto_request *request,
                             tp_project *project, tp_cancel_source *cancel,
                             tp_job_worker_proto_response *response,
+                            bool *out_terminal_claimed,
                             tp_error *err) {
+    if (out_terminal_claimed) {
+        *out_terminal_claimed = false;
+    }
     const tp_cancel_token cancel_token = tp_cancel_source_token(cancel);
-    int eligible = 0;
-    for (int i = 0; i < project->atlas_count; ++i) {
-        const tp_project_atlas *atlas = &project->atlases[i];
-        if (!tp_id128_is_nil(request->atlas_id) &&
-            !tp_id128_eq(request->atlas_id, atlas->id)) {
-            continue;
-        }
-        for (int target = 0; target < atlas->target_count; ++target) {
-            if (atlas->targets[target].enabled) {
-                eligible++;
-                break;
-            }
-        }
-    }
-    if (eligible == 0) {
-        return tp_error_set(err, TP_STATUS_NOT_FOUND,
-                            "nothing to export");
-    }
-
-    /* Export gets the same private per-request directory as Pack (master spec §10.4).
-     * Export packs each atlas through tp_pack, which writes
-     * `<work_dir>/<atlas_name>.ntpack` and -- unlike Pack -- never deletes it,
-     * so a shared work_dir meant two Exports of the same atlas (two instances,
-     * or a native Export racing a preview Pack) wrote and read ONE file through
-     * one name, and every Export left that file behind forever. The name is
-     * keyed on the HOST pid for the same reason Pack's is: one naming contract,
-     * one reaper (tp_worker_reap_stale_dirs). Unlike Pack's, this directory
-     * never outlives the worker -- nothing here is handed to the host -- so it
-     * is removed on every exit path below. */
     char request_dir[TP_IDENTITY_PATH_MAX + 32];
     bool request_dir_too_long = false;
     if (!make_request_dir(request->work_dir, request->request_id,
@@ -612,75 +630,106 @@ static tp_status run_export(const tp_job_worker_proto_request *request,
                          "job worker could not create its private Export directory");
     }
 
+    export_terminal_context terminal_context = {
+        .request_id = request->request_id,
+    };
+    const tp_export_snapshot_job_opts opts = {
+        .terminal_boundary = publish_export_terminal_boundary,
+        .terminal_boundary_context = &terminal_context,
+    };
+    tp_export_snapshot_job *job = NULL;
+    tp_status status = tp_export_project_job_create_internal(
+        project, request_dir, &opts, &job, err);
+    if (status != TP_STATUS_OK) {
+        tp_worker_remove_dir_tree(request_dir);
+        return status;
+    }
+    int eligible = 0;
+    const int atlas_count =
+        tp_export_snapshot_job_atlas_count(job);
+    for (int i = 0; i < atlas_count; ++i) {
+        tp_export_snapshot_atlas_info info = {0};
+        if (tp_export_snapshot_job_atlas_info(
+                job, i, &info, NULL) == TP_STATUS_OK &&
+            (tp_id128_is_nil(request->atlas_id) ||
+             tp_id128_eq(request->atlas_id,
+                         info.atlas_id)) &&
+            info.enabled_target_count > 0) {
+            ++eligible;
+        }
+    }
+    if (eligible == 0) {
+        tp_export_snapshot_job_destroy(job);
+        tp_worker_remove_dir_tree(request_dir);
+        return tp_error_set(err, TP_STATUS_NOT_FOUND,
+                            "nothing to export");
+    }
+    terminal_context.eligible = eligible;
+
     tp_status first_status = TP_STATUS_OK;
     int current = 0;
-    for (int i = 0; i < project->atlas_count; ++i) {
-        const tp_project_atlas *atlas = &project->atlases[i];
+    bool cancellation_ended_work = false;
+    for (int i = 0; i < atlas_count; ++i) {
+        tp_export_snapshot_atlas_info info = {0};
+        status = tp_export_snapshot_job_atlas_info(
+            job, i, &info, err);
+        if (status != TP_STATUS_OK) {
+            first_status = status;
+            break;
+        }
         if (!tp_id128_is_nil(request->atlas_id) &&
-            !tp_id128_eq(request->atlas_id, atlas->id)) {
+            !tp_id128_eq(request->atlas_id,
+                         info.atlas_id)) {
             continue;
         }
-        bool enabled = false;
-        for (int target = 0; target < atlas->target_count; ++target) {
-            enabled = enabled || atlas->targets[target].enabled;
-        }
-        if (!enabled) {
+        if (info.enabled_target_count == 0) {
             continue;
         }
         if (tp_cancel_source_poll(cancel)) {
+            cancellation_ended_work = true;
             break;
         }
         current++;
+        terminal_context.current = current;
         (void)publish_progress(
             request->request_id, current - 1, eligible,
             TP_JOB_WORKER_PHASE_SOURCE_TRAVERSAL);
-        tp_pack_input input = {0};
         tp_error atlas_error = {{0}};
-        tp_status status = tp_pack_input_build_cancellable(
-            project, i, &input, &cancel_token, &atlas_error);
-        if (status == TP_STATUS_OK && input.count == 0) {
-            response->export_result.atlases_skipped++;
-            tp_pack_input_free(&input);
-            continue;
-        }
-        for (int target = 0;
-             status == TP_STATUS_OK &&
-             target < atlas->target_count;
-             ++target) {
-            if (!atlas->targets[target].enabled) {
-                continue;
-            }
-            char output_path[TP_IDENTITY_PATH_MAX];
-            status = tp_project_resolve_path(
-                project, atlas->targets[target].out_path,
-                output_path, sizeof output_path);
-            if (status == TP_STATUS_OK) {
-                tp_mkdirs_parent(output_path);
-            } else {
-                (void)tp_error_set(
-                    &atlas_error, status,
-                    "job worker cannot resolve Export output path");
-            }
-        }
         tp_arena *arena = tp_arena_create(0);
         tp_export_notices notices;
         tp_export_notices_init(&notices);
         tp_export_report report = {0};
         int runs = 0;
-        if (status == TP_STATUS_OK && arena) {
+        if (arena) {
             (void)publish_progress(
                 request->request_id, current, eligible,
                 TP_JOB_WORKER_PHASE_EXPORT_WRITE);
-            tp_export_run_opts opts = {
-                .report = &report,
-                .cancel = &cancel_token,
-            };
-            status = tp_export_run_ex(
-                project, i, input.descs, input.count,
-                request_dir, arena, &notices, &runs, &opts,
-                &atlas_error);
-        } else if (status == TP_STATUS_OK) {
-            status = TP_STATUS_OOM;
+#ifdef TP_ENABLE_TEST_SEAMS
+            /* Lets client tests observe a real non-zero worker progress frame
+             * before terminal publication. The process inherited this value;
+             * changing the parent environment after spawn cannot affect it. */
+            const unsigned long progress_block_ms =
+                test_block_ms(
+                    "TP_TEST_JOB_WORKER_BLOCK_AFTER_EXPORT_PROGRESS_MS");
+            if (progress_block_ms > 0UL) {
+                worker_sleep_ms(progress_block_ms);
+            }
+#endif
+            status =
+                tp_export_snapshot_job_run_atlas_ex_cancellable(
+                    job, i, arena, &notices, &report, &runs,
+                    NULL, NULL, &cancel_token, &atlas_error);
+        } else {
+            status = tp_error_set(
+                &atlas_error, TP_STATUS_OOM,
+                "job worker could not allocate Export arena");
+        }
+        if (report.input_outcome ==
+            TP_EXPORT_INPUT_NO_USABLE_IMAGES) {
+            response->export_result.atlases_skipped++;
+            tp_export_notices_free(&notices);
+            tp_arena_destroy(arena);
+            continue;
         }
         bool writer_failed = false;
         const char *writer_error = NULL;
@@ -705,7 +754,7 @@ static tp_status run_export(const tp_job_worker_proto_request *request,
                 (void)snprintf(
                     response->export_result.first_error,
                     sizeof response->export_result.first_error,
-                    "%s: %s", atlas->name,
+                    "%s: %s", info.name,
                     writer_error && writer_error[0]
                         ? writer_error
                         : "Export writer failed");
@@ -736,7 +785,7 @@ static tp_status run_export(const tp_job_worker_proto_request *request,
                 (void)snprintf(
                     response->export_result.first_error,
                     sizeof response->export_result.first_error,
-                    "%s: %s", atlas->name,
+                    "%s: %s", info.name,
                     atlas_error.msg[0]
                         ? atlas_error.msg
                         : tp_status_str(status));
@@ -744,16 +793,34 @@ static tp_status run_export(const tp_job_worker_proto_request *request,
         }
         tp_export_notices_free(&notices);
         tp_arena_destroy(arena);
-        tp_pack_input_free(&input);
         if (status == TP_STATUS_CANCELLED) {
+            cancellation_ended_work = true;
             break;
         }
+    }
+    /* The per-writer callback is the narrow boundary when the final eligible
+     * target actually invokes a writer. A command can still have published
+     * earlier targets and end with only skipped/pre-writer-failure work. Once
+     * that tail has returned there is no future writer, so publish the same
+     * boundary here rather than letting a later Cancel rewrite real output. */
+    if (!terminal_context.claimed &&
+        !cancellation_ended_work &&
+        (response->export_result.targets > 0 ||
+         response->export_result.publication_uncertain)) {
+        (void)publish_export_terminal_boundary_now(
+            &terminal_context);
     }
     /* Nothing in here is published to the host: the exported files already went
      * to their target output paths, and the staged `.ntpack` was an internal
      * step. Take it with us on success, failure, and cancellation alike. */
+    tp_export_snapshot_job_destroy(job);
     tp_worker_remove_dir_tree(request_dir);
-    const bool cancelled = tp_cancel_source_fired(cancel);
+    const bool cancelled =
+        !terminal_context.claimed &&
+        tp_cancel_source_fired(cancel);
+    if (out_terminal_claimed) {
+        *out_terminal_claimed = terminal_context.claimed;
+    }
     response->export_result.partial_publication =
         response->export_result.targets > 0 &&
         (cancelled || first_status != TP_STATUS_OK);
@@ -777,6 +844,7 @@ int tp_job_worker_main_request(const uint8_t *bytes, size_t length) {
         request.session_instance_generation;
     response.request_id = request.request_id;
     const double start = worker_now_ms();
+    bool export_terminal_claimed = false;
 
     tp_project *project = NULL;
     tp_cancel_source cancel = {.probe = child_stdin_probe};
@@ -805,7 +873,8 @@ int tp_job_worker_main_request(const uint8_t *bytes, size_t length) {
     } else if (status == TP_STATUS_OK &&
                request.kind == TP_SESSION_JOB_EXPORT) {
         status = run_export(
-            &request, project, &cancel, &response, &error);
+            &request, project, &cancel, &response,
+            &export_terminal_claimed, &error);
     } else if (status == TP_STATUS_OK) {
         status = tp_error_set(
             &error, TP_STATUS_INVALID_ARGUMENT,
@@ -819,7 +888,9 @@ int tp_job_worker_main_request(const uint8_t *bytes, size_t length) {
      * encoded SUCCEEDED+CANCELLED, was rejected, the worker exited with no frame
      * at all, and the host reported "job worker process crashed"; a Pack or
      * Export whose control channel died reported a silently truncated success. */
-    if (tp_cancel_source_fired(&cancel) && status != TP_STATUS_CANCELLED) {
+    if (tp_cancel_source_fired(&cancel) &&
+        !export_terminal_claimed &&
+        status != TP_STATUS_CANCELLED) {
         status = tp_error_set(
             &error, TP_STATUS_CANCELLED, "%s",
             tp_cancel_source_reason(&cancel) == TP_CANCEL_REASON_CONTROL_LOST

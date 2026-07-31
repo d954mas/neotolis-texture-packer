@@ -1,7 +1,7 @@
 #ifndef TP_CORE_TP_NAME_MAP_H
 #define TP_CORE_TP_NAME_MAP_H
 
-/* Reverse map hash(name) -> name (plan §2.8). NtAtlasRegion only stores
+/* Reverse map hash(name) -> name. NtAtlasRegion only stores
  * nt_hash64_str(sprite_name) -- the tool knows every input name up front, so
  * it builds this map once and resolves hashes back to names on parse-back.
  * Names are copied into the map's own storage (malloc-owned, independent of

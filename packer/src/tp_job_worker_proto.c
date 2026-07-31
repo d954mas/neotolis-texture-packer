@@ -176,7 +176,8 @@ static bool valid_file_phase(int32_t phase) {
 
 static bool valid_progress_phase(int32_t phase) {
   return phase >= (int32_t)TP_JOB_WORKER_PHASE_SOURCE_TRAVERSAL &&
-         phase <= (int32_t)TP_JOB_WORKER_PHASE_EXPORT_WRITE;
+         phase <=
+             (int32_t)TP_JOB_WORKER_PHASE_EXPORT_TERMINAL_BOUNDARY;
 }
 
 static bool valid_count(int32_t count) {

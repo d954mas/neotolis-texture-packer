@@ -1,7 +1,7 @@
 #ifndef NTPACKER_GUI_VIEW_LISTS_H
 #define NTPACKER_GUI_VIEW_LISTS_H
 
-/* Left panel view (ux.md region D): the atlases list, the sprite source tree (vlist-virtualized),
+/* Left panel view: the atlases list, the sprite source tree (vlist-virtualized),
  * and the animations list, each with its add-button row, inline rename, drag/hover row visuals, and
  * right-click context-menu trigger. Declare-only: exposes the one entry point frame() calls. Include
  * discipline: this view TU may include gui_defs/gui_state/gui_widgets/gui_actions/gui_rows headers +

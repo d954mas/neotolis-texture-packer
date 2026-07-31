@@ -210,20 +210,37 @@ static bool job_claim_terminal(tp_live_job *job) {
     return false;
 }
 
+/* The Export worker has crossed its final irreversible writer boundary. The
+ * progress frame is the cross-process linearization event: if cancellation
+ * already won, keep that decision; otherwise no later request may rewrite the
+ * terminal outcome. */
+static void job_claim_worker_terminal(tp_live_job *job) {
+    int expected = TP_JOB_TERMINAL_OPEN;
+    (void)atomic_compare_exchange_strong_explicit(
+        &job->terminal_claim, &expected, TP_JOB_TERMINAL_CLAIMED,
+        memory_order_acq_rel, memory_order_acquire);
+}
+
 static void job_cancel_owned(tp_session_owned_job *owned) {
     (void)job_request_cancel((tp_live_job *)owned);
 }
+
+static bool job_request_cancel_owned(tp_session_owned_job *owned) {
+    return job_request_cancel((tp_live_job *)owned);
+}
+
+static void job_compact_owned(tp_session_owned_job *owned);
 
 /* The session rejected this job's terminal result (cancelled, or its targets were
  * deleted), so nothing will ever adopt the packed pages. Free the arena now rather
  * than at destroy: for a big Pack that is every page's pixels, held for as long as
  * the host takes to consume the terminal state. The terminal result keeps its
  * status/error/metadata -- only the released pointers are cleared, so a later
- * tp_session_job_take_result reads NULL pack pointers, never freed memory. The
+ * tp_session_update reads NULL pack pointers, never freed memory. The
  * descriptor and observation_targets are untouched (the session borrows them).
  *
  * A released Pack payload also stops claiming SUCCEEDED. Leaving the terminal
- * state alone let tp_session_job_take_result hand back a SUCCEEDED Pack with
+ * state alone let tp_session_update hand back a SUCCEEDED Pack with
  * NULL arena/result -- a caller that trusts the state (they all do) then
  * dereferences NULL. The rejection is reported as what it is: CANCELLED when
  * this job's own cancellation was accepted, otherwise a structured failure for
@@ -233,13 +250,15 @@ static void job_release_payload_owned(tp_session_owned_job *owned) {
     if (!job) {
         return;
     }
+    if (job->kind != TP_SESSION_JOB_PACK) {
+        return;
+    }
     tp_arena_destroy(job->arena);
     job->arena = NULL;
     job->pack_result = NULL;
     job->terminal_result.pack.arena = NULL;
     job->terminal_result.pack.result = NULL;
-    if (job->kind != TP_SESSION_JOB_PACK ||
-        job->terminal_result.state != TP_SESSION_JOB_SUCCEEDED) {
+    if (job->terminal_result.state != TP_SESSION_JOB_SUCCEEDED) {
         return;
     }
     const bool cancelled = atomic_load_explicit(
@@ -254,6 +273,19 @@ static void job_release_payload_owned(tp_session_owned_job *owned) {
     atomic_store_explicit(&job->state, job->terminal_result.state,
                           memory_order_release);
 }
+
+#ifdef TP_ENABLE_TEST_SEAMS
+void tp_job__test_release_export_payload(tp_session_job_result *result) {
+    if (!result) {
+        return;
+    }
+    tp_live_job job = {0};
+    job.kind = TP_SESSION_JOB_EXPORT;
+    job.terminal_result = *result;
+    job_release_payload_owned(&job.owner);
+    *result = job.terminal_result;
+}
+#endif
 
 static void job_destroy_owned(tp_session_owned_job *owned) {
     tp_live_job *job = (tp_live_job *)owned;
@@ -750,6 +782,11 @@ static void job_pump_owned(tp_session_owned_job *owned) {
             job->owner.observation_descriptor.request_id &&
         progress.current >= 0 && progress.total >= 0 &&
         progress.current <= progress.total) {
+        if (job->kind == TP_SESSION_JOB_EXPORT &&
+            progress.phase ==
+                TP_JOB_WORKER_PHASE_EXPORT_TERMINAL_BOUNDARY) {
+            job_claim_worker_terminal(job);
+        }
         atomic_store_explicit(&job->current, progress.current,
                               memory_order_relaxed);
         atomic_store_explicit(&job->total, progress.total,
@@ -914,6 +951,8 @@ tp_status tp_session_pack_job_start(tp_session *session,
         .base_input_token = job->input_token_at_start,
         .targets = &job->pack_observation_target,
         .target_count = 1U,
+        .request_cancel = job_request_cancel_owned,
+        .compact = job_compact_owned,
     };
     tp_session_owned_job_configure_observation(
         &job->owner, &descriptor, job_observe);
@@ -1033,6 +1072,8 @@ tp_status tp_session_export_start(tp_session *session,
         .base_input_token = job->input_token_at_start,
         .targets = job->observation_targets,
         .target_count = job->observation_target_count,
+        .request_cancel = job_request_cancel_owned,
+        .compact = job_compact_owned,
     };
     tp_session_owned_job_configure_observation(
         &job->owner, &descriptor, job_observe);
@@ -1049,86 +1090,23 @@ bool tp_session_job_active(const tp_session *session) {
     return active;
 }
 
-tp_status tp_session_job_poll(tp_session *session,
-                              tp_session_job_progress *out,
-                              tp_error *err) {
-    if (!session || !out) {
-        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
-                            "job poll requires session and output");
-    }
-    tp_live_job *job =
-        (tp_live_job *)tp_session_job_acquire_internal(session);
-    if (!job) {
-        return tp_error_set(err, TP_STATUS_NOT_FOUND,
-                            "session has no active job");
-    }
-    if (job->owner.pump) {
-        job->owner.pump(&job->owner);
-    }
-    (void)tp_session_job_observation_admit_internal(
-        session, &job->owner);
-    memset(out, 0, sizeof *out);
-    out->kind = job->kind;
-    out->state = (tp_session_job_state)atomic_load_explicit(
-        &job->state, memory_order_acquire);
-    out->current =
-        atomic_load_explicit(&job->current, memory_order_relaxed);
-    out->total =
-        atomic_load_explicit(&job->total, memory_order_relaxed);
-    out->elapsed_ms =
-        out->state == TP_SESSION_JOB_RUNNING
-            ? job_now_ms() - job->started_ms
-            : job->elapsed_ms;
-    tp_session_job_release_internal(&job->owner);
-    return TP_STATUS_OK;
-}
-
 tp_status tp_session_job_cancel(tp_session *session, tp_error *err) {
-    tp_live_job *job =
-        (tp_live_job *)tp_session_job_acquire_internal(session);
+    tp_session_owned_job *job =
+        tp_session_job_acquire_internal(session);
     if (!job) {
         return tp_error_set(err, TP_STATUS_NOT_FOUND,
                             "session has no active job");
     }
-    const bool accepted = job_request_cancel(job);
-    tp_session_job_release_internal(&job->owner);
+    const tp_session_job_request_cancel_fn request_cancel =
+        job->observation_descriptor.request_cancel;
+    const bool accepted =
+        request_cancel && request_cancel(job);
+    tp_session_job_release_internal(job);
     return accepted
                ? TP_STATUS_OK
                : tp_error_set(
                      err, TP_STATUS_INVALID_ARGUMENT,
                      "job cancellation was already requested or the job is terminal");
-}
-
-tp_status tp_session_job_take_result(tp_session *session,
-                                     tp_session_job_result *out,
-                                     tp_error *err) {
-    if (!session || !out) {
-        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
-                            "job result requires session and output");
-    }
-    tp_live_job *job =
-        (tp_live_job *)tp_session_job_acquire_internal(session);
-    if (!job) {
-        return tp_error_set(err, TP_STATUS_NOT_FOUND,
-                            "session has no active job");
-    }
-    if ((tp_session_job_state)atomic_load_explicit(
-            &job->state, memory_order_acquire) ==
-        TP_SESSION_JOB_RUNNING) {
-        tp_session_job_release_internal(&job->owner);
-        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
-                            "job is still running");
-    }
-    const tp_status status = tp_session_job_detach_internal(
-        session, &job->owner, err);
-    if (status != TP_STATUS_OK) {
-        tp_session_job_release_internal(&job->owner);
-        return status;
-    }
-    tp_session_job_release_internal(&job->owner);
-    *out = job->terminal_result;
-    out->_owner = (tp_session_job_result_handle *)job;
-    return TP_STATUS_OK;
 }
 
 void tp_session_job_result_destroy(tp_session_job_result *result) {
@@ -1142,9 +1120,8 @@ void tp_session_job_result_destroy(tp_session_job_result *result) {
     memset(result, 0, sizeof *result);
 }
 
-void tp_session_job_result_compact(tp_session_job_result *result) {
-    tp_live_job *job =
-        result ? (tp_live_job *)result->_owner : NULL;
+static void job_compact_owned(tp_session_owned_job *owned) {
+    tp_live_job *job = (tp_live_job *)owned;
     if (!job) {
         return;
     }
@@ -1170,6 +1147,14 @@ void tp_session_job_result_compact(tp_session_job_result *result) {
      * observed job state still borrows) stay untouched: job_destroy_owned
      * remains the exactly-once release for them, and every pointer freed above
      * is NULL so that destroy stays a no-op for it. */
+}
+
+void tp_session_job_result_compact(tp_session_job_result *result) {
+    tp_session_owned_job *job =
+        result ? (tp_session_owned_job *)result->_owner : NULL;
+    if (job && job->observation_descriptor.compact) {
+        job->observation_descriptor.compact(job);
+    }
 }
 
 tp_pack_freshness tp_session_pack_result_freshness(

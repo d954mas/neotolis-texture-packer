@@ -351,7 +351,7 @@ void filter_type_pump(void) {
     if (!s_filter_active || nt_ui_input_any_focused(s_ctx)) {
         return; /* not armed, or an engine text field owns typed chars this frame */
     }
-    if (s_confirm_open || s_about_open || s_export_open || s_recovery_open ||
+    if (gui_actions_lifecycle_active() || s_about_open || s_export_open || gui_actions_recovery_active() ||
         gui_draft_phase() != GUI_EDIT_IDLE) {
         return; /* a modal / inline-rename owns the keyboard -- don't steal its chars into the filter */
     }
@@ -460,7 +460,7 @@ static void declare_sprite_list(nt_ui_context_t *ctx) {
     CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(GUI_LEFT_SPRITE_HEADER_H))}, .childGap = Su(6), .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
         section_rule_label(ctx, "SPRITES");
         CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}}}) {}
-        /* Smart folder is the primary input (ux.md principle 3: folders, not files); it keeps its label so
+        /* Smart folder is the primary input; it keeps its label so
          * the live-linked behaviour is explicit (owner 2026-07-11). Per-file adds are "the exception", so the
          * Files button is icon-only (tooltip in declare_tooltips) -- this also keeps the header on one line at
          * the owner's 450px panel where two labelled buttons overran and wrapped "Smart folder". */
@@ -735,7 +735,7 @@ static void declare_sprite_list(nt_ui_context_t *ctx) {
     nt_ui_vlist_end(ctx);
 }
 
-/* ANIMATIONS block (ux.md §2.1 region D, §3.7b): one row per animation (id + frame count), a per-row
+/* ANIMATIONS block: one row per animation (id + frame count), a per-row
  * [x] remove + right-click Rename/Remove/Preview, "+ Animation" to add. Double-click a row = preview. */
 static void declare_animations_list(nt_ui_context_t *ctx,
                                     const tp_session_snapshot *snapshot,

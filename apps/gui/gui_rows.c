@@ -4,7 +4,6 @@
 
 #include "gui_state.h"
 #include "gui_project.h"
-#include "gui_scan.h"
 #include "gui_pack.h"
 #include "gui_left_layout.h"
 
@@ -279,7 +278,7 @@ static char *rows_strdup(const char *text) {
 
 // #endregion
 
-// #region multi-select + natural sort (ux.md §3.7b selection gesture)
+// #region multi-select + natural sort
 #if defined(TP_GUI_VIEW_TEST_DIR)
 static uint64_t s_test_selection_identity_comparisons;
 static uint64_t s_test_selection_compaction_moves;
@@ -764,14 +763,13 @@ static long long row_packed_area(tp_id128 source_id, const char *source_key) {
     if (tp_id128_is_nil(source_id) || !source_key || source_key[0] == '\0') {
         return 0;
     }
-    const int atlas_index =
-        gui_view_atlas_index(gui_project_snapshot());
-    const tp_result *result = gui_pack_result(atlas_index);
+    const tp_id128 atlas_id = gui_view_atlas_id();
+    const tp_result *result = gui_pack_result(atlas_id);
     if (!result) {
         return 0;
     }
     const int idx = gui_pack_find_sprite_ref(
-        atlas_index, source_id, source_key);
+        atlas_id, source_id, source_key);
     if (idx < 0 || idx >= result->sprite_count) {
         return 0;
     }
@@ -781,14 +779,6 @@ static long long row_packed_area(tp_id128 source_id, const char *source_key) {
 
 /* §61.1 `mtime` = live file modification time via the shared stat facility. 0 when the path is empty,
  * a directory, or unstattable (sorts as oldest). Folder children reuse the scan entry's mtime instead. */
-static long long row_stat_mtime(const char *abs) {
-    long long mtime = 0;
-    if (abs && abs[0] != '\0') {
-        (void)gui_scan_stat(abs, NULL, &mtime); /* false leaves mtime at 0 */
-    }
-    return mtime;
-}
-
 void build_rows(void) {
 #if defined(NTPACKER_GUI_BENCH)
     s_bench_counters.cache_key_checks++;
@@ -807,7 +797,7 @@ void build_rows(void) {
     /* §61.1 size reads live pack regions: a repack publishes a new result (new version) without touching
      * the model/source generations, so fold the pack version into the key or sort-by-size would stay stale. */
     const uint64_t pack_version =
-        gui_pack_result_version(atlas_index);
+        gui_pack_result_version(a ? a->id : tp_id128_nil());
     if (a && s_row_cache_valid && tp_id128_eq(s_row_cache_atlas_id, a->id) &&
         s_row_cache_snapshot_generation == snapshot_generation &&
         s_row_cache_source_generation == source_generation &&
@@ -829,6 +819,8 @@ void build_rows(void) {
         set_status_ex(STATUS_ERROR, "Out of memory: sprite override index unavailable.");
         return;
     }
+    const tp_source_runtime_projection *projection =
+        gui_project_sources();
     for (int si = 0; si < a->source_count; ++si) {
 #if defined(NTPACKER_GUI_BENCH)
         s_bench_counters.source_iterations++;
@@ -843,12 +835,16 @@ void build_rows(void) {
             continue;
         }
         const char *sp = source->path;
-        tp_scan_kind disk_kind = TP_SCAN_KIND_MISSING;
-        tp_status probe_status = path_status;
-        if (probe_status == TP_STATUS_OK) {
-            probe_status =
-                gui_scan_classify_checked(abs, &disk_kind, &error);
-        } else {
+        const tp_source_runtime_source *runtime =
+            tp_source_runtime_source_by_id(
+                projection, a->id, source->id);
+        tp_status probe_status =
+            runtime ? runtime->status : TP_STATUS_NOT_FOUND;
+        if (runtime && runtime->absolute_path) {
+            (void)snprintf(
+                abs, sizeof abs, "%s",
+                runtime->absolute_path);
+        } else if (path_status != TP_STATUS_OK) {
             abs[0] = '\0';
         }
         /* Source type belongs to the model. A temporarily missing/unreadable
@@ -888,8 +884,14 @@ void build_rows(void) {
                               "Out of memory: sprite list unavailable.");
                 return;
             }
+            const char *diagnostic =
+                runtime && runtime->error.msg[0]
+                    ? runtime->error.msg
+                    : (error.msg[0]
+                           ? error.msg
+                           : tp_status_str(probe_status));
             set_statusf_ex(STATUS_WARNING, "Could not inspect source: %s",
-                           error.msg);
+                           diagnostic);
             continue;
         }
         if (probe_status == TP_STATUS_NOT_FOUND) {
@@ -902,32 +904,22 @@ void build_rows(void) {
                 return;
             }
         } else if (is_dir) {
-            const gui_scan_result *sc = NULL;
-            const tp_status scan_status = gui_scan_get(abs, &sc, &error);
-            if (scan_status != TP_STATUS_OK) {
-                r->runtime_status = scan_status;
-                (void)snprintf(r->label, sizeof r->label,
-                               "\xE2\x9A\xA0 %s/  \xC2\xB7  scan failed",
-                               path_last(sp));
-                if (!row_set_strings(r, NULL, NULL, abs)) {
-                    rows_clear();
-                    set_status_ex(STATUS_ERROR,
-                                  "Out of memory: sprite list unavailable.");
-                    return;
-                }
-                set_statusf_ex(STATUS_WARNING, "Could not scan source: %s",
-                               error.msg);
-                continue;
-            }
             (void)snprintf(r->label, sizeof r->label, "%s/  \xC2\xB7  %d",
-                           path_last(sp), sc->count);
+                           path_last(sp), runtime->entry_count);
             if (!row_set_strings(r, NULL, NULL, abs)) {
                 rows_clear();
                 set_status_ex(STATUS_ERROR,
                               "Out of memory: sprite list unavailable.");
                 return;
             }
-            for (int ci = 0; ci < sc->count; ++ci) {
+            for (int ci = 0; ci < runtime->entry_count; ++ci) {
+                const tp_source_runtime_entry *entry =
+                    tp_source_runtime_entry_at(
+                        projection,
+                        runtime->first_entry + ci);
+                if (!entry) {
+                    continue;
+                }
 #if defined(NTPACKER_GUI_BENCH)
                 s_bench_counters.child_iterations++;
 #endif
@@ -943,27 +935,36 @@ void build_rows(void) {
                 cr->child = ci;
                 cr->indent = 1;
                 cr->source_id = source->id;
-                cr->mtime = sc->entries[ci].mtime; /* scan already stat'd every child -- no re-stat */
-                if (!row_set_strings(cr, sc->entries[ci].rel,
-                                     sc->entries[ci].rel,
-                                     sc->entries[ci].abs)) {
+                cr->mtime = entry->mtime;
+                if (!row_set_strings(cr, entry->source_key,
+                                     entry->source_key,
+                                     entry->absolute_path)) {
                     rows_clear();
                     set_status_ex(STATUS_ERROR,
                                   "Out of memory: sprite list unavailable.");
                     return;
                 }
-                row_display(cr->source_id, cr->source_key, sc->entries[ci].rel,
-                            path_last(sc->entries[ci].rel), cr->label,
+                row_display(cr->source_id, cr->source_key,
+                            entry->source_key,
+                            path_last(entry->source_key), cr->label,
                             sizeof cr->label);
             }
         } else {
-            if (!row_set_strings(r, path_last(sp), path_last(sp), abs)) {
+            const tp_source_runtime_entry *entry =
+                runtime && runtime->entry_count > 0
+                    ? tp_source_runtime_entry_at(
+                          projection, runtime->first_entry)
+                    : NULL;
+            if (!row_set_strings(
+                    r, entry ? entry->source_key : path_last(sp),
+                    entry ? entry->source_key : path_last(sp),
+                    entry ? entry->absolute_path : abs)) {
                 rows_clear();
                 set_status_ex(STATUS_ERROR,
                               "Out of memory: sprite list unavailable.");
                 return;
             }
-            r->mtime = row_stat_mtime(abs); /* file source: not part of a scan result, stat it live */
+            r->mtime = entry ? entry->mtime : 0;
             row_display(r->source_id, r->source_key, r->sprite_name,
                         path_last(sp), r->label,
                         sizeof r->label);
@@ -1913,8 +1914,7 @@ void select_row_for_result_region(const tp_result *result, int region_idx) {
 
 void select_row_for_region(int region_idx) {
     select_row_for_result_region(
-        gui_pack_result(
-            gui_view_atlas_index(gui_project_snapshot())),
+        gui_pack_result(gui_view_atlas_id()),
         region_idx);
 }
 // #endregion

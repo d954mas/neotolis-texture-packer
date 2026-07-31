@@ -3,16 +3,11 @@
 
 /*
  * 128-bit runtime ID primitive + injectable RNG seam implementing the
- * structural-ID contract in master spec §5.4.
+ * structural-ID contract in docs/formats/project-v5.md.
  *
- * SCOPE BOUNDARY (architecture decision, lead review):
- *   This introduces ONLY what an unsaved-session identity needs: the 16-byte
- *   value, nil/equality, and random generation through an injectable RNG seam.
- *   A later extension owns the FULL id128 surface and EXTENDS this same header/TU -- it adds
- *   parse/format (the "atlas_/source_/..." shape IDs), the versioned stable hash
- *   (tp_hash128 / sprite_id), and the persistent schema-v2 ID fields. It must
- *   NOT redefine `tp_id128` or the `tp_rng` seam; it builds on them. Keeping this
- *   minimal here is deliberate so the two packets do not duplicate the primitive.
+ * The surface owns the 16-byte value, nil/equality, random generation through
+ * an injectable RNG seam, shape-ID parse/format, and stable hashing. Other
+ * identity layers build on it rather than redefining `tp_id128` or `tp_rng`.
  *
  * Errors are the production `tp_status` model (never an abort on caller input):
  * an RNG that fails or short-reads yields TP_STATUS_RNG_FAILED, and *out is left

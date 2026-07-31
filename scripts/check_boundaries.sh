@@ -1,7 +1,23 @@
 #!/usr/bin/env bash
-# Boundary gates (see git history: docs/plans/op-layer-and-cli.md §A6, removed 2026-07-20): greppable rules that
-# keep the tp_core / frontend split honest. Run from the repo root. Exit 0 = clean.
+# Boundary gates: greppable rules that keep the tp_core / frontend split honest.
+# Run from the repo root. Exit 0 = clean.
 # A legit exception is annotated in-source with "boundary-ok:" on the same line.
+#
+# Native Windows CTest can launch Git Bash with a PATH that does not contain
+# Bash's own /usr/bin directory. Establish it using shell parameter expansion
+# before the gate calls grep/sed/awk/mktemp.
+case "${BASH:-}" in
+    */*)
+        _tp_bash_bin=${BASH%/*}
+        case ":${PATH:-}:" in
+            *":$_tp_bash_bin:"*) ;;
+            *) PATH="$_tp_bash_bin${PATH:+:$PATH}" ;;
+        esac
+        export PATH
+        unset _tp_bash_bin
+        ;;
+esac
+
 set -u
 fail=0
 
@@ -263,8 +279,8 @@ _session_deps='#include[[:space:]]*[<"][^>"]*(apps/|gui|cli|protocol|cJSON)'
 _session_impl='(^|[^A-Za-z0-9_])(fopen|fwrite|open|CreateFile|LockFile|tp_journal_(encode|decode)[A-Za-z0-9_]*|tp_pack|tp_export_run)[[:space:]]*\('
 # All session TUs plus the shared private header. R10c's
 # mutable-project-ownership scan runs over the .c TUs only.
-_session_gate_srcs="packer/src/tp_session.c packer/src/tp_session_observation.c packer/src/tp_session_job_observation.c packer/src/tp_session_snapshot.c packer/src/tp_session_snapshot_query.c packer/src/tp_session_internal.h packer/src/tp_session_job_observation_internal.h"
-_session_gate_owner_srcs="packer/src/tp_session.c packer/src/tp_session_observation.c packer/src/tp_session_job_observation.c packer/src/tp_session_snapshot.c packer/src/tp_session_snapshot_query.c"
+_session_gate_srcs="packer/src/tp_session.c packer/src/tp_session_snapshot.c packer/src/tp_session_snapshot_query.c packer/src/tp_session_internal.h"
+_session_gate_owner_srcs="packer/src/tp_session.c packer/src/tp_session_snapshot.c packer/src/tp_session_snapshot_query.c"
 r10a=$(grep -nE "$_session_deps" $_session_gate_srcs 2>/dev/null |
     grep -v 'boundary-ok:')
 [ -n "$r10a" ] && hit "R10a frontend/protocol dependency in tp_session" "$r10a"
@@ -302,15 +318,14 @@ if ! printf '    snapshot->project = model->project;\n' |
     hit "R10-selftest" "R10c detector missed mixed snapshot/model ownership"
 fi
 
-# 11. GUI source refresh has one publication choke point. The scan backend may
-#     clear its own cache, but shipping callers must also advance the session
-#     source generation/event through gui_project_invalidate_sources().
+# 11. Source filesystem truth is a session-owned projection. The deleted GUI
+#     scan/cache path must not reappear in shipping code or tests.
 r11=$(find apps/gui -type f \( -name '*.c' -o -name '*.h' \) |
-    grep -vE '/(gui_project|gui_scan|gui_selftest|test_[^/]*|tp_bench_[^/]*)\.(c|h)$' |
-    xargs grep -nE 'gui_scan_invalidate_all[[:space:]]*\(' 2>/dev/null)
-[ -n "$r11" ] && hit "R11 raw GUI source invalidation outside project chokepoint" "$r11"
-if ! printf '    gui_scan_invalidate_all();\n' | grep -qE 'gui_scan_invalidate_all[[:space:]]*\('; then
-    hit "R11-selftest" "R11 detector failed to catch a seeded raw invalidation"
+    xargs grep -nE 'gui_scan(_[A-Za-z0-9_]+)?[[:space:]]*\(' 2>/dev/null)
+[ -n "$r11" ] && hit "R11 legacy GUI source scan/cache path" "$r11"
+if ! printf '    gui_scan_get(path, &result, &error);\n' |
+    grep -qE 'gui_scan(_[A-Za-z0-9_]+)?[[:space:]]*\('; then
+    hit "R11-selftest" "R11 detector failed to catch a seeded GUI scan"
 fi
 
 # 12. Deferred collection intents capture stable IDs + expected revision, never
@@ -488,9 +503,8 @@ fi
 # 17. Comment hygiene: shipping source comments are short WHY only, never a phase/
 #     review tag. Bans the bracketed fix/review markers, R5b-x phase labels, Fx-xx
 #     phase tags (incl. suffixed F2-05b-ii-A forms), and the Dx: crash-diagnostic
-#     comment prefix. Spec/decision references are deliberately NOT matched: a bare
-#     "§7.2" or section-qualified "decision 0011 §4" is permitted and must
-#     survive. The Fx-xx alternative omits a trailing \b so a reintroduced F2-05a /
+#     comment prefix. Durable contract references are deliberately NOT matched and
+#     must survive. The Fx-xx alternative omits a trailing \b so a reintroduced F2-05a /
 #     F2-05b-i variant is still caught; the Dx: alternative excludes a leading letter
 #     or '%' so "%H:%M:%S" strftime and "PATH:" are not flagged. Test/bench/selftest
 #     sources are outside shipping_srcs and keep their oracles. A legit hit (e.g. a
@@ -517,9 +531,9 @@ if printf '%s\n' \
     '/* keep the derived suffix [0] slot */' \
     '    (void)snprintf(t, sizeof t, "%H:%M:%S", tm);' \
     '    const char *k = "PATH:";' \
-    '/* selector resolution (master spec §7.2) */' \
-    '/* dedup pending (decision 0012 §6); never merge */' \
-    '/* order rule (decision 0011 §4): id-keyed collections */' |
+    '/* selector resolution (model contract) */' \
+    '/* dedup pending; never merge */' \
+    '/* order rule: id-keyed collections */' |
     grep -qE "$_comment_tags"; then
     hit "R17-selftest" "R17 detector false-positives on legitimate suffix/strftime/PATH/section-reference content"
 fi
@@ -563,19 +577,20 @@ tp_project_model_internal tp_project|tp_project_parse
 tp_project_parse_internal tp_project_parse|tp_project_write
 tp_project_write_internal tp_project_parse|tp_project_write
 tp_project_identity_internal tp_project_identity|tp_project_parse|tp_project_write|tp_history_codec_read|tp_input|tp_model|tp_model_journal|tp_op_validate_atlas|tp_op_validate_source_sprite|tp_op_validate_animation|tp_op_validate_target|tp_session|tp_txn_apply
-tp_project_generation_internal tp_model|tp_project_generation|tp_session_snapshot|tp_session_observation
+tp_project_generation_internal tp_model|tp_project_generation|tp_session_snapshot
 tp_project_mutation_internal tp_project|tp_project_parse|tp_diff_entity|tp_diff_apply|tp_diff_capture|tp_export_run|tp_input|tp_op_apply|tp_op_validate|tp_op_validate_animation|tp_op_validate_target|tp_session|tp_session_snapshot|tp_session_snapshot_query
 tp_txn_internal         tp_model|tp_model_journal|tp_txn_apply|tp_txn_parse|tp_txn_encode|tp_txn_idset|tp_txn_lower|tp_txn_result|tp_project_clone|tp_history
-tp_model_seam           tp_session|tp_session_snapshot|tp_session_observation|tp_session_job_observation|tp_recovery_claim|tp_recovery_store|tp_txn_internal|tp_txn_apply|tp_txn_parse|tp_txn_encode|tp_txn_idset|tp_txn_lower|tp_project_clone|tp_history
+tp_model_seam           tp_session|tp_session_snapshot|tp_recovery_claim|tp_recovery_store|tp_txn_internal|tp_txn_apply|tp_txn_parse|tp_txn_encode|tp_txn_idset|tp_txn_lower|tp_project_clone|tp_history
 tp_recovery_live_seam   tp_session|tp_recovery|tp_recovery_internal
-tp_session_internal     tp_session|tp_session_observation|tp_session_job_observation|tp_session_snapshot|tp_session_layout|tp_recovery|tp_recovery_claim|tp_validate|tp_validate_target_settings|tp_export|tp_export_run|tp_input|tp_sprite_index
-tp_session_job_observation_internal tp_session|tp_session_observation|tp_session_job_observation|tp_job|tp_job_owner_internal
-tp_session_layout       tp_session|tp_session_observation|tp_session_job_observation|tp_session_snapshot
-tp_session_snapshot_internal tp_job|tp_session_observation|tp_session_snapshot|tp_session_snapshot_query
+tp_session_internal     tp_session|tp_session_snapshot|tp_session_layout|tp_recovery|tp_recovery_claim|tp_validate|tp_validate_target_settings|tp_export|tp_export_run|tp_input|tp_sprite_index
+tp_session_layout       tp_session|tp_session_snapshot
+tp_session_snapshot_internal tp_job|tp_session|tp_session_snapshot|tp_session_snapshot_query
 tp_recovery_backend_types_internal tp_recovery_backend_posix|tp_recovery_backend_win32|tp_recovery_state_internal
 tp_recovery_internal    tp_recovery|tp_recovery_state_internal|tp_recovery_claim|tp_recovery_scan|tp_recovery_store
 tp_recovery_state_internal tp_recovery|tp_recovery_claim|tp_recovery_scan|tp_recovery_store
-tp_job_owner_internal   tp_session|tp_session_observation|tp_session_job_observation|tp_job
+tp_job_owner_internal   tp_session|tp_job|tp_refresh_job
+tp_source_runtime_internal tp_source_runtime|tp_refresh_job|tp_session
+tp_project_owned_internal tp_project_owned|tp_project|tp_project_clone|tp_diff_entity
 tp_source_plan_internal tp_source_plan|tp_op_validate|tp_op_validate_source_sprite
 tp_source_path_text_internal tp_source_path_text|tp_op_validate|tp_project|tp_project_identity|tp_project_parse|tp_source_plan
 tp_srckey_internal      tp_srckey|tp_project_identity|tp_op_validate_animation|tp_validate_source|tp_validate_sprite
@@ -590,6 +605,7 @@ tp_build_proto_internal tp_build_proto|tp_build_worker|tp_build_worker_main
 tp_build_worker_internal tp_build_worker|tp_pack|tp_job_worker_main
 tp_job_worker_internal  tp_build_worker_main|tp_job_worker_main|tp_job_worker_process_internal|tp_job_worker_proto
 tp_job_worker_process_internal tp_job|tp_job_worker
+tp_export_job_internal tp_export_run|tp_job_worker_main
 tp_proc_internal        tp_proc_win32|tp_proc_posix|tp_build_worker|tp_job_worker|tp_job_worker_main
 EOF
 }
@@ -802,7 +818,9 @@ else
     trap - EXIT
 fi
 
-# 22. Spec §16 verification-id traceability. Every USA-01..USA-32 must be OWNED,
+# 22. Retained verification-id traceability. The pre-session-view USA ids were
+#     removed with their obsolete observation/client contracts; every remaining
+#     USA id must still be OWNED,
 #     and ownership has exactly two classes:
 #       test -- a `/* USA-nn ... */` tag within 3 lines of the `void test_`
 #               definition it claims, in a TEST source file, AND that function
@@ -825,11 +843,9 @@ fi
 #     production comment, CMakeLists note, or the gate's own self-test text
 #     satisfied: an id could keep its tag long after its last test was deleted.
 _usa_ids() {
-    _usa_i=1
-    while [ "$_usa_i" -le 32 ]; do
-        printf 'USA-%02d\n' "$_usa_i"
-        _usa_i=$((_usa_i + 1))
-    done
+    printf '%s\n' \
+        USA-11 USA-14 USA-15 USA-16 USA-17 USA-18 USA-19 USA-20 USA-21 \
+        USA-22 USA-23 USA-24 USA-25 USA-27 USA-28 USA-29 USA-31
 }
 # Reads the ids present in a corpus on $1, prints the ids that are absent.
 _usa_missing() {
@@ -1081,9 +1097,6 @@ else
     rm -rf "$_r22_dir"
     trap - EXIT
 fi
-if [ -z "$(_usa_missing "$(_usa_ids | grep -v '^USA-07$')")" ]; then
-    hit "R22-selftest" "R22 detector failed to catch an id with no owning test"
-fi
 if [ -n "$(_usa_missing "$(_usa_ids)")" ]; then
     hit "R22-selftest" "R22 detector false-positives on a fully covered id set"
 fi
@@ -1195,8 +1208,8 @@ FNR == 1 { in_block = 0; depth = 0; split("", seam); seam_only = 0; pending = 0 
 # DEBT, not design. Each name below is a seam that predates this rule and whose
 # owning component is not fenced yet. The list is exact -- full symbol names, no
 # prefixes, no patterns -- so a NEW unfenced seam, including one in an
-# already-listed component, is still a hit. Packet W1-P6 fenced the session,
-# project, and build-worker families and could not reach past its file zone; the
+# already-listed component, is still a hit. The session, project, and
+# build-worker families are already fenced; the
 # owners still owed a fence are tp_diff/tp_history, tp_idset, tp_image, tp_journal,
 # tp_model, tp_op, tp_recovery, tp_txn, tp_validate, the CLI pack-fault binary's
 # tp_export_run arming call, and the GUI's gui_project__test_session.
@@ -1303,6 +1316,66 @@ else
         hit "R24-selftest" "R24 ignored its exact debt allowance"
     rm -rf "$_r24_dir"
     trap - EXIT
+fi
+
+# 25. The GUI has one explicit host driver. Only gui_actions.c advances the
+#     private project FSM; main/dev adapters advance gui_actions_step, and views
+#     can only include the typed ingress/passive-state header.
+_gui_project_step_call='(^|[^A-Za-z0-9_])gui_project_step[[:space:]]*\('
+r25_project=$(find apps/gui -maxdepth 1 -type f \
+    \( -name 'gui*.c' -o -name 'main.c' \) \
+    ! -name 'gui_actions.c' ! -name 'gui_project.c' \
+    ! -name 'gui_selftest.c' |
+    xargs grep -nE "$_gui_project_step_call" 2>/dev/null)
+[ -n "$r25_project" ] &&
+    hit "R25 multiple GUI project FSM drivers" "$r25_project"
+
+_gui_project_test_driver_include='#include[[:space:]]+"gui_project_test_driver[.]h"'
+_gui_test_fixture_include='#include[[:space:]]+"test_gui_[A-Za-z0-9_]*[.]h"'
+r25_shipping_test_driver=$(find apps/gui -maxdepth 1 -type f \
+    \( -name 'gui*.c' -o -name 'main.c' \) \
+    ! -name 'gui_selftest.c' |
+    xargs grep -nE "${_gui_project_test_driver_include}|${_gui_test_fixture_include}" 2>/dev/null)
+[ -n "$r25_shipping_test_driver" ] &&
+    hit "R25 shipping GUI source imports a test driver or fixture" \
+        "$r25_shipping_test_driver"
+
+_gui_view_driver_include='#include[[:space:]]+"gui_actions_(driver|dev)[.]h"'
+r25_view=$(grep -nE "$_gui_view_driver_include" \
+    apps/gui/gui_view_*.c apps/gui/gui_view_*.h 2>/dev/null)
+[ -n "$r25_view" ] &&
+    hit "R25 view includes a host-driving actions contract" "$r25_view"
+
+# A production helper header can otherwise smuggle the project driver into a
+# shipping TU without putting the forbidden call in that TU. Only the concrete
+# driver declaration, the two owning internal surfaces, and the test-only
+# inline driver may name/import it.
+_gui_project_driver_header_include='#include[[:space:]]+"gui_project_(driver|test_driver)[.]h"'
+r25_header=$(find apps/gui -maxdepth 1 -type f -name '*.h' \
+    ! -name 'test_*.h' \
+    ! -name 'gui_actions_internal.h' \
+    ! -name 'gui_project_driver.h' \
+    ! -name 'gui_project_internal.h' \
+    ! -name 'gui_project_test_driver.h' |
+    xargs grep -nE "${_gui_project_step_call}|${_gui_project_driver_header_include}|${_gui_test_fixture_include}" 2>/dev/null)
+[ -n "$r25_header" ] &&
+    hit "R25 production header introduces a project FSM driver" "$r25_header"
+
+if ! printf '    gui_project_step(&result, &error);\n' |
+    grep -qE "$_gui_project_step_call"; then
+    hit "R25-selftest" "R25 failed to catch a seeded second project driver"
+fi
+if ! printf '#include "gui_actions_driver.h"\n' |
+    grep -qE "$_gui_view_driver_include"; then
+    hit "R25-selftest" "R25 failed to catch a seeded view-header driver include"
+fi
+if ! printf '#include "gui_project_test_driver.h"\nstatic bool second_driver(void) { return gui_project_test_new(); }\n' |
+    grep -qE "$_gui_project_test_driver_include"; then
+    hit "R25-selftest" "R25 failed to catch a seeded wrapper-based project driver"
+fi
+if ! printf '#include "test_gui_action_trace_fixture.h"\nstatic bool second_driver(void) { return gui_project_test_new(); }\n' |
+    grep -qE "$_gui_test_fixture_include"; then
+    hit "R25-selftest" "R25 failed to catch a seeded transitive GUI test fixture"
 fi
 
 if [ "$fail" -eq 0 ]; then

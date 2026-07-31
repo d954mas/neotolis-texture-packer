@@ -1,6 +1,6 @@
 /*
- * Semantic-state identity, computed SEPARATELY from the revision
- * counter (master spec §8, decision 0011 §4).
+ * Semantic-state identity, computed SEPARATELY from the revision counter
+ * (docs/architecture/model-operations-and-session.md).
  * `dirty = current identity != saved-baseline
  * identity` -- NOT derived from the revision number, so applying the inverse of an
  * edit returns to clean even at a higher revision, and "mark saved" re-baselines
@@ -22,7 +22,7 @@
  * pixels, thumbnails, GUI view state + s_model_ver, the project file PATH (identity
  * key, not content).
  *
- * ORDER RULE (decision 0011 §4): ID-keyed collections
+ * ORDER RULE: ID-keyed collections
  * (atlases/sources/sprites/animations/
  * targets) are ORDER-NORMALIZED -- their per-element hashes are combined with a
  * COMMUTATIVE 128-bit sum, so a reorder does not change identity. The sole exception
@@ -33,7 +33,8 @@
  * implementation additionally folds `kind` (folder/file) -- a deliberate, minor,
  * conservative SUPERSET: kind is persistent serialized content whose change alters
  * packing and (for a missing source) sprite-id derivation, so over-detecting a change
- * is the safe error direction. Documented in docs/decisions/0011.
+ * is the safe error direction. See
+ * docs/architecture/model-operations-and-session.md.
  */
 
 #include "tp_core/tp_transaction.h"

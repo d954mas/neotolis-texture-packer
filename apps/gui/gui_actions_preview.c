@@ -157,7 +157,7 @@ bool gui_animation_edit_matches(tp_id128 atlas_id, tp_id128 animation_id) {
 
 // #endregion
 
-// #region animation + preview actions (ux.md §3.7b)
+// #region animation + preview actions
 const tp_snapshot_animation *preview_animation(void) {
     const tp_session_snapshot *snapshot = gui_project_snapshot();
     return s_preview_active && snapshot
@@ -258,6 +258,7 @@ void gui_request_open_preview(const gui_animation_ref *animation) {
 
 /* Creates an animation from the current multi-selection: frames natural-sorted, id from the common
  * prefix (auto "animN" when there is none). Selects the new animation (opens its editor). */
+#ifdef NTPACKER_GUI_SELFTEST
 int create_animation_from_selection(void) {
     if (s_multi_sel_count <= 0) {
         return -1;
@@ -274,10 +275,12 @@ int create_animation_from_selection(void) {
                                          ? tp_session_snapshot_atlas_at(snapshot,
                                                                         atlas_index)
                                          : NULL;
+    const tp_id128 atlas_id =
+        atlas ? atlas->id : tp_id128_nil();
     const gui_project_create_result created =
         atlas
             ? gui_project_create_animation(
-                  atlas->id,
+                  atlas_id,
                   tp_session_snapshot_revision(snapshot),
                   base[0] ? base : NULL,
                   s_sel_sort_refs, n)
@@ -285,32 +288,45 @@ int create_animation_from_selection(void) {
                   .visible_index = -1,
               };
     if (created.committed) {
-        gui_view_select_animation(created.created_id);
-        const tp_session_snapshot *after = gui_project_snapshot();
-        const tp_snapshot_atlas *a = after
-            ? tp_session_snapshot_atlas_by_id(
-                  after, gui_view_atlas_id())
-            : NULL;
-        const tp_snapshot_animation *created_animation =
-            a
-                ? tp_session_snapshot_animation_by_id(
-                      after, a->id, created.created_id)
-                : NULL;
-        set_statusf("Created animation '%s' with %d frame(s) (Ctrl+Z to undo).",
-                    created_animation
-                        ? created_animation->name
-                        : "?",
-                    n);
+        gui_actions__record_created_animation(
+            atlas_id, created.created_id, n, true);
     }
-    return created.visible_index;
+    tp_error error = {{0}};
+    if (gui_actions_step(NULL, &error) !=
+        TP_STATUS_OK) {
+        return -1;
+    }
+    if (!created.committed) {
+        return -1;
+    }
+    snapshot = gui_project_snapshot();
+    atlas = snapshot
+                ? tp_session_snapshot_atlas_by_id(
+                      snapshot, atlas_id)
+                : NULL;
+    for (int index = 0;
+         atlas && index < atlas->animation_count;
+         ++index) {
+        const tp_snapshot_animation *animation =
+            tp_session_snapshot_animation_at(
+                snapshot, atlas_id, index);
+        if (animation &&
+            tp_id128_eq(
+                animation->id,
+                created.created_id)) {
+            return index;
+        }
+    }
+    return -1;
 }
+#endif
 
 /* Appends the current multi-selection (natural-sorted) as frames of one stable animation.
  * DEFERRED: this is called from declare_animation_editor, which holds live
  * `a`/`an` pointers it keeps dereferencing AFTER this returns. A synchronous commit here would
  * clone-swap + free the project under those pointers -> use-after-free on a plain "Add frames"
  * click. So it builds the sorted selection (read-only) and ENQUEUES an add-frames edit carrying
- * COPIED keys; apply_pending drains it next frame with no live pointer held (benign one-frame
+ * COPIED keys; gui_actions_step drains it next frame with no live pointer held (benign one-frame
  * lag, consistent with every other panel edit). */
 void add_selection_frames_to_animation(
     const gui_animation_ref *animation) {
@@ -335,10 +351,16 @@ void open_preview_ref(const gui_animation_ref *ref) {
         return;
     }
     /* Opening the preview is an outer action, so the active draft is SUBMITTED
-     * first and the action continues only on a terminal success -- it must never
-     * silently discard the user's edit (same ordering class as
-     * gui_actions__browse_target). The snapshot is read after the submit. */
+     * first and the action continues only on a terminal success. A real submit
+     * invalidates the borrowed cut, so the stable ref is promoted back to the
+     * intent queue only after project step publishes the next cut. */
+    const bool submitted_draft =
+        gui_draft_phase() != GUI_EDIT_IDLE;
     if (!gui_actions__submit_draft()) {
+        return;
+    }
+    if (submitted_draft) {
+        gui_request_open_preview(ref);
         return;
     }
     const tp_session_snapshot *snapshot = gui_project_snapshot();
@@ -367,7 +389,7 @@ void open_preview_ref(const gui_animation_ref *ref) {
     /* A fresh arming has never seen a result yet, so a not-yet-packed atlas keeps
      * showing the hint instead of being reported as a released result. */
     s_actions.preview_had_result = false;
-    if (!gui_pack_result(atlas_index)) {
+    if (!gui_pack_result(ref->atlas_id)) {
         set_status("Pack (Ctrl+P) to preview the animation on packed regions.");
     } else {
         set_statusf("Previewing '%s' \xE2\x80\x94 Space play/pause.", animation->name);
@@ -453,7 +475,9 @@ static void preview_frames_rebuild(const tp_session_snapshot *snapshot,
      * so it is the resident fast path -- never the residency flip S21 removed
      * from the every-frame path. `result` (the caller's peek of THIS atlas) is
      * unaffected either way: making an atlas resident cannot evict itself. */
-    if (!gui_pack_result(atlas_index)) {
+    const tp_id128 atlas_id =
+        s_actions.preview_animation_ref.atlas_id;
+    if (!gui_pack_result(atlas_id)) {
         s_actions.preview_frames.count = 0;
         s_actions.preview_frames.valid = false;
         return;
@@ -476,7 +500,7 @@ static void preview_frames_rebuild(const tp_session_snapshot *snapshot,
 #endif
         const tp_snapshot_frame *frame = &frames[i];
         const int sprite_index = gui_pack_find_sprite_ref(
-            atlas_index, frame->source_id, frame->source_key);
+            atlas_id, frame->source_id, frame->source_key);
         if (sprite_index < 0 || sprite_index >= result->sprite_count) {
             continue;
         }
@@ -540,8 +564,10 @@ void update_preview(void) {
      * every frame of a preview whose atlas is not the viewed one flip residency
      * twice (two index rebuilds + two LRU passes per frame), and under budget
      * pressure could evict the very result the canvas had just bound. */
-    const tp_result *pr = gui_pack_result_peek(atlas_index);
-    const uint64_t result_version = gui_pack_result_version(atlas_index);
+    const tp_result *pr = gui_pack_result_peek(
+        s_actions.preview_animation_ref.atlas_id);
+    const uint64_t result_version = gui_pack_result_version(
+        s_actions.preview_animation_ref.atlas_id);
     s_canvas.anim_sprite = -1;
     s_preview_frame_count = 0;
     if (!an) {

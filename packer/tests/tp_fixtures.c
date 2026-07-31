@@ -1,4 +1,4 @@
-/* Procedural fixture generators (plan §3.1, task 6). See tp_fixtures.h. */
+/* Procedural fixture generators. See tp_fixtures.h. */
 
 #define _CRT_SECURE_NO_WARNINGS
 

@@ -43,5 +43,16 @@ tp_status tp_session_snapshot__capture(
  * ownership remains with the caller. */
 tp_status tp_session_snapshot__materialize_captured(
     tp_session_snapshot *snapshot, tp_error *err);
+/* Rebuilds only the snapshot half of the borrowed live view when its committed
+ * cut changed. On failure the previous view remains intact. */
+tp_status tp_session_view__refresh_snapshot(
+    tp_session *session, tp_error *err);
+/* Prepares the exact immutable snapshot cut a successful source Refresh will
+ * publish. The caller performs the allocation-free source/event/history commit,
+ * then adopts this snapshot so an OOM cannot tear the old live view. */
+tp_status tp_session_view__prepare_source_refresh(
+    tp_session *session, tp_session_snapshot **out, tp_error *err);
+void tp_session_view__adopt_prepared_source_refresh(
+    tp_session *session, tp_session_snapshot *replacement);
 
 #endif /* TP_SESSION_SNAPSHOT_INTERNAL_H */
