@@ -59,6 +59,10 @@ bool gui_pack_preview_publish(tp_session_job_result *job_result,
         }
         return false;
     }
+    /* Preview pins the receipt beyond this poll exactly like the native result
+     * cache. Retain only the arena-backed Pack result, not the exited worker,
+     * serialized request, and request paths. */
+    tp_session_job_result_compact(job_result);
     tp_session_pack_job_result *pack = &job_result->pack;
     if (s_preview.result_owner) {
         tp_session_job_result owned = {0};

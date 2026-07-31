@@ -16,6 +16,7 @@ typedef struct gui_project_state {
     uint64_t observed_source_generation;
     int64_t observed_revision;
     bool completion_pending;
+    bool refresh_pending;
     bool frame_pinned;
     bool discard_retired_session;
     gui_project_controller_status_port

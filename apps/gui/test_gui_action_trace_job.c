@@ -192,6 +192,113 @@ void test_pack_result_slots_reject_ownerless_results(void) {
     TEST_ASSERT_NULL(gui_pack_preview_result(0));
 }
 
+static gui_pack_done drain_current_job(
+    gui_pack_result_info *info) {
+    gui_pack_done done = GUI_PACK_DONE_NONE;
+    for (int attempt = 0;
+         attempt < 5000 &&
+         done == GUI_PACK_DONE_NONE;
+         ++attempt) {
+        tp_error error = {{0}};
+        TEST_ASSERT_EQUAL_INT(
+            TP_STATUS_OK,
+            gui_project_frame_begin(&error));
+        done = gui_pack_poll(info);
+        gui_project_frame_end();
+        if (done == GUI_PACK_DONE_NONE) {
+            nt_time_sleep(0.001);
+        }
+    }
+    TEST_ASSERT_NOT_EQUAL(
+        GUI_PACK_DONE_NONE, done);
+    return done;
+}
+
+static void admit_and_drain_pending_refresh(
+    uint64_t source_generation_before) {
+    tp_error error = {{0}};
+    TEST_ASSERT_FALSE(gui_project_job_busy());
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_project_frame_begin(&error));
+    TEST_ASSERT_TRUE(gui_project_job_busy());
+    TEST_ASSERT_EQUAL_INT(
+        TP_SESSION_JOB_REFRESH,
+        gui_project_job_active_kind());
+    gui_project_frame_end();
+
+    gui_pack_result_info refresh = {0};
+    TEST_ASSERT_EQUAL_INT(
+        GUI_PACK_DONE_REFRESH_OK,
+        drain_current_job(&refresh));
+    TEST_ASSERT_TRUE(
+        gui_project_source_runtime_generation() >
+        source_generation_before);
+
+    /* Duplicate automatic requests coalesce into the one Refresh just drained. */
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_project_frame_begin(&error));
+    gui_project_frame_end();
+    TEST_ASSERT_FALSE(gui_project_job_busy());
+}
+
+void test_pending_auto_refresh_survives_pack_and_export_contention(void) {
+    TEST_ASSERT_TRUE(
+        gui_pack_init(TP_GUI_TRACE_TEST_DIR));
+    const tp_session_snapshot *snapshot =
+        gui_project_snapshot();
+    const tp_snapshot_atlas *atlas =
+        tp_session_snapshot_atlas_at(
+            snapshot, 0);
+    TEST_ASSERT_NOT_NULL(atlas);
+    const tp_id128 atlas_id = atlas->id;
+
+    char error_text[256] = {0};
+    TEST_ASSERT_TRUE(
+        gui_pack_async_start(
+            atlas_id, error_text,
+            sizeof error_text));
+    const uint64_t before_pack_refresh =
+        gui_project_source_runtime_generation();
+    TEST_ASSERT_EQUAL_INT(
+        GUI_ADD_ADDED,
+        gui_project_add_source_kind(
+            atlas_id,
+            gui_project_committed_revision(),
+            "__pending_during_pack__.png",
+            TP_SOURCE_KIND_FILE));
+    gui_project_refresh_sources();
+    gui_project_refresh_sources();
+
+    gui_pack_result_info pack = {0};
+    (void)drain_current_job(&pack);
+    admit_and_drain_pending_refresh(
+        before_pack_refresh);
+
+    snapshot = gui_project_snapshot();
+    const tp_snapshot_source *source =
+        tp_session_snapshot_source_at(
+            snapshot, atlas_id, 0);
+    TEST_ASSERT_NOT_NULL(source);
+    TEST_ASSERT_TRUE(
+        gui_pack_export_async_start(
+            error_text, sizeof error_text));
+    const uint64_t before_export_refresh =
+        gui_project_source_runtime_generation();
+    TEST_ASSERT_TRUE(
+        gui_project_remove_source(
+            atlas_id, source->id,
+            gui_project_committed_revision()));
+    gui_project_refresh_sources();
+    gui_project_refresh_sources();
+
+    gui_pack_result_info export_result = {0};
+    (void)drain_current_job(&export_result);
+    admit_and_drain_pending_refresh(
+        before_export_refresh);
+}
+
 void test_confirm_save_publishes_before_new_and_new_message_wins(void) {
     char error[256] = {0};
     TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_OK,
@@ -907,7 +1014,15 @@ void test_new_open_and_shutdown_expose_ready_states_before_cutover(void) {
     TEST_ASSERT_EQUAL_UINT64(
         generation + 1U,
         gui_project_session_instance_generation());
+    TEST_ASSERT_FALSE(gui_project_job_busy());
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_project_frame_begin(NULL));
     TEST_ASSERT_TRUE(gui_project_job_busy());
+    TEST_ASSERT_EQUAL_INT(
+        TP_SESSION_JOB_REFRESH,
+        gui_project_job_active_kind());
+    gui_project_frame_end();
     settle_project_job();
 
     tp_rng rng = tp_rng_os();
@@ -953,7 +1068,15 @@ void test_new_open_and_shutdown_expose_ready_states_before_cutover(void) {
     TEST_ASSERT_EQUAL_INT(
         GUI_PROJECT_LIFECYCLE_OPEN,
         completed);
+    TEST_ASSERT_FALSE(gui_project_job_busy());
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_project_frame_begin(NULL));
     TEST_ASSERT_TRUE(gui_project_job_busy());
+    TEST_ASSERT_EQUAL_INT(
+        TP_SESSION_JOB_REFRESH,
+        gui_project_job_active_kind());
+    gui_project_frame_end();
     settle_project_job();
 
     completed = GUI_PROJECT_LIFECYCLE_NONE;
@@ -1117,6 +1240,8 @@ int main(int argc, char **argv) {
     }
     UNITY_BEGIN();
     RUN_TEST(test_pack_result_slots_reject_ownerless_results);
+    RUN_TEST(
+        test_pending_auto_refresh_survives_pack_and_export_contention);
     RUN_TEST(test_lifecycle_requests_are_declaration_only);
     RUN_TEST(test_lifecycle_requests_require_explicit_draft_choice);
     RUN_TEST(test_lifecycle_apply_continues_only_after_terminal_draft_submit);

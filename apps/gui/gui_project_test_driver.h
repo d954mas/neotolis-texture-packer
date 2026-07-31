@@ -85,10 +85,19 @@ static inline tp_status gui_project_test_finish(
             err, TP_STATUS_INVALID_ARGUMENT,
             "GUI lifecycle completed with an unexpected receipt");
     }
-    /* New/Open intentionally schedule their initial Refresh only after ACTIVE
-     * opens ingress. Component tests settle that asynchronous bootstrap before
-     * making same-stack assertions about the adopted view. */
+    /* New/Open leave one coalesced Refresh pending after ACTIVE opens ingress.
+     * Its only admission point is frame_begin, so publish that first boundary
+     * before waiting for the asynchronous bootstrap. */
     unsigned int attempts = 0U;
+    if (expected == GUI_PROJECT_LIFECYCLE_NEW ||
+        expected == GUI_PROJECT_LIFECYCLE_OPEN) {
+        tp_status update_status =
+            gui_project_frame_begin(err);
+        if (update_status != TP_STATUS_OK) {
+            return update_status;
+        }
+        gui_project_frame_end();
+    }
     while (gui_project_job_busy() &&
            attempts++ < 5000U) {
         tp_status update_status =

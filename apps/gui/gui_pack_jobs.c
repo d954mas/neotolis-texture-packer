@@ -575,7 +575,6 @@ bool gui_pack_preview_async_start(tp_id128 atlas_id, const char *exporter_id,
         }
         return false;
     }
-    gui_project_refresh_sources();
     const tp_session_snapshot *snapshot = gui_project_snapshot();
     const tp_snapshot_atlas *atlas =
         snapshot ? tp_session_snapshot_atlas_by_id(snapshot, atlas_id) : NULL;

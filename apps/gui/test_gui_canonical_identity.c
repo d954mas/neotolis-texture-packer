@@ -234,6 +234,38 @@ static bool remove_flat_test_dir(const char *root) {
 #endif
 }
 
+static int count_request_dirs(const char *root) {
+    int count = 0;
+#ifdef _WIN32
+    char pattern[TP_IDENTITY_PATH_MAX];
+    (void)snprintf(
+        pattern, sizeof pattern, "%s/req-*", root);
+    WIN32_FIND_DATAA item;
+    HANDLE find = FindFirstFileA(pattern, &item);
+    if (find != INVALID_HANDLE_VALUE) {
+        do {
+            if ((item.dwFileAttributes &
+                 FILE_ATTRIBUTE_DIRECTORY) != 0) {
+                ++count;
+            }
+        } while (FindNextFileA(find, &item));
+        (void)FindClose(find);
+    }
+#else
+    DIR *dir = opendir(root);
+    if (dir) {
+        struct dirent *item;
+        while ((item = readdir(dir)) != NULL) {
+            if (strncmp(item->d_name, "req-", 4U) == 0) {
+                ++count;
+            }
+        }
+        (void)closedir(dir);
+    }
+#endif
+    return count;
+}
+
 static tp_journal_io attach_memory_recovery(void) {
     tp_journal_io io = tp_journal_io_memory();
     TEST_ASSERT_NOT_NULL(io.ctx);
@@ -742,12 +774,15 @@ void test_selected_animation_id_survives_preceding_animation_removal(void) {
         0, gui_view_animation_index(snapshot));
 }
 
-void test_preview_result_rejects_source_refresh_after_job_capture(void) {
-    (void)add_coin_source();
+void test_preview_pack_admits_with_sources_and_pending_refresh_runs_later(void) {
+    const tp_id128 atlas_id = add_coin_source();
     TEST_ASSERT_TRUE(gui_pack_init(TP_GUI_IDENTITY_TEST_DIR));
     char error[256] = {0};
-    TEST_ASSERT_TRUE(gui_pack_preview_async_start(0, "defold", error,
-                                                  sizeof error));
+    TEST_ASSERT_TRUE_MESSAGE(
+        gui_pack_preview_async_start(
+            atlas_id, "defold", error,
+            sizeof error),
+        error);
     admit_queued_job();
     gui_project_refresh_sources();
 
@@ -760,8 +795,61 @@ void test_preview_result_rejects_source_refresh_after_job_capture(void) {
         }
     }
     TEST_ASSERT_EQUAL_INT(GUI_PACK_DONE_PREVIEW_OK, done);
-    TEST_ASSERT_TRUE(info.input_changed);
-    TEST_ASSERT_NULL(gui_pack_preview_result(0));
+    TEST_ASSERT_FALSE(info.input_changed);
+    TEST_ASSERT_NOT_NULL(
+        gui_pack_preview_result(atlas_id));
+
+    tp_error refresh_error = {{0}};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_project_frame_begin(
+            &refresh_error));
+    TEST_ASSERT_EQUAL_INT(
+        TP_SESSION_JOB_REFRESH,
+        gui_project_job_active_kind());
+    gui_project_frame_end();
+    done = GUI_PACK_DONE_NONE;
+    for (int i = 0;
+         i < 5000 &&
+         done == GUI_PACK_DONE_NONE;
+         ++i) {
+        done = pump_pack_frame(&info);
+        if (done == GUI_PACK_DONE_NONE) {
+            nt_time_sleep(0.001);
+        }
+    }
+    TEST_ASSERT_EQUAL_INT(
+        GUI_PACK_DONE_REFRESH_OK, done);
+    TEST_ASSERT_NULL(
+        gui_pack_preview_result(atlas_id));
+}
+
+void test_preview_pack_compacts_receipt_before_long_lived_pin(void) {
+    const tp_id128 atlas_id = add_coin_source();
+    TEST_ASSERT_TRUE(
+        gui_pack_init(TP_GUI_IDENTITY_TEST_DIR));
+    char error[256] = {0};
+    TEST_ASSERT_TRUE_MESSAGE(
+        gui_pack_preview_blocking(
+            atlas_id, "defold", error,
+            sizeof error),
+        error);
+
+    const tp_result *preview =
+        gui_pack_preview_result(atlas_id);
+    TEST_ASSERT_NOT_NULL(preview);
+    TEST_ASSERT_TRUE(preview->sprite_count > 0);
+    TEST_ASSERT_TRUE(preview->page_count > 0);
+    TEST_ASSERT_NOT_NULL(preview->pages[0].rgba);
+    TEST_ASSERT_EQUAL_INT(
+        0,
+        count_request_dirs(
+            TP_GUI_IDENTITY_TEST_DIR));
+
+    gui_pack_preview_clear();
+    gui_pack_preview_clear();
+    TEST_ASSERT_NULL(
+        gui_pack_preview_result(atlas_id));
 }
 
 void test_preview_after_native_pack_uses_observed_runtime_generation(void) {
@@ -2685,6 +2773,10 @@ int main(int argc, char **argv) {
     RUN_TEST(test_sprite_edit_rejects_genuinely_stale_captured_revision);
     RUN_TEST(test_delayed_animation_context_ref_never_retargets_after_index_shift);
     RUN_TEST(test_delayed_target_context_ref_never_retargets_after_index_shift);
+    RUN_TEST(
+        test_preview_pack_admits_with_sources_and_pending_refresh_runs_later);
+    RUN_TEST(
+        test_preview_pack_compacts_receipt_before_long_lived_pin);
     RUN_TEST(
         test_preview_after_native_pack_uses_observed_runtime_generation);
     RUN_TEST(

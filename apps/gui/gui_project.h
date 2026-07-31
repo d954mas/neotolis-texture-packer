@@ -188,8 +188,11 @@ const char *gui_project_display_name(void); /* file basename, or "untitled" */
 bool gui_project_has_path(void);
 bool gui_project_is_dirty(void);
 bool gui_project_is_stale(void);
-/* Single owner for external source-runtime invalidation: drops the scan cache,
- * advances the session source generation/event, and invalidates the GUI view. */
+/* Coalesces one automatic source Refresh request. Membership edits, Undo/Redo,
+ * and New/Open use this path so an occupied task slot cannot lose the request.
+ * Admission is retried only at the common frame boundary. Explicit user
+ * Refresh continues to use gui_project_job_enqueue_refresh and receives its
+ * typed admission result immediately. */
 void gui_project_refresh_sources(void);
 
 /* --- dirty/stale projection --- */

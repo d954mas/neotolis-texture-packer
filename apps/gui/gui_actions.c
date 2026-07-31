@@ -183,7 +183,11 @@ void gui_actions__refresh(void) {
 bool gui_actions_refresh_diff_headless(int *out_added, int *out_removed,
                                        int *out_changed) {
     const uint64_t before = gui_project_source_runtime_generation();
-    gui_project_refresh_sources();
+    char start_error[256] = {0};
+    if (!gui_refresh_async_start(
+            start_error, sizeof start_error)) {
+        return false;
+    }
 #ifdef TP_ENABLE_TEST_SEAMS
     while (gui_project_job_busy()) {
         tp_error update_error = {{0}};

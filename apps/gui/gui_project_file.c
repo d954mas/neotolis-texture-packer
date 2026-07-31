@@ -84,6 +84,7 @@ void gui_project__assert_lifecycle_invariants(void) {
         NT_ASSERT(s_project.candidate == NULL);
         NT_ASSERT(!s_project.frame_pinned);
         NT_ASSERT(!s_project.completion_pending);
+        NT_ASSERT(!s_project.refresh_pending);
         return;
     }
     if (state == GUI_PROJECT_LIFECYCLE_ACTIVE ||
@@ -111,6 +112,7 @@ static void lifecycle_transition(
 }
 
 static void lifecycle_force_closed(void) {
+    s_project.refresh_pending = false;
     s_project.lifecycle_state =
         GUI_PROJECT_LIFECYCLE_CLOSED;
     gui_project__assert_lifecycle_invariants();
@@ -281,6 +283,7 @@ void gui_project_shutdown(void) {
     s_project.recovery_root[0] = '\0';
     s_project.save_notice_pending = false;
     s_project.save_notice[0] = '\0';
+    s_project.refresh_pending = false;
 }
 
 tp_status gui_project_lifecycle_begin_new(
@@ -386,6 +389,7 @@ void gui_project_lifecycle_force_close(void) {
     s_project.view = NULL;
     s_project.discard_retired_session = false;
     s_project.frame_pinned = false;
+    s_project.refresh_pending = false;
     lifecycle_force_closed();
 }
 
@@ -446,6 +450,7 @@ tp_status gui_project_lifecycle_pump(
             GUI_PROJECT_LIFECYCLE_SHUTDOWN);
         s_project.session = NULL;
         s_project.view = NULL;
+        s_project.refresh_pending = false;
     }
     if (retired &&
         s_project.discard_retired_session) {

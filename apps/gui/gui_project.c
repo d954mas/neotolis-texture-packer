@@ -222,6 +222,28 @@ bool gui_project_observed_input_token(
     return true;
 }
 
+static void admit_pending_refresh(void) {
+    if (!s_project.refresh_pending ||
+        s_project.lifecycle_state !=
+            GUI_PROJECT_LIFECYCLE_ACTIVE ||
+        !s_project.session ||
+        s_project.frame_pinned ||
+        s_project.completion_pending ||
+        tp_session_job_active(s_project.session)) {
+        return;
+    }
+    tp_error error = {{0}};
+    const tp_status status =
+        gui_project_job_enqueue_refresh(&error);
+    if (status == TP_STATUS_OK ||
+        status == TP_STATUS_BUSY) {
+        return;
+    }
+    s_project.refresh_pending = false;
+    gui_project__note_session_reject(
+        status, &error);
+}
+
 tp_status gui_project_frame_begin(tp_error *err) {
     gui_project__assert_lifecycle_invariants();
     if (!s_project.session ||
@@ -235,6 +257,7 @@ tp_status gui_project_frame_begin(tp_error *err) {
             err, TP_STATUS_INVALID_ARGUMENT,
             "GUI host completion was not consumed before the next frame");
     }
+    admit_pending_refresh();
     tp_session_job_result completion = {0};
     const tp_status status =
         tp_session_update(
@@ -319,8 +342,13 @@ tp_status gui_project_job_enqueue_refresh(tp_error *err) {
         .session_instance_generation =
             s_project.instance_generation,
     };
-    return tp_session_refresh_start(
+    const tp_status status =
+        tp_session_refresh_start(
         s_project.session, &request, err);
+    if (status == TP_STATUS_OK) {
+        s_project.refresh_pending = false;
+    }
+    return status;
 }
 
 tp_status gui_project_job_enqueue_cancel(
@@ -392,11 +420,10 @@ int64_t gui_project_committed_revision(void) {
 }
 
 void gui_project_refresh_sources(void) {
-    tp_error err = {{0}};
-    const tp_status status =
-        gui_project_job_enqueue_refresh(&err);
-    if (status != TP_STATUS_OK) {
-        gui_project__note_session_reject(status, &err);
+    if (s_project.session &&
+        s_project.lifecycle_state !=
+            GUI_PROJECT_LIFECYCLE_CLOSED) {
+        s_project.refresh_pending = true;
     }
 }
 
