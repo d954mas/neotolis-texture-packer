@@ -25,7 +25,7 @@ void publish_project_frame(void) {
 }
 
 void settle_project_job(void) {
-    /* Automatic Refresh is admitted only at frame_begin. Cross that boundary
+    /* Automatic Refresh is admitted only at gui_actions_step. Cross that boundary
      * once before waiting so a pending membership refresh becomes observable. */
     publish_project_frame();
     for (int attempt = 0;

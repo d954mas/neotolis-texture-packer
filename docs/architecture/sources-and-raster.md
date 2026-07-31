@@ -56,6 +56,13 @@ prepares the complete replacement view, then atomically replaces one
 session-owned immutable source-runtime projection keyed by stable atlas/source
 IDs and canonical source-local keys.
 
+Filesystem calls are not assumed to be preemptible. The Refresh worker holds a
+private owner lease until terminal, so retiring the live session requests
+cancellation but does not block indefinitely in `join`. Normal completion is
+joined and compacted by the owner; a worker that outlives its retired session
+releases and detaches its own completed thread state. It owns only the admitted
+snapshot, previous projection, and terminal result—never the mutable session.
+
 The adopted replacement advances source-runtime state and adds a non-undoable
 visible refresh marker. It does not:
 

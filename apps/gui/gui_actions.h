@@ -5,8 +5,9 @@
  * owner, between-frame structural requests, pack/export/undo/redo/refresh,
  * file dialogs, lifecycle confirmation, animation operations, and preview.
  * This layer is Clay-free AND nt_ui-free. Views declare values into typed
- * drafts or enqueue structural requests with stable identities; apply_pending
- * consumes them at the top of the next frame. Include discipline:
+ * drafts or enqueue structural requests with stable identities;
+ * gui_actions_step consumes them at the next between-frame boundary. Include
+ * discipline:
  * actions -> gui_state + gui_rows + model headers
  * (gui_project/gui_canvas/gui_pack) + tinyfiledialogs; it must never include
  * widgets or any view header. */
@@ -23,7 +24,7 @@
 extern "C" {
 #endif
 
-/* --- deferred side-effect queue (enqueued by views, consumed by apply_pending) ---
+/* --- deferred side-effect queue (enqueued by views, consumed by gui_actions_step) ---
  * There is ONE queue and it is private to the actions layer. A view declares an
  * intent through the functions below and can neither read nor reorder what is
  * queued; the drain order is the actions layer's contract, not a view's. */
@@ -65,7 +66,7 @@ extern int s_modal_action;
 /* --- R6b: startup crash-recovery modal glue --- */
 extern bool s_recovery_open;                       /* R6b: the startup recovery modal is visible */
 /* The orphan list is stashed inside gui_actions.c; the modal (gui_view_chrome.c) reads it via count/at
- * and requests a per-row action, which is DEFERRED to the next apply_pending() (so the Save-As file dialog
+ * and requests a per-row action, which is DEFERRED to the next gui_actions_step (so the Save-As file dialog
  * and the disk-mutating resolve run outside nt_ui_begin/end, like s_pending_save_as). */
 void gui_actions_open_recovery(const gui_recovery_list *list); /* copy list, set s_recovery_open (main() startup) */
 int  gui_actions_recovery_count(void);
@@ -135,8 +136,6 @@ void gui_edit_target_enabled(const gui_target_ref *target, bool enabled);
 void gui_edit_target_exporter(const gui_target_ref *target,
                               const char *exporter_id);
 
-/* --- deferred semantic ingress: commits blur edits and drains action queues --- */
-void apply_pending(void);
 typedef enum gui_job_request_kind {
     GUI_JOB_REQUEST_NONE = 0,
     GUI_JOB_REQUEST_REFRESH,
@@ -164,6 +163,11 @@ typedef struct gui_actions_step_result {
  * presentation against the newly published borrowed view. */
 tp_status gui_actions_step(
     gui_actions_step_result *out, tp_error *err);
+#if defined(NTPACKER_GUI_SELFTEST) || defined(TP_ENABLE_TEST_SEAMS)
+/* Test-only half-step for proving that requests remain deferred before the
+ * host boundary. Shipping callers must use gui_actions_step. */
+void gui_actions__test_drain_intents(void);
+#endif
 /* Releases the action layer's own heap at exit: every intent still queued (with
  * the frame refs / names it owns), the preview frame map, and the retained
  * refresh fingerprint (its strdup'd paths). Disarms the preview player with it,
@@ -171,14 +175,14 @@ tp_status gui_actions_step(
  * touched -- each of those owners has its own shutdown, and this one holds no
  * reference to any of them, so it runs first. */
 void gui_actions_shutdown(void);
-/* Raised by a view widget when an edit gesture ends. apply_pending submits the
+/* Raised by a view widget when an edit gesture ends. gui_actions_step submits the
  * active draft once, producing one transaction and one Undo step. */
 void gui_request_gesture_commit(void);
 
 /* --- pack / export / undo / redo / refresh --- */
 void do_pack(void);          /* interactive async pack of the selected atlas */
 void do_pack_blocking(void); /* deterministic blocking pack (selftest + --shot) */
-/* View-facing semantic ingress. The request is consumed by apply_pending()
+/* View-facing semantic ingress. The request is consumed by gui_actions_step
  * between frames; neither menu declaration nor keyboard handling mutates the
  * session directly. */
 void gui_request_undo(void);

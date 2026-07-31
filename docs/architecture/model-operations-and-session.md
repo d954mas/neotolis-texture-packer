@@ -130,13 +130,15 @@ source projection or advancing generation, events, and history. If preparation
 fails, the previous complete view remains current and the terminal task remains
 available for a later `update` retry.
 
-The GUI client converts frame intents and explicit edit drafts into typed
-operations in its local `gui_project_operations` lowering module, submits them
-to the session, then renders from the borrowed current view. Only
-`gui_project_frame_begin` updates the active session and receives a terminal
-payload; operation lowering, persistence, and recovery queries never perform a
-second observation. This is not a session adapter or client mirror. Drafts are
-UI state, not a second hidden project copy.
+The GUI client converts typed requests and explicit edit drafts into operations
+in its local `gui_project_operations` lowering module, submits them to the
+session, then renders from the borrowed current view. `gui_actions_step` is the
+one public between-frame boundary. It calls the internal `gui_project_step`,
+which alone updates the active session and receives the owned terminal payload;
+operation lowering, persistence, recovery queries, and views never perform a
+second observation. Typed step receipts report task admission and lifecycle
+completion without exposing a pump sequence. This is not a session adapter or
+client mirror. Drafts are UI state, not a second hidden project copy.
 
 The file CLI uses immutable load/apply-preview facilities for queries and dry
 runs, and a short-lived writable session for saved-file mutations.

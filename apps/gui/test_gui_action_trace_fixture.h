@@ -16,7 +16,7 @@
 #include "gui_actions_internal.h"
 #include "gui_pack.h"
 #include "gui_pack_internal.h"
-#include "gui_project.h"
+#include "gui_project_internal.h"
 #include "gui_project_test_driver.h"
 #include "gui_rows.h"
 #include "gui_state.h"

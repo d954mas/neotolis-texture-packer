@@ -59,11 +59,19 @@ The session runtime admits at most one Pack, Export, or Refresh task at a time.
 A second start returns `busy`. Refresh performs source filesystem I/O on its
 worker and the session adopts its stable-ID-keyed immutable projection only if
 the captured model generation is still current. The small GUI project host owns
-only the active/candidate session pair and explicitly cancels and drains an old
-task before replacement. Its stored lifecycle state is one of closed, active,
-intent-specific draining, or intent-specific ready-to-cutover; cutover does not
-depend on reconstructing state from pointer and flag combinations. A
-superseded completion is never presented as current.
+only the active/candidate session pair. Replacement requests cancellation and
+drains for a bounded grace period; after the deadline it retires the old
+session without waiting indefinitely for a blocked filesystem call. A Refresh
+worker owns a private job lease until terminal and may release/detach itself
+after its session has retired. Its immutable snapshot and projection never
+borrow the live session.
+
+The stored GUI lifecycle state is one of closed, active, intent-specific
+draining, or intent-specific ready-to-cutover. One internal project step may
+advance draining through ready to active/closed and emits one typed lifecycle
+terminal; callers do not assemble those phases. Cutover does not depend on
+reconstructing state from pointer and flag combinations. A superseded
+completion is never presented as current.
 
 Generic task operations dispatch through the concrete owned-job interface.
 Cancellation therefore addresses the Pack, Export, or Refresh owner without a
@@ -125,7 +133,9 @@ candidate. Cache storage is not persisted to disk.
 Pack transfers one terminal result through `tp_session_update`. The GUI may
 then adopt a successful completion into its preview/cache. Export uses the same
 captured model, effective settings, pack core, normalization, and target
-writers, then publishes external files.
+writers, then publishes external files. The final writer callback publishes an
+explicit terminal boundary to the host; cancellation after that boundary cannot
+rewrite a successfully published Export into Cancelled.
 
 Each target's declared output set is all-or-none. A command spanning multiple
 targets can nevertheless finish with `partial_publication`, and a direct-writer

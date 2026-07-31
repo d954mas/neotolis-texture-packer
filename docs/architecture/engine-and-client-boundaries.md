@@ -78,14 +78,26 @@ writer produces `project_live`.
 
 ## Native GUI
 
-The GUI owns one small session host. Views submit intents; actions own draft
-conflict rules, the thin mutation adapter submits one typed operation batch,
-and the host owns `update + borrowed view`, task completion, and active/candidate
-lifecycle cutover. The lifecycle is an explicit transition machine with
-closed, active, intent-specific draining, and ready-to-cutover states. Source
-rows are rendered from the session-owned immutable runtime projection; the GUI
-does not scan or fingerprint source files. There is no in-process
-transport/client mirror.
+The GUI owns one small session host. Views only declare drafts or call typed
+`gui_request_*` ingress. The top-level controller calls `gui_actions_step`
+once between frames; that one function drains intents, advances the internal
+project FSM, consumes typed task/lifecycle terminals, and reconciles
+presentation against the newly borrowed view. Cancel is a deferred request,
+not a direct view-to-session mutation.
+
+`gui_project_step` is an internal host primitive and the sole live-session
+update driver. The project host owns `tp_session_update`, task completion, and
+active/candidate lifecycle cutover. Its explicit states are closed, active,
+intent-specific draining, and ready-to-cutover. A caller never assembles
+apply/pump/poll/end phases and never reconstructs lifecycle state from pointer
+and flag combinations. Architecture gates keep the project step out of the
+public GUI interface, session update/admission out of other GUI modules, and
+host stepping out of views.
+
+The thin mutation adapter still submits one typed operation batch. Source rows
+are rendered from the session-owned immutable runtime projection; the GUI does
+not scan or fingerprint source files. There is no in-process transport/client
+mirror.
 
 GUI presentation state—selection, filter, scroll, modal state, draft text,
 preview playback, GPU resources—is not persisted unless explicitly represented

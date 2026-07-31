@@ -54,17 +54,17 @@ void test_lifecycle_apply_mine_resolves_conflict_before_continuing(void) {
         gui_draft_phase());
 
     request_new();
-    apply_pending();
+    gui_actions__test_drain_intents();
     TEST_ASSERT_TRUE(s_confirm_open);
     TEST_ASSERT_TRUE(s_confirm_draft);
     s_modal_action = MODAL_SAVE;
-    apply_pending();
+    gui_actions__test_drain_intents();
 
     TEST_ASSERT_EQUAL_INT(
         GUI_EDIT_IDLE, gui_draft_phase());
     TEST_ASSERT_FALSE(s_confirm_open);
     publish_project_frame();
-    apply_pending();
+    gui_actions__test_drain_intents();
     TEST_ASSERT_TRUE(s_confirm_open);
     TEST_ASSERT_FALSE(s_confirm_draft);
     atlas = tp_session_snapshot_atlas_by_id(
@@ -73,7 +73,7 @@ void test_lifecycle_apply_mine_resolves_conflict_before_continuing(void) {
     TEST_ASSERT_EQUAL_INT(
         draft_padding, atlas->padding);
     s_modal_action = MODAL_CANCEL;
-    apply_pending();
+    gui_actions__test_drain_intents();
 }
 
 void test_exit_failed_apply_keeps_confirmation_and_draft_open(void) {
@@ -89,11 +89,11 @@ void test_exit_failed_apply_keeps_confirmation_and_draft_open(void) {
         GUI_ATLAS_PADDING, -1, 0.0F);
 
     request_exit();
-    apply_pending();
+    gui_actions__test_drain_intents();
     TEST_ASSERT_TRUE(s_confirm_open);
     TEST_ASSERT_TRUE(s_confirm_draft);
     s_modal_action = MODAL_SAVE;
-    apply_pending();
+    gui_actions__test_drain_intents();
 
     TEST_ASSERT_TRUE(s_confirm_open);
     TEST_ASSERT_TRUE(s_confirm_draft);
@@ -110,7 +110,7 @@ void test_exit_failed_apply_keeps_confirmation_and_draft_open(void) {
         tp_session_snapshot_revision(
             gui_project_snapshot()));
     s_modal_action = MODAL_CANCEL;
-    apply_pending();
+    gui_actions__test_drain_intents();
     gui_draft_discard();
 }
 
@@ -142,7 +142,7 @@ void test_pack_request_submits_active_draft_before_starting_job(void) {
         GUI_ATLAS_PADDING, new_padding, 0.0F);
 
     gui_request_pack();
-    apply_pending();
+    gui_actions__test_drain_intents();
     publish_project_frame();
 
     TEST_ASSERT_EQUAL_INT(
@@ -321,14 +321,14 @@ void test_confirm_save_publishes_before_new_and_new_message_wins(void) {
     TEST_ASSERT_EQUAL_INT(
         2, tp_session_snapshot_atlas_count(
                gui_project_snapshot()));
-    apply_pending();
+    gui_actions__test_drain_intents();
     TEST_ASSERT_TRUE(s_confirm_open);
     TEST_ASSERT_EQUAL_INT(GUI_LIFECYCLE_REQUEST_NEW, s_after_confirm);
     TEST_ASSERT_EQUAL_INT(2, tp_session_snapshot_atlas_count(
                                  gui_project_snapshot()));
 
     s_modal_action = MODAL_CANCEL;
-    apply_pending();
+    gui_actions__test_drain_intents();
     TEST_ASSERT_FALSE(s_confirm_open);
     TEST_ASSERT_EQUAL_INT(GUI_LIFECYCLE_REQUEST_NONE, s_after_confirm);
     TEST_ASSERT_TRUE(gui_project_is_dirty());
@@ -336,10 +336,10 @@ void test_confirm_save_publishes_before_new_and_new_message_wins(void) {
                                  gui_project_snapshot()));
 
     request_new();
-    apply_pending();
+    gui_actions__test_drain_intents();
     TEST_ASSERT_TRUE(s_confirm_open);
     s_modal_action = MODAL_SAVE;
-    apply_pending();
+    gui_actions__test_drain_intents();
 
     TEST_ASSERT_FALSE(s_confirm_open);
     TEST_ASSERT_EQUAL_INT(GUI_LIFECYCLE_REQUEST_NONE, s_after_confirm);
@@ -390,7 +390,7 @@ void test_recovery_decision_runs_next_frame_and_failure_keeps_row(void) {
     TEST_ASSERT_EQUAL_INT(1, gui_actions_recovery_count());
     TEST_ASSERT_EQUAL_STRING("recovery queued", s_status);
 
-    apply_pending();
+    gui_actions__test_drain_intents();
     TEST_ASSERT_TRUE(s_recovery_open);
     TEST_ASSERT_EQUAL_INT(1, gui_actions_recovery_count());
     TEST_ASSERT_EQUAL_INT(STATUS_ERROR, s_status_sev);
@@ -463,7 +463,7 @@ static void assert_lifecycle_requires_draft_choice(
         atlas->padding + 1, 0.0F);
 
     request();
-    apply_pending();
+    gui_actions__test_drain_intents();
     TEST_ASSERT_TRUE(s_confirm_open);
     TEST_ASSERT_TRUE(s_confirm_draft);
     TEST_ASSERT_EQUAL_INT(expected, s_after_confirm);
@@ -475,7 +475,7 @@ static void assert_lifecycle_requires_draft_choice(
             gui_project_snapshot()));
 
     s_modal_action = MODAL_CANCEL;
-    apply_pending();
+    gui_actions__test_drain_intents();
     TEST_ASSERT_FALSE(s_confirm_open);
     TEST_ASSERT_FALSE(s_confirm_draft);
     TEST_ASSERT_EQUAL_INT(
@@ -587,7 +587,7 @@ void test_failed_atlas_gesture_aborts_dependent_action_batch(void) {
     gui_request_gesture_commit();
     gui_request_add_atlas();
 
-    apply_pending();
+    gui_actions__test_drain_intents();
     TEST_ASSERT_EQUAL_INT64(
         revision,
         tp_session_snapshot_revision(
@@ -607,7 +607,7 @@ void test_failed_atlas_gesture_aborts_dependent_action_batch(void) {
     TEST_ASSERT_FALSE(gui_actions__intent_queued(GUI_INTENT_ADD_ATLAS));
     TEST_ASSERT_EQUAL_INT(
         GUI_EDIT_EDITING, gui_draft_phase());
-    apply_pending();
+    gui_actions__test_drain_intents();
     TEST_ASSERT_EQUAL_INT(
         1, tp_session_snapshot_atlas_count(
                gui_project_snapshot()));
@@ -662,7 +662,7 @@ void test_sequential_drafts_and_dependent_intent_advance_exactly(void) {
         GUI_ATLAS_PADDING,
         atlas->padding + 1, 0.0F);
     gui_request_gesture_commit();
-    apply_pending();
+    gui_actions__test_drain_intents();
     publish_project_frame();
 
     TEST_ASSERT_TRUE(
@@ -671,14 +671,14 @@ void test_sequential_drafts_and_dependent_intent_advance_exactly(void) {
     gui_edit_anim_fps(
         &animation, new_fps);
     gui_request_gesture_commit();
-    apply_pending();
+    gui_actions__test_drain_intents();
     publish_project_frame();
 
     TEST_ASSERT_TRUE(
         trace_target_ref_at(0, 0, &target));
     gui_edit_target_enabled(
         &target, new_enabled);
-    apply_pending();
+    gui_actions__test_drain_intents();
     publish_project_frame();
 
     snapshot = gui_project_snapshot();
@@ -722,7 +722,7 @@ void test_busy_new_enters_drain_and_resets_only_after_completion(void) {
         gui_project_lifecycle_state_query());
     TEST_ASSERT_EQUAL_STRING(
         "old session remains visible", s_status);
-    apply_pending();
+    gui_actions__test_drain_intents();
     TEST_ASSERT_EQUAL_INT(
         GUI_PROJECT_LIFECYCLE_NEW_DRAINING,
         gui_project_lifecycle_state_query());

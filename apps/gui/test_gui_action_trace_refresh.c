@@ -129,7 +129,7 @@ void test_first_refresh_stat_failure_invalidates_runtime_and_preview(void) {
 
     tp_scan__test_set_stat_error(EACCES);
     gui_request_refresh();
-    apply_pending();
+    gui_actions__test_drain_intents();
     TEST_ASSERT_TRUE(gui_project_job_busy());
     TEST_ASSERT_EQUAL_INT(
         TP_SESSION_JOB_NONE,
@@ -601,7 +601,7 @@ void test_refresh_retains_external_change_when_source_is_removed(void) {
 void test_user_refresh_returns_async_busy_and_publishes_terminal_once(void) {
     gui_actions__test_reset_refresh_completion();
     gui_request_refresh();
-    apply_pending();
+    gui_actions__test_drain_intents();
 
     TEST_ASSERT_TRUE(gui_project_job_busy());
     TEST_ASSERT_EQUAL_INT(
@@ -611,7 +611,7 @@ void test_user_refresh_returns_async_busy_and_publishes_terminal_once(void) {
     TEST_ASSERT_EQUAL_STRING("Refreshing sources...", s_status);
 
     gui_request_refresh();
-    apply_pending();
+    gui_actions__test_drain_intents();
     TEST_ASSERT_TRUE(gui_project_job_busy());
     TEST_ASSERT_EQUAL_INT(STATUS_WARNING, s_status_sev);
     TEST_ASSERT_NOT_NULL(strstr(s_status, "Busy"));
@@ -663,7 +663,7 @@ void test_refresh_lifecycle_cancel_drains_before_session_cutover(void) {
 
     tp_scan__test_arm_walk_gate();
     gui_request_refresh();
-    apply_pending();
+    gui_actions__test_drain_intents();
     TEST_ASSERT_TRUE(gui_project_job_busy());
     for (int attempt = 0;
          attempt < 5000 &&
@@ -758,7 +758,7 @@ void test_refresh_lifecycle_deadline_retires_blocked_worker(void) {
 
     tp_scan__test_arm_walk_gate();
     gui_request_refresh();
-    apply_pending();
+    gui_actions__test_drain_intents();
     for (int attempt = 0;
          attempt < 5000 &&
          !tp_scan__test_walk_gate_entered();

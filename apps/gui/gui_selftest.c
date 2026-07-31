@@ -274,7 +274,7 @@ static bool selftest_set_atlas_name_at(int index, const char *name) {
         return false;
     }
     gui_request_gesture_commit();
-    apply_pending();
+    gui_actions__test_drain_intents();
     const bool committed =
         gui_draft_phase() == GUI_EDIT_IDLE;
     if (!committed) {
@@ -358,7 +358,7 @@ static bool selftest_set_sprite_rename_at(int atlas_index, const char *source_ke
         return false;
     }
     gui_request_gesture_commit();
-    apply_pending();
+    gui_actions__test_drain_intents();
     const bool committed =
         gui_draft_phase() == GUI_EDIT_IDLE;
     if (!committed) {
@@ -405,7 +405,7 @@ static bool selftest_rename_animation_frame_at(int atlas_index,
         return false;
     }
     gui_request_gesture_commit();
-    apply_pending();
+    gui_actions__test_drain_intents();
     const bool committed =
         gui_draft_phase() == GUI_EDIT_IDLE;
     if (!committed) {
@@ -423,7 +423,7 @@ static bool selftest_set_sprite_origin_at(int atlas_index, const char *source_ke
     }
     gui_edit_sprite_origin(&sprite, axis, value);
     gui_request_gesture_commit();
-    apply_pending();
+    gui_actions__test_drain_intents();
     return gui_draft_phase() == GUI_EDIT_IDLE;
 }
 
@@ -436,7 +436,7 @@ static bool selftest_set_sprite_slice9_at(int atlas_index, const char *source_ke
     }
     gui_edit_sprite_slice9(&sprite, component, value);
     gui_request_gesture_commit();
-    apply_pending();
+    gui_actions__test_drain_intents();
     return gui_draft_phase() == GUI_EDIT_IDLE;
 }
 
@@ -449,7 +449,7 @@ static bool selftest_set_sprite_override_at(int atlas_index, const char *source_
     }
     gui_edit_sprite_override(&sprite, which, value);
     gui_request_gesture_commit();
-    apply_pending();
+    gui_actions__test_drain_intents();
     return gui_draft_phase() == GUI_EDIT_IDLE;
 }
 
@@ -507,7 +507,7 @@ static bool selftest_set_anim_id_at(int atlas_index, int animation_index,
         return false;
     }
     gui_request_gesture_commit();
-    apply_pending();
+    gui_actions__test_drain_intents();
     const bool committed =
         gui_draft_phase() == GUI_EDIT_IDLE;
     if (!committed) {
@@ -525,7 +525,7 @@ static bool selftest_set_anim_fps_at(int atlas_index, int animation_index,
     }
     gui_edit_anim_fps(&animation, fps);
     gui_request_gesture_commit();
-    apply_pending();
+    gui_actions__test_drain_intents();
     return gui_draft_phase() == GUI_EDIT_IDLE;
 }
 
@@ -538,7 +538,7 @@ static bool selftest_set_anim_playback_at(int atlas_index, int animation_index,
     }
     gui_edit_anim_playback(&animation, playback);
     gui_request_gesture_commit();
-    apply_pending();
+    gui_actions__test_drain_intents();
     return gui_draft_phase() == GUI_EDIT_IDLE;
 }
 
@@ -551,14 +551,14 @@ static bool selftest_set_anim_flip_at(int atlas_index, int animation_index,
     }
     gui_edit_anim_flip(&animation, 0, flip_h);
     gui_request_gesture_commit();
-    apply_pending();
+    gui_actions__test_drain_intents();
     if (!selftest_animation_ref_at(
             atlas_index, animation_index, &animation)) {
         return false;
     }
     gui_edit_anim_flip(&animation, 1, flip_v);
     gui_request_gesture_commit();
-    apply_pending();
+    gui_actions__test_drain_intents();
     return gui_draft_phase() == GUI_EDIT_IDLE;
 }
 
@@ -631,13 +631,13 @@ static bool selftest_set_target_at(int atlas_index, int target_index,
     }
     gui_edit_target_exporter(
         &target, exporter_copy);
-    apply_pending();
+    gui_actions__test_drain_intents();
     if (!selftest_target_ref_at(
             atlas_index, target_index, &target)) {
         return false;
     }
     gui_edit_target_enabled(&target, enabled);
-    apply_pending();
+    gui_actions__test_drain_intents();
     const tp_snapshot_target *result =
         selftest_target_at(atlas_index, target_index);
     return result &&
@@ -1606,7 +1606,7 @@ void run_selftest(void) {
             tp_session_snapshot_revision(setting_snapshot),
             GUI_ATLAS_PADDING, 7, 0.0F);
         gui_request_gesture_commit();
-        apply_pending();
+        gui_actions__test_drain_intents();
         NT_ASSERT(gui_draft_phase() == GUI_EDIT_IDLE &&
                   "padding draft submits before continuing");
         nt_log_info("SELFTEST: setting change stale=%d (expect 1)", gui_project_is_stale());
@@ -1620,7 +1620,7 @@ void run_selftest(void) {
             tp_session_snapshot_revision(setting_snapshot),
             GUI_ATLAS_SHAPE, 2, 0.0F);
         gui_request_gesture_commit();
-        apply_pending();
+        gui_actions__test_drain_intents();
         NT_ASSERT(gui_draft_phase() == GUI_EDIT_IDLE &&
                   "shape draft submits before continuing");
         double pms = 0.0;
@@ -1837,7 +1837,7 @@ void run_selftest(void) {
         gui_request_open_preview(&preview_ref);
         NT_ASSERT(selftest_remove_animation_named_at(aidx, "shift_first") &&
                   "M2: shift the animation collection before preview drain");
-        apply_pending();
+        gui_actions__test_drain_intents();
         const tp_session_snapshot *shift_snapshot = gui_project_snapshot();
         const tp_snapshot_atlas *shift_atlas = selftest_atlas_at(aidx, NULL);
         const int shift_selection =
@@ -1861,7 +1861,7 @@ void run_selftest(void) {
         gui_request_remove_animation_ref(&remove_preview_ref);
         (void)selftest_select_animation_at(
             aidx, 0); /* another stable selection must not define preview ownership */
-        apply_pending();
+        gui_actions__test_drain_intents();
         NT_ASSERT(!s_preview_active &&
                   "M2: removing the previewed animation compares stable IDs, not queued indices");
 
@@ -1878,7 +1878,7 @@ void run_selftest(void) {
             0)); /* redirect the live UI after intent capture */
         multi_sel_clear();
         multi_sel_add("wrong_selection");
-        apply_pending();
+        gui_actions__test_drain_intents();
         shift_snapshot = gui_project_snapshot();
         shift_atlas = selftest_atlas_at(aidx, NULL);
         const tp_snapshot_animation *queued = shift_atlas
@@ -1942,7 +1942,7 @@ void run_selftest(void) {
 
         /* (3) F1: "Add frames" is DEFERRED (was a synchronous commit -> UAF while declare_animation_editor
          *     held a live `an` it kept dereferencing). The enqueue captures COPIED keys, so the frames land
-         *     only on the apply_pending drain AND clearing the live selection between enqueue and drain does
+         *     only on the test intent drain AND clearing the live selection between enqueue and drain does
          *     NOT change what lands. If someone reverts to a synchronous commit, fc_mid becomes 2 and this
          *     assertion fails HERE -- the UAF cannot regress silently. */
         gui_project_test_new();
@@ -1974,7 +1974,7 @@ void run_selftest(void) {
         const tp_snapshot_animation *f1a = selftest_animation_at(0, f1anim);
         const int fc_mid = f1a ? f1a->frame_count : -1;
         multi_sel_clear();                    /* mutate the selection AFTER the enqueue: copied keys stand */
-        apply_pending();                      /* drains -> gui_project_anim_add_frames replays the copies */
+        gui_actions__test_drain_intents();                      /* drains -> gui_project_anim_add_frames replays the copies */
         f1a = selftest_animation_at(0, f1anim);
         const int fc_after = f1a ? f1a->frame_count : -1;
         const tp_snapshot_frame *f1f0 = selftest_frame_at(0, f1anim, 0);
@@ -2019,7 +2019,7 @@ void run_selftest(void) {
         gui_target_ref f2ref;
         NT_ASSERT(selftest_target_ref_at(0, 0, &f2ref));
         gui_edit_target_enabled(&f2ref, !en_was);
-        apply_pending();
+        gui_actions__test_drain_intents();
         f2t = selftest_target_at(0, 0);
         nt_log_info("SELFTEST: F2 out_path len=%zu after toggle enabled %d->%d (match=%d)", strlen(f2t->out_path),
                     en_was, f2t->enabled, strcmp(f2t->out_path, longp) == 0);
@@ -2097,7 +2097,7 @@ void run_selftest(void) {
         (void)selftest_set_target_path_at(0, 0, "out/typed.json");
         gui_edit_target_enabled(&t11_ref, !t11_en);
         gui_request_gesture_commit();
-        apply_pending();
+        gui_actions__test_drain_intents();
         const tp_snapshot_target *t11i = selftest_target_at(0, 0);
         NT_ASSERT(strcmp(t11i->out_path, "out/typed.json") == 0 &&
                   t11i->enabled == !t11_en &&
@@ -2108,7 +2108,7 @@ void run_selftest(void) {
         NT_ASSERT(selftest_target_ref_at(0, 0, &t11_ref));
         gui_edit_target_enabled(&t11_ref, !t11_en1);
         gui_request_gesture_commit();
-        apply_pending();
+        gui_actions__test_drain_intents();
         t11i = selftest_target_at(0, 0);
         NT_ASSERT(gui_draft_phase() == GUI_EDIT_EDITING &&
                   t11i->enabled == t11_en1 &&
@@ -2398,7 +2398,7 @@ void run_selftest(void) {
                   !gui_project__test_recovery_notice(
                       TP_STATUS_JOURNAL_FAILED, NULL) &&
                   "J8: view-facing New only enqueues before the between-frame drain");
-        apply_pending();
+        gui_actions__test_drain_intents();
         const bool j8kept = gui_project_has_path();
         nt_log_info("SELFTEST: J8 draft-gate has_path=%d confirm=%d draft=%d",
                     (int)j8kept, (int)s_confirm_open,
@@ -2411,7 +2411,7 @@ void run_selftest(void) {
                        TP_STATUS_JOURNAL_FAILED, NULL) &&
                   "J8: opening the draft choice does not submit it");
         s_modal_action = MODAL_SAVE; /* Apply & Continue */
-        apply_pending();
+        gui_actions__test_drain_intents();
         NT_ASSERT(gui_draft_phase() == GUI_EDIT_IDLE &&
                   s_confirm_open && !s_confirm_draft &&
                   s_after_confirm == GUI_LIFECYCLE_REQUEST_NEW &&
@@ -2423,7 +2423,7 @@ void run_selftest(void) {
                       !gui_project_take_op_error(NULL, 0) &&
                   "J8: draft submit preserves the persistent recovery warning");
         s_modal_action = MODAL_CANCEL;
-        apply_pending();
+        gui_actions__test_drain_intents();
         NT_ASSERT(!s_confirm_open && !s_confirm_draft &&
                   s_after_confirm == GUI_LIFECYCLE_REQUEST_NONE &&
                   gui_project_has_path() &&
@@ -2553,7 +2553,7 @@ void run_selftest(void) {
             j11b_atlas->id, j11b_revision);
         NT_ASSERT(gui_text_edit_update(""));
         gui_request_gesture_commit();
-        apply_pending();
+        gui_actions__test_drain_intents();
         nt_log_info("SELFTEST: J11b invalid atlas Enter phase=%d revision=%lld (want EDITING, unchanged)",
                     (int)gui_draft_phase(), (long long)tp_session_snapshot_revision(gui_project_snapshot()));
         NT_ASSERT(gui_draft_phase() == GUI_EDIT_EDITING &&
@@ -2599,7 +2599,7 @@ void run_selftest(void) {
                        TP_STATUS_JOURNAL_FAILED, NULL) &&
                   "J12: blocked Undo does not consume the pending recovery failure");
         gui_request_gesture_commit();
-        apply_pending();
+        gui_actions__test_drain_intents();
         NT_ASSERT(gui_project__test_recovery_notice(
                       TP_STATUS_JOURNAL_FAILED, NULL) &&
                   gui_draft_phase() == GUI_EDIT_IDLE &&
@@ -3285,7 +3285,7 @@ void selftest_pre_frame(void) {
         }
     } else if (s_st_phase == 9) {
         /* Async-path equivalence (req 4): start an async pack, spin until it lands (poll_async in
-         * apply_pending swaps it in), then a blocking reference pack of the same project must match --
+         * gui_actions_step swaps it in), then a blocking reference pack of the same project must match --
          * determinism holds because only WHERE the pack ran changed. */
         g_ui_scale = 1.0F;
         g_nt_window.fb_width = 1280;
@@ -3463,7 +3463,7 @@ void selftest_pre_frame(void) {
     } else if (s_st_phase == 12) {
         /* Async EXPORT (req 4a): mirror phase 9's async==blocking pattern for the export path. Start an
          * async export of a fresh single-atlas project whose seeded target points at an isolated tmp base
-         * under the build dir, spin until it lands (poll_async in apply_pending reads the report + frees the
+         * under the build dir, spin until it lands (gui_actions_step reads the report + frees the
          * job), then assert the on-disk json + page png exist -- the export_worker / save_buffer clone /
          * mkdirs path is otherwise untested (only the blocking gui_pack_export was exercised). */
         g_ui_scale = 1.0F;

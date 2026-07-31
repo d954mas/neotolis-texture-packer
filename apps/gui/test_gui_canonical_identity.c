@@ -17,7 +17,7 @@
 #include "gui_canvas.h"
 #include "gui_pack.h"
 #include "gui_pack_internal.h"
-#include "gui_project.h"
+#include "gui_project_internal.h"
 #include "gui_project_test_driver.h"
 #include "gui_recovery_indicator.h"
 #include "gui_rows.h"
@@ -1078,7 +1078,7 @@ void test_controller_guard_rejects_identity_change_before_flush_or_write(void) {
 
     attached = false;
     gui_request_gesture_commit();
-    apply_pending();
+    gui_actions__test_drain_intents();
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
         gui_project_save_as(
@@ -1143,7 +1143,7 @@ void test_controller_guard_rejects_identity_change_before_flush_or_write(void) {
 
     attached = false;
     gui_request_gesture_commit();
-    apply_pending();
+    gui_actions__test_drain_intents();
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
         gui_project_save_as(
@@ -1333,7 +1333,7 @@ void test_long_sprite_keys_with_shared_prefix_keep_distinct_draft_identity(void)
     gui_edit_sprite_override(
         &first_ref, GUI_SPRITE_OV_MARGIN, 3);
     gui_request_gesture_commit();
-    apply_pending();
+    gui_actions__test_drain_intents();
     publish_project_frame();
     TEST_ASSERT_EQUAL_INT(GUI_EDIT_IDLE, gui_draft_phase());
 
@@ -1345,7 +1345,7 @@ void test_long_sprite_keys_with_shared_prefix_keep_distinct_draft_identity(void)
     gui_edit_sprite_override(
         &second_ref, GUI_SPRITE_OV_MARGIN, 7);
     gui_request_gesture_commit();
-    apply_pending();
+    gui_actions__test_drain_intents();
     publish_project_frame();
     TEST_ASSERT_EQUAL_INT(GUI_EDIT_IDLE, gui_draft_phase());
 
@@ -1931,7 +1931,7 @@ void test_adding_an_atlas_stops_the_armed_animation_preview(void) {
     arm_preview_on_atlas(0);
 
     gui_request_add_atlas();
-    apply_pending();
+    gui_actions__test_drain_intents();
 
     TEST_ASSERT_FALSE_MESSAGE(tp_id128_eq(gui_view_atlas_id(), first_id),
                               "adding an atlas selects the new atlas");
@@ -2049,7 +2049,7 @@ void test_pack_result_follows_stable_atlas_across_index_shift(void) {
         packed_atlas_id, tp_session_snapshot_revision(snapshot),
         GUI_ATLAS_PIXELS_PER_UNIT, 0, 2.0F));
     gui_request_gesture_commit();
-    apply_pending();
+    gui_actions__test_drain_intents();
     publish_project_frame();
     gui_view_select_atlas(packed_atlas_id);
     do_pack_blocking();
@@ -2101,7 +2101,7 @@ void test_create_animation_preserves_both_canonical_selected_sprites(void) {
     gui_request_create_animation_from_selection();
     multi_sel_clear();
     gui_view_select_atlas(tp_id128_nil());
-    apply_pending();
+    gui_actions__test_drain_intents();
     publish_project_frame();
     gui_view_select_atlas(atlas_id);
 
@@ -2146,7 +2146,7 @@ void test_add_frames_preserves_both_canonical_selected_sprites(void) {
     multi_sel_add_ref(right->source_id, right->source_key);
     add_selection_frames_to_animation(
         &animation_ref);
-    apply_pending();
+    gui_actions__test_drain_intents();
     publish_project_frame();
 
     snapshot = gui_project_snapshot();
@@ -2225,7 +2225,7 @@ void test_sprite_edit_rejects_genuinely_stale_captured_revision(void) {
     TEST_ASSERT_TRUE(
         gui_text_edit_update("must-not-land"));
     gui_request_gesture_commit();
-    apply_pending();
+    gui_actions__test_drain_intents();
 
     snapshot = gui_project_snapshot();
     const tp_snapshot_sprite *sprite = tp_session_snapshot_sprite_by_key(
@@ -2272,7 +2272,7 @@ void test_delayed_animation_context_ref_never_retargets_after_index_shift(void) 
     TEST_ASSERT_TRUE(remove_animation_observed(&first));
 
     gui_request_remove_animation_ref(&captured_second);
-    apply_pending();
+    gui_actions__test_drain_intents();
 
     snapshot = gui_project_snapshot();
     TEST_ASSERT_NOT_NULL(tp_session_snapshot_animation_by_id(
@@ -2321,7 +2321,7 @@ void test_delayed_target_context_ref_never_retargets_after_index_shift(void) {
     TEST_ASSERT_TRUE(remove_target_observed(&first));
 
     gui_request_remove_target_ref(&captured_second);
-    apply_pending();
+    gui_actions__test_drain_intents();
 
     snapshot = gui_project_snapshot();
     TEST_ASSERT_NOT_NULL(tp_session_snapshot_target_by_id(
@@ -2368,7 +2368,7 @@ void test_required_recovery_without_root_warns_but_allows_edit_undo_redo(void) {
         padding_before + 1, 0.0F));
     TEST_ASSERT_FALSE(gui_project_can_undo());
     gui_request_gesture_commit();
-    apply_pending();
+    gui_actions__test_drain_intents();
     publish_project_frame();
     snapshot = gui_project_snapshot();
     atlas = snapshot ? tp_session_snapshot_atlas_by_id(snapshot, atlas_id) : NULL;
@@ -2443,7 +2443,7 @@ void test_recovery_notice_is_sticky_exact_and_clears_after_save_heals(void) {
         atlas_id, tp_session_snapshot_revision(snapshot) - 1,
         GUI_ATLAS_PADDING, atlas->padding + 1, 0.0F));
     gui_request_gesture_commit();
-    apply_pending();
+    gui_actions__test_drain_intents();
     TEST_ASSERT_EQUAL_INT(
         GUI_EDIT_CONFLICTED,
         gui_draft_phase());

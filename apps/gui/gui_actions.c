@@ -3,12 +3,11 @@
 
 #include "gui_actions.h"
 #include "gui_actions_internal.h"
-#include "gui_project.h"
+#include "gui_project_internal.h"
 
 #include "gui_defs.h" /* S() -- the compact-strip stop that folds the preview selector away */
 #include "gui_state.h"
 #include "gui_rows.h"
-#include "gui_project.h"
 #include "gui_canvas.h"
 #include "gui_pack.h"
 #include "gui_paths.h"
@@ -47,7 +46,7 @@ bool s_confirm_open;
 bool s_confirm_draft;
 int s_modal_action;
 /* R6b: startup crash-recovery modal glue. The orphan list lives here; the modal reads it via the
- * count/at accessors and requests a per-row action, deferred to apply_pending() (below) so the
+ * count/at accessors and requests a per-row action, deferred to gui_actions_step so the
  * Save-As dialog + disk-mutating gui_recovery_resolve run outside nt_ui_begin/end, like s_pending_save_as. */
 bool s_recovery_open;
 double s_last_pack_ms;      /* wall-clock ms of the last successful pack (for the stats line) */
@@ -242,7 +241,7 @@ bool gui_actions_refresh_diff_headless(int *out_added, int *out_removed,
 // #endregion
 
 // #region deferred side-effects (run at the top of the frame, between frames)
-void apply_pending(void) {
+static void gui_actions__drain_intents(void) {
     if (gui_project_lifecycle_state_query() !=
         GUI_PROJECT_LIFECYCLE_ACTIVE) {
         return;
@@ -320,7 +319,7 @@ void apply_pending(void) {
     if (s_actions.pending_lifecycle_request !=
         GUI_LIFECYCLE_REQUEST_NONE) {
         /* A draft terminal is already committed, but its view echo belongs to
-         * frame_begin below. Preserve the lifecycle request for the next
+         * project step below. Preserve the lifecycle request for the next
          * between-frame gate instead of clearing or executing it on stale
          * dirty state. */
         return;
@@ -369,7 +368,7 @@ tp_status gui_actions_step(
     gui_actions_step_result *out, tp_error *err) {
     gui_actions_step_result result = {0};
     s_actions.active_step_result = &result;
-    apply_pending();
+    gui_actions__drain_intents();
     s_actions.active_step_result = NULL;
     gui_project_step_result project_result = {0};
     const tp_status status =
@@ -392,5 +391,11 @@ tp_status gui_actions_step(
     }
     return TP_STATUS_OK;
 }
+
+#if defined(NTPACKER_GUI_SELFTEST) || defined(TP_ENABLE_TEST_SEAMS)
+void gui_actions__test_drain_intents(void) {
+    gui_actions__drain_intents();
+}
+#endif
 
 // #endregion

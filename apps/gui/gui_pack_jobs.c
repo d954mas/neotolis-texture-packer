@@ -12,7 +12,7 @@
 #include "tp_core/tp_scan.h"
 
 #include "gui_paths.h"
-#include "gui_project.h"
+#include "gui_project_internal.h"
 
 #define GUI_PACK_MAX_ATLASES 64
 

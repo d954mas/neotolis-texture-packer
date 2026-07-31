@@ -57,7 +57,7 @@ typedef enum gui_intent_kind {
 } gui_intent_kind;
 
 /* Contiguous kind ranges of the one queue, named after the boundary each one
- * runs at inside apply_pending(). A phase is drained on its own because the
+ * runs inside gui_actions_step. A phase is drained on its own because the
  * lifecycle/confirm/recovery owners sit BETWEEN them and may abort the frame. */
 typedef enum gui_intent_phase {
     GUI_INTENT_PHASE_EDIT = 0,   /* after the draft prerequisite settles */

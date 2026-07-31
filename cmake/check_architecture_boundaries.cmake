@@ -659,15 +659,21 @@ foreach(_source IN LISTS _gui_shipping_sources)
     foreach(_symbol IN ITEMS
             tp_session_pack_job_start
             tp_session_export_start
+            tp_session_refresh_start
             tp_session_job_active
             tp_session_job_poll
             tp_session_job_take_result
-            tp_session_job_cancel)
+            tp_session_job_cancel
+            tp_session_update)
         _arch_assert_absent(
             "${_relative}" "${_symbol}"
             "A2b single GUI host admission owner")
     endforeach()
 endforeach()
+_arch_assert_absent(
+    "apps/gui/gui_project_file.c"
+    "tp_session_refresh_start"
+    "A2b Refresh admission belongs to gui_project.c")
 
 # Completed A2a observation ownership. Recovery may take a temporary immutable
 # snapshot for candidate preflight and post-Save-As metadata; it never observes.
@@ -754,6 +760,50 @@ endforeach()
 
 # Completed A2d lifecycle cut.
 _arch_assert_absent("apps/gui/gui_project_file.c" "install_session" "A2d")
+foreach(_symbol IN ITEMS
+        gui_project_step
+        gui_project_step_result)
+    _arch_assert_absent(
+        "apps/gui/gui_project.h" "${_symbol}"
+        "A2d project FSM driver is internal")
+endforeach()
+foreach(_source IN LISTS _gui_shipping_sources)
+    cmake_path(GET _source FILENAME _filename)
+    cmake_path(RELATIVE_PATH _source BASE_DIRECTORY "${_arch_root}"
+               OUTPUT_VARIABLE _relative)
+    if(NOT _filename STREQUAL "gui_project.c"
+       AND NOT _filename STREQUAL "gui_actions.c"
+       AND NOT _filename STREQUAL "gui_pack_jobs.c"
+       AND NOT _filename STREQUAL "gui_selftest.c")
+        _arch_assert_absent(
+            "${_relative}" "gui_project_step"
+            "A2d one internal project FSM driver")
+    endif()
+    if(_filename MATCHES "^gui_view_.*\\.c$")
+        _arch_assert_absent(
+            "${_relative}" "gui_actions_step"
+            "A7 views submit requests and never drive the host")
+    endif()
+    if(NOT _filename STREQUAL "gui_actions.c"
+       AND NOT _filename STREQUAL "gui_selftest.c")
+        _arch_assert_absent(
+            "${_relative}" "gui_actions__test_drain_intents"
+            "A7 half-step remains test-only")
+    endif()
+    foreach(_legacy IN ITEMS
+            apply_pending
+            gui_project_frame_begin
+            gui_project_frame_end
+            gui_project_take_completion
+            gui_project_lifecycle_pump
+            gui_actions_poll_host_completion
+            gui_actions_pump_lifecycle
+            gui_pack_poll)
+        _arch_assert_absent(
+            "${_relative}" "${_legacy}"
+            "A2d/A7 deleted manual lifecycle protocol")
+    endforeach()
+endforeach()
 foreach(_symbol IN ITEMS
         gui_project__session_client
         gui_project__host_queue)

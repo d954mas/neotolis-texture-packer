@@ -37,6 +37,24 @@ saved project / live operator
 Clients never bypass core validation, canonical naming, transaction,
 revision/dirty, persistence, or Undo rules.
 
+The native GUI has one explicit control loop:
+
+```text
+view request / typed draft
+          |
+   gui_actions_step
+          |
+ internal gui_project_step
+          |
+ tp_session_update + FSM transition
+          |
+ newly borrowed session view + typed receipts
+```
+
+Views never pump the session, poll jobs, cancel a job directly, or assemble
+lifecycle phases. The actions controller is the public between-frame ingress;
+the project step is an internal host primitive enforced by architecture gates.
+
 ## Current and target boundaries
 
 The current product has a file-oriented CLI, a native live GUI, and an

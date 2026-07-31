@@ -696,7 +696,7 @@ void declare_confirm_modal(nt_ui_context_t *ctx) {
 /* R6b startup crash-recovery modal: one row per recovered crash-orphan; each row resolves via the R6a
  * layer (Discard always; Save-to-original + Save As only for a genuinely recoverable orphan -- an
  * old-format entry is Discard-only, marked "(old format)"). Actions are requested through gui_actions
- * (deferred to apply_pending, which runs the Save-As dialog + disk save outside begin/end). "Later"
+ * (deferred to gui_actions_step, which runs the Save-As dialog + disk save outside begin/end). "Later"
  * leaves every orphan on disk for next launch. Mirrors declare_export_modal's scrolled per-row list +
  * unique per-row button IDs. Dormant when s_recovery_open is false (as in the whole selftest build). */
 void declare_recovery_modal(nt_ui_context_t *ctx) {

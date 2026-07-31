@@ -310,7 +310,7 @@ int create_animation_from_selection(void) {
  * `a`/`an` pointers it keeps dereferencing AFTER this returns. A synchronous commit here would
  * clone-swap + free the project under those pointers -> use-after-free on a plain "Add frames"
  * click. So it builds the sorted selection (read-only) and ENQUEUES an add-frames edit carrying
- * COPIED keys; apply_pending drains it next frame with no live pointer held (benign one-frame
+ * COPIED keys; gui_actions_step drains it next frame with no live pointer held (benign one-frame
  * lag, consistent with every other panel edit). */
 void add_selection_frames_to_animation(
     const gui_animation_ref *animation) {

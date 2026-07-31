@@ -307,14 +307,17 @@ static void bench_run_probes(void) {
             a0->id, rev, GUI_ATLAS_PADDING,
             newpad, 0.0F);
         gui_request_gesture_commit();
-        apply_pending();
+        tp_error step_error = {{0}};
+        const bool step_ok =
+            gui_actions_step(
+                NULL, &step_error) == TP_STATUS_OK;
         snap = gui_project_snapshot();
         a0 = snap
                  ? tp_session_snapshot_atlas_at(
                        snap, 0)
                  : NULL;
         const bool edit_ok =
-            a0 && a0->padding == newpad;
+            step_ok && a0 && a0->padding == newpad;
         const double e1 = bench_now_ms();
         bench_samples_record(&edit, edit_ok, e1 - e0);
         if (!edit_ok) {
