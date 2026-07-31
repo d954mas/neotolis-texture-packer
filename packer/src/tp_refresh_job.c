@@ -97,12 +97,20 @@ static bool refresh_observe(tp_session_owned_job *owned,
     return true;
 }
 
+static bool refresh_cancel_requested(void *context) {
+    const tp_refresh_job *job = context;
+    return atomic_load_explicit(
+        &job->cancel_requested, memory_order_acquire);
+}
+
 static int refresh_thread(void *context) {
     tp_refresh_job *job = context;
     tp_source_runtime_projection *projection = NULL;
     tp_error error = {{0}};
+    const tp_cancel_token cancel = {
+        refresh_cancel_requested, job};
     tp_status status = tp_source_runtime_build(
-        job->snapshot, &projection, &error);
+        job->snapshot, &projection, &cancel, &error);
     const bool cancelled = atomic_load_explicit(
         &job->cancel_requested, memory_order_acquire);
     memset(&job->terminal, 0, sizeof job->terminal);

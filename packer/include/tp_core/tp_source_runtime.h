@@ -19,6 +19,7 @@ typedef struct tp_source_runtime_source {
     const char *absolute_path;
     bool folder;
     tp_status status;
+    tp_error error;
     int first_entry;
     int entry_count;
 } tp_source_runtime_source;

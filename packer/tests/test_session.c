@@ -26,12 +26,14 @@
 #include "tp_core/tp_sprite_index.h"
 #include "tp_core/tp_transaction.h"
 #include "tp_diff_internal.h"
+#include "tp_fs_internal.h"
 #include "tp_journal_internal.h"
 #include "tp_project_internal.h"
 #include "tp_project_mutation_internal.h"
 #include "tp_recovery_internal.h"
 #include "tp_session_internal.h"
 #include "tp_source_plan_internal.h"
+#include "tp_test_seams.h"
 #include "tp_txn_internal.h"
 #include "unity.h"
 
@@ -40,10 +42,12 @@ static const char *g_scratch = NULL;
 void setUp(void) {
     tp_journal__test_set_record_limit(0U);
     tp_history__test_set_limits(0, 0U, 0U);
+    tp_scan__test_reset_all();
 }
 void tearDown(void) {
     tp_journal__test_set_record_limit(0U);
     tp_history__test_set_limits(0, 0U, 0U);
+    tp_scan__test_reset_all();
 }
 
 static void assert_canonical_path(const char *input, const char *actual) {
@@ -71,6 +75,31 @@ static tp_session *make_session(void) {
     tp_error err;
     tp_session *session = NULL;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_session_create(&rng, &session, &err));
+    TEST_ASSERT_NOT_NULL(session);
+    return session;
+}
+
+static tp_session *make_refresh_session(
+    const char *const *paths,
+    const tp_source_kind *kinds, int count) {
+    tp_project *project = tp_project_create();
+    TEST_ASSERT_NOT_NULL(project);
+    tp_project_atlas *atlas = &project->atlases[0];
+    for (int i = 0; i < count; ++i) {
+        TEST_ASSERT_EQUAL_INT(
+            TP_STATUS_OK,
+            tp_project_atlas_add_source_kind(
+                atlas, paths[i], kinds[i]));
+    }
+    uint8_t seed = 0x61U;
+    tp_rng rng = {deterministic_fill, &seed};
+    tp_error error = {{0}};
+    tp_session *session = NULL;
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_session_adopt_owned(
+            project, &rng, &session, &error),
+        error.msg);
     TEST_ASSERT_NOT_NULL(session);
     return session;
 }
@@ -139,6 +168,334 @@ void test_refresh_generic_cancel_and_compact_use_concrete_owner(void) {
 
     tp_session_job_result_destroy(&completion);
     tp_session_destroy(session);
+}
+
+void test_refresh_normalizes_folder_and_file_source_keys(void) {
+    char root[1024];
+    char nested[1100];
+    char decomposed_path[1200];
+    (void)snprintf(
+        root, sizeof root, "%s/refresh_canonical_keys",
+        g_scratch);
+    (void)snprintf(
+        nested, sizeof nested, "%s/nested", root);
+    (void)snprintf(
+        decomposed_path, sizeof decomposed_path,
+        "%s/cafe\xcc\x81.png", nested);
+    tp_fs_remove_tree(root);
+    tp_mkdirs(nested);
+    TEST_ASSERT_TRUE(
+        tp_fs_write_file(decomposed_path, "x", 1U));
+
+    const char *paths[] = {root, decomposed_path};
+    const tp_source_kind kinds[] = {
+        TP_SOURCE_KIND_FOLDER, TP_SOURCE_KIND_FILE};
+    tp_session *session =
+        make_refresh_session(paths, kinds, 2);
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        session_refresh_sources(session, &error), error.msg);
+
+    const struct tp_session_view *view =
+        tp_session_view(session);
+    TEST_ASSERT_NOT_NULL(view);
+    TEST_ASSERT_EQUAL_INT(
+        2, tp_source_runtime_source_count(view->sources));
+    TEST_ASSERT_EQUAL_INT(
+        2, tp_source_runtime_entry_count(view->sources));
+    const tp_source_runtime_source *folder =
+        tp_source_runtime_source_at(view->sources, 0);
+    const tp_source_runtime_source *file =
+        tp_source_runtime_source_at(view->sources, 1);
+    TEST_ASSERT_NOT_NULL(folder);
+    TEST_ASSERT_NOT_NULL(file);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, folder->status);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, file->status);
+    TEST_ASSERT_EQUAL_STRING("", folder->error.msg);
+    TEST_ASSERT_EQUAL_STRING("", file->error.msg);
+    TEST_ASSERT_EQUAL_STRING(
+        "nested/caf\xc3\xa9.png",
+        tp_source_runtime_entry_at(
+            view->sources, folder->first_entry)->source_key);
+    TEST_ASSERT_EQUAL_STRING(
+        "caf\xc3\xa9.png",
+        tp_source_runtime_entry_at(
+            view->sources, file->first_entry)->source_key);
+
+    tp_session_destroy(session);
+    tp_fs_remove_tree(root);
+}
+
+void test_refresh_reports_canonical_source_key_collision(void) {
+    char root[1024];
+    char composed[1100];
+    char decomposed[1100];
+    (void)snprintf(
+        root, sizeof root, "%s/refresh_key_collision",
+        g_scratch);
+    (void)snprintf(
+        composed, sizeof composed,
+        "%s/caf\xc3\xa9.png", root);
+    (void)snprintf(
+        decomposed, sizeof decomposed,
+        "%s/cafe\xcc\x81.png", root);
+    tp_fs_remove_tree(root);
+    tp_mkdirs(root);
+    TEST_ASSERT_TRUE(tp_fs_write_file(composed, "a", 1U));
+    TEST_ASSERT_TRUE(tp_fs_write_file(decomposed, "b", 1U));
+    tp_scan_result scan = {0};
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK, tp_scan_dir(root, &scan, &error),
+        error.msg);
+    if (scan.count != 2) {
+        tp_scan_free(&scan);
+        tp_fs_remove_tree(root);
+        TEST_IGNORE_MESSAGE(
+            "filesystem does not preserve canonically equivalent names separately");
+    }
+    tp_scan_free(&scan);
+
+    const char *paths[] = {root};
+    const tp_source_kind kinds[] = {
+        TP_SOURCE_KIND_FOLDER};
+    tp_session *session =
+        make_refresh_session(paths, kinds, 1);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        session_refresh_sources(session, &error), error.msg);
+    const struct tp_session_view *view =
+        tp_session_view(session);
+    const tp_source_runtime_source *source =
+        tp_source_runtime_source_at(view->sources, 0);
+    TEST_ASSERT_NOT_NULL(source);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_INVALID_ARGUMENT, source->status);
+    TEST_ASSERT_NOT_NULL(
+        strstr(source->error.msg,
+               "canonical source-key collision"));
+    TEST_ASSERT_EQUAL_INT(0, source->entry_count);
+    TEST_ASSERT_EQUAL_INT(
+        0, tp_source_runtime_entry_count(view->sources));
+
+    tp_session_destroy(session);
+    tp_fs_remove_tree(root);
+}
+
+void test_refresh_retains_source_local_diagnostic(void) {
+    char missing[1024];
+    (void)snprintf(
+        missing, sizeof missing, "%s/refresh_missing_source",
+        g_scratch);
+    tp_fs_remove_tree(missing);
+    const char *paths[] = {missing};
+    const tp_source_kind kinds[] = {
+        TP_SOURCE_KIND_FOLDER};
+    tp_session *session =
+        make_refresh_session(paths, kinds, 1);
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        session_refresh_sources(session, &error), error.msg);
+    const struct tp_session_view *view =
+        tp_session_view(session);
+    const tp_source_runtime_source *source =
+        tp_source_runtime_source_at(view->sources, 0);
+    TEST_ASSERT_NOT_NULL(source);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_NOT_FOUND, source->status);
+    TEST_ASSERT_TRUE(source->error.msg[0] != '\0');
+    TEST_ASSERT_EQUAL_INT(0, source->entry_count);
+
+    tp_session_destroy(session);
+}
+
+void test_refresh_cancel_interrupts_active_folder_scan(void) {
+    char root[1024];
+    (void)snprintf(
+        root, sizeof root, "%s/refresh_cancel_scan",
+        g_scratch);
+    tp_fs_remove_tree(root);
+    tp_mkdirs(root);
+    for (int i = 0; i < 16; ++i) {
+        char path[1100];
+        (void)snprintf(
+            path, sizeof path, "%s/sprite-%02d.png",
+            root, i);
+        TEST_ASSERT_TRUE(tp_fs_write_file(path, "x", 1U));
+    }
+    const char *paths[] = {root};
+    const tp_source_kind kinds[] = {
+        TP_SOURCE_KIND_FOLDER};
+    tp_session *session =
+        make_refresh_session(paths, kinds, 1);
+    tp_scan__test_arm_post_entry_gate();
+    tp_error error = {{0}};
+    const tp_refresh_job_request request = {0};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_session_refresh_start(
+            session, &request, &error),
+        error.msg);
+    int spins = 0;
+    while (!tp_scan__test_post_entry_gate_entered() &&
+           spins++ < 1000000) {
+        thrd_yield();
+    }
+    TEST_ASSERT_TRUE_MESSAGE(
+        tp_scan__test_post_entry_gate_entered(),
+        "Refresh did not enter the deterministic scan gate");
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_session_job_cancel(session, &error));
+    tp_scan__test_release_post_entry_gate();
+
+    tp_session_job_result completion = {0};
+    spins = 0;
+    while (tp_session_job_active(session) &&
+           spins++ < 1000000) {
+        TEST_ASSERT_EQUAL_INT_MESSAGE(
+            TP_STATUS_OK,
+            tp_session_update(
+                session, &completion, &error),
+            error.msg);
+        thrd_yield();
+    }
+    TEST_ASSERT_FALSE(tp_session_job_active(session));
+    TEST_ASSERT_EQUAL_INT(
+        TP_SESSION_JOB_CANCELLED, completion.state);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_CANCELLED, completion.status);
+    TEST_ASSERT_EQUAL_INT(
+        1, tp_scan__test_visited_entries());
+    TEST_ASSERT_EQUAL_UINT64(
+        0U,
+        tp_session_snapshot_source_generation(
+            tp_session_view(session)->snapshot));
+
+    tp_session_job_result_destroy(&completion);
+    tp_session_destroy(session);
+    tp_fs_remove_tree(root);
+}
+
+void test_refresh_snapshot_oom_keeps_previous_cut_retryable(void) {
+    char root[1024];
+    char old_path[1100];
+    char new_path[1100];
+    (void)snprintf(
+        root, sizeof root, "%s/refresh_atomic_oom",
+        g_scratch);
+    (void)snprintf(
+        old_path, sizeof old_path, "%s/old.png", root);
+    (void)snprintf(
+        new_path, sizeof new_path, "%s/new.png", root);
+    tp_fs_remove_tree(root);
+    tp_mkdirs(root);
+    TEST_ASSERT_TRUE(tp_fs_write_file(old_path, "old", 3U));
+    const char *paths[] = {root};
+    const tp_source_kind kinds[] = {
+        TP_SOURCE_KIND_FOLDER};
+    tp_session *session =
+        make_refresh_session(paths, kinds, 1);
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        session_refresh_sources(session, &error), error.msg);
+    const struct tp_session_view *before =
+        tp_session_view(session);
+    const tp_source_runtime_projection *before_sources =
+        before->sources;
+    TEST_ASSERT_EQUAL_INT(
+        1, tp_source_runtime_entry_count(before_sources));
+    TEST_ASSERT_EQUAL_UINT64(
+        1U,
+        tp_session_snapshot_source_generation(
+            before->snapshot));
+    TEST_ASSERT_EQUAL_UINT64(
+        1U, tp_session_event_sequence(session));
+    TEST_ASSERT_EQUAL_INT(
+        1, tp_session_history_count(session));
+
+    TEST_ASSERT_TRUE(tp_fs_write_file(new_path, "new", 3U));
+    const tp_refresh_job_request request = {0};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_session_refresh_start(
+            session, &request, &error),
+        error.msg);
+    tp_session__test_fail_snapshot_allocation_after(0U);
+    bool saw_oom = false;
+    for (int spins = 0;
+         tp_session_job_active(session) &&
+         spins < 1000000; ++spins) {
+        tp_session_job_result completion = {0};
+        const tp_status status = tp_session_update(
+            session, &completion, &error);
+        TEST_ASSERT_EQUAL_INT(
+            TP_SESSION_JOB_NONE, completion.kind);
+        if (status == TP_STATUS_OOM) {
+            saw_oom = true;
+            break;
+        }
+        TEST_ASSERT_EQUAL_INT_MESSAGE(
+            TP_STATUS_OK, status, error.msg);
+        thrd_yield();
+    }
+    TEST_ASSERT_TRUE_MESSAGE(
+        saw_oom,
+        "terminal Refresh did not exercise snapshot OOM");
+    TEST_ASSERT_TRUE(tp_session_job_active(session));
+    const struct tp_session_view *failed =
+        tp_session_view(session);
+    TEST_ASSERT_EQUAL_PTR(before_sources, failed->sources);
+    TEST_ASSERT_EQUAL_INT(
+        1, tp_source_runtime_entry_count(failed->sources));
+    TEST_ASSERT_EQUAL_STRING(
+        "old.png",
+        tp_source_runtime_entry_at(
+            failed->sources, 0)->source_key);
+    TEST_ASSERT_EQUAL_UINT64(
+        1U,
+        tp_session_snapshot_source_generation(
+            failed->snapshot));
+    TEST_ASSERT_EQUAL_UINT64(
+        1U, tp_session_event_sequence(session));
+    TEST_ASSERT_EQUAL_INT(
+        1, tp_session_history_count(session));
+
+    tp_session__test_reset_snapshot_allocations();
+    tp_session_job_result completion = {0};
+    for (int spins = 0;
+         tp_session_job_active(session) &&
+         spins < 1000000; ++spins) {
+        TEST_ASSERT_EQUAL_INT_MESSAGE(
+            TP_STATUS_OK,
+            tp_session_update(
+                session, &completion, &error),
+            error.msg);
+        thrd_yield();
+    }
+    TEST_ASSERT_FALSE(tp_session_job_active(session));
+    TEST_ASSERT_EQUAL_INT(
+        TP_SESSION_JOB_SUCCEEDED, completion.state);
+    const struct tp_session_view *adopted =
+        tp_session_view(session);
+    TEST_ASSERT_TRUE(
+        before_sources != adopted->sources);
+    TEST_ASSERT_EQUAL_INT(
+        2, tp_source_runtime_entry_count(adopted->sources));
+    TEST_ASSERT_EQUAL_UINT64(
+        2U,
+        tp_session_snapshot_source_generation(
+            adopted->snapshot));
+    TEST_ASSERT_EQUAL_UINT64(
+        2U, tp_session_event_sequence(session));
+    TEST_ASSERT_EQUAL_INT(
+        2, tp_session_history_count(session));
+
+    tp_session_job_result_destroy(&completion);
+    tp_session_destroy(session);
+    tp_fs_remove_tree(root);
 }
 
 static tp_operation rename_op(tp_id128 atlas_id, const char *name);
@@ -3479,6 +3836,11 @@ int main(int argc, char **argv) {
     UNITY_BEGIN();
     RUN_TEST(
         test_refresh_generic_cancel_and_compact_use_concrete_owner);
+    RUN_TEST(test_refresh_normalizes_folder_and_file_source_keys);
+    RUN_TEST(test_refresh_reports_canonical_source_key_collision);
+    RUN_TEST(test_refresh_retains_source_local_diagnostic);
+    RUN_TEST(test_refresh_cancel_interrupts_active_folder_scan);
+    RUN_TEST(test_refresh_snapshot_oom_keeps_previous_cut_retryable);
     RUN_TEST(test_snapshot_preview_apply_isolated_and_revision_exact);
     RUN_TEST(test_snapshot_allocation_failures_return_structured_oom);
     RUN_TEST(test_snapshot_creation_does_not_clone_and_same_generation_shares_project);

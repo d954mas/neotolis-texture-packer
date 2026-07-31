@@ -1,12 +1,14 @@
 #ifndef TP_SOURCE_RUNTIME_INTERNAL_H
 #define TP_SOURCE_RUNTIME_INTERNAL_H
 
+#include "tp_core/tp_cancel.h"
 #include "tp_core/tp_session.h"
 #include "tp_core/tp_source_runtime.h"
 
 tp_status tp_source_runtime_build(
     const tp_session_snapshot *snapshot,
-    tp_source_runtime_projection **out, tp_error *err);
+    tp_source_runtime_projection **out,
+    const tp_cancel_token *cancel, tp_error *err);
 tp_source_runtime_projection *tp_source_runtime_clone(
     const tp_source_runtime_projection *projection);
 void tp_source_runtime_destroy(

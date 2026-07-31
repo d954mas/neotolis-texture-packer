@@ -168,9 +168,25 @@ static bool snapshot_matches_session(
            snapshot->has_saved_file_fingerprint ==
                session->has_saved_file_fingerprint &&
            (!snapshot->has_saved_file_fingerprint ||
-            tp_id128_eq(
-                snapshot->saved_file_fingerprint,
-                session->saved_file_fingerprint));
+             tp_id128_eq(
+                 snapshot->saved_file_fingerprint,
+                 session->saved_file_fingerprint));
+}
+
+static void session_view_adopt_snapshot(
+    tp_session *session, tp_session_snapshot *replacement) {
+    tp_session_snapshot *retired =
+        session->view_snapshot;
+    session->view_snapshot = replacement;
+    session->view.snapshot = replacement;
+    if (session->view.snapshot_generation <
+        UINT64_MAX) {
+        ++session->view.snapshot_generation;
+    }
+    if (session->view.generation < UINT64_MAX) {
+        ++session->view.generation;
+    }
+    tp_session_snapshot_destroy(retired);
 }
 
 tp_status tp_session_view__refresh_snapshot(
@@ -193,19 +209,38 @@ tp_status tp_session_view__refresh_snapshot(
     if (status != TP_STATUS_OK) {
         return status;
     }
-    tp_session_snapshot *retired =
-        session->view_snapshot;
-    session->view_snapshot = replacement;
-    session->view.snapshot = replacement;
-    if (session->view.snapshot_generation <
-        UINT64_MAX) {
-        ++session->view.snapshot_generation;
-    }
-    if (session->view.generation < UINT64_MAX) {
-        ++session->view.generation;
-    }
-    tp_session_snapshot_destroy(retired);
+    session_view_adopt_snapshot(session, replacement);
     return TP_STATUS_OK;
+}
+
+tp_status tp_session_view__prepare_source_refresh(
+    tp_session *session, tp_session_snapshot **out, tp_error *err) {
+    NT_ASSERT(session != NULL);
+    NT_ASSERT(out != NULL);
+    *out = NULL;
+    tp_session_snapshot *replacement = NULL;
+    tp_status status = tp_session_snapshot__capture(
+        session, &replacement, err);
+    if (status != TP_STATUS_OK) {
+        return status;
+    }
+    ++replacement->admission_sequence;
+    ++replacement->source_generation;
+    ++replacement->event_sequence;
+    status = tp_session_snapshot__materialize_captured(
+        replacement, err);
+    if (status == TP_STATUS_OK) {
+        *out = replacement;
+    }
+    return status;
+}
+
+void tp_session_view__adopt_prepared_source_refresh(
+    tp_session *session, tp_session_snapshot *replacement) {
+    NT_ASSERT(session != NULL);
+    NT_ASSERT(replacement != NULL);
+    NT_ASSERT(snapshot_matches_session(replacement, session));
+    session_view_adopt_snapshot(session, replacement);
 }
 
 static tp_status snapshot_materialize(tp_session_snapshot *snapshot,

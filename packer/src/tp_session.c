@@ -635,10 +635,11 @@ tp_status tp_session_update(
         tp_session_job_sample sample = {0};
         if (job->observe &&
             job->observe(job, &sample)) {
-            session_job_state_from_sample(
-                session, job, &sample);
-            if (sample.state !=
+            if (sample.state ==
                 TP_SESSION_JOB_RUNNING) {
+                session_job_state_from_sample(
+                    session, job, &sample);
+            } else {
                 tp_session_job_rejection rejection =
                     TP_SESSION_JOB_REJECTION_NONE;
                 if (sample.cancellation_requested ||
@@ -669,6 +670,27 @@ tp_status tp_session_update(
                     session_job_state_from_sample(
                         session, job, &sample);
                 }
+                tp_session_snapshot *prepared_refresh_snapshot =
+                    NULL;
+                if (rejection ==
+                        TP_SESSION_JOB_REJECTION_NONE &&
+                    sample.terminal_result &&
+                    sample.terminal_result->kind ==
+                        TP_SESSION_JOB_REFRESH &&
+                    sample.terminal_result->state ==
+                        TP_SESSION_JOB_SUCCEEDED &&
+                    sample.terminal_result->refresh.projection) {
+                    const tp_status prepare_status =
+                        tp_session_view__prepare_source_refresh(
+                            session,
+                            &prepared_refresh_snapshot, err);
+                    if (prepare_status != TP_STATUS_OK) {
+                        tp_session_job_release_internal(job);
+                        return prepare_status;
+                    }
+                }
+                session_job_state_from_sample(
+                    session, job, &sample);
                 session->observed_job_state.rejection =
                     rejection;
                 session->observed_job_state
@@ -684,8 +706,10 @@ tp_status tp_session_update(
                     sample.terminal_result->state ==
                         TP_SESSION_JOB_SUCCEEDED &&
                     sample.terminal_result->refresh.projection) {
-                    tp_source_runtime_destroy(
-                        session->source_projection);
+                    NT_ASSERT(
+                        prepared_refresh_snapshot != NULL);
+                    tp_source_runtime_projection *retired_projection =
+                        session->source_projection;
                     session->source_projection =
                         sample.terminal_result->refresh.projection;
                     sample.terminal_result->refresh.projection =
@@ -699,7 +723,16 @@ tp_status tp_session_update(
                         TP_SESSION_EVENT_SOURCE_RUNTIME_CHANGED,
                         NULL, revision, revision, NULL, NULL);
                     history_record_refresh(session);
+                    session->view.sources =
+                        session->source_projection;
+                    tp_session_view__adopt_prepared_source_refresh(
+                        session, prepared_refresh_snapshot);
+                    prepared_refresh_snapshot = NULL;
+                    tp_source_runtime_destroy(
+                        retired_projection);
                 }
+                NT_ASSERT(
+                    prepared_refresh_snapshot == NULL);
                 NT_ASSERT(session->active_job == job);
                 session->active_job = NULL;
                 tp_session_job_release_internal(job);
