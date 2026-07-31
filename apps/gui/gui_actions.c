@@ -16,6 +16,9 @@
 #include "tinyfiledialogs.h"
 
 #include "clipboard/nt_clipboard.h"
+#if defined(NTPACKER_GUI_DEV_SEAMS) || defined(TP_ENABLE_TEST_SEAMS)
+#include "time/nt_time.h"
+#endif
 #include "tp_core/tp_export.h" /* tp_exporter_at -> the preview selector's exporter list */
 #include "tp_core/tp_id.h"
 #include "tp_core/tp_names.h"  /* tp_names_common_prefix (anim id from selection) */
@@ -162,48 +165,74 @@ void gui_actions__refresh(void) {
     char error[256] = {0};
     if (gui_refresh_async_start(error, sizeof error)) {
         set_status_ex(STATUS_INFO, "Refreshing sources...");
-#ifdef TP_ENABLE_TEST_SEAMS
-        while (gui_pack_async_busy()) {
-            tp_error update_error = {{0}};
-            if (gui_project_frame_begin(&update_error) !=
-                TP_STATUS_OK) {
-                break;
-            }
-            gui_actions__poll_pack();
-            gui_project_frame_end();
-        }
-#endif
     } else {
         set_statusf_ex(
             STATUS_ERROR, "Refresh failed: %s", error);
     }
 }
 
-/* Headless seam drains the same session Refresh task. */
+/* Dev/test-only blocking driver. The admitted Refresh still advances solely
+ * through the production frame/action pump. Test builds read the typed
+ * completion copied by gui_actions__poll_pack after its real poll path. */
+#if defined(NTPACKER_GUI_DEV_SEAMS) || defined(TP_ENABLE_TEST_SEAMS)
 bool gui_actions_refresh_diff_headless(int *out_added, int *out_removed,
-                                       int *out_changed) {
+                                       int *out_changed,
+                                       int *out_unavailable) {
+#ifdef TP_ENABLE_TEST_SEAMS
+    gui_actions__test_reset_refresh_completion();
+#else
     const uint64_t before = gui_project_source_runtime_generation();
+#endif
     char start_error[256] = {0};
     if (!gui_refresh_async_start(
             start_error, sizeof start_error)) {
         return false;
     }
 #ifdef TP_ENABLE_TEST_SEAMS
+    gui_pack_done done = GUI_PACK_DONE_NONE;
+    gui_pack_result_info info = {0};
+    for (int attempt = 0;
+         attempt < 5000 && done == GUI_PACK_DONE_NONE;
+         ++attempt) {
+        tp_error update_error = {{0}};
+        if (gui_project_frame_begin(
+                &update_error) != TP_STATUS_OK) {
+            return false;
+        }
+        gui_actions_poll_host_completion();
+        gui_project_frame_end();
+        if (!gui_actions__test_take_refresh_completion(
+                &done, &info) &&
+            gui_project_job_busy()) {
+            nt_time_sleep(0.001);
+        }
+    }
+    if (done == GUI_PACK_DONE_NONE) {
+        return false;
+    }
+    if (out_added) *out_added = info.added;
+    if (out_removed) *out_removed = info.removed;
+    if (out_changed) *out_changed = info.changed;
+    if (out_unavailable) *out_unavailable = info.unavailable;
+    return done == GUI_PACK_DONE_REFRESH_OK;
+#else
     while (gui_project_job_busy()) {
         tp_error update_error = {{0}};
         if (gui_project_frame_begin(
                 &update_error) != TP_STATUS_OK) {
-            break;
+            return false;
         }
-        gui_actions__poll_pack();
+        gui_actions_poll_host_completion();
         gui_project_frame_end();
     }
-#endif
-    if (out_added) *out_added = 0;
-    if (out_removed) *out_removed = 0;
-    if (out_changed) *out_changed = 0;
+    (void)out_added;
+    (void)out_removed;
+    (void)out_changed;
+    (void)out_unavailable;
     return gui_project_source_runtime_generation() > before;
+#endif
 }
+#endif
 
 // #endregion
 

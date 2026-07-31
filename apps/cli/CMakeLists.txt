@@ -559,10 +559,10 @@ add_test(NAME cli_large_project_packable COMMAND ${CMAKE_COMMAND}
     -DNOT_EXIST_FILES=${CMAKE_CURRENT_BINARY_DIR}/cli_large_project_dry
     -P "${_run}")
 
-# (o) B3b parity: `ntpacker pack` == direct-core (tp_demo_export) BYTE-FOR-BYTE on a
-# fixture exercising a nested relative out_path, a rename feeding an anim, a dotfile
-# override, and a fractional pivot (float/locale canary). tp_demo_export lives in
-# packer/tests; both targets are built by the top-level build. No GL -> runs on 3 OS.
+# (o) Client parity: ordinary `ntpacker pack` == public live-session Export
+# BYTE-FOR-BYTE on one staged saved project. The fixture exercises a nested
+# relative out_path, a rename feeding an anim, a dotfile override, and a
+# fractional pivot (float/locale canary). No GL -> runs on 3 OS.
 add_test(NAME cli_parity COMMAND ${CMAKE_COMMAND}
     -DNTPACKER=$<TARGET_FILE:ntpacker>
     -DDEMO=$<TARGET_FILE:tp_demo_export>

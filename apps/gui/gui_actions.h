@@ -166,10 +166,13 @@ void gui_request_redo(void);
  * must use gui_request_undo/gui_request_redo. */
 void do_undo(void);
 void do_redo(void);
-/* Headless seam that drains the same session Refresh task and preserves
- * revision/dirty state. */
+/* Dev/test-only blocking driver over the production async Refresh frame pump.
+ * It is absent from the shipping build. */
+#if defined(NTPACKER_GUI_DEV_SEAMS) || defined(TP_ENABLE_TEST_SEAMS)
 bool gui_actions_refresh_diff_headless(int *out_added, int *out_removed,
-                                       int *out_changed);
+                                       int *out_changed,
+                                       int *out_unavailable);
+#endif
 /* Refresh policy seam: after runtime invalidation, even a later diff failure
  * leaves the retained preview stale. */
 bool gui_actions_refresh_should_mark_stale(tp_status status,

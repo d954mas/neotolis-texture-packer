@@ -28,12 +28,16 @@ typedef struct scan_vec {
 /* Test-only allocation seam. Keeping the seam in this module lets the
  * atomic-result contract be swept without replacing the process allocator. */
 static _Thread_local int s_scan_alloc_fail = -1;
-static _Thread_local int s_scan_stat_error;
+/* Refresh tests arm this on the owner thread and the real Refresh worker
+ * consumes it. Each test binary is process-isolated; production omits it. */
+static atomic_int s_scan_stat_error;
 static _Thread_local bool s_scan_sort_started;
 static _Thread_local bool s_scan_sort_finished;
 
 void tp_scan__test_set_alloc_fail(int nth) { s_scan_alloc_fail = nth; }
-void tp_scan__test_set_stat_error(int error) { s_scan_stat_error = error; }
+void tp_scan__test_set_stat_error(int error) {
+    atomic_store(&s_scan_stat_error, error);
+}
 void tp_scan__test_reset_sort_finished(void) {
     s_scan_sort_started = false;
     s_scan_sort_finished = false;
@@ -116,7 +120,7 @@ static void scan_post_entry_gate(void) {
 
 void tp_scan__test_reset_all(void) {
     s_scan_alloc_fail = -1;
-    s_scan_stat_error = 0;
+    atomic_store(&s_scan_stat_error, 0);
     s_scan_sort_started = false;
     s_scan_sort_finished = false;
 
@@ -580,8 +584,9 @@ tp_status tp_scan_classify_checked(const char *abs, tp_scan_kind *out,
                             "source classification path is empty");
     }
 #ifdef TP_ENABLE_TEST_SEAMS
-    if (s_scan_stat_error != 0) {
-        errno = s_scan_stat_error;
+    const int stat_error = atomic_load(&s_scan_stat_error);
+    if (stat_error != 0) {
+        errno = stat_error;
         return scan_errno_status(errno, "stat", abs, err);
     }
 #endif

@@ -10,6 +10,33 @@
 
 #include "tp_core/tp_export.h"
 
+#ifdef TP_ENABLE_TEST_SEAMS
+static bool s_test_refresh_completion_pending;
+static gui_pack_done s_test_refresh_completion_done;
+static gui_pack_result_info s_test_refresh_completion_info;
+
+void gui_actions__test_reset_refresh_completion(void) {
+    s_test_refresh_completion_pending = false;
+    s_test_refresh_completion_done = GUI_PACK_DONE_NONE;
+    s_test_refresh_completion_info = (gui_pack_result_info){0};
+}
+
+bool gui_actions__test_take_refresh_completion(
+    gui_pack_done *out_done, gui_pack_result_info *out_info) {
+    if (!s_test_refresh_completion_pending) {
+        return false;
+    }
+    if (out_done) {
+        *out_done = s_test_refresh_completion_done;
+    }
+    if (out_info) {
+        *out_info = s_test_refresh_completion_info;
+    }
+    gui_actions__test_reset_refresh_completion();
+    return true;
+}
+#endif
+
 // #region pack / export actions
 /* Ctrl+P / Pack: start the selected atlas's typed session Pack job. On success clear the
  * preview-stale bit and upload the packed pages to the canvas (atlas-page view); on failure the
@@ -189,7 +216,17 @@ static void preview_target_sync(void) {
  * the packed snapshot) and route the outcome through the severity status. Called from apply_pending. */
 static void poll_async(void) {
     gui_pack_result_info info;
-    switch (gui_pack_poll(&info)) {
+    const gui_pack_done done = gui_pack_poll(&info);
+#ifdef TP_ENABLE_TEST_SEAMS
+    if (done == GUI_PACK_DONE_REFRESH_OK ||
+        done == GUI_PACK_DONE_REFRESH_FAIL ||
+        done == GUI_PACK_DONE_REFRESH_CANCELLED) {
+        s_test_refresh_completion_done = done;
+        s_test_refresh_completion_info = info;
+        s_test_refresh_completion_pending = true;
+    }
+#endif
+    switch (done) {
         case GUI_PACK_DONE_PACK_OK: {
             /* The core-captured immutable input token covers both committed
              * model state and source-runtime refreshes. */

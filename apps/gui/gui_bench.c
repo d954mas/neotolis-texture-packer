@@ -351,7 +351,7 @@ static void bench_run_probes(void) {
          * near-free invalidate the earlier probe measured. The headless seam omits the UI/status/canvas
          * side effects, so the refresh semantic-purity invariant asserted below still holds. */
         const bool refresh_ok = gui_actions_refresh_diff_headless(
-            &r_added, &r_removed, &r_changed);
+            &r_added, &r_removed, &r_changed, NULL);
         const double t1 = bench_now_ms();
         bench_samples_record(&refresh, refresh_ok, t1 - t0);
     }

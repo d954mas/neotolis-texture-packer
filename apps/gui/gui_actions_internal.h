@@ -2,6 +2,9 @@
 #define NTPACKER_GUI_ACTIONS_INTERNAL_H
 
 #include "gui_actions.h"
+#ifdef TP_ENABLE_TEST_SEAMS
+#include "gui_pack.h"
+#endif
 
 #include "tp_core/tp_export.h"
 #include "tp_core/tp_srckey.h"
@@ -254,6 +257,13 @@ void gui_actions__refresh(void);
 void gui_actions__export(void);
 void gui_actions__preview_target_start(int combo_index);
 void gui_actions__poll_pack(void);
+#ifdef TP_ENABLE_TEST_SEAMS
+/* Copies only value fields from the already-consumed Refresh terminal. These
+ * seams never poll, retain a job owner, or influence scheduling. */
+void gui_actions__test_reset_refresh_completion(void);
+bool gui_actions__test_take_refresh_completion(
+    gui_pack_done *out_done, gui_pack_result_info *out_info);
+#endif
 void gui_actions__apply_recovery(void);
 void gui_actions__clear_pending(void);
 void gui_actions__clear_history_request(void);

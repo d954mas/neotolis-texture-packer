@@ -470,11 +470,10 @@ tp_add_test(NAME raw_ownership LIBS tp_build unity PRIVATE_SRC
     MAKE_DIRS "${CMAKE_BINARY_DIR}/tp_raw_ownership_test"
     ARGS "${CMAKE_BINARY_DIR}/tp_raw_ownership_test")
 
-# Dev driver / smoke tool (NOT a ctest): load a `.ntpacker_project`, assemble each
-# atlas's sprites through the shared op layer (tp_pack_input_build), and run every
-# enabled target -> the project's out_paths. Regenerates the Defold demo's ntpacker
-# exports deterministically and serves as the CLI parity oracle (byte-identical to
-# `ntpacker pack`). Input assembly + decode live in tp_core now (no stb here).
+# Live-session Export dev driver / smoke tool (NOT a ctest): open one saved
+# project, start the public session Export command, and drain its typed receipt.
+# It serves as the live-headless half of CLI parity without owning mutable
+# project, source-expansion, packing, or export orchestration.
 #   tp_demo_export <project.ntpacker_project> [work_dir]
 tp_add_test(NAME demo_export TARGET tp_demo_export
     SOURCES tp_demo_export.c
