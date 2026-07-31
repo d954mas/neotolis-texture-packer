@@ -26,8 +26,7 @@ set(_arch_rules
     VIEW_PLATFORM
     VIEW_MODEL_POLICY
     CORE_FRONTEND
-    ASYNC_RAW_SESSION
-    HOST_QUEUE_RAW_SESSION_STORAGE)
+    ASYNC_RAW_SESSION)
 
 foreach(_rule IN LISTS _arch_rules)
     set_property(GLOBAL PROPERTY "ARCH_HITS_${_rule}" "")
@@ -189,14 +188,7 @@ foreach(_source IN LISTS _arch_sources)
     # The async family is code that runs off the host/UI thread: job workers,
     # transports, and out-of-process clients. Its rule forbids retaining or
     # calling a raw `tp_session *`, because that session belongs to another
-    # thread. gui_host_queue is deliberately NOT in this family: it runs ON
-    # the host thread and legitimately passes `tp_session *` through its
-    # drain/admission functions, which is why the old `host_queue` token had
-    # to be exempted line-for-line the moment it was added. The two things
-    # that must actually be true of the queue are expressed directly instead:
-    # HOST_QUEUE_RAW_SESSION_STORAGE (it never RETAINS a session) and the
-    # gui_host_queue_* containment sweep below (its symbols never leak past
-    # the host owner).
+    # thread.
     set(_is_async false)
     if(_relative MATCHES "(^|/)[^/]*(worker|transport|dev[_-]?api|mcp)[^/]*\\.(c|h)$")
         set(_is_async true)
@@ -352,17 +344,6 @@ foreach(_source IN LISTS _arch_sources)
         _arch_scan_all(ASYNC_RAW_SESSION "${_relative}" "${_symbols}"
             "(^|[^A-Za-z0-9_])((const[ \t\r\n]+)?tp_session)[ \t\r\n]*\\*[ \t\r\n]*([A-Za-z_][A-Za-z0-9_]*)"
             4 "tp_session-pointer:")
-    endif()
-    # The struct BODY is extracted first and its members scanned separately.
-    # One pattern spanning both steps let the greedy body wildcard swallow every
-    # member but the last, so a queue retaining two sessions reported one hit no
-    # matter which scan mode the member match ran in.
-    if(_relative MATCHES "^apps/gui/gui_host_queue\\.(c|h)$"
-       AND _symbols MATCHES "typedef[ \t\r\n]+struct[ \t\r\n]+gui_host_queue[ \t\r\n]*\\{([^}]*)\\}")
-        _arch_scan_all(HOST_QUEUE_RAW_SESSION_STORAGE "${_relative}"
-            "${CMAKE_MATCH_1}"
-            "(^|[^A-Za-z0-9_])((const[ \t\r\n]+)?tp_session)[ \t\r\n]*\\*[ \t\r\n]*([A-Za-z_][A-Za-z0-9_]*)[ \t\r\n]*@"
-            4 "retained-tp_session-member:")
     endif()
 endforeach()
 
@@ -602,9 +583,6 @@ _arch_report_debt(VIEW_MODEL_POLICY "PV-settings/RESULT-INDEX"
                   "apps/gui/gui_view_settings\\.c|#include:tp_core/tp_export.h,#include:tp_core/tp_validate.h,tp_exporter_count,tp_exporter_at,tp_validate_session_snapshot_target,tp_project_sprite_effective_shape,gui_pack_result,gui_pack_find_sprite_ref")
 _arch_assert_rule(CORE_FRONTEND "A1a/A1b")
 _arch_assert_rule(ASYNC_RAW_SESSION "A1c/A2b")
-_arch_assert_rule(
-    HOST_QUEUE_RAW_SESSION_STORAGE
-    "A2b no retained raw session")
 
 # Zero-only deletion guard. Behavioral tests prove presence and sequencing;
 # this gate only prevents a removed path from returning.
@@ -664,11 +642,6 @@ _arch_assert_absent("apps/gui/gui_actions.c"
                     "s_refresh_fingerprint_session" "A2b")
 _arch_assert_absent("apps/gui/main.c" "gui_pack_worker_active" "A2b")
 _arch_assert_absent("apps/gui/main.c" "gui_pack_poll" "A2b")
-_arch_assert_absent(
-    "apps/gui/gui_host_queue.h"
-    "tp_session[ \t]*\\*[ \t]*[A-Za-z_][A-Za-z0-9_]*[ \t]*;"
-    "A2b no retained raw session")
-
 file(GLOB _gui_shipping_sources LIST_DIRECTORIES false
     "${_arch_root}/apps/gui/gui*.c"
     "${_arch_root}/apps/gui/main.c")
@@ -719,7 +692,7 @@ foreach(_source IN LISTS _gui_observation_sources)
                OUTPUT_VARIABLE _relative)
     cmake_path(CONVERT "${_relative}" TO_CMAKE_PATH_LIST _relative NORMALIZE)
     if(_relative MATCHES
-       "^apps/gui/(gui_session_client|gui_selftest|tp_bench_[^/]*|test_[^/]*|client_parity_[^/]*)\\.(c|h)$")
+       "^apps/gui/(gui_selftest|tp_bench_[^/]*|test_[^/]*|client_parity_[^/]*)\\.(c|h)$")
         continue()
     endif()
     foreach(_symbol IN ITEMS tp_session_observe
@@ -768,8 +741,7 @@ foreach(_source IN LISTS _gui_shipping_sources)
     _arch_assert_absent(
         "${_relative}" "tp_session_apply"
         "A2c single GUI mutation owner")
-    if(NOT _filename STREQUAL "gui_project_operations.c"
-       AND NOT _filename STREQUAL "gui_session_client.c")
+    if(NOT _filename STREQUAL "gui_project_operations.c")
         _arch_assert_absent(
             "${_relative}" "gui_session_client_submit"
             "A5 single GUI submit owner")
@@ -804,18 +776,6 @@ foreach(_path IN ITEMS
             "${_path}" "${_symbol}" "A2d")
     endforeach()
 endforeach()
-foreach(_symbol IN ITEMS
-        gui_host_binding_receipt
-        gui_host_command_kind
-        has_pending_start
-        drain_cancel_pending)
-    _arch_assert_absent(
-        "apps/gui/gui_host_queue.h"
-        "${_symbol}" "A2d")
-    _arch_assert_absent(
-        "apps/gui/gui_host_binding.h"
-        "${_symbol}" "A2d")
-endforeach()
 _arch_assert_absent(
     "apps/gui/gui_project_internal.h"
     "gui_session_client[ \t\r\n]+client[ \t\r\n]*;"
@@ -825,8 +785,6 @@ _arch_assert_absent(
     "gui_host_queue[ \t\r\n]+host_queue[ \t\r\n]*;"
     "A2d single host queue storage")
 foreach(_path IN ITEMS
-        apps/gui/gui_host_queue.c
-        apps/gui/gui_host_queue.h
         apps/gui/gui_project.c
         apps/gui/gui_project.h)
     foreach(_symbol IN ITEMS
@@ -841,15 +799,11 @@ _arch_assert_absent("apps/gui/gui_actions_dialogs.c" "gui_project_open" "A2d")
 _arch_assert_absent("apps/gui/main.c" "gui_project_open" "A2d")
 _arch_assert_absent("apps/gui/gui_pack_jobs.c"
                     "gui_project_lifecycle_begin_shutdown" "A2d")
-foreach(_path IN ITEMS apps/gui/gui_host_queue.c apps/gui/gui_host_queue.h)
-    _arch_assert_absent("${_path}" "gui_host_queue_can_replace" "A2d")
-endforeach()
-
 foreach(_source IN LISTS _gui_shipping_sources)
     cmake_path(RELATIVE_PATH _source BASE_DIRECTORY "${_arch_root}"
                OUTPUT_VARIABLE _relative)
     if(_relative MATCHES
-       "^apps/gui/(gui_host_binding|gui_host_queue|gui_session_client|gui_selftest)\\.c$")
+       "^apps/gui/gui_selftest\\.c$")
         continue()
     endif()
     foreach(_symbol IN ITEMS
@@ -865,11 +819,10 @@ foreach(_source IN LISTS _gui_shipping_sources)
     endforeach()
 endforeach()
 
-# P5: history, identity, and source-runtime commands belong to the host owner
-# (spec 6.1), not to whichever file happens to hold a borrowed session. The
-# binding owns the sole active-session pointer, so these session entry points
-# may appear only there; every other GUI TU goes through
-# gui_host_binding_undo/redo/save/save_as/invalidate_sources.
+# History, identity, and source-runtime commands belong to the small project
+# host, not to whichever file happens to hold a borrowed view. The host owns the
+# sole active-session pointer, so these session entry points may appear only in
+# gui_project.c/gui_project_file.c.
 foreach(_source IN LISTS _gui_shipping_sources)
     cmake_path(GET _source FILENAME _filename)
     if(_filename STREQUAL "gui_project.c"

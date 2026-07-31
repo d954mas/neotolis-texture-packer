@@ -124,11 +124,19 @@ retains only compact terminal metadata. Owned snapshots remain available for
 real file, thread, or transport boundaries; the frame loop does not allocate
 one per update.
 
+Fallible view preparation happens before publication. In particular, a
+successful Refresh prepares its replacement snapshot before replacing the
+source projection or advancing generation, events, and history. If preparation
+fails, the previous complete view remains current and the terminal task remains
+available for a later `update` retry.
+
 The GUI client converts frame intents and explicit edit drafts into typed
 operations in its local `gui_project_operations` lowering module, submits them
-to the session, then renders from the borrowed current view. This is not a
-session adapter or client mirror. Drafts are UI state, not a second hidden
-project copy.
+to the session, then renders from the borrowed current view. Only
+`gui_project_frame_begin` updates the active session and receives a terminal
+payload; operation lowering, persistence, and recovery queries never perform a
+second observation. This is not a session adapter or client mirror. Drafts are
+UI state, not a second hidden project copy.
 
 The file CLI uses immutable load/apply-preview facilities for queries and dry
 runs, and a short-lived writable session for saved-file mutations.

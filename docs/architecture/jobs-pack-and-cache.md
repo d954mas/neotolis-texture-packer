@@ -60,7 +60,15 @@ A second start returns `busy`. Refresh performs source filesystem I/O on its
 worker and the session adopts its stable-ID-keyed immutable projection only if
 the captured model generation is still current. The small GUI project host owns
 only the active/candidate session pair and explicitly cancels and drains an old
-task before replacement. A superseded completion is never presented as current.
+task before replacement. Its stored lifecycle state is one of closed, active,
+intent-specific draining, or intent-specific ready-to-cutover; cutover does not
+depend on reconstructing state from pointer and flag combinations. A
+superseded completion is never presented as current.
+
+Generic task operations dispatch through the concrete owned-job interface.
+Cancellation therefore addresses the Pack, Export, or Refresh owner without a
+layout cast. A client retaining a terminal receipt beyond its poll boundary
+must compact it first; compaction is concrete-owner-specific and idempotent.
 
 ## Pack-input identity
 

@@ -172,8 +172,7 @@ foreach(TP_ARCH_RULE IN ITEMS
         VIEW_PLATFORM
         VIEW_MODEL_POLICY
         CORE_FRONTEND
-        ASYNC_RAW_SESSION
-        HOST_QUEUE_RAW_SESSION_STORAGE)
+        ASYNC_RAW_SESSION)
     string(TOLOWER "${TP_ARCH_RULE}" TP_ARCH_FIXTURE)
     add_test(NAME "tp_architecture_negative_${TP_ARCH_FIXTURE}"
         COMMAND "${CMAKE_COMMAND}"
@@ -217,7 +216,6 @@ foreach(TP_ARCH_ALL_FIXTURE IN ITEMS
         "core_frontend_second_call|CORE_FRONTEND"
         # declarators
         "async_raw_session_second_declaration|ASYNC_RAW_SESSION"
-        "host_queue_second_member|HOST_QUEUE_RAW_SESSION_STORAGE"
         # the lexical layer the scans above read: comments and literals must be
         # removed in ONE pass, or a `'"'` character literal / a `//` inside a
         # string silently blanks real code and every scan under-reports

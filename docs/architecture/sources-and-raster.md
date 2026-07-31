@@ -39,7 +39,9 @@ Current accepted extensions are:
 
 Scanner ordering and source-key derivation are deterministic. Duplicate keys,
 invalid UTF-8, path overflows, inaccessible files, and decode errors become
-structured findings.
+structured findings. The immutable runtime projection preserves the complete
+source-local `tp_error` beside its coarse status, so a live headless client does
+not need to reconstruct diagnostics from presentation text.
 
 The stored `kind` is authoritative when disk cannot be consulted. Runtime
 stat/scanning can still observe that a path's current filesystem type differs.
@@ -48,9 +50,11 @@ stat/scanning can still observe that a path's current filesystem type differs.
 
 Refresh is the third session task kind beside Pack and Export. Admission
 captures an immutable session snapshot, and the worker performs all filesystem
-stat/scanning off the session owner thread. A successful terminal result
-atomically replaces one session-owned immutable source-runtime projection keyed
-by stable atlas/source IDs and source-local keys.
+stat/scanning off the session owner thread. Its cancel token is polled between
+sources and recursive directory entries. A successful terminal result first
+prepares the complete replacement view, then atomically replaces one
+session-owned immutable source-runtime projection keyed by stable atlas/source
+IDs and canonical source-local keys.
 
 The adopted replacement advances source-runtime state and adds a non-undoable
 visible refresh marker. It does not:
@@ -64,9 +68,12 @@ visible refresh marker. It does not:
 The GUI exposes explicit Refresh and renders only the borrowed projection from
 `tp_session_view`. It has no filesystem scan cache, fingerprint baseline, or
 parallel source truth. Pack and Export read their own immutable job inputs and
-do not implicitly start Refresh. The current product does not implement
-persistent filesystem watchers. Watcher-driven refresh is a target capability
-and must preserve the same task admission and semantic-purity boundary.
+do not implicitly start Refresh. Automatic Refresh requests caused by source
+membership edits, Undo/Redo, New, or Open are one coalesced host-owned pending
+bit; an occupied task slot cannot lose the request and no second task queue is
+created. The current product does not implement persistent filesystem watchers.
+Watcher-driven refresh is a target capability and must preserve the same task
+admission and semantic-purity boundary.
 
 ## Raster decode boundary
 
