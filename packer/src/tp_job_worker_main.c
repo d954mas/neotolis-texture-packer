@@ -217,9 +217,9 @@ typedef struct export_terminal_context {
     bool claimed;
 } export_terminal_context;
 
-static bool publish_export_terminal_boundary(void *opaque) {
-    export_terminal_context *context = opaque;
-    if (!context || context->current != context->eligible) {
+static bool publish_export_terminal_boundary_now(
+    export_terminal_context *context) {
+    if (!context || context->claimed) {
         return false;
     }
     context->claimed = true;
@@ -243,6 +243,13 @@ static bool publish_export_terminal_boundary(void *opaque) {
     }
 #endif
     return true;
+}
+
+static bool publish_export_terminal_boundary(void *opaque) {
+    export_terminal_context *context = opaque;
+    return context &&
+           context->current == context->eligible &&
+           publish_export_terminal_boundary_now(context);
 }
 
 static void collect_image_hash(void *context, int sprite_index,
@@ -661,6 +668,7 @@ static tp_status run_export(const tp_job_worker_proto_request *request,
 
     tp_status first_status = TP_STATUS_OK;
     int current = 0;
+    bool cancellation_ended_work = false;
     for (int i = 0; i < atlas_count; ++i) {
         tp_export_snapshot_atlas_info info = {0};
         status = tp_export_snapshot_job_atlas_info(
@@ -678,6 +686,7 @@ static tp_status run_export(const tp_job_worker_proto_request *request,
             continue;
         }
         if (tp_cancel_source_poll(cancel)) {
+            cancellation_ended_work = true;
             break;
         }
         current++;
@@ -774,8 +783,21 @@ static tp_status run_export(const tp_job_worker_proto_request *request,
         tp_export_notices_free(&notices);
         tp_arena_destroy(arena);
         if (status == TP_STATUS_CANCELLED) {
+            cancellation_ended_work = true;
             break;
         }
+    }
+    /* The per-writer callback is the narrow boundary when the final eligible
+     * target actually invokes a writer. A command can still have published
+     * earlier targets and end with only skipped/pre-writer-failure work. Once
+     * that tail has returned there is no future writer, so publish the same
+     * boundary here rather than letting a later Cancel rewrite real output. */
+    if (!terminal_context.claimed &&
+        !cancellation_ended_work &&
+        (response->export_result.targets > 0 ||
+         response->export_result.publication_uncertain)) {
+        (void)publish_export_terminal_boundary_now(
+            &terminal_context);
     }
     /* Nothing in here is published to the host: the exported files already went
      * to their target output paths, and the staged `.ntpack` was an internal

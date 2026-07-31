@@ -142,7 +142,8 @@ typedef enum gui_job_request_kind {
     GUI_JOB_REQUEST_CANCEL,
     GUI_JOB_REQUEST_PACK,
     GUI_JOB_REQUEST_EXPORT,
-    GUI_JOB_REQUEST_PREVIEW
+    GUI_JOB_REQUEST_PREVIEW,
+    GUI_JOB_REQUEST_COUNT
 } gui_job_request_kind;
 
 typedef struct gui_job_request_receipt {
@@ -151,7 +152,10 @@ typedef struct gui_job_request_receipt {
     char detail[256];
 } gui_job_request_receipt;
 
-enum { GUI_ACTIONS_STEP_MAX_JOB_RECEIPTS = 4 };
+enum {
+    GUI_ACTIONS_STEP_MAX_JOB_RECEIPTS =
+        GUI_JOB_REQUEST_COUNT - 1
+};
 typedef struct gui_actions_step_result {
     gui_job_request_receipt
         job_receipts[GUI_ACTIONS_STEP_MAX_JOB_RECEIPTS];

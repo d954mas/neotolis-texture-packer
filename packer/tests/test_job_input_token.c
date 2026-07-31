@@ -210,6 +210,50 @@ static tp_id128 add_enabled_export_target(
     return target_id;
 }
 
+static tp_id128 add_empty_export_atlas(tp_session *session) {
+    const tp_id128 atlas_id = {{
+        0x31U, 0x42U, 0x53U, 0x64U,
+        0x75U, 0x86U, 0x97U, 0xA8U,
+        0xB9U, 0xCAU, 0xDBU, 0xECU,
+        0xFDU, 0x0EU, 0x1FU, 0x30U,
+    }};
+    const tp_id128 target_id = {{
+        0x41U, 0x52U, 0x63U, 0x74U,
+        0x85U, 0x96U, 0xA7U, 0xB8U,
+        0xC9U, 0xDAU, 0xEBU, 0xFCU,
+        0x0DU, 0x1EU, 0x2FU, 0x40U,
+    }};
+    tp_operation operations[2] = {0};
+    operations[0].kind = TP_OP_ATLAS_CREATE;
+    operations[0].atlas_id = atlas_id;
+    operations[0].u.atlas_create.name = (char *)"empty-tail";
+    operations[1].kind = TP_OP_TARGET_CREATE;
+    operations[1].atlas_id = atlas_id;
+    operations[1].u.target_create.target_id = target_id;
+    operations[1].u.target_create.exporter_id =
+        (char *)TP_EXPORTER_ID_JSON_NEOTOLIS;
+    operations[1].u.target_create.out_path =
+        (char *)"out/empty-tail";
+    operations[1].u.target_create.enabled = true;
+
+    tp_txn_request request = {0};
+    request.schema = TP_TXN_SCHEMA;
+    memcpy(request.id_hex, "abababababababababababababababab",
+           sizeof request.id_hex);
+    request.expected_revision = tp_session_revision(session);
+    request.ops = operations;
+    request.op_count = 2U;
+    tp_txn_result result = {0};
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_session_apply(session, &request, &result, &error),
+        error.msg);
+    TEST_ASSERT_TRUE(result.committed);
+    tp_txn_result_free(&result);
+    return atlas_id;
+}
+
 static tp_session_job_result wait_for_result(tp_session *session) {
     tp_error error = {{0}};
     tp_session_job_result result = {0};
@@ -848,6 +892,16 @@ void test_export_cancel_is_rejected_after_final_writer_boundary(void) {
         boundary_reached,
         "Export worker did not reach its final-writer boundary");
 
+    /* The marker is written by the worker after the boundary frame. Admit
+     * that frame on the host before testing the host-side cancel decision. */
+    tp_session_job_result unexpected = {0};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_session_update(session, &unexpected, &error),
+        error.msg);
+    TEST_ASSERT_EQUAL_INT(
+        TP_SESSION_JOB_NONE, unexpected.kind);
+
     const tp_status cancel_status =
         tp_session_job_cancel(session, &error);
     tp_session_job_result result = wait_for_result(session);
@@ -866,6 +920,83 @@ void test_export_cancel_is_rejected_after_final_writer_boundary(void) {
     TEST_ASSERT_EQUAL_INT(
         TP_SESSION_JOB_SUCCEEDED, result_state);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, result_status);
+}
+
+void test_export_boundary_survives_a_final_atlas_without_a_writer(void) {
+    tp_session *session = make_session();
+    char work_dir[1024];
+    scratch_dir(work_dir, sizeof work_dir);
+    remove_tree(work_dir);
+    tp_mkdirs(work_dir);
+    const tp_id128 atlas_id = default_atlas_id(session);
+    add_file_source(session, atlas_id, work_dir);
+    (void)add_enabled_export_target(session, atlas_id);
+    (void)add_empty_export_atlas(session);
+
+    char marker[1200];
+    const int marker_length = snprintf(
+        marker, sizeof marker, "%s/export-tail-boundary.marker", work_dir);
+    TEST_ASSERT_TRUE(
+        marker_length > 0 && (size_t)marker_length < sizeof marker);
+    set_worker_env(
+        "TP_TEST_JOB_WORKER_EXPORT_BOUNDARY_MARKER", marker);
+    set_worker_env(
+        "TP_TEST_JOB_WORKER_BLOCK_AFTER_EXPORT_BOUNDARY_MS", "250");
+
+    const tp_export_command_request request = {
+        .work_dir = work_dir,
+        .atlas_id = {{0}},
+    };
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_session_export_start(session, &request, &error),
+        error.msg);
+
+    bool boundary_reached = false;
+    for (long spin = 0; spin < 10000000L; ++spin) {
+        tp_session_job_result unexpected = {0};
+        TEST_ASSERT_EQUAL_INT_MESSAGE(
+            TP_STATUS_OK,
+            tp_session_update(session, &unexpected, &error),
+            error.msg);
+        TEST_ASSERT_EQUAL_INT(
+            TP_SESSION_JOB_NONE, unexpected.kind);
+        tp_fs_info info;
+        if (tp_fs_stat(marker, &info) &&
+            info.kind == TP_FS_KIND_REGULAR) {
+            boundary_reached = true;
+            break;
+        }
+        thrd_yield();
+    }
+    TEST_ASSERT_TRUE_MESSAGE(
+        boundary_reached,
+        "Export did not claim terminal after its no-writer tail");
+
+    tp_session_job_result unexpected = {0};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_session_update(session, &unexpected, &error),
+        error.msg);
+    TEST_ASSERT_EQUAL_INT(
+        TP_SESSION_JOB_NONE, unexpected.kind);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_INVALID_ARGUMENT,
+        tp_session_job_cancel(session, &error));
+
+    tp_session_job_result result = wait_for_result(session);
+    set_worker_env("TP_TEST_JOB_WORKER_EXPORT_BOUNDARY_MARKER", "");
+    set_worker_env(
+        "TP_TEST_JOB_WORKER_BLOCK_AFTER_EXPORT_BOUNDARY_MS", "");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_SESSION_JOB_SUCCEEDED, result.state, result.error.msg);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, result.status);
+    TEST_ASSERT_EQUAL_INT(1, result.export_result.targets);
+    TEST_ASSERT_EQUAL_INT(1, result.export_result.atlases_skipped);
+    tp_session_job_result_destroy(&result);
+    tp_session_destroy(session);
+    remove_tree(work_dir);
 }
 
 /* The contract admits a work_dir up to TP_IDENTITY_PATH_MAX-1 (host and proto
@@ -951,6 +1082,8 @@ int main(int argc, char **argv) {
     RUN_TEST(test_export_target_allocation_failure_is_fail_atomic);
     RUN_TEST(test_releasing_export_payload_preserves_terminal_metadata);
     RUN_TEST(test_export_cancel_is_rejected_after_final_writer_boundary);
+    RUN_TEST(
+        test_export_boundary_survives_a_final_atlas_without_a_writer);
     RUN_TEST(test_pack_succeeds_under_a_work_dir_deeper_than_the_old_buffers);
     return UNITY_END();
 }
