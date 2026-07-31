@@ -767,6 +767,36 @@ void test_export_target_allocation_failure_is_fail_atomic(void) {
     remove_tree(work_dir);
 }
 
+void test_releasing_export_payload_preserves_terminal_metadata(void) {
+    tp_session_job_result result = {
+        .kind = TP_SESSION_JOB_EXPORT,
+        .state = TP_SESSION_JOB_CANCELLED,
+        .status = TP_STATUS_CANCELLED,
+        .export_result = {
+            .targets = 3,
+            .files = 4,
+            .notices = 5,
+            .atlases_ok = 6,
+            .atlases_failed = 7,
+        },
+    };
+    (void)snprintf(
+        result.export_result.first_error,
+        sizeof result.export_result.first_error,
+        "%s", "writer failed after partial publication");
+
+    tp_job__test_release_export_payload(&result);
+
+    TEST_ASSERT_EQUAL_INT(3, result.export_result.targets);
+    TEST_ASSERT_EQUAL_INT(4, result.export_result.files);
+    TEST_ASSERT_EQUAL_INT(5, result.export_result.notices);
+    TEST_ASSERT_EQUAL_INT(6, result.export_result.atlases_ok);
+    TEST_ASSERT_EQUAL_INT(7, result.export_result.atlases_failed);
+    TEST_ASSERT_EQUAL_STRING(
+        "writer failed after partial publication",
+        result.export_result.first_error);
+}
+
 /* The contract admits a work_dir up to TP_IDENTITY_PATH_MAX-1 (host and proto
  * both accept it), but the worker used to cap it at ~512 through three fixed
  * buffers, so an install a few hundred characters deep failed EVERY Pack with
@@ -848,6 +878,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_compacted_pack_result_keeps_pages_and_destroys_cleanly);
     RUN_TEST(test_artifact_path_allocation_failure_leaves_no_orphan);
     RUN_TEST(test_export_target_allocation_failure_is_fail_atomic);
+    RUN_TEST(test_releasing_export_payload_preserves_terminal_metadata);
     RUN_TEST(test_pack_succeeds_under_a_work_dir_deeper_than_the_old_buffers);
     return UNITY_END();
 }

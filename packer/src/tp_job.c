@@ -239,13 +239,15 @@ static void job_release_payload_owned(tp_session_owned_job *owned) {
     if (!job) {
         return;
     }
+    if (job->kind != TP_SESSION_JOB_PACK) {
+        return;
+    }
     tp_arena_destroy(job->arena);
     job->arena = NULL;
     job->pack_result = NULL;
     job->terminal_result.pack.arena = NULL;
     job->terminal_result.pack.result = NULL;
-    if (job->kind != TP_SESSION_JOB_PACK ||
-        job->terminal_result.state != TP_SESSION_JOB_SUCCEEDED) {
+    if (job->terminal_result.state != TP_SESSION_JOB_SUCCEEDED) {
         return;
     }
     const bool cancelled = atomic_load_explicit(
@@ -260,6 +262,19 @@ static void job_release_payload_owned(tp_session_owned_job *owned) {
     atomic_store_explicit(&job->state, job->terminal_result.state,
                           memory_order_release);
 }
+
+#ifdef TP_ENABLE_TEST_SEAMS
+void tp_job__test_release_export_payload(tp_session_job_result *result) {
+    if (!result) {
+        return;
+    }
+    tp_live_job job = {0};
+    job.kind = TP_SESSION_JOB_EXPORT;
+    job.terminal_result = *result;
+    job_release_payload_owned(&job.owner);
+    *result = job.terminal_result;
+}
+#endif
 
 static void job_destroy_owned(tp_session_owned_job *owned) {
     tp_live_job *job = (tp_live_job *)owned;
