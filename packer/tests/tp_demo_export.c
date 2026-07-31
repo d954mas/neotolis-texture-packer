@@ -14,7 +14,9 @@
 
 #define _CRT_SECURE_NO_WARNINGS
 
+#include <stdbool.h>
 #include <stdio.h>
+#include <string.h>
 
 #include "tinycthread.h"
 
@@ -23,7 +25,8 @@
 #include "tp_core/tp_scan.h"
 #include "tp_core/tp_session.h"
 
-static int run_live_export(const char *project_path, const char *work_dir) {
+static int run_live_export(const char *project_path, const char *work_dir,
+                           bool json) {
     tp_rng rng = tp_rng_os();
     tp_session *session = NULL;
     tp_error error = {{0}};
@@ -76,22 +79,55 @@ static int run_live_export(const char *project_path, const char *work_dir) {
         (void)fprintf(
             stderr, "live Export published unexpected job kind %d\n",
             (int)result.kind);
-    } else if (result.state != TP_SESSION_JOB_SUCCEEDED ||
-               result.status != TP_STATUS_OK) {
-        (void)fprintf(
-            stderr, "live Export failed: %s (%s)\n",
-            tp_status_str(result.status), result.error.msg);
     } else {
-        (void)printf(
-            "live Export: %d target(s), %d file(s), %d notice(s), "
-            "%d atlas(es) ok, %d failed, %d skipped\n",
-            result.export_result.targets,
-            result.export_result.files,
-            result.export_result.notices,
-            result.export_result.atlases_ok,
-            result.export_result.atlases_failed,
-            result.export_result.atlases_skipped);
-        rc = 0;
+        if (json) {
+            (void)printf(
+                "{\"schema\":1,\"state\":%d,\"status\":%d,"
+                "\"rejection\":%d,\"targets\":%d,\"files\":%d,"
+                "\"notices\":%d,\"atlases_ok\":%d,"
+                "\"atlases_failed\":%d,\"atlases_skipped\":%d,"
+                "\"partial_publication\":%s,"
+                "\"publication_uncertain\":%s}\n",
+                (int)result.state,
+                (int)result.status,
+                (int)result.rejection,
+                result.export_result.targets,
+                result.export_result.files,
+                result.export_result.notices,
+                result.export_result.atlases_ok,
+                result.export_result.atlases_failed,
+                result.export_result.atlases_skipped,
+                result.export_result.partial_publication
+                    ? "true"
+                    : "false",
+                result.export_result.publication_uncertain
+                    ? "true"
+                    : "false");
+        }
+        if (result.state !=
+                TP_SESSION_JOB_SUCCEEDED ||
+            result.status != TP_STATUS_OK) {
+            (void)fprintf(
+                stderr,
+                "live Export failed: %s (%s)\n",
+                tp_status_str(result.status),
+                result.error.msg);
+        } else if (!json) {
+            (void)printf(
+                "live Export: %d target(s), %d file(s), %d notice(s), "
+                "%d atlas(es) ok, %d failed, %d skipped\n",
+                result.export_result.targets,
+                result.export_result.files,
+                result.export_result.notices,
+                result.export_result.atlases_ok,
+                result.export_result.atlases_failed,
+                result.export_result.atlases_skipped);
+        }
+        if (result.state ==
+                TP_SESSION_JOB_SUCCEEDED &&
+            result.status == TP_STATUS_OK) {
+            rc = 0;
+        }
     }
 
     tp_session_job_result_destroy(&result);
@@ -111,10 +147,25 @@ int main(int argc, char **argv) {
         return 2;
     }
 
-    const char *work_dir = argc > 2 ? argv[2] : ".";
+    bool json = false;
+    const char *work_dir = ".";
+    for (int i = 2; i < argc; ++i) {
+        if (strcmp(argv[i], "--json") == 0) {
+            json = true;
+        } else if (strcmp(work_dir, ".") == 0) {
+            work_dir = argv[i];
+        } else {
+            (void)fprintf(
+                stderr,
+                "usage: %s <project.ntpacker_project> [work_dir] [--json]\n",
+                argv[0]);
+            return 2;
+        }
+    }
     tp_mkdirs(work_dir);
-    const int rc = run_live_export(argv[1], work_dir);
-    if (rc == 0) {
+    const int rc = run_live_export(
+        argv[1], work_dir, json);
+    if (rc == 0 && !json) {
         (void)printf("tp_demo_export: OK\n");
     }
     return rc;

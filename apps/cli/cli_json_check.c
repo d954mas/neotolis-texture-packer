@@ -510,7 +510,9 @@ int main(int argc, char **argv) {
     if (!buf) {
         return fail("cannot read input file");
     }
-    cJSON *root = cJSON_Parse(buf);
+    const char *parse_end = NULL;
+    cJSON *root = cJSON_ParseWithOpts(
+        buf, &parse_end, true);
     free(buf);
     if (!root) {
         return fail("stdout payload is not valid JSON");
