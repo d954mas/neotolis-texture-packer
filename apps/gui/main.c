@@ -1121,11 +1121,19 @@ static int gui_main_utf8(int argc, char *argv[]) {
             }
             if (open_status == TP_STATUS_OK &&
                 open_completed ==
+                    GUI_PROJECT_LIFECYCLE_NONE) {
+                open_status =
+                    gui_project_lifecycle_pump(
+                        &open_completed,
+                        &open_error);
+            }
+            if (open_status == TP_STATUS_OK &&
+                open_completed ==
                     GUI_PROJECT_LIFECYCLE_OPEN) {
                 if (!recovery_warn_shown) { /* routine confirmation must not clobber the recovery warning */
                     set_statusf("Opened %s", gui_project_display_name());
                 }
-            } else {
+            } else if (open_status != TP_STATUS_OK) {
                 /* A genuine open FAILURE is surfaced even over a recovery warning: it is a concrete,
                  * user-initiated failure the user is actively waiting on (they asked to open THIS file), it
                  * is higher severity (STATUS_ERROR > STATUS_WARNING), and it is rare. Present actionable

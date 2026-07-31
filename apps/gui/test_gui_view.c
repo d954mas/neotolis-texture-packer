@@ -2032,6 +2032,8 @@ void test_source_probe_failure_is_typed_warning_not_missing(void) {
     TEST_ASSERT_EQUAL_INT(TP_STATUS_PATH_RESOLVE_FAILED,
                           s_rows[1].runtime_status);
     TEST_ASSERT_EQUAL_INT(STATUS_WARNING, s_status_sev);
+    TEST_ASSERT_NOT_NULL(
+        strstr(s_status, "directory scan could not stat"));
 }
 
 void test_missing_folder_retains_folder_kind_and_missing_state(void) {

@@ -60,6 +60,7 @@ set(_arch_view_files
 set(_arch_deleted_files
     apps/gui/gui_project_pending.c
     apps/gui/client_parity_manifest.c
+    apps/gui/client_parity_manifest.h
     apps/gui/gui_host_binding.c
     apps/gui/gui_host_binding.h
     apps/gui/gui_host_queue.c

@@ -884,8 +884,14 @@ void build_rows(void) {
                               "Out of memory: sprite list unavailable.");
                 return;
             }
+            const char *diagnostic =
+                runtime && runtime->error.msg[0]
+                    ? runtime->error.msg
+                    : (error.msg[0]
+                           ? error.msg
+                           : tp_status_str(probe_status));
             set_statusf_ex(STATUS_WARNING, "Could not inspect source: %s",
-                           error.msg);
+                           diagnostic);
             continue;
         }
         if (probe_status == TP_STATUS_NOT_FOUND) {

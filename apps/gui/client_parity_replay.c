@@ -14,6 +14,57 @@ static int fail(const char *step, tp_status status, const tp_error *err) {
     return 1;
 }
 
+static int verify_operation_coverage(void) {
+    static const tp_op_kind covered[] = {
+        TP_OP_ATLAS_CREATE,
+        TP_OP_ATLAS_REMOVE,
+        TP_OP_ATLAS_RENAME,
+        TP_OP_ATLAS_SETTINGS_SET,
+        TP_OP_SOURCE_ADD,
+        TP_OP_SOURCE_REMOVE,
+        TP_OP_SPRITE_OVERRIDE_SET,
+        TP_OP_SPRITE_OVERRIDE_CLEAR,
+        TP_OP_SPRITE_NAME_SET,
+        TP_OP_ANIMATION_CREATE,
+        TP_OP_ANIMATION_REMOVE,
+        TP_OP_ANIMATION_SETTINGS_SET,
+        TP_OP_ANIMATION_FRAME_ADD,
+        TP_OP_ANIMATION_FRAME_REMOVE,
+        TP_OP_ANIMATION_FRAME_MOVE,
+        TP_OP_TARGET_CREATE,
+        TP_OP_TARGET_REMOVE,
+        TP_OP_TARGET_SET,
+        TP_OP_ANIMATION_RENAME,
+    };
+    bool seen[TP_OP_KIND_COUNT] = {false};
+    for (size_t i = 0U; i < sizeof covered / sizeof covered[0]; ++i) {
+        const tp_op_kind kind = covered[i];
+        if (kind <= TP_OP_INVALID || kind >= TP_OP_KIND_COUNT ||
+            seen[kind]) {
+            (void)fprintf(
+                stderr,
+                "client parity operation coverage is invalid at kind %d\n",
+                (int)kind);
+            return 1;
+        }
+        seen[kind] = true;
+    }
+    for (int kind = TP_OP_INVALID + 1;
+         kind < TP_OP_KIND_COUNT; ++kind) {
+        const bool reserved =
+            kind == TP_OP_SOURCE_REPLACE ||
+            kind == TP_OP_ANIMATION_FRAMES_SET;
+        if (seen[kind] == reserved) {
+            (void)fprintf(
+                stderr,
+                "client parity operation coverage is incomplete at kind %d\n",
+                kind);
+            return 1;
+        }
+    }
+    return 0;
+}
+
 static int deterministic_fill(void *ctx, uint8_t *dst, size_t count) {
     uint8_t *next = (uint8_t *)ctx;
     for (size_t i = 0U; i < count; ++i) {
@@ -846,6 +897,9 @@ static int replay(const char *family, const char *base_path,
 }
 
 int main(int argc, char **argv) {
+    if (verify_operation_coverage() != 0) {
+        return 1;
+    }
     if (argc == 3 && strcmp(argv[1], "seed") == 0) {
         return seed_project(argv[2]);
     }
