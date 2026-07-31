@@ -722,19 +722,9 @@ static int replay_sprite_clear(tp_session *session, tp_error *err) {
     if (require_submit_terminal(
             "sprite name clear", status, transaction_id,
             &terminal, false, err) != 0) return 1;
-    tp_op_sprite_set settings;
-    memset(&settings, 0, sizeof settings);
-    settings.mask = TP_SPF_ALL;
-    settings.origin_x = TP_PROJECT_ORIGIN_DEFAULT;
-    settings.origin_y = TP_PROJECT_ORIGIN_DEFAULT;
-    settings.ov_shape = TP_PROJECT_OV_INHERIT;
-    settings.ov_allow_rotate = TP_PROJECT_OV_INHERIT;
-    settings.ov_max_vertices = TP_PROJECT_OV_INHERIT;
-    settings.ov_margin = TP_PROJECT_OV_INHERIT;
-    settings.ov_extrude = TP_PROJECT_OV_INHERIT;
-    status = gui_project_operation_set_sprite_override(
+    status = gui_project_operation_clear_sprite_override(
         s_replay_client, atlas_id, source_id, source_key,
-        revision_of(session, err), &settings,
+        revision_of(session, err), TP_SPF_ALL,
         (gui_project_operation_submit_identity){0}, NULL, NULL, err);
     return status == TP_STATUS_OK ? 0 : fail("sprite clear", status, err);
 }

@@ -80,6 +80,14 @@ tp_status gui_project_operation_set_sprite_override(tp_session *client, tp_id128
                                           const char transaction_id[33],
                                           gui_project_operation_submit_terminal *out_terminal,
                                           tp_error *err);
+tp_status gui_project_operation_clear_sprite_override(
+    tp_session *client, tp_id128 atlas_id,
+    tp_id128 source_id, const char *source_key,
+    int64_t expected_revision, uint32_t mask,
+    gui_project_operation_submit_identity identity,
+    const char transaction_id[33],
+    gui_project_operation_submit_terminal *out_terminal,
+    tp_error *err);
 
 tp_status gui_project_operation_create_animation(tp_session *client, tp_id128 atlas_id,
                                        tp_id128 animation_id,
