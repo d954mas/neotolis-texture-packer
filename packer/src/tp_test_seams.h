@@ -35,6 +35,8 @@ void tp_scan__test_release_post_entry_gate(void);
 int tp_scan__test_visited_entries(void);
 void tp_scan__test_reset_all(void);
 
+int tp_refresh_job__test_active_workers(void);
+
 void tp_job__test_fail_next_observation_target_allocation(void);
 void tp_job__test_fail_next_artifact_path_allocation(void);
 void tp_job__test_set_worker_timeout_ms(int timeout_ms);

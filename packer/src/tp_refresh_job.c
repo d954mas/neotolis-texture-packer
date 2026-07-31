@@ -28,6 +28,15 @@ typedef struct tp_refresh_job {
     tp_session_job_result terminal;
 } tp_refresh_job;
 
+#ifdef TP_ENABLE_TEST_SEAMS
+static atomic_int s_test_active_workers;
+
+int tp_refresh_job__test_active_workers(void) {
+    return atomic_load_explicit(
+        &s_test_active_workers, memory_order_acquire);
+}
+#endif
+
 static bool refresh_request_cancel(
     tp_session_owned_job *owned) {
     tp_refresh_job *job = (tp_refresh_job *)owned;
@@ -94,7 +103,15 @@ static void refresh_destroy(tp_session_owned_job *owned) {
     tp_refresh_job *job = (tp_refresh_job *)owned;
     refresh_cancel(owned);
     if (job->thread_started) {
-        (void)thrd_join(job->thread, NULL);
+        if (thrd_equal(job->thread, thrd_current())) {
+            /* The worker owns the final lease after its session is retired.
+             * It cannot join itself; detaching here releases the native thread
+             * handle while the completed worker releases its private state. */
+            (void)thrd_detach(job->thread);
+        } else {
+            (void)thrd_join(job->thread, NULL);
+        }
+        job->thread_started = false;
     }
     tp_source_runtime_destroy(job->terminal.refresh.projection);
     tp_source_runtime_destroy(job->previous);
@@ -129,6 +146,10 @@ static bool refresh_cancel_requested(void *context) {
 
 static int refresh_thread(void *context) {
     tp_refresh_job *job = context;
+#ifdef TP_ENABLE_TEST_SEAMS
+    atomic_fetch_add_explicit(
+        &s_test_active_workers, 1, memory_order_acq_rel);
+#endif
     tp_source_runtime_projection *projection = NULL;
     tp_error error = {{0}};
     const tp_cancel_token cancel = {
@@ -163,13 +184,24 @@ static int refresh_thread(void *context) {
     atomic_store_explicit(
         &job->state, job->terminal.state,
         memory_order_release);
+#ifdef TP_ENABLE_TEST_SEAMS
+    atomic_fetch_sub_explicit(
+        &s_test_active_workers, 1, memory_order_acq_rel);
+#endif
+    /* Last access to job: a retired session may already have released the
+     * host lease, in which case this release destroys/detaches on this thread. */
+    tp_session_job_release_internal(&job->owner);
     return 0;
 }
 
 static tp_status refresh_start_thread(void *context, tp_error *err) {
     tp_refresh_job *job = context;
+    /* The worker lease makes session retirement bounded even if a filesystem
+     * call cannot observe cancellation. The worker releases it at terminal. */
+    tp_session_job_retain_internal(&job->owner);
     if (thrd_create(&job->thread, refresh_thread, job) !=
         thrd_success) {
+        tp_session_job_release_internal(&job->owner);
         return tp_error_set(
             err, TP_STATUS_BUILDER_FAILED,
             "Refresh worker thread could not start");

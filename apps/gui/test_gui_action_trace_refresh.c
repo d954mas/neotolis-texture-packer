@@ -728,6 +728,100 @@ void test_refresh_lifecycle_cancel_drains_before_session_cutover(void) {
     TEST_ASSERT_EQUAL_INT(0, refresh_test_rmdir(folder_path));
 }
 
+void test_refresh_lifecycle_deadline_retires_blocked_worker(void) {
+    const tp_session_snapshot *snapshot =
+        gui_project_snapshot();
+    const tp_snapshot_atlas *atlas =
+        tp_session_snapshot_atlas_at(snapshot, 0);
+    TEST_ASSERT_NOT_NULL(atlas);
+
+    char folder_path[1200];
+    char source_path[1280];
+    TEST_ASSERT_TRUE(snprintf(
+        folder_path, sizeof folder_path,
+        "%s/deadline-refresh", TP_GUI_TRACE_TEST_DIR) > 0);
+    TEST_ASSERT_TRUE(snprintf(
+        source_path, sizeof source_path,
+        "%s/source.png", folder_path) > 0);
+    tp_mkdirs(folder_path);
+    FILE *source = fopen(source_path, "wb");
+    TEST_ASSERT_NOT_NULL(source);
+    TEST_ASSERT_EQUAL_size_t(
+        1U, fwrite("x", 1U, 1U, source));
+    TEST_ASSERT_EQUAL_INT(0, fclose(source));
+    TEST_ASSERT_EQUAL_INT(
+        GUI_ADD_ADDED,
+        gui_project_add_source_kind(
+            atlas->id,
+            tp_session_snapshot_revision(snapshot),
+            folder_path, TP_SOURCE_KIND_FOLDER));
+
+    tp_scan__test_arm_walk_gate();
+    gui_request_refresh();
+    apply_pending();
+    for (int attempt = 0;
+         attempt < 5000 &&
+         !tp_scan__test_walk_gate_entered();
+         ++attempt) {
+        nt_time_sleep(0.001);
+    }
+    TEST_ASSERT_TRUE(tp_scan__test_walk_gate_entered());
+    TEST_ASSERT_EQUAL_INT(
+        1, tp_refresh_job__test_active_workers());
+
+    const uint64_t instance_before =
+        gui_project_session_instance_generation();
+    gui_project__test_set_drain_grace_ms(0);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_project_lifecycle_begin_new(NULL));
+    const double started_at = nt_time_now();
+    gui_project_step_result result = {0};
+    const tp_status step_status =
+        gui_project_step(&result, NULL);
+    const double elapsed = nt_time_now() - started_at;
+    const gui_project_lifecycle_state state_after_step =
+        gui_project_lifecycle_state_query();
+    const gui_project_lifecycle_kind receipt =
+        result.lifecycle_completed;
+    const uint64_t instance_after =
+        gui_project_session_instance_generation();
+    tp_session_job_result_destroy(&result.completion);
+
+    /* Always unpark and drain before asserting so a failing implementation
+     * cannot strand a worker across Unity teardown. */
+    tp_scan__test_release_walk_gate();
+    for (int attempt = 0;
+         attempt < 5000 &&
+         tp_refresh_job__test_active_workers() != 0;
+         ++attempt) {
+        nt_time_sleep(0.001);
+    }
+    TEST_ASSERT_EQUAL_INT(
+        0, tp_refresh_job__test_active_workers());
+    if (gui_project_test_state_is_transitioning(
+            gui_project_lifecycle_state_query())) {
+        gui_project_lifecycle_kind drained =
+            GUI_PROJECT_LIFECYCLE_NONE;
+        TEST_ASSERT_EQUAL_INT(
+            TP_STATUS_OK,
+            gui_project_test_drain(&drained, NULL));
+    }
+    gui_project__test_set_drain_grace_ms(-1);
+
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, step_status);
+    TEST_ASSERT_TRUE(elapsed < 0.5);
+    TEST_ASSERT_EQUAL_INT(
+        GUI_PROJECT_LIFECYCLE_ACTIVE,
+        state_after_step);
+    TEST_ASSERT_EQUAL_INT(
+        GUI_PROJECT_LIFECYCLE_NEW, receipt);
+    TEST_ASSERT_EQUAL_UINT64(
+        instance_before + 1U, instance_after);
+    TEST_ASSERT_EQUAL_INT(0, remove(source_path));
+    TEST_ASSERT_EQUAL_INT(0, refresh_test_rmdir(folder_path));
+}
+
 int main(int argc, char **argv) {
     if (tp_build_is_worker_invocation(argc, argv)) {
         return tp_build_worker_main();
@@ -753,5 +847,7 @@ int main(int argc, char **argv) {
         test_user_refresh_returns_async_busy_and_publishes_terminal_once);
     RUN_TEST(
         test_refresh_lifecycle_cancel_drains_before_session_cutover);
+    RUN_TEST(
+        test_refresh_lifecycle_deadline_retires_blocked_worker);
     return UNITY_END();
 }

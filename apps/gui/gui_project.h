@@ -369,6 +369,7 @@ tp_session *gui_project__test_session(void);
 #endif
 #ifdef TP_ENABLE_TEST_SEAMS
 uint64_t gui_project__test_open_call_count(void);
+void gui_project__test_set_drain_grace_ms(int grace_ms);
 #endif
 
 #ifdef __cplusplus

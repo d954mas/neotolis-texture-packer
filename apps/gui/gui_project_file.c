@@ -4,11 +4,15 @@
 #include <string.h>
 
 #include "core/nt_assert.h"
+#include "time/nt_time.h"
 #include "tp_core/tp_identity.h"
 #include "tp_core/tp_session.h"
 
+#define GUI_PROJECT_DRAIN_GRACE_SECONDS 1.0
+
 #ifdef TP_ENABLE_TEST_SEAMS
 static uint64_t s_test_open_call_count;
+static int s_test_drain_grace_ms = -1;
 #endif
 
 static bool lifecycle_is_new(
@@ -87,8 +91,15 @@ void gui_project__assert_lifecycle_invariants(void) {
         NT_ASSERT(s_project.candidate != NULL);
     }
     if (lifecycle_is_ready(state)) {
-        NT_ASSERT(!tp_session_job_active(
-            s_project.session));
+        NT_ASSERT(
+            !tp_session_job_active(
+                s_project.session) ||
+            s_project.drain_deadline_expired);
+    }
+    if (state == GUI_PROJECT_LIFECYCLE_ACTIVE ||
+        state == GUI_PROJECT_LIFECYCLE_CLOSED) {
+        NT_ASSERT(!s_project.drain_deadline_expired);
+        NT_ASSERT(s_project.drain_started_at == 0.0);
     }
 }
 
@@ -102,9 +113,43 @@ static void lifecycle_transition(
 
 static void lifecycle_force_closed(void) {
     s_project.refresh_pending = false;
+    s_project.drain_started_at = 0.0;
+    s_project.drain_deadline_expired = false;
     s_project.lifecycle_state =
         GUI_PROJECT_LIFECYCLE_CLOSED;
     gui_project__assert_lifecycle_invariants();
+}
+
+static void lifecycle_begin_drain(
+    gui_project_lifecycle_state draining_state) {
+    s_project.drain_started_at = nt_time_now();
+    s_project.drain_deadline_expired = false;
+    lifecycle_transition(draining_state);
+}
+
+static double lifecycle_drain_grace_seconds(void) {
+#ifdef TP_ENABLE_TEST_SEAMS
+    if (s_test_drain_grace_ms >= 0) {
+        return (double)s_test_drain_grace_ms / 1000.0;
+    }
+#endif
+    return GUI_PROJECT_DRAIN_GRACE_SECONDS;
+}
+
+static bool lifecycle_task_is_drained(void) {
+    if (!tp_session_job_active(s_project.session)) {
+        return true;
+    }
+    if (s_project.drain_deadline_expired) {
+        return true;
+    }
+    const double elapsed =
+        nt_time_now() - s_project.drain_started_at;
+    if (elapsed < lifecycle_drain_grace_seconds()) {
+        return false;
+    }
+    s_project.drain_deadline_expired = true;
+    return true;
 }
 
 static gui_project_lifecycle_kind lifecycle_kind(
@@ -184,7 +229,7 @@ static tp_status begin_candidate(
     }
     s_project.candidate = candidate;
     s_project.discard_retired_session = true;
-    lifecycle_transition(draining_state);
+    lifecycle_begin_drain(draining_state);
     if (tp_session_job_active(s_project.session)) {
         tp_error cancel_error = {{0}};
         (void)tp_session_job_cancel(
@@ -344,7 +389,7 @@ tp_status gui_project_lifecycle_begin_shutdown(
     }
     s_project.discard_retired_session =
         discard_recovery;
-    lifecycle_transition(
+    lifecycle_begin_drain(
         GUI_PROJECT_LIFECYCLE_SHUTDOWN_DRAINING);
     if (tp_session_job_active(s_project.session)) {
         tp_error cancel_error = {{0}};
@@ -389,8 +434,7 @@ tp_status gui_project__advance_lifecycle(
     }
     if (!lifecycle_is_ready(
             s_project.lifecycle_state)) {
-        if (tp_session_job_active(
-                s_project.session)) {
+        if (!lifecycle_task_is_drained()) {
             return TP_STATUS_OK;
         }
         lifecycle_transition(
@@ -430,6 +474,8 @@ tp_status gui_project__advance_lifecycle(
     }
     tp_session_destroy(retired);
     s_project.discard_retired_session = false;
+    s_project.drain_started_at = 0.0;
+    s_project.drain_deadline_expired = false;
     lifecycle_transition(
         kind == GUI_PROJECT_LIFECYCLE_SHUTDOWN
             ? GUI_PROJECT_LIFECYCLE_CLOSED
@@ -538,6 +584,11 @@ bool gui_project_redo(void) {
 uint64_t gui_project__test_open_call_count(
     void) {
     return s_test_open_call_count;
+}
+
+void gui_project__test_set_drain_grace_ms(
+    int grace_ms) {
+    s_test_drain_grace_ms = grace_ms;
 }
 #endif
 

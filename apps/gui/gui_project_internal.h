@@ -19,6 +19,8 @@ typedef struct gui_project_state {
     bool snapshot_published;
     bool refresh_pending;
     bool discard_retired_session;
+    double drain_started_at;
+    bool drain_deadline_expired;
     gui_project_controller_status_port
         controller_status;
     bool preview_stale;

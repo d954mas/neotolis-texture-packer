@@ -271,6 +271,11 @@ tp_add_gui_test(NAME gui_view
 # cases create and delete real files under it, and `ctest -j` runs the three
 # binaries concurrently.
 foreach(_trace_area draft refresh job)
+    set(_trace_area_sources)
+    if(_trace_area STREQUAL "refresh")
+        list(APPEND _trace_area_sources
+            "${CMAKE_SOURCE_DIR}/packer/src/tp_refresh_job.c")
+    endif()
     tp_add_gui_test(NAME gui_action_trace_${_trace_area}
         SOURCES
             test_gui_action_trace_${_trace_area}.c
@@ -279,6 +284,7 @@ foreach(_trace_area draft refresh job)
             "${CMAKE_SOURCE_DIR}/packer/src/tp_job.c"
             "${CMAKE_SOURCE_DIR}/packer/src/tp_job_worker.c"
             "${CMAKE_SOURCE_DIR}/packer/src/tp_job_worker_proto.c"
+            ${_trace_area_sources}
             ${_tp_gui_headless_sources}
         LIBS ${_tp_gui_headless_libs}
         INCLUDE_DIRS ${_tp_gui_headless_includes}
