@@ -63,6 +63,9 @@ void test_lifecycle_apply_mine_resolves_conflict_before_continuing(void) {
 
     TEST_ASSERT_EQUAL_INT(
         GUI_EDIT_IDLE, gui_draft_phase());
+    TEST_ASSERT_FALSE(s_confirm_open);
+    publish_project_frame();
+    apply_pending();
     TEST_ASSERT_TRUE(s_confirm_open);
     TEST_ASSERT_FALSE(s_confirm_draft);
     atlas = tp_session_snapshot_atlas_by_id(
@@ -101,7 +104,7 @@ void test_exit_failed_apply_keeps_confirmation_and_draft_open(void) {
     TEST_ASSERT_EQUAL_INT(
         GUI_EDIT_EDITING, gui_draft_phase());
     TEST_ASSERT_EQUAL_INT(
-        GUI_PROJECT_LIFECYCLE_OPEN_IDLE,
+        GUI_PROJECT_LIFECYCLE_ACTIVE,
         gui_project_lifecycle_state_query());
     TEST_ASSERT_EQUAL_INT64(
         revision,
@@ -127,6 +130,7 @@ void test_pack_request_submits_active_draft_before_starting_job(void) {
             tp_session_snapshot_revision(snapshot),
             "__pack_after_draft__.png",
             TP_SOURCE_KIND_FILE));
+    settle_project_job();
     snapshot = gui_project_snapshot();
     atlas = tp_session_snapshot_atlas_at(
         snapshot, 0);
@@ -140,6 +144,7 @@ void test_pack_request_submits_active_draft_before_starting_job(void) {
 
     gui_request_pack();
     apply_pending();
+    publish_project_frame();
 
     TEST_ASSERT_EQUAL_INT(
         GUI_EDIT_IDLE, gui_draft_phase());
@@ -193,12 +198,17 @@ void test_confirm_save_publishes_before_new_and_new_message_wins(void) {
                                   gui_project_save_as(s_save_path, error,
                                                       sizeof error),
                                   error);
+    publish_project_frame();
     TEST_ASSERT_FALSE(gui_project_is_dirty());
     TEST_ASSERT_EQUAL_INT(1, tp_session_snapshot_atlas_count(
                                  gui_project_snapshot()));
 
-    TEST_ASSERT_EQUAL_INT(
-        1, gui_project_add_atlas().visible_index);
+    const gui_project_create_result created =
+        gui_project_add_atlas();
+    TEST_ASSERT_TRUE(created.committed);
+    TEST_ASSERT_TRUE(created.observation_pending);
+    TEST_ASSERT_EQUAL_INT(-1, created.visible_index);
+    publish_project_frame();
     TEST_ASSERT_TRUE(gui_project_is_dirty());
     TEST_ASSERT_EQUAL_INT(2, tp_session_snapshot_atlas_count(
                                  gui_project_snapshot()));
@@ -231,12 +241,16 @@ void test_confirm_save_publishes_before_new_and_new_message_wins(void) {
     TEST_ASSERT_FALSE(s_confirm_open);
     TEST_ASSERT_EQUAL_INT(GUI_LIFECYCLE_REQUEST_NONE, s_after_confirm);
     TEST_ASSERT_EQUAL_INT(
-        GUI_PROJECT_LIFECYCLE_DRAINING,
+        GUI_PROJECT_LIFECYCLE_NEW_DRAINING,
         gui_project_lifecycle_state_query());
     TEST_ASSERT_TRUE(gui_project_has_path());
     TEST_ASSERT_EQUAL_INT(
         2, tp_session_snapshot_atlas_count(
                gui_project_snapshot()));
+    gui_actions_pump_lifecycle();
+    TEST_ASSERT_EQUAL_INT(
+        GUI_PROJECT_LIFECYCLE_NEW_READY,
+        gui_project_lifecycle_state_query());
     gui_actions_pump_lifecycle();
     TEST_ASSERT_FALSE(gui_project_has_path());
     TEST_ASSERT_FALSE(gui_project_is_dirty());
@@ -303,7 +317,7 @@ static void assert_declaration_only_request(
     TEST_ASSERT_FALSE(s_confirm_open);
     TEST_ASSERT_FALSE(gui_actions__intent_queued(GUI_INTENT_OPEN));
     TEST_ASSERT_EQUAL_INT(
-        GUI_PROJECT_LIFECYCLE_OPEN_IDLE,
+        GUI_PROJECT_LIFECYCLE_ACTIVE,
         gui_project_lifecycle_state_query());
     TEST_ASSERT_EQUAL_UINT64(
         generation,
@@ -401,12 +415,15 @@ void test_lifecycle_apply_continues_only_after_terminal_draft_submit(void) {
     apply_pending();
     TEST_ASSERT_EQUAL_INT(
         GUI_EDIT_IDLE, gui_draft_phase());
+    TEST_ASSERT_FALSE(s_confirm_open);
+    publish_project_frame();
+    apply_pending();
     TEST_ASSERT_TRUE(s_confirm_open);
     TEST_ASSERT_FALSE(s_confirm_draft);
     TEST_ASSERT_EQUAL_INT(
         new_padding, atlas_at(0)->padding);
     TEST_ASSERT_EQUAL_INT(
-        GUI_PROJECT_LIFECYCLE_OPEN_IDLE,
+        GUI_PROJECT_LIFECYCLE_ACTIVE,
         gui_project_lifecycle_state_query());
     s_modal_action = MODAL_CANCEL;
     apply_pending();
@@ -434,12 +451,18 @@ void test_lifecycle_discard_continues_without_submitting_draft(void) {
         revision,
         tp_session_snapshot_revision(
             gui_project_snapshot()));
+    publish_project_frame();
+    apply_pending();
     TEST_ASSERT_EQUAL_INT(
-        GUI_PROJECT_LIFECYCLE_DRAINING,
+        GUI_PROJECT_LIFECYCLE_NEW_DRAINING,
         gui_project_lifecycle_state_query());
     gui_actions_pump_lifecycle();
     TEST_ASSERT_EQUAL_INT(
-        GUI_PROJECT_LIFECYCLE_OPEN_IDLE,
+        GUI_PROJECT_LIFECYCLE_NEW_READY,
+        gui_project_lifecycle_state_query());
+    gui_actions_pump_lifecycle();
+    TEST_ASSERT_EQUAL_INT(
+        GUI_PROJECT_LIFECYCLE_ACTIVE,
         gui_project_lifecycle_state_query());
 }
 
@@ -502,12 +525,15 @@ void test_sequential_drafts_and_dependent_intent_advance_exactly(void) {
         tp_session_snapshot_atlas_at(snapshot, 0);
     TEST_ASSERT_NOT_NULL(atlas);
     const tp_id128 atlas_id = atlas->id;
-    TEST_ASSERT_EQUAL_INT(
-        0, (gui_project_create_animation(
-               atlas_id,
-               tp_session_snapshot_revision(snapshot),
-               "dependent", NULL, 0))
-               .visible_index);
+    const gui_project_create_result created =
+        gui_project_create_animation(
+            atlas_id,
+            tp_session_snapshot_revision(snapshot),
+            "dependent", NULL, 0);
+    TEST_ASSERT_TRUE(created.committed);
+    TEST_ASSERT_TRUE(created.observation_pending);
+    TEST_ASSERT_EQUAL_INT(-1, created.visible_index);
+    publish_project_frame();
 
     snapshot = gui_project_snapshot();
     atlas = tp_session_snapshot_atlas_by_id(
@@ -541,6 +567,7 @@ void test_sequential_drafts_and_dependent_intent_advance_exactly(void) {
         atlas->padding + 1, 0.0F);
     gui_request_gesture_commit();
     apply_pending();
+    publish_project_frame();
 
     TEST_ASSERT_TRUE(
         trace_animation_ref_at(
@@ -549,12 +576,14 @@ void test_sequential_drafts_and_dependent_intent_advance_exactly(void) {
         &animation, new_fps);
     gui_request_gesture_commit();
     apply_pending();
+    publish_project_frame();
 
     TEST_ASSERT_TRUE(
         trace_target_ref_at(0, 0, &target));
     gui_edit_target_enabled(
         &target, new_enabled);
     apply_pending();
+    publish_project_frame();
 
     snapshot = gui_project_snapshot();
     const tp_snapshot_animation *animation_after =
@@ -596,13 +625,13 @@ void test_busy_new_enters_drain_and_resets_only_after_completion(void) {
     request_new();
     gui_request_refresh();
     TEST_ASSERT_EQUAL_INT(
-        GUI_PROJECT_LIFECYCLE_OPEN_IDLE,
+        GUI_PROJECT_LIFECYCLE_ACTIVE,
         gui_project_lifecycle_state_query());
     TEST_ASSERT_EQUAL_STRING(
         "old session remains visible", s_status);
     apply_pending();
     TEST_ASSERT_EQUAL_INT(
-        GUI_PROJECT_LIFECYCLE_DRAINING,
+        GUI_PROJECT_LIFECYCLE_NEW_DRAINING,
         gui_project_lifecycle_state_query());
     TEST_ASSERT_EQUAL_UINT64(
         old_generation,
@@ -612,12 +641,12 @@ void test_busy_new_enters_drain_and_resets_only_after_completion(void) {
     TEST_ASSERT_TRUE(gui_actions__intent_queued(GUI_INTENT_REFRESH));
     for (int attempt = 0;
          attempt < 5000 &&
-         gui_project_lifecycle_state_query() ==
-             GUI_PROJECT_LIFECYCLE_DRAINING;
+         gui_project_test_state_is_transitioning(
+             gui_project_lifecycle_state_query());
          ++attempt) {
         gui_actions_pump_lifecycle();
-        if (gui_project_lifecycle_state_query() ==
-            GUI_PROJECT_LIFECYCLE_DRAINING) {
+        if (gui_project_test_state_is_draining(
+                gui_project_lifecycle_state_query())) {
             TEST_ASSERT_EQUAL_INT(
                 TP_STATUS_OK,
                 gui_project_frame_begin(NULL));
@@ -627,7 +656,7 @@ void test_busy_new_enters_drain_and_resets_only_after_completion(void) {
         }
     }
     TEST_ASSERT_EQUAL_INT(
-        GUI_PROJECT_LIFECYCLE_OPEN_IDLE,
+        GUI_PROJECT_LIFECYCLE_ACTIVE,
         gui_project_lifecycle_state_query());
     TEST_ASSERT_EQUAL_UINT64(
         old_generation + 1U,
@@ -800,7 +829,7 @@ void test_terminal_job_completion_is_consumed_before_cutover(void) {
         TP_STATUS_OK,
         gui_project_lifecycle_begin_new(NULL));
     TEST_ASSERT_EQUAL_INT(
-        GUI_PROJECT_LIFECYCLE_DRAINING,
+        GUI_PROJECT_LIFECYCLE_NEW_DRAINING,
         gui_project_lifecycle_state_query());
 
     TEST_ASSERT_EQUAL_INT(
@@ -817,7 +846,17 @@ void test_terminal_job_completion_is_consumed_before_cutover(void) {
         gui_project_lifecycle_pump(
             &completed, NULL));
     TEST_ASSERT_EQUAL_INT(
-        GUI_PROJECT_LIFECYCLE_OPEN_IDLE,
+        GUI_PROJECT_LIFECYCLE_NEW_READY,
+        gui_project_lifecycle_state_query());
+    TEST_ASSERT_EQUAL_INT(
+        GUI_PROJECT_LIFECYCLE_NONE,
+        completed);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_project_lifecycle_pump(
+            &completed, NULL));
+    TEST_ASSERT_EQUAL_INT(
+        GUI_PROJECT_LIFECYCLE_ACTIVE,
         gui_project_lifecycle_state_query());
     TEST_ASSERT_EQUAL_INT(
         GUI_PROJECT_LIFECYCLE_NEW,
@@ -825,6 +864,234 @@ void test_terminal_job_completion_is_consumed_before_cutover(void) {
     TEST_ASSERT_EQUAL_INT(
         GUI_PACK_DONE_NONE,
         gui_pack_poll(NULL));
+}
+
+void test_new_open_and_shutdown_expose_ready_states_before_cutover(void) {
+    const uint64_t generation =
+        gui_project_session_instance_generation();
+    gui_project_lifecycle_kind completed =
+        GUI_PROJECT_LIFECYCLE_NONE;
+
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_project_lifecycle_begin_new(NULL));
+    TEST_ASSERT_EQUAL_INT(
+        GUI_PROJECT_LIFECYCLE_NEW_DRAINING,
+        gui_project_lifecycle_state_query());
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_INVALID_ARGUMENT,
+        gui_project_lifecycle_begin_new(NULL));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_project_lifecycle_pump(
+            &completed, NULL));
+    TEST_ASSERT_EQUAL_INT(
+        GUI_PROJECT_LIFECYCLE_NEW_READY,
+        gui_project_lifecycle_state_query());
+    TEST_ASSERT_EQUAL_UINT64(
+        generation,
+        gui_project_session_instance_generation());
+    TEST_ASSERT_EQUAL_INT(
+        GUI_PROJECT_LIFECYCLE_NONE,
+        completed);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_project_lifecycle_pump(
+            &completed, NULL));
+    TEST_ASSERT_EQUAL_INT(
+        GUI_PROJECT_LIFECYCLE_ACTIVE,
+        gui_project_lifecycle_state_query());
+    TEST_ASSERT_EQUAL_INT(
+        GUI_PROJECT_LIFECYCLE_NEW,
+        completed);
+    TEST_ASSERT_EQUAL_UINT64(
+        generation + 1U,
+        gui_project_session_instance_generation());
+    TEST_ASSERT_TRUE(gui_project_job_busy());
+    settle_project_job();
+
+    tp_rng rng = tp_rng_os();
+    tp_session *saved = NULL;
+    tp_session_save_result save_result = {0};
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_session_create_default_project(
+            &rng, &saved, &error));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_session_save_as(
+            saved, s_save_path,
+            &save_result, &error));
+    tp_session_destroy(saved);
+
+    completed = GUI_PROJECT_LIFECYCLE_NONE;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_project_lifecycle_begin_open(
+            s_save_path, &error));
+    TEST_ASSERT_EQUAL_INT(
+        GUI_PROJECT_LIFECYCLE_OPEN_DRAINING,
+        gui_project_lifecycle_state_query());
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_project_lifecycle_pump(
+            &completed, &error));
+    TEST_ASSERT_EQUAL_INT(
+        GUI_PROJECT_LIFECYCLE_OPEN_READY,
+        gui_project_lifecycle_state_query());
+    TEST_ASSERT_EQUAL_INT(
+        GUI_PROJECT_LIFECYCLE_NONE,
+        completed);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_project_lifecycle_pump(
+            &completed, &error));
+    TEST_ASSERT_EQUAL_INT(
+        GUI_PROJECT_LIFECYCLE_ACTIVE,
+        gui_project_lifecycle_state_query());
+    TEST_ASSERT_EQUAL_INT(
+        GUI_PROJECT_LIFECYCLE_OPEN,
+        completed);
+    TEST_ASSERT_TRUE(gui_project_job_busy());
+    settle_project_job();
+
+    completed = GUI_PROJECT_LIFECYCLE_NONE;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_project_lifecycle_begin_shutdown(
+            true, &error));
+    TEST_ASSERT_EQUAL_INT(
+        GUI_PROJECT_LIFECYCLE_SHUTDOWN_DRAINING,
+        gui_project_lifecycle_state_query());
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_project_lifecycle_pump(
+            &completed, &error));
+    TEST_ASSERT_EQUAL_INT(
+        GUI_PROJECT_LIFECYCLE_SHUTDOWN_READY,
+        gui_project_lifecycle_state_query());
+    TEST_ASSERT_EQUAL_INT(
+        GUI_PROJECT_LIFECYCLE_NONE,
+        completed);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_project_lifecycle_pump(
+            &completed, &error));
+    TEST_ASSERT_EQUAL_INT(
+        GUI_PROJECT_LIFECYCLE_CLOSED,
+        gui_project_lifecycle_state_query());
+    TEST_ASSERT_EQUAL_INT(
+        GUI_PROJECT_LIFECYCLE_SHUTDOWN,
+        completed);
+}
+
+void test_terminal_completion_survives_edit_and_recovery_sync(void) {
+    TEST_ASSERT_TRUE(
+        gui_pack_init(
+            TP_GUI_TRACE_TEST_DIR));
+    char error_text[256] = {0};
+    TEST_ASSERT_TRUE(
+        gui_pack_export_async_start(
+            error_text, sizeof error_text));
+    for (int attempt = 0;
+         attempt < 5000 &&
+         gui_pack_async_busy();
+         ++attempt) {
+        TEST_ASSERT_EQUAL_INT(
+            TP_STATUS_OK,
+            gui_project_frame_begin(NULL));
+        gui_project_frame_end();
+        if (gui_pack_async_busy()) {
+            nt_time_sleep(0.001);
+        }
+    }
+    TEST_ASSERT_FALSE(gui_pack_async_busy());
+
+    const tp_session_snapshot *snapshot =
+        gui_project_snapshot();
+    const tp_snapshot_atlas *atlas =
+        tp_session_snapshot_atlas_at(
+            snapshot, 0);
+    TEST_ASSERT_NOT_NULL(atlas);
+    const int64_t observed_revision =
+        tp_session_snapshot_revision(snapshot);
+    const tp_op_atlas_settings settings = {
+        .mask = TP_AF_PADDING,
+        .padding = atlas->padding + 1,
+    };
+    gui_project_operation_submit_terminal terminal = {0};
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_project_submit_atlas_settings(
+            atlas->id, observed_revision,
+            &settings,
+            (gui_project_operation_submit_identity){0},
+            "abababababababababababababababab",
+            &terminal, &error));
+    TEST_ASSERT_TRUE(terminal.committed);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK, terminal.status);
+    TEST_ASSERT_EQUAL_INT64(
+        observed_revision + 1,
+        terminal.revision);
+    TEST_ASSERT_EQUAL_INT64(
+        observed_revision + 1,
+        gui_project_committed_revision());
+    TEST_ASSERT_EQUAL_INT64(
+        observed_revision,
+        tp_session_snapshot_revision(
+            gui_project_snapshot()));
+
+    gui_recovery_notice notice = {0};
+    TEST_ASSERT_FALSE(
+        gui_project_recovery_notice_query(
+            &notice));
+    gui_pack_result_info info = {0};
+    TEST_ASSERT_EQUAL_INT(
+        GUI_PACK_DONE_EXPORT_OK,
+        gui_pack_poll(&info));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_project_frame_begin(&error));
+    gui_project_frame_end();
+    TEST_ASSERT_EQUAL_INT64(
+        observed_revision + 1,
+        tp_session_snapshot_revision(
+            gui_project_snapshot()));
+}
+
+void test_frame_pin_rejects_common_operation_ingress(void) {
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_project_frame_begin(&error));
+    const tp_session_snapshot *snapshot =
+        gui_project_snapshot();
+    const tp_snapshot_atlas *atlas =
+        tp_session_snapshot_atlas_at(
+            snapshot, 0);
+    TEST_ASSERT_NOT_NULL(atlas);
+    const int64_t revision =
+        tp_session_snapshot_revision(snapshot);
+    const tp_op_atlas_settings settings = {
+        .mask = TP_AF_PADDING,
+        .padding = atlas->padding + 1,
+    };
+    gui_project_operation_submit_terminal terminal = {0};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_INVALID_ARGUMENT,
+        gui_project_submit_atlas_settings(
+            atlas->id, revision, &settings,
+            (gui_project_operation_submit_identity){0},
+            "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+            &terminal, &error));
+    TEST_ASSERT_FALSE(terminal.committed);
+    TEST_ASSERT_EQUAL_INT64(
+        revision,
+        gui_project_committed_revision());
+    gui_project_frame_end();
 }
 
 void test_empty_export_surfaces_skipped_atlas_warning(void) {
@@ -869,6 +1136,12 @@ int main(int argc, char **argv) {
     RUN_TEST(test_export_failure_formatter_warns_about_uncertain_publication);
     RUN_TEST(test_late_export_cancel_keeps_completed_success_outcome);
     RUN_TEST(test_terminal_job_completion_is_consumed_before_cutover);
+    RUN_TEST(
+        test_new_open_and_shutdown_expose_ready_states_before_cutover);
+    RUN_TEST(
+        test_terminal_completion_survives_edit_and_recovery_sync);
+    RUN_TEST(
+        test_frame_pin_rejects_common_operation_ingress);
     RUN_TEST(test_empty_export_surfaces_skipped_atlas_warning);
     return UNITY_END();
 }

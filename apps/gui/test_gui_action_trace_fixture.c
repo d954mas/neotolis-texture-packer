@@ -15,6 +15,10 @@ void gui_shell_reset_shown_result(void) {}
 
 void pump_action_frame(void) {
     apply_pending();
+    publish_project_frame();
+}
+
+void publish_project_frame(void) {
     tp_error error = {{0}};
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
@@ -24,6 +28,54 @@ void pump_action_frame(void) {
         gui_project_frame_begin(&error));
     gui_actions_poll_host_completion();
     gui_project_frame_end();
+}
+
+void settle_project_job(void) {
+    for (int attempt = 0;
+         attempt < 5000 && gui_project_job_busy();
+         ++attempt) {
+        publish_project_frame();
+        if (gui_project_job_busy()) {
+            nt_time_sleep(0.001);
+        }
+    }
+    TEST_ASSERT_FALSE(gui_project_job_busy());
+}
+
+gui_project_create_result create_animation_observed(
+    tp_id128 atlas_id, int64_t expected_revision,
+    const char *name, const tp_op_sprite_ref *frames,
+    int frame_count) {
+    gui_project_create_result created =
+        gui_project_create_animation(
+            atlas_id, expected_revision, name,
+            frames, frame_count);
+    if (!created.committed) {
+        return created;
+    }
+    publish_project_frame();
+    const tp_session_snapshot *snapshot =
+        gui_project_snapshot();
+    const tp_snapshot_atlas *atlas =
+        tp_session_snapshot_atlas_by_id(
+            snapshot, atlas_id);
+    created.visible_index = -1;
+    for (int index = 0;
+         atlas && index < atlas->animation_count;
+         ++index) {
+        const tp_snapshot_animation *animation =
+            tp_session_snapshot_animation_at(
+                snapshot, atlas_id, index);
+        if (animation &&
+            tp_id128_eq(
+                animation->id,
+                created.created_id)) {
+            created.visible_index = index;
+            break;
+        }
+    }
+    created.observation_pending = false;
+    return created;
 }
 
 const tp_snapshot_atlas *atlas_at(int index) {
@@ -88,6 +140,7 @@ gui_sprite_ref add_test_sprite_ref(const char *source_path,
         gui_project_add_source_kind(
             atlas_id, tp_session_snapshot_revision(snapshot),
             source_path, TP_SOURCE_KIND_FILE));
+    settle_project_job();
     snapshot = gui_project_snapshot();
     const tp_snapshot_source *source =
         tp_session_snapshot_source_at(snapshot, atlas_id, 0);

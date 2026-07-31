@@ -1181,7 +1181,7 @@ static int gui_main_utf8(int argc, char *argv[]) {
         bool iteration_failed = false;
         nt_window_poll();
         if (gui_project_lifecycle_state_query() ==
-            GUI_PROJECT_LIFECYCLE_OPEN_IDLE) {
+            GUI_PROJECT_LIFECYCLE_ACTIVE) {
             const tp_status begin_status =
                 gui_project_lifecycle_begin_shutdown(
                     false, &shutdown_error);
@@ -1214,9 +1214,14 @@ static int gui_main_utf8(int argc, char *argv[]) {
                             : tp_status_str(
                                   pump_status));
                 }
-            } else if (
-                gui_project_lifecycle_state_query() ==
-                GUI_PROJECT_LIFECYCLE_DRAINING) {
+            } else {
+                const gui_project_lifecycle_state state =
+                    gui_project_lifecycle_state_query();
+                if (state != GUI_PROJECT_LIFECYCLE_NEW_DRAINING &&
+                    state != GUI_PROJECT_LIFECYCLE_OPEN_DRAINING &&
+                    state != GUI_PROJECT_LIFECYCLE_SHUTDOWN_DRAINING) {
+                    continue;
+                }
                 const tp_status observe_status =
                     gui_project_frame_begin(
                         &shutdown_error);

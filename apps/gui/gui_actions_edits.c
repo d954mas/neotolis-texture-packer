@@ -901,15 +901,15 @@ static bool component_draft_begin(
          * read from the snapshot BEFORE this call -- is stale by construction.
          * The new draft's base is the revision the blur itself produced; keeping
          * the caller's would conflict the new draft against our own commit. */
-        const tp_session_snapshot *after = gui_project_snapshot();
-        if (!after) {
+        const int64_t committed_revision =
+            gui_project_committed_revision();
+        if (committed_revision < 0) {
             set_status_ex(
                 STATUS_WARNING,
                 "No session is available for this edit.");
             return false;
         }
-        expected_revision =
-            tp_session_snapshot_revision(after);
+        expected_revision = committed_revision;
     }
     if (edit->phase == GUI_EDIT_IDLE) {
         tp_id128 draft_id = tp_id128_nil();

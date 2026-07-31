@@ -92,14 +92,6 @@ static tp_status apply_atlas_ops_identified(
     tp_status status =
         tp_session_apply(
             client, &request, &result, err);
-    if (result.committed || result.no_change) {
-        const tp_status update_status =
-            tp_session_update(client, NULL, err);
-        if (status == TP_STATUS_OK &&
-            update_status != TP_STATUS_OK) {
-            status = update_status;
-        }
-    }
     if (out_terminal) {
         *out_terminal =
             (gui_project_operation_submit_terminal){

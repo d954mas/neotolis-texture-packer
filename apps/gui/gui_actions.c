@@ -117,7 +117,7 @@ void do_redo(void) {
 
 void gui_request_undo(void) {
     if (gui_project_lifecycle_state_query() !=
-        GUI_PROJECT_LIFECYCLE_OPEN_IDLE) {
+        GUI_PROJECT_LIFECYCLE_ACTIVE) {
         return;
     }
     s_pending_history_action = GUI_PENDING_HISTORY_UNDO;
@@ -125,7 +125,7 @@ void gui_request_undo(void) {
 
 void gui_request_redo(void) {
     if (gui_project_lifecycle_state_query() !=
-        GUI_PROJECT_LIFECYCLE_OPEN_IDLE) {
+        GUI_PROJECT_LIFECYCLE_ACTIVE) {
         return;
     }
     s_pending_history_action = GUI_PENDING_HISTORY_REDO;
@@ -184,6 +184,17 @@ bool gui_actions_refresh_diff_headless(int *out_added, int *out_removed,
                                        int *out_changed) {
     const uint64_t before = gui_project_source_runtime_generation();
     gui_project_refresh_sources();
+#ifdef TP_ENABLE_TEST_SEAMS
+    while (gui_project_job_busy()) {
+        tp_error update_error = {{0}};
+        if (gui_project_frame_begin(
+                &update_error) != TP_STATUS_OK) {
+            break;
+        }
+        gui_actions__poll_pack();
+        gui_project_frame_end();
+    }
+#endif
     if (out_added) *out_added = 0;
     if (out_removed) *out_removed = 0;
     if (out_changed) *out_changed = 0;
@@ -194,8 +205,8 @@ bool gui_actions_refresh_diff_headless(int *out_added, int *out_removed,
 
 // #region deferred side-effects (run at the top of the frame, between frames)
 void apply_pending(void) {
-    if (gui_project_lifecycle_state_query() ==
-        GUI_PROJECT_LIFECYCLE_DRAINING) {
+    if (gui_project_lifecycle_state_query() !=
+        GUI_PROJECT_LIFECYCLE_ACTIVE) {
         return;
     }
     const bool save_as_requires_preflight =
@@ -239,7 +250,7 @@ void apply_pending(void) {
         gui_project_snapshot();
     const int64_t revision_after_atlas =
         after_atlas
-            ? tp_session_snapshot_revision(after_atlas)
+            ? gui_project_committed_revision()
             : -1;
     if (revision_before_atlas >= 0 &&
         revision_after_atlas >= 0) {
@@ -256,16 +267,24 @@ void apply_pending(void) {
     s_actions.gesture_commit = false;
 
     if (gui_actions__apply_lifecycle_request() &&
-        gui_project_lifecycle_state_query() ==
-            GUI_PROJECT_LIFECYCLE_DRAINING) {
+        gui_project_lifecycle_state_query() !=
+            GUI_PROJECT_LIFECYCLE_ACTIVE) {
         return;
     }
 
     apply_pending_history_action();
 
     gui_actions__apply_confirm();
-    if (gui_project_lifecycle_state_query() ==
-        GUI_PROJECT_LIFECYCLE_DRAINING) {
+    if (gui_project_lifecycle_state_query() !=
+        GUI_PROJECT_LIFECYCLE_ACTIVE) {
+        return;
+    }
+    if (s_actions.pending_lifecycle_request !=
+        GUI_LIFECYCLE_REQUEST_NONE) {
+        /* A draft terminal is already committed, but its view echo belongs to
+         * frame_begin below. Preserve the lifecycle request for the next
+         * between-frame gate instead of clearing or executing it on stale
+         * dirty state. */
         return;
     }
 
@@ -289,5 +308,6 @@ void gui_actions_shutdown(void) {
 
 void gui_actions_poll_host_completion(void) {
     gui_actions__poll_pack();
+    gui_actions__reconcile_observation();
 }
 // #endregion

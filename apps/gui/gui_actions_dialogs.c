@@ -376,7 +376,7 @@ bool gui_actions__apply_lifecycle_request(void) {
         return false;
     }
     if (gui_project_lifecycle_state_query() !=
-        GUI_PROJECT_LIFECYCLE_OPEN_IDLE) {
+        GUI_PROJECT_LIFECYCLE_ACTIVE) {
         set_status_ex(
             STATUS_WARNING,
             "A project lifecycle transition is already in progress.");
@@ -421,7 +421,9 @@ static void confirm_continue(void) {
         s_after_confirm;
     s_after_confirm =
         GUI_LIFECYCLE_REQUEST_NONE;
-    (void)gui_actions__apply_lifecycle_request();
+    /* A committed draft publishes into the borrowed GUI view at the following
+     * frame boundary. Re-enter the lifecycle gate next frame so dirty/identity
+     * decisions read that one common observation. */
 }
 // #endregion
 

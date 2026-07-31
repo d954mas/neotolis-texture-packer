@@ -158,6 +158,9 @@ void gui_actions__intent_shutdown(void) {
     s_actions.intents = NULL;
     s_actions.intent_count = 0;
     s_actions.intent_cap = 0;
+    s_actions.pending_frame_selection.present = false;
+    s_actions.pending_added_atlas_status_id =
+        tp_id128_nil();
 }
 
 /* Drops every queued intent whose kind is in [first,last], destroying payloads. */
@@ -174,6 +177,61 @@ static void intent_clear_range(gui_intent_kind first, gui_intent_kind last) {
     s_actions.intent_count = kept;
 }
 
+void gui_actions__reconcile_observation(void) {
+    const tp_session_snapshot *snapshot =
+        gui_project_snapshot();
+    if (s_actions.pending_frame_selection.present) {
+        const tp_id128 atlas_id =
+            s_actions.pending_frame_selection.atlas_id;
+        const tp_id128 animation_id =
+            s_actions.pending_frame_selection.animation_id;
+        const int frame_index =
+            s_actions.pending_frame_selection.frame_index;
+        const tp_snapshot_animation *animation =
+            snapshot
+                ? tp_session_snapshot_animation_by_id(
+                      snapshot, atlas_id, animation_id)
+                : NULL;
+        if (tp_id128_eq(
+                gui_view_atlas_id(), atlas_id) &&
+            tp_id128_eq(
+                gui_view_animation_id(),
+                animation_id)) {
+            gui_view_select_animation_frame(
+                snapshot,
+                animation &&
+                        frame_index >= 0 &&
+                        frame_index <
+                            animation->frame_count
+                    ? frame_index
+                    : -1);
+        }
+        s_actions.pending_frame_selection.present =
+            false;
+    }
+
+    if (!tp_id128_is_nil(
+            s_actions.pending_added_atlas_status_id)) {
+        const tp_snapshot_atlas *added =
+            snapshot
+                ? tp_session_snapshot_atlas_by_id(
+                      snapshot,
+                      s_actions
+                          .pending_added_atlas_status_id)
+                : NULL;
+        if (added) {
+            set_statusf(
+                "Added atlas '%s'", added->name);
+        } else {
+            set_status_ex(
+                STATUS_ERROR,
+                "The added atlas was not present after publication.");
+        }
+        s_actions.pending_added_atlas_status_id =
+            tp_id128_nil();
+    }
+}
+
 /* --- executors ----------------------------------------------------------- */
 
 static void intent_add_atlas(void) {
@@ -188,12 +246,8 @@ static void intent_add_atlas(void) {
      * Without this the player stayed armed on the previous atlas and kept reading
      * a result the canvas is no longer bound to. */
     preview_stop();
-    const tp_snapshot_atlas *added =
-        !tp_id128_is_nil(created.created_id)
-            ? tp_session_snapshot_atlas_by_id(gui_project_snapshot(),
-                                              created.created_id)
-            : NULL;
-    set_statusf("Added atlas '%s'", added ? added->name : "?");
+    s_actions.pending_added_atlas_status_id =
+        created.created_id;
 }
 
 /* One created animation reports itself the same way whether it came from the
@@ -280,10 +334,14 @@ static bool intent_execute(const gui_intent *intent) {
                     intent->payload.animation_edit.first,
                     intent->payload.animation_edit.second) &&
                 intent->payload.animation_edit.follow_selection) {
-                gui_view_select_animation_frame(
-                    gui_project_snapshot(),
+                s_actions.pending_frame_selection.atlas_id =
+                    intent->payload.animation_edit.animation.atlas_id;
+                s_actions.pending_frame_selection.animation_id =
+                    intent->payload.animation_edit.animation.animation_id;
+                s_actions.pending_frame_selection.frame_index =
                     intent->payload.animation_edit.first +
-                        intent->payload.animation_edit.second);
+                    intent->payload.animation_edit.second;
+                s_actions.pending_frame_selection.present = true;
             }
             break;
         case GUI_INTENT_ANIM_ADD_FRAMES:

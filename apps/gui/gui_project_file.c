@@ -11,6 +11,141 @@
 static uint64_t s_test_open_call_count;
 #endif
 
+static bool lifecycle_is_new(
+    gui_project_lifecycle_state state) {
+    return state == GUI_PROJECT_LIFECYCLE_NEW_DRAINING ||
+           state == GUI_PROJECT_LIFECYCLE_NEW_READY;
+}
+
+static bool lifecycle_is_open(
+    gui_project_lifecycle_state state) {
+    return state == GUI_PROJECT_LIFECYCLE_OPEN_DRAINING ||
+           state == GUI_PROJECT_LIFECYCLE_OPEN_READY;
+}
+
+static bool lifecycle_is_shutdown(
+    gui_project_lifecycle_state state) {
+    return state == GUI_PROJECT_LIFECYCLE_SHUTDOWN_DRAINING ||
+           state == GUI_PROJECT_LIFECYCLE_SHUTDOWN_READY;
+}
+
+static bool lifecycle_is_ready(
+    gui_project_lifecycle_state state) {
+    return state == GUI_PROJECT_LIFECYCLE_NEW_READY ||
+           state == GUI_PROJECT_LIFECYCLE_OPEN_READY ||
+           state == GUI_PROJECT_LIFECYCLE_SHUTDOWN_READY;
+}
+
+static bool lifecycle_transition_allowed(
+    gui_project_lifecycle_state from,
+    gui_project_lifecycle_state to) {
+    switch (from) {
+        case GUI_PROJECT_LIFECYCLE_CLOSED:
+            return to == GUI_PROJECT_LIFECYCLE_ACTIVE;
+        case GUI_PROJECT_LIFECYCLE_ACTIVE:
+            return to == GUI_PROJECT_LIFECYCLE_NEW_DRAINING ||
+                   to == GUI_PROJECT_LIFECYCLE_OPEN_DRAINING ||
+                   to == GUI_PROJECT_LIFECYCLE_SHUTDOWN_DRAINING;
+        case GUI_PROJECT_LIFECYCLE_NEW_DRAINING:
+            return to == GUI_PROJECT_LIFECYCLE_NEW_READY;
+        case GUI_PROJECT_LIFECYCLE_NEW_READY:
+            return to == GUI_PROJECT_LIFECYCLE_ACTIVE;
+        case GUI_PROJECT_LIFECYCLE_OPEN_DRAINING:
+            return to == GUI_PROJECT_LIFECYCLE_OPEN_READY;
+        case GUI_PROJECT_LIFECYCLE_OPEN_READY:
+            return to == GUI_PROJECT_LIFECYCLE_ACTIVE;
+        case GUI_PROJECT_LIFECYCLE_SHUTDOWN_DRAINING:
+            return to == GUI_PROJECT_LIFECYCLE_SHUTDOWN_READY;
+        case GUI_PROJECT_LIFECYCLE_SHUTDOWN_READY:
+            return to == GUI_PROJECT_LIFECYCLE_CLOSED;
+    }
+    return false;
+}
+
+void gui_project__assert_lifecycle_invariants(void) {
+    const gui_project_lifecycle_state state =
+        s_project.lifecycle_state;
+    const bool has_live_session =
+        state != GUI_PROJECT_LIFECYCLE_CLOSED;
+    NT_ASSERT(
+        has_live_session ==
+        (s_project.session != NULL));
+    NT_ASSERT(!s_project.frame_pinned ||
+              has_live_session);
+    NT_ASSERT(
+        s_project.completion_pending ==
+        (s_project.completion.kind !=
+         TP_SESSION_JOB_NONE));
+    NT_ASSERT(!s_project.completion_pending ||
+              has_live_session);
+    NT_ASSERT(!has_live_session ||
+              s_project.view != NULL);
+    if (state == GUI_PROJECT_LIFECYCLE_CLOSED) {
+        NT_ASSERT(s_project.candidate == NULL);
+        NT_ASSERT(!s_project.frame_pinned);
+        NT_ASSERT(!s_project.completion_pending);
+        return;
+    }
+    if (state == GUI_PROJECT_LIFECYCLE_ACTIVE ||
+        lifecycle_is_shutdown(state)) {
+        NT_ASSERT(s_project.candidate == NULL);
+    } else {
+        NT_ASSERT(
+            lifecycle_is_new(state) ||
+            lifecycle_is_open(state));
+        NT_ASSERT(s_project.candidate != NULL);
+    }
+    if (lifecycle_is_ready(state)) {
+        NT_ASSERT(!tp_session_job_active(
+            s_project.session));
+        NT_ASSERT(!s_project.completion_pending);
+    }
+}
+
+static void lifecycle_transition(
+    gui_project_lifecycle_state next) {
+    NT_ASSERT(lifecycle_transition_allowed(
+        s_project.lifecycle_state, next));
+    s_project.lifecycle_state = next;
+    gui_project__assert_lifecycle_invariants();
+}
+
+static void lifecycle_force_closed(void) {
+    s_project.lifecycle_state =
+        GUI_PROJECT_LIFECYCLE_CLOSED;
+    gui_project__assert_lifecycle_invariants();
+}
+
+static gui_project_lifecycle_kind lifecycle_kind(
+    gui_project_lifecycle_state state) {
+    if (lifecycle_is_new(state)) {
+        return GUI_PROJECT_LIFECYCLE_NEW;
+    }
+    if (lifecycle_is_open(state)) {
+        return GUI_PROJECT_LIFECYCLE_OPEN;
+    }
+    if (lifecycle_is_shutdown(state)) {
+        return GUI_PROJECT_LIFECYCLE_SHUTDOWN;
+    }
+    return GUI_PROJECT_LIFECYCLE_NONE;
+}
+
+static gui_project_lifecycle_state lifecycle_ready_state(
+    gui_project_lifecycle_state state) {
+    switch (state) {
+        case GUI_PROJECT_LIFECYCLE_NEW_DRAINING:
+            return GUI_PROJECT_LIFECYCLE_NEW_READY;
+        case GUI_PROJECT_LIFECYCLE_OPEN_DRAINING:
+            return GUI_PROJECT_LIFECYCLE_OPEN_READY;
+        case GUI_PROJECT_LIFECYCLE_SHUTDOWN_DRAINING:
+            return GUI_PROJECT_LIFECYCLE_SHUTDOWN_READY;
+        default:
+            break;
+    }
+    NT_ASSERT(false);
+    return state;
+}
+
 static void reset_cutover_state(
     gui_project_lifecycle_kind kind) {
     s_project.op_error = false;
@@ -24,10 +159,7 @@ static void reset_cutover_state(
 
 static tp_status require_idle_lifecycle(
     tp_error *err) {
-    if (gui_project_lifecycle_state_query() !=
-            GUI_PROJECT_LIFECYCLE_OPEN_IDLE ||
-        s_project.lifecycle_kind !=
-            GUI_PROJECT_LIFECYCLE_NONE) {
+    if (!gui_project__ingress_is_open()) {
         return tp_error_set(
             err, TP_STATUS_INVALID_ARGUMENT,
             "GUI project lifecycle transition is already in progress");
@@ -36,7 +168,7 @@ static tp_status require_idle_lifecycle(
 }
 
 static tp_status begin_candidate(
-    gui_project_lifecycle_kind kind,
+    gui_project_lifecycle_state draining_state,
     tp_session *candidate, tp_error *err) {
     NT_ASSERT(candidate != NULL);
     const tp_status recovery_status =
@@ -60,9 +192,13 @@ static tp_status begin_candidate(
             "GUI replacement requires one open idle session");
     }
     s_project.candidate = candidate;
-    s_project.lifecycle_kind = kind;
     s_project.discard_retired_session = true;
-    s_project.cancel_requested = false;
+    lifecycle_transition(draining_state);
+    if (tp_session_job_active(s_project.session)) {
+        tp_error cancel_error = {{0}};
+        (void)tp_session_job_cancel(
+            s_project.session, &cancel_error);
+    }
     return TP_STATUS_OK;
 }
 
@@ -92,37 +228,6 @@ static bool controller_attached(void) {
     return s_project.controller_status.attached &&
            s_project.controller_status.attached(
                s_project.controller_status.context);
-}
-
-static tp_status observe_current_identity(
-    tp_error *err) {
-    if (!s_project.session ||
-        s_project.frame_pinned) {
-        return tp_error_set(
-            err, TP_STATUS_NOT_FOUND,
-            "GUI session identity is unavailable");
-    }
-    tp_session_job_result completion = {0};
-    const tp_status status =
-        tp_session_update(
-            s_project.session, &completion, err);
-    if (completion.kind !=
-        TP_SESSION_JOB_NONE) {
-        if (s_project.completion_pending) {
-            tp_session_job_result_destroy(
-                &completion);
-            return tp_error_set(
-                err, TP_STATUS_INVALID_ARGUMENT,
-                "GUI host already has an unconsumed completion");
-        }
-        s_project.completion = completion;
-        s_project.completion_pending = true;
-    }
-    if (status == TP_STATUS_OK) {
-        s_project.view =
-            tp_session_view(s_project.session);
-    }
-    return status;
 }
 
 // #region lifecycle
@@ -165,6 +270,8 @@ void gui_project_init(void) {
             ? s_project.view->snapshot_generation
             : 0U;
     s_project.preview_stale = false;
+    lifecycle_transition(
+        GUI_PROJECT_LIFECYCLE_ACTIVE);
 }
 
 void gui_project_shutdown(void) {
@@ -190,7 +297,7 @@ tp_status gui_project_lifecycle_begin_new(
         return create_status;
     }
     return begin_candidate(
-        GUI_PROJECT_LIFECYCLE_NEW,
+        GUI_PROJECT_LIFECYCLE_NEW_DRAINING,
         candidate, err);
 }
 
@@ -221,11 +328,6 @@ tp_status gui_project_lifecycle_begin_open(
     if (canonical_status != TP_STATUS_OK) {
         return canonical_status;
     }
-    const tp_status observe_status =
-        observe_current_identity(err);
-    if (observe_status != TP_STATUS_OK) {
-        return observe_status;
-    }
     if (current_identity_is(canonical_path)) {
         return tp_error_set(
             err, TP_STATUS_PROJECT_LIVE,
@@ -245,7 +347,7 @@ tp_status gui_project_lifecycle_begin_open(
         return open_status;
     }
     return begin_candidate(
-        GUI_PROJECT_LIFECYCLE_OPEN,
+        GUI_PROJECT_LIFECYCLE_OPEN_DRAINING,
         candidate, err);
 }
 
@@ -256,11 +358,15 @@ tp_status gui_project_lifecycle_begin_shutdown(
     if (lifecycle_status != TP_STATUS_OK) {
         return lifecycle_status;
     }
-    s_project.lifecycle_kind =
-        GUI_PROJECT_LIFECYCLE_SHUTDOWN;
     s_project.discard_retired_session =
         discard_recovery;
-    s_project.cancel_requested = false;
+    lifecycle_transition(
+        GUI_PROJECT_LIFECYCLE_SHUTDOWN_DRAINING);
+    if (tp_session_job_active(s_project.session)) {
+        tp_error cancel_error = {{0}};
+        (void)tp_session_job_cancel(
+            s_project.session, &cancel_error);
+    }
     return TP_STATUS_OK;
 }
 
@@ -278,10 +384,9 @@ void gui_project_lifecycle_force_close(void) {
     tp_session_destroy(s_project.session);
     s_project.session = NULL;
     s_project.view = NULL;
-    s_project.lifecycle_kind =
-        GUI_PROJECT_LIFECYCLE_NONE;
-    s_project.cancel_requested = false;
     s_project.discard_retired_session = false;
+    s_project.frame_pinned = false;
+    lifecycle_force_closed();
 }
 
 tp_status gui_project_lifecycle_pump(
@@ -290,39 +395,41 @@ tp_status gui_project_lifecycle_pump(
     if (completed) {
         *completed = GUI_PROJECT_LIFECYCLE_NONE;
     }
-    if (!s_project.session) {
+    gui_project__assert_lifecycle_invariants();
+    if (s_project.lifecycle_state ==
+        GUI_PROJECT_LIFECYCLE_CLOSED) {
         return tp_error_set(
             err, TP_STATUS_NOT_FOUND,
             "GUI host has no live session");
     }
-    if (s_project.lifecycle_kind ==
-        GUI_PROJECT_LIFECYCLE_NONE) {
+    if (s_project.frame_pinned) {
+        return tp_error_set(
+            err, TP_STATUS_INVALID_ARGUMENT,
+            "GUI lifecycle cannot advance during a pinned frame");
+    }
+    if (s_project.lifecycle_state ==
+        GUI_PROJECT_LIFECYCLE_ACTIVE) {
         return TP_STATUS_OK;
     }
-    if (tp_session_job_active(
-            s_project.session)) {
-        if (!s_project.cancel_requested) {
-            const tp_status cancel_status =
-                tp_session_job_cancel(
-                    s_project.session, err);
-            if (cancel_status == TP_STATUS_OK) {
-                s_project.cancel_requested = true;
-            }
+    if (!lifecycle_is_ready(
+            s_project.lifecycle_state)) {
+        if (tp_session_job_active(
+                s_project.session) ||
+            s_project.completion_pending) {
+            return TP_STATUS_OK;
         }
-        return TP_STATUS_OK;
-    }
-    if (s_project.completion_pending) {
+        lifecycle_transition(
+            lifecycle_ready_state(
+                s_project.lifecycle_state));
         return TP_STATUS_OK;
     }
 
     const gui_project_lifecycle_kind kind =
-        s_project.lifecycle_kind;
+        lifecycle_kind(
+            s_project.lifecycle_state);
     tp_session *retired = s_project.session;
     if (kind == GUI_PROJECT_LIFECYCLE_NEW ||
         kind == GUI_PROJECT_LIFECYCLE_OPEN) {
-        NT_ASSERT(
-            kind == GUI_PROJECT_LIFECYCLE_NEW ||
-            kind == GUI_PROJECT_LIFECYCLE_OPEN);
         NT_ASSERT(s_project.candidate != NULL);
         s_project.session = s_project.candidate;
         s_project.candidate = NULL;
@@ -333,18 +440,7 @@ tp_status gui_project_lifecycle_pump(
         s_project.view =
             tp_session_view(s_project.session);
         reset_cutover_state(kind);
-        gui_project__reduce_view();
-        if (s_project.recovery_required &&
-            !tp_session_recovery_available(
-                s_project.session)) {
-            gui_project_note_recovery_setup_failure(
-                "the recovery directory is not configured");
-        }
-        gui_project_refresh_sources();
     } else {
-        NT_ASSERT(
-            kind ==
-            GUI_PROJECT_LIFECYCLE_SHUTDOWN);
         NT_ASSERT(
             kind ==
             GUI_PROJECT_LIFECYCLE_SHUTDOWN);
@@ -357,10 +453,23 @@ tp_status gui_project_lifecycle_pump(
             retired, NULL);
     }
     tp_session_destroy(retired);
-    s_project.lifecycle_kind =
-        GUI_PROJECT_LIFECYCLE_NONE;
-    s_project.cancel_requested = false;
     s_project.discard_retired_session = false;
+    lifecycle_transition(
+        kind == GUI_PROJECT_LIFECYCLE_SHUTDOWN
+            ? GUI_PROJECT_LIFECYCLE_CLOSED
+            : GUI_PROJECT_LIFECYCLE_ACTIVE);
+    if (kind == GUI_PROJECT_LIFECYCLE_NEW ||
+        kind == GUI_PROJECT_LIFECYCLE_OPEN) {
+        gui_project__reduce_view();
+        if (s_project.recovery_required &&
+            !tp_session_recovery_available(
+                s_project.session)) {
+            gui_project_note_recovery_setup_failure(
+                "the recovery directory is not configured");
+        }
+        /* Initial source I/O is admitted only after ACTIVE opens ingress. */
+        gui_project_refresh_sources();
+    }
     if (completed) {
         *completed = kind;
     }
@@ -416,17 +525,12 @@ bool gui_project_undo(void) {
         return false;
     }
     tp_error e = {0};
-    tp_status st = tp_session_undo(
+    const tp_status st = tp_session_undo(
         s_project.session, &e);
     if (st != TP_STATUS_OK) {
         if (st != TP_STATUS_NOT_FOUND) {
             note_history_reject("undo", st, &e);
         }
-        return false;
-    }
-    st = observe_current_identity(&e);
-    if (st != TP_STATUS_OK) {
-        note_history_reject("undo view update", st, &e);
         return false;
     }
     s_project.preview_stale = true; /* restored model no longer matches the last pack */
@@ -439,17 +543,12 @@ bool gui_project_redo(void) {
         return false;
     }
     tp_error e = {0};
-    tp_status st = tp_session_redo(
+    const tp_status st = tp_session_redo(
         s_project.session, &e);
     if (st != TP_STATUS_OK) {
         if (st != TP_STATUS_NOT_FOUND) {
             note_history_reject("redo", st, &e);
         }
-        return false;
-    }
-    st = observe_current_identity(&e);
-    if (st != TP_STATUS_OK) {
-        note_history_reject("redo view update", st, &e);
         return false;
     }
     s_project.preview_stale = true;
@@ -490,18 +589,6 @@ tp_status gui_project_save(char *err_out, size_t err_cap) {
             (void)snprintf(err_out, err_cap, "%s", err.msg[0] ? err.msg : tp_status_str(st));
         }
         return st;
-    }
-    const tp_status update_status =
-        observe_current_identity(&err);
-    if (update_status != TP_STATUS_OK) {
-        if (err_out && err_cap) {
-            (void)snprintf(
-                err_out, err_cap, "%s",
-                err.msg[0]
-                    ? err.msg
-                    : tp_status_str(update_status));
-        }
-        return update_status;
     }
     if (result.recovery_degraded) {
         gui_project__note_recovery_degraded(result.recovery_status);
@@ -546,19 +633,6 @@ static tp_status save_as_preflight(
         }
         return canonical;
     }
-    const tp_status observe_status =
-        observe_current_identity(&err);
-    if (observe_status != TP_STATUS_OK) {
-        if (err_out && err_cap) {
-            (void)snprintf(
-                err_out, err_cap, "%s",
-                err.msg[0]
-                    ? err.msg
-                    : tp_status_str(
-                          observe_status));
-        }
-        return observe_status;
-    }
     if (!current_identity_is(canonical_path) &&
         controller_attached()) {
         if (err_out && err_cap) {
@@ -597,18 +671,6 @@ tp_status gui_project_save_as(const char *path, char *err_out, size_t err_cap) {
                            err.msg[0] ? err.msg : tp_status_str(st));
         }
         return st;
-    }
-    const tp_status update_status =
-        observe_current_identity(&err);
-    if (update_status != TP_STATUS_OK) {
-        if (err_out && err_cap) {
-            (void)snprintf(
-                err_out, err_cap, "%s",
-                err.msg[0]
-                    ? err.msg
-                    : tp_status_str(update_status));
-        }
-        return update_status;
     }
     if (result.recovery_degraded) {
         gui_project__note_recovery_degraded(result.recovery_status);

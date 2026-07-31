@@ -195,6 +195,14 @@ typedef struct gui_actions_state {
     bool draft_apply_mine;
     bool gesture_commit;
 
+    struct {
+        tp_id128 atlas_id;
+        tp_id128 animation_id;
+        int frame_index;
+        bool present;
+    } pending_frame_selection;
+    tp_id128 pending_added_atlas_status_id;
+
     gui_intent *intents;
     int intent_count;
     int intent_cap;
@@ -228,6 +236,7 @@ void gui_actions__rebase_deferred_edits(
     int64_t revision_after);
 void gui_actions__discard_deferred_edits(void);
 void gui_actions__discard_edits(void);
+void gui_actions__reconcile_observation(void);
 bool gui_actions__submit_draft(void);
 bool gui_actions__apply_draft_mine(void);
 void gui_actions__apply_confirm(void);

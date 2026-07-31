@@ -170,9 +170,15 @@ tp_session *gui_project__borrow_active_session(void) {
 
 bool gui_project__ingress_is_open(void) {
     return s_project.session &&
-           s_project.lifecycle_kind ==
-               GUI_PROJECT_LIFECYCLE_NONE &&
+           s_project.lifecycle_state ==
+               GUI_PROJECT_LIFECYCLE_ACTIVE &&
            !s_project.frame_pinned;
+}
+
+tp_session *gui_project__mutation_session(void) {
+    return gui_project__ingress_is_open()
+               ? s_project.session
+               : NULL;
 }
 
 const tp_session_snapshot *gui_project_snapshot(void) {
@@ -217,6 +223,7 @@ bool gui_project_observed_input_token(
 }
 
 tp_status gui_project_frame_begin(tp_error *err) {
+    gui_project__assert_lifecycle_invariants();
     if (!s_project.session ||
         s_project.frame_pinned) {
         return tp_error_set(
@@ -257,6 +264,7 @@ tp_status gui_project_frame_begin(tp_error *err) {
 
 void gui_project_frame_end(void) {
     s_project.frame_pinned = false;
+    gui_project__assert_lifecycle_invariants();
 }
 
 bool gui_project_frame_is_pinned(void) {
@@ -362,14 +370,8 @@ gui_project_job_observed_state(void) {
 
 gui_project_lifecycle_state
 gui_project_lifecycle_state_query(void) {
-    if (!s_project.session) {
-        return GUI_PROJECT_LIFECYCLE_CLOSED;
-    }
-    if (s_project.lifecycle_kind ==
-        GUI_PROJECT_LIFECYCLE_NONE) {
-        return GUI_PROJECT_LIFECYCLE_OPEN_IDLE;
-    }
-    return GUI_PROJECT_LIFECYCLE_DRAINING;
+    gui_project__assert_lifecycle_invariants();
+    return s_project.lifecycle_state;
 }
 
 void gui_project_set_controller_status_port(
@@ -382,40 +384,20 @@ gui_project_session_instance_generation(void) {
     return s_project.instance_generation;
 }
 
+int64_t gui_project_committed_revision(void) {
+    return s_project.session
+               ? tp_session_revision(
+                     s_project.session)
+               : -1;
+}
+
 void gui_project_refresh_sources(void) {
-    if (!gui_project__ingress_is_open()) {
-        return;
-    }
     tp_error err = {{0}};
-    const tp_refresh_job_request request = {
-        .session_instance_generation =
-            s_project.instance_generation,
-    };
-    const tp_status status = tp_session_refresh_start(
-        s_project.session, &request, &err);
+    const tp_status status =
+        gui_project_job_enqueue_refresh(&err);
     if (status != TP_STATUS_OK) {
         gui_project__note_session_reject(status, &err);
-        return;
     }
-#ifdef TP_ENABLE_TEST_SEAMS
-    /* Component tests make mutations and inspect rows in one call stack. Drain
-     * the same background task here; production returns immediately and the
-     * frame pump adopts it asynchronously. */
-    while (tp_session_job_active(s_project.session)) {
-        tp_session_job_result completion = {0};
-        const tp_status update_status = tp_session_update(
-            s_project.session, &completion, &err);
-        tp_session_job_result_destroy(&completion);
-        if (update_status != TP_STATUS_OK) {
-            gui_project__note_session_reject(
-                update_status, &err);
-            return;
-        }
-    }
-#endif
-    s_project.view =
-        tp_session_view(s_project.session);
-    gui_project__reduce_view();
 }
 
 uint64_t gui_project_snapshot_model_generation(void) {
@@ -452,25 +434,13 @@ void gui_project__note_session_reject(tp_status status, const tp_error *err) {
 }
 
 void gui_project__sync_recovery_notice(void) {
-    if (!s_project.session ||
-        s_project.frame_pinned) {
+    if (!s_project.session) {
         return;
     }
-    tp_error err = {{0}};
-    const tp_status status =
-        tp_session_update(
-            s_project.session, NULL, &err);
-    if (status == TP_STATUS_OK) {
-        s_project.view =
-            tp_session_view(s_project.session);
-        if (s_project.view) {
-            reduce_project_view(
-                &s_project, s_project.view);
-        }
-    } else {
-        gui_project__note_session_reject(
-            status, &err);
-    }
+    reduce_recovery_health(
+        &s_project,
+        tp_session_recovery_health_query(
+            s_project.session));
 }
 
 // #endregion

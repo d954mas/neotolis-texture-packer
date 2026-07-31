@@ -37,7 +37,7 @@ static gui_project_create_result create_committed(
     NT_ASSERT(terminal->committed);
     return (gui_project_create_result){
         .committed = true,
-        .observation_pending = false,
+        .observation_pending = visible_index < 0,
         .created_id = created_id,
         .visible_index = visible_index,
     };
@@ -70,7 +70,7 @@ gui_project_create_result gui_project_add_atlas(void) {
     }
     err = (tp_error){0};
     gui_project_operation_submit_terminal terminal = {0};
-    const tp_status status = gui_project_operation_create_atlas(s_project.session, new_id, target_id, tp_session_snapshot_revision(snapshot), name,
+    const tp_status status = gui_project_operation_create_atlas(gui_project__mutation_session(), new_id, target_id, tp_session_snapshot_revision(snapshot), name,
         exporter_id, out_path, target_enabled, &terminal, &err);
     if (status != TP_STATUS_OK) {
         gui_project__note_session_reject(status, &err);
@@ -89,11 +89,12 @@ gui_project_create_result gui_project_add_atlas(void) {
 
 /* Returns true only after the identified removal commits. */
 bool gui_project_remove_atlas(tp_id128 atlas_id, int64_t expected_revision) {
-    if (tp_id128_is_nil(atlas_id) || !s_project.session) {
+    if (tp_id128_is_nil(atlas_id) ||
+        !gui_project__mutation_session()) {
         return false;
     }
     tp_error err = {0};
-    const tp_status status = gui_project_operation_remove_atlas(s_project.session, atlas_id, expected_revision, &err);
+    const tp_status status = gui_project_operation_remove_atlas(gui_project__mutation_session(), atlas_id, expected_revision, &err);
     if (status != TP_STATUS_OK) {
         gui_project__note_session_reject(status, &err);
         return false;
@@ -175,7 +176,7 @@ bool gui_project_add_sources(tp_id128 atlas_id, int64_t expected_revision,
     bool ok = true;
     if (m > 0) {
         tp_error err = {0};
-        const tp_status status = gui_project_operation_add_sources(s_project.session, atlas_id, ids, distinct, m,
+        const tp_status status = gui_project_operation_add_sources(gui_project__mutation_session(), atlas_id, ids, distinct, m,
             (tp_snapshot_source_kind)kind,
             expected_revision, &err);
         ok = status == TP_STATUS_OK;
@@ -200,11 +201,13 @@ bool gui_project_add_sources(tp_id128 atlas_id, int64_t expected_revision,
 /* fix3 [0]: bool -- true iff the removal committed (see gui_project_remove_atlas). */
 bool gui_project_remove_source(tp_id128 atlas_id, tp_id128 source_id,
                                int64_t expected_revision) {
-    if (!s_project.session || tp_id128_is_nil(atlas_id) || tp_id128_is_nil(source_id)) {
+    if (!gui_project__mutation_session() ||
+        tp_id128_is_nil(atlas_id) ||
+        tp_id128_is_nil(source_id)) {
         return false;
     }
     tp_error err = {0};
-    const tp_status status = gui_project_operation_remove_source(s_project.session, atlas_id, source_id, expected_revision, &err);
+    const tp_status status = gui_project_operation_remove_source(gui_project__mutation_session(), atlas_id, source_id, expected_revision, &err);
     if (status != TP_STATUS_OK) {
         gui_project__note_session_reject(status, &err);
         return false;
@@ -221,7 +224,7 @@ tp_status gui_project_submit_text(
     const char *value, gui_project_operation_submit_identity identity,
     const char transaction_id[33],
     gui_project_operation_submit_terminal *terminal, tp_error *err) {
-    if (!s_project.session || !ref ||
+    if (!gui_project__mutation_session() || !ref ||
         tp_id128_is_nil(ref->atlas_id) || !value ||
         !transaction_id) {
         return tp_error_set(
@@ -231,7 +234,7 @@ tp_status gui_project_submit_text(
     switch (kind) {
         case TP_OP_ATLAS_RENAME:
             return gui_project_operation_submit_atlas_name(
-                s_project.session, ref->atlas_id,
+                gui_project__mutation_session(), ref->atlas_id,
                 ref->expected_revision, value, identity,
                 transaction_id, terminal, err);
         case TP_OP_ANIMATION_RENAME:
@@ -239,7 +242,7 @@ tp_status gui_project_submit_text(
                 break;
             }
             return gui_project_operation_submit_animation_name(
-                s_project.session, ref->atlas_id,
+                gui_project__mutation_session(), ref->atlas_id,
                 ref->entity_id, ref->expected_revision,
                 value, identity, transaction_id,
                 terminal, err);
@@ -250,7 +253,7 @@ tp_status gui_project_submit_text(
                 break;
             }
             return gui_project_operation_submit_sprite_name(
-                s_project.session, ref->atlas_id,
+                gui_project__mutation_session(), ref->atlas_id,
                 ref->source_id, ref->source_key,
                 ref->expected_revision, value, identity,
                 transaction_id, terminal, err);
@@ -259,7 +262,7 @@ tp_status gui_project_submit_text(
                 break;
             }
             return gui_project_operation_submit_target_out_path(
-                s_project.session, ref->atlas_id,
+                gui_project__mutation_session(), ref->atlas_id,
                 ref->entity_id, ref->expected_revision,
                 value, identity, transaction_id,
                 terminal, err);
@@ -278,7 +281,7 @@ tp_status gui_project_submit_atlas_settings(
     const char transaction_id[33],
     gui_project_operation_submit_terminal *out_terminal,
     tp_error *err) {
-    if (!s_project.session ||
+    if (!gui_project__mutation_session() ||
         tp_id128_is_nil(atlas_id) || !settings ||
         !transaction_id) {
         return tp_error_set(
@@ -293,7 +296,7 @@ tp_status gui_project_submit_atlas_settings(
             "the edited atlas no longer exists");
     }
     return gui_project_operation_set_atlas_settings(
-        s_project.session, atlas_id,
+        gui_project__mutation_session(), atlas_id,
         expected_revision, settings, identity,
         transaction_id, out_terminal, err);
 }
@@ -305,7 +308,7 @@ tp_status gui_project_submit_sprite_settings(
     const char transaction_id[33],
     gui_project_operation_submit_terminal *terminal,
     tp_error *err) {
-    if (!s_project.session || !sprite ||
+    if (!gui_project__mutation_session() || !sprite ||
         tp_id128_is_nil(sprite->atlas_id) ||
         tp_id128_is_nil(sprite->source_id) ||
         !sprite->source_key || sprite->source_key[0] == '\0' ||
@@ -315,7 +318,7 @@ tp_status gui_project_submit_sprite_settings(
             "sprite draft submit requires an active session, stable target, component, and transaction");
     }
     return gui_project_operation_set_sprite_override(
-        s_project.session, sprite->atlas_id,
+        gui_project__mutation_session(), sprite->atlas_id,
         sprite->source_id, sprite->source_key,
         sprite->expected_revision, settings,
         identity, transaction_id, terminal, err);
@@ -409,7 +412,7 @@ gui_project_create_result gui_project_add_target(
         return create_failed();
     }
     gui_project_operation_submit_terminal terminal = {0};
-    const tp_status status = gui_project_operation_create_target(s_project.session, atlas_id, target_id, expected_revision,
+    const tp_status status = gui_project_operation_create_target(gui_project__mutation_session(), atlas_id, target_id, expected_revision,
         exporter_id, out_path, enabled, &terminal, &err);
     if (status != TP_STATUS_OK) {
         gui_project__note_session_reject(status, &err);
@@ -440,7 +443,7 @@ bool gui_project_remove_target(const gui_target_ref *target) {
     if (!target) return false;
     tp_error err = {0};
     const tp_status status = gui_project_operation_remove_target(
-        s_project.session, target->atlas_id,
+        gui_project__mutation_session(), target->atlas_id,
         target->target_id, target->expected_revision,
         &err);
     if (status != TP_STATUS_OK) {
@@ -453,7 +456,7 @@ bool gui_project_remove_target(const gui_target_ref *target) {
 bool gui_project_set_target_enabled(
     const gui_target_ref *target, bool enabled) {
     tp_error err = {{0}};
-    if (!s_project.session || !target ||
+    if (!gui_project__mutation_session() || !target ||
         tp_id128_is_nil(target->atlas_id) ||
         tp_id128_is_nil(target->target_id)) {
         return false;
@@ -463,7 +466,7 @@ bool gui_project_set_target_enabled(
         .enabled = enabled,
     };
     const tp_status status = gui_project_operation_set_target(
-        s_project.session, target->atlas_id,
+        gui_project__mutation_session(), target->atlas_id,
         target->target_id, target->expected_revision,
         &settings, (gui_project_operation_submit_identity){0},
         NULL, NULL, &err);
@@ -477,7 +480,7 @@ bool gui_project_set_target_enabled(
 bool gui_project_set_target_exporter(
     const gui_target_ref *target, const char *exporter_id) {
     tp_error err = {{0}};
-    if (!s_project.session || !target ||
+    if (!gui_project__mutation_session() || !target ||
         tp_id128_is_nil(target->atlas_id) ||
         tp_id128_is_nil(target->target_id) ||
         !exporter_id) {
@@ -488,7 +491,7 @@ bool gui_project_set_target_exporter(
         .exporter_id = (char *)exporter_id,
     };
     const tp_status status = gui_project_operation_set_target(
-        s_project.session, target->atlas_id,
+        gui_project__mutation_session(), target->atlas_id,
         target->target_id, target->expected_revision,
         &settings, (gui_project_operation_submit_identity){0},
         NULL, NULL, &err);
@@ -525,7 +528,7 @@ gui_project_create_result gui_project_create_animation(
     }
     tp_error err = {0};
     gui_project_operation_submit_terminal terminal = {0};
-    const tp_status status = gui_project_operation_create_animation(s_project.session, atlas_id, anim_id, expected_revision, id, frames,
+    const tp_status status = gui_project_operation_create_animation(gui_project__mutation_session(), atlas_id, anim_id, expected_revision, id, frames,
         frame_count, &terminal, &err);
     if (status != TP_STATUS_OK) {
         gui_project__note_session_reject(status, &err);
@@ -551,7 +554,7 @@ bool gui_project_remove_animation(const gui_animation_ref *animation) {
         return false;
     }
     tp_error err = {0};
-    const tp_status status = gui_project_operation_remove_animation(s_project.session, animation->atlas_id, animation->animation_id,
+    const tp_status status = gui_project_operation_remove_animation(gui_project__mutation_session(), animation->atlas_id, animation->animation_id,
         animation->expected_revision, &err);
     if (status != TP_STATUS_OK) {
         gui_project__note_session_reject(status, &err);
@@ -567,7 +570,7 @@ tp_status gui_project_submit_animation_settings(
     const char transaction_id[33],
     gui_project_operation_submit_terminal *terminal,
     tp_error *err) {
-    if (!s_project.session || !animation ||
+    if (!gui_project__mutation_session() || !animation ||
         tp_id128_is_nil(animation->atlas_id) ||
         tp_id128_is_nil(animation->animation_id) ||
         !settings || !transaction_id) {
@@ -576,7 +579,7 @@ tp_status gui_project_submit_animation_settings(
             "animation draft submit requires an active session, stable target, component, and transaction");
     }
     return gui_project_operation_set_animation_settings(
-        s_project.session, animation->atlas_id,
+        gui_project__mutation_session(), animation->atlas_id,
         animation->animation_id,
         animation->expected_revision, settings,
         identity, transaction_id, terminal, err);
@@ -591,7 +594,7 @@ bool gui_project_anim_add_frames(const gui_animation_ref *animation,
         return false;
     }
     tp_error err = {0};
-    const tp_status status = gui_project_operation_add_animation_frames(s_project.session, animation->atlas_id, animation->animation_id,
+    const tp_status status = gui_project_operation_add_animation_frames(gui_project__mutation_session(), animation->atlas_id, animation->animation_id,
         animation->expected_revision, frames, count, &err);
     if (status != TP_STATUS_OK) {
         gui_project__note_session_reject(status, &err);
@@ -606,7 +609,7 @@ bool gui_project_anim_remove_frame(const gui_animation_ref *animation,
         return false;
     }
     tp_error err = {0};
-    const tp_status status = gui_project_operation_remove_animation_frame(s_project.session, animation->atlas_id, animation->animation_id,
+    const tp_status status = gui_project_operation_remove_animation_frame(gui_project__mutation_session(), animation->atlas_id, animation->animation_id,
         animation->expected_revision, frame_index, &err);
     if (status != TP_STATUS_OK) {
         gui_project__note_session_reject(status, &err);
@@ -625,7 +628,7 @@ bool gui_project_anim_move_frame(const gui_animation_ref *animation,
         return true; /* no-op move (edge button): skip commit, as before */
     }
     tp_error err = {0};
-    const tp_status status = gui_project_operation_move_animation_frame(s_project.session, animation->atlas_id, animation->animation_id,
+    const tp_status status = gui_project_operation_move_animation_frame(gui_project__mutation_session(), animation->atlas_id, animation->animation_id,
         animation->expected_revision, frame_index, to, &err);
     if (status != TP_STATUS_OK) {
         gui_project__note_session_reject(status, &err);

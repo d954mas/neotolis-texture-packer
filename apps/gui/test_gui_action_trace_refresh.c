@@ -250,6 +250,7 @@ void test_refresh_ignores_source_membership_transactions(void) {
         gui_project_add_source_kind(
             atlas_id, tp_session_snapshot_revision(snapshot), second_path,
             TP_SOURCE_KIND_FILE));
+    settle_project_job();
     snapshot = gui_project_snapshot();
     const tp_snapshot_source *second =
         tp_session_snapshot_source_at(snapshot, atlas_id, 1);

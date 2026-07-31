@@ -3692,7 +3692,7 @@ void selftest_pre_frame(void) {
             gui_pack_shutdown();
             NT_ASSERT(
                 gui_project_lifecycle_state_query() ==
-                    GUI_PROJECT_LIFECYCLE_OPEN_IDLE &&
+                    GUI_PROJECT_LIFECYCLE_ACTIVE &&
                 gui_pack_async_busy() &&
                 "SELFTEST: pack cleanup must not own session drain");
             tp_error replacement_error = {{0}};
@@ -3706,14 +3706,14 @@ void selftest_pre_frame(void) {
         NT_ASSERT(
             s_st_pf < 3000 &&
             "SELFTEST: shutdown drain exceeded the frame cap");
-        if (gui_project_lifecycle_state_query() ==
-                GUI_PROJECT_LIFECYCLE_DRAINING ||
+        if (gui_project_lifecycle_state_query() !=
+                GUI_PROJECT_LIFECYCLE_ACTIVE ||
             gui_pack_async_busy()) {
             return;
         }
         NT_ASSERT(
             gui_project_lifecycle_state_query() ==
-            GUI_PROJECT_LIFECYCLE_OPEN_IDLE);
+            GUI_PROJECT_LIFECYCLE_ACTIVE);
         gui_shell_reset_shown_result();
         NT_ASSERT(!gui_canvas_has_atlas(&s_canvas) &&
                   gui_canvas_get_mode(&s_canvas) == GUI_CANVAS_SOURCE &&

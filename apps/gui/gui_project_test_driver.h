@@ -7,6 +7,19 @@
 #include "gui_project.h"
 #include "time/nt_time.h"
 
+static inline bool gui_project_test_state_is_draining(
+    gui_project_lifecycle_state state) {
+    return state == GUI_PROJECT_LIFECYCLE_NEW_DRAINING ||
+           state == GUI_PROJECT_LIFECYCLE_OPEN_DRAINING ||
+           state == GUI_PROJECT_LIFECYCLE_SHUTDOWN_DRAINING;
+}
+
+static inline bool gui_project_test_state_is_transitioning(
+    gui_project_lifecycle_state state) {
+    return state != GUI_PROJECT_LIFECYCLE_ACTIVE &&
+           state != GUI_PROJECT_LIFECYCLE_CLOSED;
+}
+
 static inline tp_status gui_project_test_drain(
     gui_project_lifecycle_kind *completed,
     tp_error *err) {
@@ -14,8 +27,8 @@ static inline tp_status gui_project_test_drain(
         GUI_PROJECT_LIFECYCLE_NONE;
     unsigned int attempts = 0U;
     while (attempts < 5000U &&
-           gui_project_lifecycle_state_query() ==
-               GUI_PROJECT_LIFECYCLE_DRAINING) {
+           gui_project_test_state_is_transitioning(
+               gui_project_lifecycle_state_query())) {
         attempts++;
         tp_status status =
             gui_project_lifecycle_pump(
@@ -23,8 +36,8 @@ static inline tp_status gui_project_test_drain(
         if (status != TP_STATUS_OK) {
             return status;
         }
-        if (gui_project_lifecycle_state_query() ==
-            GUI_PROJECT_LIFECYCLE_DRAINING) {
+        if (gui_project_test_state_is_draining(
+                gui_project_lifecycle_state_query())) {
             status = gui_project_frame_begin(err);
             if (status != TP_STATUS_OK) {
                 return status;
@@ -39,8 +52,8 @@ static inline tp_status gui_project_test_drain(
             nt_time_sleep(0.001);
         }
     }
-    if (gui_project_lifecycle_state_query() ==
-        GUI_PROJECT_LIFECYCLE_DRAINING) {
+    if (gui_project_test_state_is_transitioning(
+            gui_project_lifecycle_state_query())) {
         return tp_error_set(
             err, TP_STATUS_INVALID_ARGUMENT,
             "GUI lifecycle did not converge within the test budget");
@@ -71,6 +84,31 @@ static inline tp_status gui_project_test_finish(
         return tp_error_set(
             err, TP_STATUS_INVALID_ARGUMENT,
             "GUI lifecycle completed with an unexpected receipt");
+    }
+    /* New/Open intentionally schedule their initial Refresh only after ACTIVE
+     * opens ingress. Component tests settle that asynchronous bootstrap before
+     * making same-stack assertions about the adopted view. */
+    unsigned int attempts = 0U;
+    while (gui_project_job_busy() &&
+           attempts++ < 5000U) {
+        tp_status update_status =
+            gui_project_frame_begin(err);
+        if (update_status != TP_STATUS_OK) {
+            return update_status;
+        }
+        tp_session_job_result completion = {0};
+        if (gui_project_take_completion(
+                &completion)) {
+            tp_session_job_result_destroy(
+                &completion);
+        }
+        gui_project_frame_end();
+        nt_time_sleep(0.001);
+    }
+    if (gui_project_job_busy()) {
+        return tp_error_set(
+            err, TP_STATUS_INVALID_ARGUMENT,
+            "GUI initial Refresh did not converge within the test budget");
     }
     return TP_STATUS_OK;
 }
@@ -108,8 +146,8 @@ static inline tp_status gui_project_test_open(
 
 static inline void gui_project_test_shutdown(
     bool discard_recovery) {
-    if (gui_project_lifecycle_state_query() ==
-        GUI_PROJECT_LIFECYCLE_DRAINING) {
+    if (gui_project_test_state_is_transitioning(
+            gui_project_lifecycle_state_query())) {
         tp_error err = {{0}};
         gui_project_lifecycle_kind prior =
             GUI_PROJECT_LIFECYCLE_NONE;
@@ -119,7 +157,7 @@ static inline void gui_project_test_shutdown(
         NT_ASSERT(drain_status == TP_STATUS_OK);
     }
     if (gui_project_lifecycle_state_query() ==
-        GUI_PROJECT_LIFECYCLE_OPEN_IDLE) {
+        GUI_PROJECT_LIFECYCLE_ACTIVE) {
         tp_error err = {{0}};
         const tp_status begin_status =
             gui_project_lifecycle_begin_shutdown(

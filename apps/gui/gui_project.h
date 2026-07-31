@@ -51,8 +51,13 @@ typedef enum gui_project_lifecycle_kind {
 
 typedef enum gui_project_lifecycle_state {
     GUI_PROJECT_LIFECYCLE_CLOSED = 0,
-    GUI_PROJECT_LIFECYCLE_OPEN_IDLE,
-    GUI_PROJECT_LIFECYCLE_DRAINING
+    GUI_PROJECT_LIFECYCLE_ACTIVE,
+    GUI_PROJECT_LIFECYCLE_NEW_DRAINING,
+    GUI_PROJECT_LIFECYCLE_NEW_READY,
+    GUI_PROJECT_LIFECYCLE_OPEN_DRAINING,
+    GUI_PROJECT_LIFECYCLE_OPEN_READY,
+    GUI_PROJECT_LIFECYCLE_SHUTDOWN_DRAINING,
+    GUI_PROJECT_LIFECYCLE_SHUTDOWN_READY
 } gui_project_lifecycle_state;
 
 typedef bool (*gui_project_controller_attached_fn)(
@@ -171,6 +176,10 @@ bool gui_project_job_busy(void);
 tp_session_job_kind gui_project_job_active_kind(void);
 tp_session_job_observed_state gui_project_job_observed_state(void);
 uint64_t gui_project_session_instance_generation(void);
+/* Admission/control revision from the live session. Presentation still reads
+ * the frame-pinned snapshot; this scalar only sequences same-boundary intents
+ * after a synchronous operation terminal. */
+int64_t gui_project_committed_revision(void);
 uint64_t gui_project_snapshot_model_generation(void);
 tp_status gui_project_snapshot_serialize(char **out, size_t *out_len,
                                          tp_error *err);

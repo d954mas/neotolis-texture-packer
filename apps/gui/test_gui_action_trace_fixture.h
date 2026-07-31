@@ -34,6 +34,12 @@
 extern char s_save_path[1024];
 
 void pump_action_frame(void);
+void publish_project_frame(void);
+void settle_project_job(void);
+gui_project_create_result create_animation_observed(
+    tp_id128 atlas_id, int64_t expected_revision,
+    const char *name, const tp_op_sprite_ref *frames,
+    int frame_count);
 const tp_snapshot_atlas *atlas_at(int index);
 bool trace_animation_ref_at(int atlas_index, int animation_index,
                             gui_animation_ref *out);
