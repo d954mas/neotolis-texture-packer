@@ -20,10 +20,29 @@ typedef struct tp_refresh_job {
     tp_session_job_result terminal;
 } tp_refresh_job;
 
-static void refresh_cancel(tp_session_owned_job *owned) {
+static bool refresh_request_cancel(
+    tp_session_owned_job *owned) {
     tp_refresh_job *job = (tp_refresh_job *)owned;
-    atomic_store_explicit(
-        &job->cancel_requested, true, memory_order_release);
+    bool expected = false;
+    return atomic_compare_exchange_strong_explicit(
+        &job->cancel_requested, &expected, true,
+        memory_order_acq_rel, memory_order_acquire);
+}
+
+static void refresh_cancel(tp_session_owned_job *owned) {
+    (void)refresh_request_cancel(owned);
+}
+
+static void refresh_compact(tp_session_owned_job *owned) {
+    tp_refresh_job *job = (tp_refresh_job *)owned;
+    if (job->thread_started) {
+        (void)thrd_join(job->thread, NULL);
+        job->thread_started = false;
+    }
+    tp_session_snapshot_destroy(job->snapshot);
+    job->snapshot = NULL;
+    tp_source_runtime_destroy(job->previous);
+    job->previous = NULL;
 }
 
 static void refresh_release_payload(tp_session_owned_job *owned) {
@@ -172,6 +191,8 @@ tp_status tp_session_refresh_start(
         .kind = TP_SESSION_JOB_REFRESH,
         .base_input_token =
             tp_session_snapshot_input_token(job->snapshot),
+        .request_cancel = refresh_request_cancel,
+        .compact = refresh_compact,
     };
     tp_session_owned_job_configure_observation(
         &job->owner, &descriptor, refresh_observe);

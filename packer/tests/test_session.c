@@ -97,6 +97,50 @@ static tp_status session_refresh_sources(tp_session *session, tp_error *err) {
     return status;
 }
 
+void test_refresh_generic_cancel_and_compact_use_concrete_owner(void) {
+    tp_session *session = make_session();
+    tp_error err = {{0}};
+    const tp_refresh_job_request request = {0};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_session_refresh_start(session, &request, &err));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_session_job_cancel(session, &err));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_INVALID_ARGUMENT,
+        tp_session_job_cancel(session, &err));
+
+    tp_session_job_result completion = {0};
+    while (tp_session_job_active(session)) {
+        TEST_ASSERT_EQUAL_INT(
+            TP_STATUS_OK,
+            tp_session_update(session, &completion, &err));
+        thrd_yield();
+    }
+    TEST_ASSERT_EQUAL_INT(
+        TP_SESSION_JOB_REFRESH, completion.kind);
+    TEST_ASSERT_EQUAL_INT(
+        TP_SESSION_JOB_CANCELLED, completion.state);
+    TEST_ASSERT_EQUAL_INT(
+        TP_SESSION_JOB_REJECTION_CANCELLED,
+        completion.rejection);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_CANCELLED, completion.status);
+
+    tp_session_job_result_compact(&completion);
+    tp_session_job_result_compact(&completion);
+    TEST_ASSERT_EQUAL_INT(
+        TP_SESSION_JOB_REFRESH, completion.kind);
+    TEST_ASSERT_EQUAL_INT(
+        TP_SESSION_JOB_CANCELLED, completion.state);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_CANCELLED, completion.status);
+
+    tp_session_job_result_destroy(&completion);
+    tp_session_destroy(session);
+}
+
 static tp_operation rename_op(tp_id128 atlas_id, const char *name);
 
 void test_snapshot_preview_apply_isolated_and_revision_exact(void) {
@@ -3433,6 +3477,8 @@ int main(int argc, char **argv) {
     TEST_ASSERT_TRUE(argc >= 2);
     g_scratch = argv[1];
     UNITY_BEGIN();
+    RUN_TEST(
+        test_refresh_generic_cancel_and_compact_use_concrete_owner);
     RUN_TEST(test_snapshot_preview_apply_isolated_and_revision_exact);
     RUN_TEST(test_snapshot_allocation_failures_return_structured_oom);
     RUN_TEST(test_snapshot_creation_does_not_clone_and_same_generation_shares_project);

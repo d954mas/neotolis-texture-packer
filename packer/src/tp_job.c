@@ -214,6 +214,12 @@ static void job_cancel_owned(tp_session_owned_job *owned) {
     (void)job_request_cancel((tp_live_job *)owned);
 }
 
+static bool job_request_cancel_owned(tp_session_owned_job *owned) {
+    return job_request_cancel((tp_live_job *)owned);
+}
+
+static void job_compact_owned(tp_session_owned_job *owned);
+
 /* The session rejected this job's terminal result (cancelled, or its targets were
  * deleted), so nothing will ever adopt the packed pages. Free the arena now rather
  * than at destroy: for a big Pack that is every page's pixels, held for as long as
@@ -914,6 +920,8 @@ tp_status tp_session_pack_job_start(tp_session *session,
         .base_input_token = job->input_token_at_start,
         .targets = &job->pack_observation_target,
         .target_count = 1U,
+        .request_cancel = job_request_cancel_owned,
+        .compact = job_compact_owned,
     };
     tp_session_owned_job_configure_observation(
         &job->owner, &descriptor, job_observe);
@@ -1033,6 +1041,8 @@ tp_status tp_session_export_start(tp_session *session,
         .base_input_token = job->input_token_at_start,
         .targets = job->observation_targets,
         .target_count = job->observation_target_count,
+        .request_cancel = job_request_cancel_owned,
+        .compact = job_compact_owned,
     };
     tp_session_owned_job_configure_observation(
         &job->owner, &descriptor, job_observe);
@@ -1050,14 +1060,17 @@ bool tp_session_job_active(const tp_session *session) {
 }
 
 tp_status tp_session_job_cancel(tp_session *session, tp_error *err) {
-    tp_live_job *job =
-        (tp_live_job *)tp_session_job_acquire_internal(session);
+    tp_session_owned_job *job =
+        tp_session_job_acquire_internal(session);
     if (!job) {
         return tp_error_set(err, TP_STATUS_NOT_FOUND,
                             "session has no active job");
     }
-    const bool accepted = job_request_cancel(job);
-    tp_session_job_release_internal(&job->owner);
+    const tp_session_job_request_cancel_fn request_cancel =
+        job->observation_descriptor.request_cancel;
+    const bool accepted =
+        request_cancel && request_cancel(job);
+    tp_session_job_release_internal(job);
     return accepted
                ? TP_STATUS_OK
                : tp_error_set(
@@ -1076,9 +1089,8 @@ void tp_session_job_result_destroy(tp_session_job_result *result) {
     memset(result, 0, sizeof *result);
 }
 
-void tp_session_job_result_compact(tp_session_job_result *result) {
-    tp_live_job *job =
-        result ? (tp_live_job *)result->_owner : NULL;
+static void job_compact_owned(tp_session_owned_job *owned) {
+    tp_live_job *job = (tp_live_job *)owned;
     if (!job) {
         return;
     }
@@ -1104,6 +1116,14 @@ void tp_session_job_result_compact(tp_session_job_result *result) {
      * observed job state still borrows) stay untouched: job_destroy_owned
      * remains the exactly-once release for them, and every pointer freed above
      * is NULL so that destroy stays a no-op for it. */
+}
+
+void tp_session_job_result_compact(tp_session_job_result *result) {
+    tp_session_owned_job *job =
+        result ? (tp_session_owned_job *)result->_owner : NULL;
+    if (job && job->observation_descriptor.compact) {
+        job->observation_descriptor.compact(job);
+    }
 }
 
 tp_pack_freshness tp_session_pack_result_freshness(

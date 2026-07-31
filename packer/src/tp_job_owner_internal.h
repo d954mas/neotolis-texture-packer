@@ -5,6 +5,12 @@
 
 #include "tp_core/tp_session.h"
 
+typedef struct tp_session_owned_job tp_session_owned_job;
+typedef bool (*tp_session_job_request_cancel_fn)(
+    tp_session_owned_job *job);
+typedef void (*tp_session_job_compact_fn)(
+    tp_session_owned_job *job);
+
 typedef struct tp_session_job_descriptor {
     uint64_t session_instance_generation;
     uint64_t request_id;
@@ -12,6 +18,11 @@ typedef struct tp_session_job_descriptor {
     tp_session_input_token base_input_token;
     const tp_session_job_target *targets;
     size_t target_count;
+    /* Concrete-owner operations used after generic session admission. Cancel
+     * returns whether this request won that owner's terminal boundary; compact
+     * releases only request/worker state and must be idempotent. */
+    tp_session_job_request_cancel_fn request_cancel;
+    tp_session_job_compact_fn compact;
 } tp_session_job_descriptor;
 
 typedef struct tp_session_job_sample {
@@ -24,7 +35,6 @@ typedef struct tp_session_job_sample {
     tp_session_job_result *terminal_result;
 } tp_session_job_sample;
 
-typedef struct tp_session_owned_job tp_session_owned_job;
 typedef bool (*tp_session_job_observe_fn)(
     tp_session_owned_job *job,
     tp_session_job_sample *out);
