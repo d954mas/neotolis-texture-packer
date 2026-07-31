@@ -30,6 +30,11 @@ typedef struct tp_refresh_job {
 
 #ifdef TP_ENABLE_TEST_SEAMS
 static atomic_int s_test_active_workers;
+static bool s_test_fail_next_start;
+
+void tp_refresh_job__test_fail_next_start(void) {
+    s_test_fail_next_start = true;
+}
 
 int tp_refresh_job__test_active_workers(void) {
     return atomic_load_explicit(
@@ -218,6 +223,14 @@ tp_status tp_session_refresh_start(
             err, TP_STATUS_INVALID_ARGUMENT,
             "Refresh start requires session and request");
     }
+#ifdef TP_ENABLE_TEST_SEAMS
+    if (s_test_fail_next_start) {
+        s_test_fail_next_start = false;
+        return tp_error_set(
+            err, TP_STATUS_OOM,
+            "Refresh job allocation failed (test seam)");
+    }
+#endif
     tp_refresh_job *job = calloc(1U, sizeof *job);
     if (!job) {
         return tp_error_set(

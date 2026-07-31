@@ -210,6 +210,34 @@ static tp_id128 add_enabled_export_target(
     return target_id;
 }
 
+static void remove_export_target(
+    tp_session *session, tp_id128 atlas_id,
+    tp_id128 target_id) {
+    tp_operation operation = {0};
+    operation.kind = TP_OP_TARGET_REMOVE;
+    operation.atlas_id = atlas_id;
+    operation.u.target_ref.target_id = target_id;
+
+    tp_txn_request request = {0};
+    request.schema = TP_TXN_SCHEMA;
+    memcpy(request.id_hex,
+           "efefefefefefefefefefefefefefefef",
+           sizeof request.id_hex);
+    request.expected_revision =
+        tp_session_revision(session);
+    request.ops = &operation;
+    request.op_count = 1U;
+    tp_txn_result result = {0};
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_session_apply(
+            session, &request, &result, &error),
+        error.msg);
+    TEST_ASSERT_TRUE(result.committed);
+    tp_txn_result_free(&result);
+}
+
 static tp_id128 add_empty_export_atlas(tp_session *session) {
     const tp_id128 atlas_id = {{
         0x31U, 0x42U, 0x53U, 0x64U,
@@ -472,6 +500,40 @@ void test_cancel_of_a_running_pack_leaves_no_artifact_behind(void) {
         TP_STATUS_OK,
         tp_session_pack_job_start(session, &request, &error),
         error.msg);
+    bool running_progress_observed = false;
+    for (long spin = 0; spin < 10000000L; ++spin) {
+        tp_session_job_result unexpected = {0};
+        TEST_ASSERT_EQUAL_INT_MESSAGE(
+            TP_STATUS_OK,
+            tp_session_update(
+                session, &unexpected, &error),
+            error.msg);
+        TEST_ASSERT_EQUAL_INT(
+            TP_SESSION_JOB_NONE, unexpected.kind);
+        const struct tp_session_view *view =
+            tp_session_view(session);
+        TEST_ASSERT_NOT_NULL(view);
+        if (count_request_dirs(work_dir) == 1 &&
+            view->task.total == 1) {
+            TEST_ASSERT_TRUE(view->task.present);
+            TEST_ASSERT_EQUAL_INT(
+                TP_SESSION_JOB_PACK, view->task.kind);
+            TEST_ASSERT_EQUAL_INT(
+                TP_SESSION_JOB_RUNNING,
+                view->task.state);
+            TEST_ASSERT_FALSE(view->task.terminal);
+            TEST_ASSERT_EQUAL_INT(
+                0, view->task.current);
+            TEST_ASSERT_EQUAL_INT(
+                1, view->task.total);
+            running_progress_observed = true;
+            break;
+        }
+        thrd_yield();
+    }
+    TEST_ASSERT_TRUE_MESSAGE(
+        running_progress_observed,
+        "session view did not publish running Pack progress");
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK, tp_session_job_cancel(session, &error));
     tp_session_job_result result = wait_for_result(session);
@@ -811,6 +873,90 @@ void test_export_target_allocation_failure_is_fail_atomic(void) {
     remove_tree(work_dir);
 }
 
+void test_session_task_slot_rejects_every_cross_kind_pair(void) {
+    tp_session *session = make_session();
+    char work_dir[1024];
+    scratch_dir(work_dir, sizeof work_dir);
+    remove_tree(work_dir);
+    tp_mkdirs(work_dir);
+    const tp_id128 atlas_id =
+        default_atlas_id(session);
+    add_file_source(session, atlas_id, work_dir);
+    (void)add_enabled_export_target(
+        session, atlas_id);
+    const tp_pack_job_request pack = {
+        .atlas_id = atlas_id,
+        .work_dir = work_dir,
+    };
+    const tp_export_command_request export = {
+        .work_dir = work_dir,
+        .atlas_id = atlas_id,
+    };
+    const tp_refresh_job_request refresh = {0};
+    tp_error error = {{0}};
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_session_pack_job_start(
+            session, &pack, &error),
+        error.msg);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_BUSY,
+        tp_session_export_start(
+            session, &export, &error));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_BUSY,
+        tp_session_refresh_start(
+            session, &refresh, &error));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_session_job_cancel(session, &error));
+    tp_session_job_result completion =
+        wait_for_result(session);
+    tp_session_job_result_destroy(&completion);
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_session_refresh_start(
+            session, &refresh, &error),
+        error.msg);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_BUSY,
+        tp_session_pack_job_start(
+            session, &pack, &error));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_BUSY,
+        tp_session_export_start(
+            session, &export, &error));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_session_job_cancel(session, &error));
+    completion = wait_for_result(session);
+    tp_session_job_result_destroy(&completion);
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_session_export_start(
+            session, &export, &error),
+        error.msg);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_BUSY,
+        tp_session_pack_job_start(
+            session, &pack, &error));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_BUSY,
+        tp_session_refresh_start(
+            session, &refresh, &error));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_session_job_cancel(session, &error));
+    completion = wait_for_result(session);
+    tp_session_job_result_destroy(&completion);
+
+    tp_session_destroy(session);
+    remove_tree(work_dir);
+}
+
 void test_releasing_export_payload_preserves_terminal_metadata(void) {
     tp_session_job_result result = {
         .kind = TP_SESSION_JOB_EXPORT,
@@ -920,6 +1066,96 @@ void test_export_cancel_is_rejected_after_final_writer_boundary(void) {
     TEST_ASSERT_EQUAL_INT(
         TP_SESSION_JOB_SUCCEEDED, result_state);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, result_status);
+}
+
+void test_export_terminal_keeps_published_truth_after_target_deletion(void) {
+    tp_session *session = make_session();
+    char work_dir[1024];
+    scratch_dir(work_dir, sizeof work_dir);
+    remove_tree(work_dir);
+    tp_mkdirs(work_dir);
+    const tp_id128 atlas_id =
+        default_atlas_id(session);
+    add_file_source(session, atlas_id, work_dir);
+    const tp_id128 target_id =
+        add_enabled_export_target(session, atlas_id);
+
+    char marker[1200];
+    const int marker_length = snprintf(
+        marker, sizeof marker,
+        "%s/export-delete-boundary.marker",
+        work_dir);
+    TEST_ASSERT_TRUE(
+        marker_length > 0 &&
+        (size_t)marker_length < sizeof marker);
+    set_worker_env(
+        "TP_TEST_JOB_WORKER_EXPORT_BOUNDARY_MARKER",
+        marker);
+    set_worker_env(
+        "TP_TEST_JOB_WORKER_BLOCK_AFTER_EXPORT_BOUNDARY_MS",
+        "250");
+
+    const tp_export_command_request request = {
+        .work_dir = work_dir,
+        .atlas_id = atlas_id,
+    };
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_session_export_start(
+            session, &request, &error),
+        error.msg);
+
+    bool boundary_reached = false;
+    for (long spin = 0;
+         spin < 10000000L; ++spin) {
+        tp_session_job_result unexpected = {0};
+        TEST_ASSERT_EQUAL_INT_MESSAGE(
+            TP_STATUS_OK,
+            tp_session_update(
+                session, &unexpected, &error),
+            error.msg);
+        TEST_ASSERT_EQUAL_INT(
+            TP_SESSION_JOB_NONE,
+            unexpected.kind);
+        tp_fs_info info;
+        if (tp_fs_stat(marker, &info) &&
+            info.kind == TP_FS_KIND_REGULAR) {
+            boundary_reached = true;
+            break;
+        }
+        thrd_yield();
+    }
+    TEST_ASSERT_TRUE_MESSAGE(
+        boundary_reached,
+        "Export worker did not reach its final-writer boundary");
+
+    remove_export_target(
+        session, atlas_id, target_id);
+    tp_session_job_result result =
+        wait_for_result(session);
+
+    set_worker_env(
+        "TP_TEST_JOB_WORKER_EXPORT_BOUNDARY_MARKER",
+        "");
+    set_worker_env(
+        "TP_TEST_JOB_WORKER_BLOCK_AFTER_EXPORT_BOUNDARY_MS",
+        "");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_SESSION_JOB_SUCCEEDED,
+        result.state, result.error.msg);
+    TEST_ASSERT_EQUAL_INT(
+        TP_SESSION_JOB_REJECTION_NONE,
+        result.rejection);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK, result.status);
+    TEST_ASSERT_EQUAL_INT(
+        1, result.export_result.targets);
+    TEST_ASSERT_TRUE(
+        result.export_result.files > 0);
+    tp_session_job_result_destroy(&result);
+    tp_session_destroy(session);
+    remove_tree(work_dir);
 }
 
 void test_export_boundary_survives_a_final_atlas_without_a_writer(void) {
@@ -1080,8 +1316,12 @@ int main(int argc, char **argv) {
     RUN_TEST(test_compacted_pack_result_keeps_pages_and_destroys_cleanly);
     RUN_TEST(test_artifact_path_allocation_failure_leaves_no_orphan);
     RUN_TEST(test_export_target_allocation_failure_is_fail_atomic);
+    RUN_TEST(
+        test_session_task_slot_rejects_every_cross_kind_pair);
     RUN_TEST(test_releasing_export_payload_preserves_terminal_metadata);
     RUN_TEST(test_export_cancel_is_rejected_after_final_writer_boundary);
+    RUN_TEST(
+        test_export_terminal_keeps_published_truth_after_target_deletion);
     RUN_TEST(
         test_export_boundary_survives_a_final_atlas_without_a_writer);
     RUN_TEST(test_pack_succeeds_under_a_work_dir_deeper_than_the_old_buffers);

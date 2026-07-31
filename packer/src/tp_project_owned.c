@@ -100,6 +100,19 @@ void tp_project_owned_free_atlas(tp_project_atlas *atlas) {
     memset(atlas, 0, sizeof *atlas);
 }
 
+void tp_project_owned_free_project(tp_project *project) {
+    if (!project) {
+        return;
+    }
+    for (int i = 0; i < project->atlas_count; ++i) {
+        tp_project_owned_free_atlas(&project->atlases[i]);
+    }
+    free(project->atlases);
+    free(project->project_dir);
+    free(project->source_base_dir);
+    memset(project, 0, sizeof *project);
+}
+
 tp_status tp_project_owned_copy_source(tp_project_source *dst,
                                        const tp_project_source *src,
                                        tp_project_owned_allocator a) {

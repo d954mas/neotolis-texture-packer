@@ -704,6 +704,17 @@ static tp_status run_export(const tp_job_worker_proto_request *request,
             (void)publish_progress(
                 request->request_id, current, eligible,
                 TP_JOB_WORKER_PHASE_EXPORT_WRITE);
+#ifdef TP_ENABLE_TEST_SEAMS
+            /* Lets client tests observe a real non-zero worker progress frame
+             * before terminal publication. The process inherited this value;
+             * changing the parent environment after spawn cannot affect it. */
+            const unsigned long progress_block_ms =
+                test_block_ms(
+                    "TP_TEST_JOB_WORKER_BLOCK_AFTER_EXPORT_PROGRESS_MS");
+            if (progress_block_ms > 0UL) {
+                worker_sleep_ms(progress_block_ms);
+            }
+#endif
             status =
                 tp_export_snapshot_job_run_atlas_ex_cancellable(
                     job, i, arena, &notices, &report, &runs,

@@ -14,6 +14,7 @@
 #include "tp_project_internal.h"
 #include "tp_project_model_internal.h"
 #include "tp_project_mutation_internal.h"
+#include "tp_project_owned_internal.h"
 #include "tp_project_path_internal.h"
 #include "tp_source_path_text_internal.h"
 #include "tp_strutil.h"                 /* shared tp_strdup (one core definition) */
@@ -101,38 +102,6 @@ tp_status tp_project_set_atlas_name(tp_project_atlas *a, const char *name) {
     return TP_STATUS_OK;
 }
 
-static void tp_free_anim(tp_project_anim *an) {
-    for (int i = 0; i < an->frame_count; i++) {
-        free(an->frames[i].name);
-        free(an->frames[i].src_key);
-    }
-    free(an->frames);
-    free(an->name); /* `id` is a value (tp_id128), only `name` is owned */
-}
-
-static void tp_free_atlas(tp_project_atlas *a) {
-    for (int i = 0; i < a->source_count; i++) {
-        free(a->sources[i].path);
-    }
-    free(a->sources);
-    for (int i = 0; i < a->sprite_count; i++) {
-        free(a->sprites[i].name);
-        free(a->sprites[i].src_key);
-        free(a->sprites[i].rename);
-    }
-    free(a->sprites);
-    for (int i = 0; i < a->animation_count; i++) {
-        tp_free_anim(&a->animations[i]);
-    }
-    free(a->animations);
-    for (int i = 0; i < a->target_count; i++) {
-        free(a->targets[i].exporter_id);
-        free(a->targets[i].out_path);
-    }
-    free(a->targets);
-    free(a->name);
-}
-
 tp_status tp_project_remove_atlas(tp_project *p, int index) {
     if (!p) {
         return TP_STATUS_INVALID_ARGUMENT;
@@ -140,11 +109,13 @@ tp_status tp_project_remove_atlas(tp_project *p, int index) {
     if (index < 0 || index >= p->atlas_count) {
         return TP_STATUS_OUT_OF_BOUNDS;
     }
-    tp_free_atlas(&p->atlases[index]);
+    tp_project_owned_free_atlas(&p->atlases[index]);
     for (int i = index; i < p->atlas_count - 1; i++) {
         p->atlases[i] = p->atlases[i + 1];
     }
     p->atlas_count--;
+    memset(&p->atlases[p->atlas_count], 0,
+           sizeof *p->atlases);
     return TP_STATUS_OK;
 }
 
@@ -189,12 +160,7 @@ void tp_project_destroy(tp_project *p) {
     if (!p) {
         return;
     }
-    for (int i = 0; i < p->atlas_count; i++) {
-        tp_free_atlas(&p->atlases[i]);
-    }
-    free(p->atlases);
-    free(p->project_dir);
-    free(p->source_base_dir);
+    tp_project_owned_free_project(p);
     free(p);
 }
 
@@ -254,11 +220,14 @@ tp_status tp_project_atlas_remove_source(tp_project_atlas *a, int index) {
     if (index < 0 || index >= a->source_count) {
         return TP_STATUS_OUT_OF_BOUNDS;
     }
-    free(a->sources[index].path);
+    tp_project_owned_free_source(
+        &a->sources[index]);
     for (int i = index; i < a->source_count - 1; i++) {
         a->sources[i] = a->sources[i + 1];
     }
     a->source_count--;
+    memset(&a->sources[a->source_count], 0,
+           sizeof *a->sources);
     return TP_STATUS_OK;
 }
 
@@ -377,9 +346,8 @@ static tp_status remove_sprite_at(tp_project_atlas *a, int index) {
     if (!a || index < 0 || index >= a->sprite_count) {
         return TP_STATUS_OUT_OF_BOUNDS;
     }
-    free(a->sprites[index].name);
-    free(a->sprites[index].src_key);
-    free(a->sprites[index].rename);
+    tp_project_owned_free_sprite(
+        &a->sprites[index]);
     for (int j = index; j < a->sprite_count - 1; j++) {
         a->sprites[j] = a->sprites[j + 1];
     }
@@ -495,11 +463,15 @@ tp_status tp_project_atlas_remove_animation_by_id(tp_project_atlas *a, tp_id128 
     }
     for (int i = 0; i < a->animation_count; i++) {
         if (tp_id128_eq(a->animations[i].id, id)) {
-            tp_free_anim(&a->animations[i]);
+            tp_project_owned_free_anim(
+                &a->animations[i]);
             for (int j = i; j < a->animation_count - 1; j++) {
                 a->animations[j] = a->animations[j + 1];
             }
             a->animation_count--;
+            memset(
+                &a->animations[a->animation_count], 0,
+                sizeof *a->animations);
             return TP_STATUS_OK;
         }
     }
@@ -549,12 +521,14 @@ tp_status tp_project_anim_remove_frame(tp_project_anim *anim, int index) {
     if (index < 0 || index >= anim->frame_count) {
         return TP_STATUS_OUT_OF_BOUNDS;
     }
-    free(anim->frames[index].name);
-    free(anim->frames[index].src_key);
+    tp_project_owned_free_frame(
+        &anim->frames[index]);
     for (int j = index; j < anim->frame_count - 1; j++) {
         anim->frames[j] = anim->frames[j + 1];
     }
     anim->frame_count--;
+    memset(&anim->frames[anim->frame_count], 0,
+           sizeof *anim->frames);
     return TP_STATUS_OK;
 }
 
@@ -638,12 +612,14 @@ tp_status tp_project_atlas_remove_target(tp_project_atlas *a, int index) {
     if (index < 0 || index >= a->target_count) {
         return TP_STATUS_OUT_OF_BOUNDS;
     }
-    free(a->targets[index].exporter_id);
-    free(a->targets[index].out_path);
+    tp_project_owned_free_target(
+        &a->targets[index]);
     for (int i = index; i < a->target_count - 1; i++) {
         a->targets[i] = a->targets[i + 1];
     }
     a->target_count--;
+    memset(&a->targets[a->target_count], 0,
+           sizeof *a->targets);
     return TP_STATUS_OK;
 }
 

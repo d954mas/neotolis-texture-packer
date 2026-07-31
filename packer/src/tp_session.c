@@ -655,9 +655,16 @@ tp_status tp_session_update(
                         session->model_generation) {
                     rejection =
                         TP_SESSION_JOB_REJECTION_INPUT_CHANGED;
-                } else if (!session_job_targets_exist(
-                               session,
-                               &job->observation_descriptor)) {
+                } else if (
+                    job->observation_descriptor.kind !=
+                        TP_SESSION_JOB_EXPORT &&
+                    !session_job_targets_exist(
+                        session,
+                        &job->observation_descriptor)) {
+                    /* Pack results still need a live target to adopt. Export
+                     * is different: its receipt reports filesystem publication
+                     * that may already be irreversible. Deleting a model target
+                     * cannot rewrite that external truth. */
                     rejection =
                         TP_SESSION_JOB_REJECTION_TARGET_DELETED;
                 }

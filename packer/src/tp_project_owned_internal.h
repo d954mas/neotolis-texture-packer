@@ -36,6 +36,7 @@ tp_status tp_project_owned_copy_target(tp_project_target *dst,
                                        const tp_project_target *src,
                                        tp_project_owned_allocator allocator);
 
+void tp_project_owned_free_project(tp_project *project);
 void tp_project_owned_free_atlas(tp_project_atlas *atlas);
 void tp_project_owned_free_source(tp_project_source *source);
 void tp_project_owned_free_sprite(tp_project_sprite *sprite);
