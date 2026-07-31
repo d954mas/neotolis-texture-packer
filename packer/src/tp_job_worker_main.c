@@ -210,6 +210,41 @@ static bool publish_progress(uint64_t request_id, int current, int total,
     return wrote;
 }
 
+typedef struct export_terminal_context {
+    uint64_t request_id;
+    int current;
+    int eligible;
+    bool claimed;
+} export_terminal_context;
+
+static bool publish_export_terminal_boundary(void *opaque) {
+    export_terminal_context *context = opaque;
+    if (!context || context->current != context->eligible) {
+        return false;
+    }
+    context->claimed = true;
+    (void)publish_progress(
+        context->request_id, context->current, context->eligible,
+        TP_JOB_WORKER_PHASE_EXPORT_TERMINAL_BOUNDARY);
+#ifdef TP_ENABLE_TEST_SEAMS
+    const char *marker =
+        getenv("TP_TEST_JOB_WORKER_EXPORT_BOUNDARY_MARKER");
+    if (marker && marker[0]) {
+        FILE *file = tp_fs_fopen(marker, "wb");
+        if (file) {
+            (void)fwrite("claimed", 1U, 7U, file);
+            (void)fclose(file);
+        }
+    }
+    const unsigned long milliseconds = test_block_ms(
+        "TP_TEST_JOB_WORKER_BLOCK_AFTER_EXPORT_BOUNDARY_MS");
+    if (milliseconds > 0UL) {
+        worker_sleep_ms(milliseconds);
+    }
+#endif
+    return true;
+}
+
 static void collect_image_hash(void *context, int sprite_index,
                                int width, int height, const uint8_t *rgba,
                                const tp_pack_image_fingerprint *fingerprint) {
@@ -568,7 +603,11 @@ static tp_status run_pack(const tp_job_worker_proto_request *request,
 static tp_status run_export(const tp_job_worker_proto_request *request,
                             tp_project *project, tp_cancel_source *cancel,
                             tp_job_worker_proto_response *response,
+                            bool *out_terminal_claimed,
                             tp_error *err) {
+    if (out_terminal_claimed) {
+        *out_terminal_claimed = false;
+    }
     const tp_cancel_token cancel_token = tp_cancel_source_token(cancel);
     char request_dir[TP_IDENTITY_PATH_MAX + 32];
     bool request_dir_too_long = false;
@@ -584,9 +623,16 @@ static tp_status run_export(const tp_job_worker_proto_request *request,
                          "job worker could not create its private Export directory");
     }
 
+    export_terminal_context terminal_context = {
+        .request_id = request->request_id,
+    };
+    const tp_export_snapshot_job_opts opts = {
+        .terminal_boundary = publish_export_terminal_boundary,
+        .terminal_boundary_context = &terminal_context,
+    };
     tp_export_snapshot_job *job = NULL;
     tp_status status = tp_export_project_job_create_internal(
-        project, request_dir, NULL, &job, err);
+        project, request_dir, &opts, &job, err);
     if (status != TP_STATUS_OK) {
         tp_worker_remove_dir_tree(request_dir);
         return status;
@@ -611,6 +657,7 @@ static tp_status run_export(const tp_job_worker_proto_request *request,
         return tp_error_set(err, TP_STATUS_NOT_FOUND,
                             "nothing to export");
     }
+    terminal_context.eligible = eligible;
 
     tp_status first_status = TP_STATUS_OK;
     int current = 0;
@@ -634,6 +681,7 @@ static tp_status run_export(const tp_job_worker_proto_request *request,
             break;
         }
         current++;
+        terminal_context.current = current;
         (void)publish_progress(
             request->request_id, current - 1, eligible,
             TP_JOB_WORKER_PHASE_SOURCE_TRAVERSAL);
@@ -734,7 +782,12 @@ static tp_status run_export(const tp_job_worker_proto_request *request,
      * step. Take it with us on success, failure, and cancellation alike. */
     tp_export_snapshot_job_destroy(job);
     tp_worker_remove_dir_tree(request_dir);
-    const bool cancelled = tp_cancel_source_fired(cancel);
+    const bool cancelled =
+        !terminal_context.claimed &&
+        tp_cancel_source_fired(cancel);
+    if (out_terminal_claimed) {
+        *out_terminal_claimed = terminal_context.claimed;
+    }
     response->export_result.partial_publication =
         response->export_result.targets > 0 &&
         (cancelled || first_status != TP_STATUS_OK);
@@ -758,6 +811,7 @@ int tp_job_worker_main_request(const uint8_t *bytes, size_t length) {
         request.session_instance_generation;
     response.request_id = request.request_id;
     const double start = worker_now_ms();
+    bool export_terminal_claimed = false;
 
     tp_project *project = NULL;
     tp_cancel_source cancel = {.probe = child_stdin_probe};
@@ -786,7 +840,8 @@ int tp_job_worker_main_request(const uint8_t *bytes, size_t length) {
     } else if (status == TP_STATUS_OK &&
                request.kind == TP_SESSION_JOB_EXPORT) {
         status = run_export(
-            &request, project, &cancel, &response, &error);
+            &request, project, &cancel, &response,
+            &export_terminal_claimed, &error);
     } else if (status == TP_STATUS_OK) {
         status = tp_error_set(
             &error, TP_STATUS_INVALID_ARGUMENT,
@@ -800,7 +855,9 @@ int tp_job_worker_main_request(const uint8_t *bytes, size_t length) {
      * encoded SUCCEEDED+CANCELLED, was rejected, the worker exited with no frame
      * at all, and the host reported "job worker process crashed"; a Pack or
      * Export whose control channel died reported a silently truncated success. */
-    if (tp_cancel_source_fired(&cancel) && status != TP_STATUS_CANCELLED) {
+    if (tp_cancel_source_fired(&cancel) &&
+        !export_terminal_claimed &&
+        status != TP_STATUS_CANCELLED) {
         status = tp_error_set(
             &error, TP_STATUS_CANCELLED, "%s",
             tp_cancel_source_reason(&cancel) == TP_CANCEL_REASON_CONTROL_LOST

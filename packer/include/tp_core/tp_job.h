@@ -143,10 +143,11 @@ tp_status tp_session_refresh_start(tp_session *session,
                                    const tp_refresh_job_request *request,
                                    tp_error *err);
 bool tp_session_job_active(const tp_session *session);
-/* Accepts cancellation only before the terminal-boundary claim. Export
- * linearizes that claim immediately after its final eligible writer returns;
- * a request accepted before the claim may own the outcome even if that writer
- * just returned. Repeated requests and requests after the claim are rejected. */
+/* Accepts cancellation only before the terminal-boundary claim. Export's
+ * worker emits that claim immediately after its final eligible writer returns;
+ * the host linearizes it when the next tp_session_update admits the typed
+ * boundary event. A cancellation already accepted by the host keeps ownership;
+ * repeated requests and requests after admission are rejected. */
 tp_status tp_session_job_cancel(tp_session *session, tp_error *err);
 void tp_session_job_result_destroy(tp_session_job_result *result);
 /* Shrinks a TAKEN result's receipt to what it actually has to retain: the

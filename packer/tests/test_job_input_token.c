@@ -797,6 +797,77 @@ void test_releasing_export_payload_preserves_terminal_metadata(void) {
         result.export_result.first_error);
 }
 
+void test_export_cancel_is_rejected_after_final_writer_boundary(void) {
+    tp_session *session = make_session();
+    char work_dir[1024];
+    scratch_dir(work_dir, sizeof work_dir);
+    remove_tree(work_dir);
+    tp_mkdirs(work_dir);
+    const tp_id128 atlas_id = default_atlas_id(session);
+    add_file_source(session, atlas_id, work_dir);
+    (void)add_enabled_export_target(session, atlas_id);
+
+    char marker[1200];
+    const int marker_length = snprintf(
+        marker, sizeof marker, "%s/export-boundary.marker", work_dir);
+    TEST_ASSERT_TRUE(
+        marker_length > 0 && (size_t)marker_length < sizeof marker);
+    set_worker_env(
+        "TP_TEST_JOB_WORKER_EXPORT_BOUNDARY_MARKER", marker);
+    set_worker_env(
+        "TP_TEST_JOB_WORKER_BLOCK_AFTER_EXPORT_BOUNDARY_MS", "250");
+
+    const tp_export_command_request request = {
+        .work_dir = work_dir,
+        .atlas_id = atlas_id,
+    };
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_session_export_start(session, &request, &error),
+        error.msg);
+
+    bool boundary_reached = false;
+    for (long spin = 0; spin < 10000000L; ++spin) {
+        tp_session_job_result unexpected = {0};
+        TEST_ASSERT_EQUAL_INT_MESSAGE(
+            TP_STATUS_OK,
+            tp_session_update(session, &unexpected, &error),
+            error.msg);
+        TEST_ASSERT_EQUAL_INT(
+            TP_SESSION_JOB_NONE, unexpected.kind);
+        tp_fs_info info;
+        if (tp_fs_stat(marker, &info) &&
+            info.kind == TP_FS_KIND_REGULAR) {
+            boundary_reached = true;
+            break;
+        }
+        thrd_yield();
+    }
+    TEST_ASSERT_TRUE_MESSAGE(
+        boundary_reached,
+        "Export worker did not reach its final-writer boundary");
+
+    const tp_status cancel_status =
+        tp_session_job_cancel(session, &error);
+    tp_session_job_result result = wait_for_result(session);
+    const tp_session_job_state result_state = result.state;
+    const tp_status result_status = result.status;
+
+    set_worker_env("TP_TEST_JOB_WORKER_EXPORT_BOUNDARY_MARKER", "");
+    set_worker_env(
+        "TP_TEST_JOB_WORKER_BLOCK_AFTER_EXPORT_BOUNDARY_MS", "");
+    tp_session_job_result_destroy(&result);
+    tp_session_destroy(session);
+    remove_tree(work_dir);
+
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_INVALID_ARGUMENT, cancel_status);
+    TEST_ASSERT_EQUAL_INT(
+        TP_SESSION_JOB_SUCCEEDED, result_state);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, result_status);
+}
+
 /* The contract admits a work_dir up to TP_IDENTITY_PATH_MAX-1 (host and proto
  * both accept it), but the worker used to cap it at ~512 through three fixed
  * buffers, so an install a few hundred characters deep failed EVERY Pack with
@@ -879,6 +950,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_artifact_path_allocation_failure_leaves_no_orphan);
     RUN_TEST(test_export_target_allocation_failure_is_fail_atomic);
     RUN_TEST(test_releasing_export_payload_preserves_terminal_metadata);
+    RUN_TEST(test_export_cancel_is_rejected_after_final_writer_boundary);
     RUN_TEST(test_pack_succeeds_under_a_work_dir_deeper_than_the_old_buffers);
     return UNITY_END();
 }

@@ -210,6 +210,17 @@ static bool job_claim_terminal(tp_live_job *job) {
     return false;
 }
 
+/* The Export worker has crossed its final irreversible writer boundary. The
+ * progress frame is the cross-process linearization event: if cancellation
+ * already won, keep that decision; otherwise no later request may rewrite the
+ * terminal outcome. */
+static void job_claim_worker_terminal(tp_live_job *job) {
+    int expected = TP_JOB_TERMINAL_OPEN;
+    (void)atomic_compare_exchange_strong_explicit(
+        &job->terminal_claim, &expected, TP_JOB_TERMINAL_CLAIMED,
+        memory_order_acq_rel, memory_order_acquire);
+}
+
 static void job_cancel_owned(tp_session_owned_job *owned) {
     (void)job_request_cancel((tp_live_job *)owned);
 }
@@ -771,6 +782,11 @@ static void job_pump_owned(tp_session_owned_job *owned) {
             job->owner.observation_descriptor.request_id &&
         progress.current >= 0 && progress.total >= 0 &&
         progress.current <= progress.total) {
+        if (job->kind == TP_SESSION_JOB_EXPORT &&
+            progress.phase ==
+                TP_JOB_WORKER_PHASE_EXPORT_TERMINAL_BOUNDARY) {
+            job_claim_worker_terminal(job);
+        }
         atomic_store_explicit(&job->current, progress.current,
                               memory_order_relaxed);
         atomic_store_explicit(&job->total, progress.total,

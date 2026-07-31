@@ -139,7 +139,10 @@ typedef enum tp_job_worker_progress_phase {
   TP_JOB_WORKER_PHASE_IMAGE_DECODE,
   TP_JOB_WORKER_PHASE_PACK_INPUT,
   TP_JOB_WORKER_PHASE_BUILD,
-  TP_JOB_WORKER_PHASE_EXPORT_WRITE
+  TP_JOB_WORKER_PHASE_EXPORT_WRITE,
+  /* Cross-process terminal linearization: the final eligible Export writer
+   * returned and no output side effects remain. */
+  TP_JOB_WORKER_PHASE_EXPORT_TERMINAL_BOUNDARY
 } tp_job_worker_progress_phase;
 
 typedef struct tp_job_worker_proto_progress {
