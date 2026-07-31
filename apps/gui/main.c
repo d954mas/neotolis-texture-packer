@@ -1299,9 +1299,12 @@ static int gui_main_utf8(int argc, char *argv[]) {
      * failure fired (advisory timings never fail the run). */
     const int bench_exit_code =
         gui_bench_exit_code();
-    return s_auto_pack_exit_code != 0
-               ? s_auto_pack_exit_code
-               : bench_exit_code;
+#ifdef NTPACKER_GUI_DEV_SEAMS
+    if (s_auto_pack_exit_code != 0) {
+        return s_auto_pack_exit_code;
+    }
+#endif
+    return bench_exit_code;
 }
 // #endregion
 
