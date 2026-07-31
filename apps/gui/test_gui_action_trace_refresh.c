@@ -716,7 +716,11 @@ void test_refresh_lifecycle_cancel_drains_before_session_cutover(void) {
             atlas->id,
             tp_session_snapshot_revision(snapshot),
             folder_path, TP_SOURCE_KIND_FOLDER));
-    publish_project_frame();
+    /* Finish the membership-triggered automatic Refresh first. The lifecycle
+     * case below owns a distinct explicitly admitted worker; arming its gate
+     * after an already-running automatic worker would race the scan entry. */
+    settle_project_job();
+    gui_actions__test_reset_refresh_completion();
 
     tp_scan__test_arm_walk_gate();
     gui_request_refresh();
@@ -812,7 +816,11 @@ void test_refresh_lifecycle_deadline_retires_blocked_worker(void) {
             atlas->id,
             tp_session_snapshot_revision(snapshot),
             folder_path, TP_SOURCE_KIND_FOLDER));
-    publish_project_frame();
+    /* Finish the membership-triggered automatic Refresh first. The lifecycle
+     * case below owns a distinct explicitly admitted worker; arming its gate
+     * after an already-running automatic worker would race the scan entry. */
+    settle_project_job();
+    gui_actions__test_reset_refresh_completion();
 
     tp_scan__test_arm_walk_gate();
     gui_request_refresh();

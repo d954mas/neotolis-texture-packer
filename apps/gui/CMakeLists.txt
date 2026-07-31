@@ -275,6 +275,12 @@ foreach(_trace_area draft refresh job)
     if(_trace_area STREQUAL "refresh")
         list(APPEND _trace_area_sources
             "${CMAKE_SOURCE_DIR}/packer/src/tp_refresh_job.c")
+    elseif(_trace_area STREQUAL "job")
+        # The job trace re-execs itself as the outer worker. Compile the worker
+        # service into this seam-enabled target so worker-side timing gates are
+        # real test seams instead of depending on scheduler timing.
+        list(APPEND _trace_area_sources
+            "${CMAKE_SOURCE_DIR}/packer/src/tp_job_worker_main.c")
     endif()
     tp_add_gui_test(NAME gui_action_trace_${_trace_area}
         SOURCES
