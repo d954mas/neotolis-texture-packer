@@ -163,10 +163,13 @@ typedef struct gui_actions_step_result {
  * presentation against the newly published borrowed view. */
 tp_status gui_actions_step(
     gui_actions_step_result *out, tp_error *err);
-#if defined(NTPACKER_GUI_SELFTEST) || defined(TP_ENABLE_TEST_SEAMS)
+#ifdef TP_ENABLE_TEST_SEAMS
 /* Test-only half-step for proving that requests remain deferred before the
  * host boundary. Shipping callers must use gui_actions_step. */
 void gui_actions__test_drain_intents(void);
+#endif
+#ifdef NTPACKER_GUI_SELFTEST
+void gui_actions__selftest_drain_intents(void);
 #endif
 /* Releases the action layer's own heap at exit: every intent still queued (with
  * the frame refs / names it owns), the preview frame map, and the retained

@@ -17,7 +17,7 @@
 #include "gui_canvas.h"
 #include "gui_pack.h"
 #include "gui_pack_internal.h"
-#include "gui_project_internal.h"
+#include "gui_project.h"
 #include "gui_project_test_driver.h"
 #include "gui_recovery_indicator.h"
 #include "gui_rows.h"

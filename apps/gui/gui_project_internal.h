@@ -1,17 +1,7 @@
 #ifndef NTPACKER_GUI_PROJECT_INTERNAL_H
 #define NTPACKER_GUI_PROJECT_INTERNAL_H
 
-#include "gui_project.h"
-
-/* One explicit host transition. The actions controller initializes this to
- * zero, calls gui_project_step once between UI frames, then destroys
- * `completion` with tp_session_job_result_destroy when its kind is not NONE.
- * READY remains an asserted FSM state, but one step may traverse DRAINING ->
- * READY -> ACTIVE/CLOSED and reports one typed lifecycle completion. */
-typedef struct gui_project_step_result {
-    gui_project_lifecycle_kind lifecycle_completed;
-    tp_session_job_result completion;
-} gui_project_step_result;
+#include "gui_project_driver.h"
 
 /* Small active/candidate host plus presentation-only state. */
 typedef struct gui_project_state {
@@ -60,8 +50,6 @@ tp_status gui_project__prepare_candidate_recovery(
 bool gui_project__ingress_is_open(void);
 tp_session *gui_project__mutation_session(void);
 void gui_project__assert_lifecycle_invariants(void);
-tp_status gui_project_step(
-    gui_project_step_result *out, tp_error *err);
 tp_status gui_project__advance_lifecycle(
     gui_project_lifecycle_kind *completed,
     tp_error *err);

@@ -3,7 +3,7 @@
 
 #include "gui_actions.h"
 #include "gui_actions_internal.h"
-#include "gui_project_internal.h"
+#include "gui_project_driver.h"
 
 #include "gui_defs.h" /* S() -- the compact-strip stop that folds the preview selector away */
 #include "gui_state.h"
@@ -392,8 +392,13 @@ tp_status gui_actions_step(
     return TP_STATUS_OK;
 }
 
-#if defined(NTPACKER_GUI_SELFTEST) || defined(TP_ENABLE_TEST_SEAMS)
+#ifdef TP_ENABLE_TEST_SEAMS
 void gui_actions__test_drain_intents(void) {
+    gui_actions__drain_intents();
+}
+#endif
+#ifdef NTPACKER_GUI_SELFTEST
+void gui_actions__selftest_drain_intents(void) {
     gui_actions__drain_intents();
 }
 #endif

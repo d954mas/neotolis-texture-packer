@@ -4,7 +4,7 @@
 #include <stdio.h>
 
 #include "core/nt_assert.h"
-#include "gui_project_internal.h"
+#include "gui_project_driver.h"
 #include "time/nt_time.h"
 
 static inline bool gui_project_test_state_is_draining(
