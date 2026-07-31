@@ -8,7 +8,6 @@ typedef struct gui_project_state {
     tp_session *session;
     tp_session *candidate;
     const struct tp_session_view *view;
-    tp_session_job_result completion;
     gui_project_lifecycle_state lifecycle_state;
     uint64_t instance_generation;
     uint64_t reduced_instance_generation;
@@ -17,10 +16,8 @@ typedef struct gui_project_state {
     uint64_t published_snapshot_generation;
     uint64_t observed_source_generation;
     int64_t observed_revision;
-    bool completion_pending;
     bool snapshot_published;
     bool refresh_pending;
-    bool frame_pinned;
     bool discard_retired_session;
     gui_project_controller_status_port
         controller_status;
@@ -51,6 +48,9 @@ tp_status gui_project__prepare_candidate_recovery(
 bool gui_project__ingress_is_open(void);
 tp_session *gui_project__mutation_session(void);
 void gui_project__assert_lifecycle_invariants(void);
+tp_status gui_project__advance_lifecycle(
+    gui_project_lifecycle_kind *completed,
+    tp_error *err);
 void gui_project__publish_view(
     const struct tp_session_view *view);
 void gui_project__reduce_view(void);

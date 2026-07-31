@@ -157,13 +157,22 @@ bool gui_actions_refresh_should_mark_stale(tp_status status,
 /* Admit source I/O as the third kind of the session's one task slot. */
 void gui_actions__refresh(void) {
     if (gui_pack_async_busy()) {
+        gui_actions__record_job_request(
+            GUI_JOB_REQUEST_REFRESH, false,
+            "a task is already running");
         set_status_ex(
             STATUS_WARNING,
             "Busy -- a Pack, Export, or Refresh task is already running.");
         return;
     }
     char error[256] = {0};
-    if (gui_refresh_async_start(error, sizeof error)) {
+    const bool admitted =
+        gui_refresh_async_start(
+            error, sizeof error);
+    gui_actions__record_job_request(
+        GUI_JOB_REQUEST_REFRESH, admitted,
+        admitted ? "" : error);
+    if (admitted) {
         set_status_ex(STATUS_INFO, "Refreshing sources...");
     } else {
         set_statusf_ex(
@@ -195,12 +204,10 @@ bool gui_actions_refresh_diff_headless(int *out_added, int *out_removed,
          attempt < 5000 && done == GUI_PACK_DONE_NONE;
          ++attempt) {
         tp_error update_error = {{0}};
-        if (gui_project_frame_begin(
-                &update_error) != TP_STATUS_OK) {
+        if (gui_actions_step(
+                NULL, &update_error) != TP_STATUS_OK) {
             return false;
         }
-        gui_actions_poll_host_completion();
-        gui_project_frame_end();
         if (!gui_actions__test_take_refresh_completion(
                 &done, &info) &&
             gui_project_job_busy()) {
@@ -218,12 +225,10 @@ bool gui_actions_refresh_diff_headless(int *out_added, int *out_removed,
 #else
     while (gui_project_job_busy()) {
         tp_error update_error = {{0}};
-        if (gui_project_frame_begin(
-                &update_error) != TP_STATUS_OK) {
+        if (gui_actions_step(
+                NULL, &update_error) != TP_STATUS_OK) {
             return false;
         }
-        gui_actions_poll_host_completion();
-        gui_project_frame_end();
     }
     (void)out_added;
     (void)out_removed;
@@ -339,8 +344,53 @@ void gui_actions_shutdown(void) {
     gui_actions__preview_shutdown();
 }
 
-void gui_actions_poll_host_completion(void) {
-    gui_actions__poll_pack();
-    gui_actions__reconcile_observation();
+void gui_actions__record_job_request(
+    gui_job_request_kind kind, bool admitted,
+    const char *detail) {
+    gui_actions_step_result *result =
+        s_actions.active_step_result;
+    if (!result ||
+        result->job_receipt_count >=
+            GUI_ACTIONS_STEP_MAX_JOB_RECEIPTS) {
+        return;
+    }
+    gui_job_request_receipt *receipt =
+        &result->job_receipts[
+            result->job_receipt_count++];
+    receipt->kind = kind;
+    receipt->admitted = admitted;
+    (void)snprintf(
+        receipt->detail,
+        sizeof receipt->detail,
+        "%s", detail ? detail : "");
 }
+
+tp_status gui_actions_step(
+    gui_actions_step_result *out, tp_error *err) {
+    gui_actions_step_result result = {0};
+    s_actions.active_step_result = &result;
+    apply_pending();
+    s_actions.active_step_result = NULL;
+    gui_project_step_result project_result = {0};
+    const tp_status status =
+        gui_project_step(&project_result, err);
+    if (status != TP_STATUS_OK) {
+        tp_session_job_result_destroy(
+            &project_result.completion);
+        if (out) {
+            *out = result;
+        }
+        return status;
+    }
+    gui_actions__consume_completion(
+        &project_result.completion);
+    gui_actions__complete_lifecycle(
+        project_result.lifecycle_completed);
+    gui_actions__reconcile_observation();
+    if (out) {
+        *out = result;
+    }
+    return TP_STATUS_OK;
+}
+
 // #endregion

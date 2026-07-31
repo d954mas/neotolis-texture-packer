@@ -35,6 +35,7 @@ void gui_request_add_atlas(void);
 void gui_request_refresh(void);
 void gui_request_pack(void);
 void gui_request_export(void);
+void gui_request_cancel(void);
 void gui_request_add_animation(tp_id128 atlas_id, int64_t expected_revision);
 void gui_request_create_animation_from_selection(void);
 void gui_request_open_preview(const gui_animation_ref *animation);
@@ -136,6 +137,33 @@ void gui_edit_target_exporter(const gui_target_ref *target,
 
 /* --- deferred semantic ingress: commits blur edits and drains action queues --- */
 void apply_pending(void);
+typedef enum gui_job_request_kind {
+    GUI_JOB_REQUEST_NONE = 0,
+    GUI_JOB_REQUEST_REFRESH,
+    GUI_JOB_REQUEST_CANCEL,
+    GUI_JOB_REQUEST_PACK,
+    GUI_JOB_REQUEST_EXPORT,
+    GUI_JOB_REQUEST_PREVIEW
+} gui_job_request_kind;
+
+typedef struct gui_job_request_receipt {
+    gui_job_request_kind kind;
+    bool admitted;
+    char detail[256];
+} gui_job_request_receipt;
+
+enum { GUI_ACTIONS_STEP_MAX_JOB_RECEIPTS = 4 };
+typedef struct gui_actions_step_result {
+    gui_job_request_receipt
+        job_receipts[GUI_ACTIONS_STEP_MAX_JOB_RECEIPTS];
+    int job_receipt_count;
+} gui_actions_step_result;
+
+/* The one between-frame boundary: drain typed UI intents, advance the explicit
+ * project FSM once, consume its typed task/lifecycle terminals, then reconcile
+ * presentation against the newly published borrowed view. */
+tp_status gui_actions_step(
+    gui_actions_step_result *out, tp_error *err);
 /* Releases the action layer's own heap at exit: every intent still queued (with
  * the frame refs / names it owns), the preview frame map, and the retained
  * refresh fingerprint (its strdup'd paths). Disarms the preview player with it,
@@ -143,13 +171,6 @@ void apply_pending(void);
  * touched -- each of those owners has its own shutdown, and this one holds no
  * reference to any of them, so it runs first. */
 void gui_actions_shutdown(void);
-/* Consumes only host-classified Pack/Export completions after the frame's
- * atomic observation has reduced them. */
-void gui_actions_poll_host_completion(void);
-/* Drives the sole aggregate lifecycle owner between frames and consumes typed
- * cutover/shutdown receipts before the next observation is pinned. */
-void gui_actions_pump_lifecycle(void);
-
 /* Raised by a view widget when an edit gesture ends. apply_pending submits the
  * active draft once, producing one transaction and one Undo step. */
 void gui_request_gesture_commit(void);

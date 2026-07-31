@@ -60,12 +60,7 @@ static void publish_project_frame(void) {
     tp_error error = {{0}};
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
-        gui_project_lifecycle_pump(NULL, &error));
-    TEST_ASSERT_EQUAL_INT(
-        TP_STATUS_OK,
-        gui_project_frame_begin(&error));
-    gui_actions_poll_host_completion();
-    gui_project_frame_end();
+        gui_actions_step(NULL, &error));
 }
 
 static void settle_project_observation(void) {

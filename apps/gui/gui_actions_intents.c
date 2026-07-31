@@ -43,7 +43,8 @@ static const struct {
     [GUI_INTENT_PHASE_STRUCTURAL] = {GUI_INTENT_ADD_ATLAS,
                                      GUI_INTENT_OPEN_PREVIEW},
     [GUI_INTENT_PHASE_REFRESH] = {GUI_INTENT_REFRESH, GUI_INTENT_REFRESH},
-    [GUI_INTENT_PHASE_PACK] = {GUI_INTENT_PACK, GUI_INTENT_PREVIEW_TARGET},
+    [GUI_INTENT_PHASE_PACK] = {GUI_INTENT_CANCEL,
+                               GUI_INTENT_PREVIEW_TARGET},
 };
 
 /* The two edit families append (a click each); every other kind was one
@@ -93,6 +94,7 @@ static void intent_payload_dispose(gui_intent *intent) {
         case GUI_INTENT_REMOVE_ANIMATION:
         case GUI_INTENT_OPEN_PREVIEW:
         case GUI_INTENT_REFRESH:
+        case GUI_INTENT_CANCEL:
         case GUI_INTENT_PACK:
         case GUI_INTENT_EXPORT:
         case GUI_INTENT_PREVIEW_TARGET:
@@ -448,6 +450,9 @@ static bool intent_execute(const gui_intent *intent) {
         case GUI_INTENT_REFRESH:
             gui_actions__refresh();
             break;
+        case GUI_INTENT_CANCEL:
+            gui_actions__cancel();
+            break;
         case GUI_INTENT_PACK:
             do_pack();
             break;
@@ -557,6 +562,7 @@ void gui_request_add_files(void) { intent_request(GUI_INTENT_ADD_FILES); }
 void gui_request_add_folder(void) { intent_request(GUI_INTENT_ADD_FOLDER); }
 void gui_request_add_atlas(void) { intent_request(GUI_INTENT_ADD_ATLAS); }
 void gui_request_refresh(void) { intent_request(GUI_INTENT_REFRESH); }
+void gui_request_cancel(void) { intent_request(GUI_INTENT_CANCEL); }
 void gui_request_pack(void) { intent_request(GUI_INTENT_PACK); }
 void gui_request_export(void) { intent_request(GUI_INTENT_EXPORT); }
 

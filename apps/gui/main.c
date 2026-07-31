@@ -485,13 +485,17 @@ static void handle_list_nav(void) {
  * Dev seam: compiled out (with its argv branch) unless NTPACKER_GUI_DEV_SEAMS is on. */
 static bool s_auto_pack;
 static int s_auto_pack_frame;
+static bool s_auto_pack_requested;
 static bool s_auto_pack_started;
-static void auto_pack_tick(void) {
+static int s_auto_pack_exit_code;
+static void auto_pack_tick(
+    const gui_actions_step_result *step) {
     if (!s_auto_pack) {
         return;
     }
     s_auto_pack_frame++;
-    if (!s_auto_pack_started && s_auto_pack_frame == 8) {
+    if (!s_auto_pack_requested &&
+        s_auto_pack_frame == 8) {
         const tp_session_snapshot *snapshot =
             gui_project_snapshot();
         const tp_snapshot_atlas *first =
@@ -501,15 +505,41 @@ static void auto_pack_tick(void) {
                 : NULL;
         gui_view_select_atlas(
             first ? first->id : tp_id128_nil());
-        do_pack(); /* async */
+        gui_request_pack();
+        s_auto_pack_requested = true;
+    }
+    for (int i = 0;
+         step && i < step->job_receipt_count;
+         ++i) {
+        const gui_job_request_receipt *receipt =
+            &step->job_receipts[i];
+        if (receipt->kind !=
+            GUI_JOB_REQUEST_PACK) {
+            continue;
+        }
+        if (!receipt->admitted) {
+            nt_log_error(
+                "AUTO-PACK: request rejected: %s",
+                receipt->detail[0]
+                    ? receipt->detail
+                    : "no detail");
+            s_auto_pack_exit_code = 1;
+            nt_app_quit();
+            return;
+        }
         s_auto_pack_started = true;
-    } else if (s_auto_pack_started && s_auto_pack_frame > 8 && !gui_pack_async_busy()) {
+    }
+    if (s_auto_pack_started &&
+        !gui_pack_async_busy()) {
         nt_log_info("AUTO-PACK: async pack landed, quitting");
         nt_app_quit();
     }
 }
 #else
-static inline void auto_pack_tick(void) {}
+static inline void auto_pack_tick(
+    const gui_actions_step_result *step) {
+    (void)step;
+}
 #endif /* NTPACKER_GUI_DEV_SEAMS */
 
 static void frame(void) {
@@ -523,8 +553,6 @@ static void frame(void) {
     selftest_pre_frame();
 #endif
 
-    /* dialogs + model mutations queued last frame run here, cleanly between frames */
-    apply_pending();
     /* The benchmark model suite intentionally performs edit/Undo/Redo probes.
      * Run it at the same between-frame semantic ingress boundary, never after
      * the immutable observation has been pinned for declaration. */
@@ -534,24 +562,24 @@ static void frame(void) {
      * gated on RENDERED frames (gui_shot_note_rendered), not on this counter. */
     gui_shot_pre_pin_tick();
 
-    gui_actions_pump_lifecycle();
+    tp_error observation_error = {{0}};
+    gui_actions_step_result step = {0};
+    const tp_status observation_status =
+        gui_actions_step(
+            &step, &observation_error);
+    if (observation_status != TP_STATUS_OK) {
+        set_statusf_ex(
+            STATUS_ERROR,
+            "Presentation step failed: %s",
+            observation_error.msg[0]
+                ? observation_error.msg
+                : tp_status_str(
+                      observation_status));
+    }
     if (gui_project_lifecycle_state_query() ==
         GUI_PROJECT_LIFECYCLE_CLOSED) {
         return;
     }
-
-    tp_error observation_error = {{0}};
-    const tp_status observation_status =
-        gui_project_frame_begin(&observation_error);
-    if (observation_status != TP_STATUS_OK) {
-        set_statusf_ex(
-            STATUS_ERROR,
-            "Presentation observation failed: %s",
-            observation_error.msg[0]
-                ? observation_error.msg
-                : tp_status_str(observation_status));
-    }
-    gui_actions_poll_host_completion();
 
     /* Heartbeat: the frame loop keeps ticking while a pack/export runs in the owned process, so a slow
      * concave pack never freezes the window. Throttled to ~2 Hz; the frames-since count shows the rate. */
@@ -568,7 +596,7 @@ static void frame(void) {
             s_hb_frames = 0;
         }
     }
-    auto_pack_tick(); /* dev (--auto-pack): drive a headless async pack for the heartbeat proof */
+    auto_pack_tick(&step); /* dev (--auto-pack): drive a headless async pack for the heartbeat proof */
 
     if (nt_input_key_is_pressed(NT_KEY_ESCAPE)) {
         if (gui_view_chrome_consume_escape()) {
@@ -874,9 +902,6 @@ static void frame(void) {
     gui_bench_post_draw(); /* perf-probe mode: accrue frame-time samples, write output, then quit */
 
     nt_window_swap_buffers();
-    if (gui_project_frame_is_pinned()) {
-        gui_project_frame_end();
-    }
 }
 // #endregion
 
@@ -1107,29 +1132,18 @@ static int gui_main_utf8(int argc, char *argv[]) {
             break;
         case GUI_STARTUP_OPEN: { /* block scope: a label may not be followed by a declaration (C17) */
             tp_error open_error = {{0}};
-            gui_project_lifecycle_kind
-                open_completed =
-                    GUI_PROJECT_LIFECYCLE_NONE;
             tp_status open_status =
                 gui_project_lifecycle_begin_open(
                     proj_arg, &open_error);
             if (open_status == TP_STATUS_OK) {
                 open_status =
-                    gui_project_lifecycle_pump(
-                        &open_completed,
+                    gui_actions_step(
+                        NULL,
                         &open_error);
             }
             if (open_status == TP_STATUS_OK &&
-                open_completed ==
-                    GUI_PROJECT_LIFECYCLE_NONE) {
-                open_status =
-                    gui_project_lifecycle_pump(
-                        &open_completed,
-                        &open_error);
-            }
-            if (open_status == TP_STATUS_OK &&
-                open_completed ==
-                    GUI_PROJECT_LIFECYCLE_OPEN) {
+                gui_project_lifecycle_state_query() ==
+                    GUI_PROJECT_LIFECYCLE_ACTIVE) {
                 if (!recovery_warn_shown) { /* routine confirmation must not clobber the recovery warning */
                     set_statusf("Opened %s", gui_project_display_name());
                 }
@@ -1206,50 +1220,25 @@ static int gui_main_utf8(int argc, char *argv[]) {
                                   begin_status));
                 }
             }
-        } else {
-            const tp_status pump_status =
-                gui_project_lifecycle_pump(
-                    NULL, &shutdown_error);
-            if (pump_status != TP_STATUS_OK) {
+        }
+        if (!iteration_failed &&
+            gui_project_lifecycle_state_query() !=
+                GUI_PROJECT_LIFECYCLE_CLOSED) {
+            const tp_status step_status =
+                gui_actions_step(
+                    NULL,
+                    &shutdown_error);
+            if (step_status != TP_STATUS_OK) {
                 iteration_failed = true;
                 if (shutdown_failures %
                         k_shutdown_log_every ==
                     0) {
                     nt_log_error(
-                        "GUI host shutdown pump failed: %s",
+                        "GUI host shutdown step failed: %s",
                         shutdown_error.msg[0]
                             ? shutdown_error.msg
                             : tp_status_str(
-                                  pump_status));
-                }
-            } else {
-                const gui_project_lifecycle_state state =
-                    gui_project_lifecycle_state_query();
-                if (state != GUI_PROJECT_LIFECYCLE_NEW_DRAINING &&
-                    state != GUI_PROJECT_LIFECYCLE_OPEN_DRAINING &&
-                    state != GUI_PROJECT_LIFECYCLE_SHUTDOWN_DRAINING) {
-                    continue;
-                }
-                const tp_status observe_status =
-                    gui_project_frame_begin(
-                        &shutdown_error);
-                if (observe_status == TP_STATUS_OK) {
-                    gui_actions_poll_host_completion();
-                } else {
-                    iteration_failed = true;
-                    if (shutdown_failures %
-                            k_shutdown_log_every ==
-                        0) {
-                        nt_log_error(
-                            "GUI shutdown observation failed: %s",
-                            shutdown_error.msg[0]
-                                ? shutdown_error.msg
-                                : tp_status_str(
-                                      observe_status));
-                    }
-                }
-                if (gui_project_frame_is_pinned()) {
-                    gui_project_frame_end();
+                                  step_status));
                 }
             }
         }
@@ -1308,7 +1297,11 @@ static int gui_main_utf8(int argc, char *argv[]) {
     gui_crash_clear_marker();
     /* 0 for a normal run; --bench-perf returns non-zero iff an invariant assert or a hard fixture-load
      * failure fired (advisory timings never fail the run). */
-    return gui_bench_exit_code();
+    const int bench_exit_code =
+        gui_bench_exit_code();
+    return s_auto_pack_exit_code != 0
+               ? s_auto_pack_exit_code
+               : bench_exit_code;
 }
 // #endregion
 

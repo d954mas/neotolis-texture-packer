@@ -30,25 +30,22 @@ static inline tp_status gui_project_test_drain(
            gui_project_test_state_is_transitioning(
                gui_project_lifecycle_state_query())) {
         attempts++;
-        tp_status status =
-            gui_project_lifecycle_pump(
-                &terminal, err);
+        gui_project_step_result result = {0};
+        const tp_status status =
+            gui_project_step(
+                &result, err);
         if (status != TP_STATUS_OK) {
             return status;
         }
-        if (gui_project_test_state_is_draining(
+        if (result.lifecycle_completed !=
+            GUI_PROJECT_LIFECYCLE_NONE) {
+            terminal =
+                result.lifecycle_completed;
+        }
+        tp_session_job_result_destroy(
+            &result.completion);
+        if (gui_project_test_state_is_transitioning(
                 gui_project_lifecycle_state_query())) {
-            status = gui_project_frame_begin(err);
-            if (status != TP_STATUS_OK) {
-                return status;
-            }
-            tp_session_job_result completion = {0};
-            if (gui_project_take_completion(
-                    &completion)) {
-                tp_session_job_result_destroy(
-                    &completion);
-            }
-            gui_project_frame_end();
             nt_time_sleep(0.001);
         }
     }
@@ -86,32 +83,29 @@ static inline tp_status gui_project_test_finish(
             "GUI lifecycle completed with an unexpected receipt");
     }
     /* New/Open leave one coalesced Refresh pending after ACTIVE opens ingress.
-     * Its only admission point is frame_begin, so publish that first boundary
-     * before waiting for the asynchronous bootstrap. */
+     * Publish the next explicit step before waiting for its terminal. */
     unsigned int attempts = 0U;
     if (expected == GUI_PROJECT_LIFECYCLE_NEW ||
         expected == GUI_PROJECT_LIFECYCLE_OPEN) {
-        tp_status update_status =
-            gui_project_frame_begin(err);
+        gui_project_step_result result = {0};
+        const tp_status update_status =
+            gui_project_step(&result, err);
         if (update_status != TP_STATUS_OK) {
             return update_status;
         }
-        gui_project_frame_end();
+        tp_session_job_result_destroy(
+            &result.completion);
     }
     while (gui_project_job_busy() &&
            attempts++ < 5000U) {
-        tp_status update_status =
-            gui_project_frame_begin(err);
+        gui_project_step_result result = {0};
+        const tp_status update_status =
+            gui_project_step(&result, err);
         if (update_status != TP_STATUS_OK) {
             return update_status;
         }
-        tp_session_job_result completion = {0};
-        if (gui_project_take_completion(
-                &completion)) {
-            tp_session_job_result_destroy(
-                &completion);
-        }
-        gui_project_frame_end();
+        tp_session_job_result_destroy(
+            &result.completion);
         nt_time_sleep(0.001);
     }
     if (gui_project_job_busy()) {

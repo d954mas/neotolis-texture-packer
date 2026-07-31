@@ -411,7 +411,7 @@ static void bench_run_probes(void) {
         s_bench_fail = true;
     }
     if (started) {
-        (void)gui_pack_async_cancel(NULL);
+        gui_request_cancel();
     }
 }
 

@@ -2,6 +2,7 @@
 #define NTPACKER_GUI_ACTIONS_INTERNAL_H
 
 #include "gui_actions.h"
+#include "gui_project.h"
 #ifdef TP_ENABLE_TEST_SEAMS
 #include "gui_pack.h"
 #endif
@@ -49,6 +50,7 @@ typedef enum gui_intent_kind {
     GUI_INTENT_REMOVE_ANIMATION,
     GUI_INTENT_OPEN_PREVIEW,
     GUI_INTENT_REFRESH,
+    GUI_INTENT_CANCEL,
     GUI_INTENT_PACK,
     GUI_INTENT_EXPORT,
     GUI_INTENT_PREVIEW_TARGET
@@ -209,6 +211,7 @@ typedef struct gui_actions_state {
     gui_intent *intents;
     int intent_count;
     int intent_cap;
+    gui_actions_step_result *active_step_result;
 } gui_actions_state;
 
 extern gui_actions_state s_actions;
@@ -254,9 +257,16 @@ void gui_actions__add_files(void);
 void gui_actions__add_folder(void);
 void gui_actions__browse_target(const gui_target_ref *target);
 void gui_actions__refresh(void);
+void gui_actions__cancel(void);
 void gui_actions__export(void);
 void gui_actions__preview_target_start(int combo_index);
-void gui_actions__poll_pack(void);
+void gui_actions__consume_completion(
+    tp_session_job_result *completion);
+void gui_actions__complete_lifecycle(
+    gui_project_lifecycle_kind completed);
+void gui_actions__record_job_request(
+    gui_job_request_kind kind, bool admitted,
+    const char *detail);
 #ifdef TP_ENABLE_TEST_SEAMS
 /* Copies only value fields from the already-consumed Refresh terminal. These
  * seams never poll, retain a job owner, or influence scheduling. */

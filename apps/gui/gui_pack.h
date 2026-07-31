@@ -24,7 +24,7 @@
  *
  * That cold tier is the reason a demoted atlas can stay resident at all: the
  * store compresses its pages in the BACKGROUND (one low-priority thread, applied
- * on the per-frame pump inside gui_pack_poll) and decompresses them in parallel
+ * on the per-frame pump inside gui_actions_step) and decompresses them in parallel
  * when the atlas is switched back to. The only thing a caller of the functions
  * below can observe about it is that switching to a long-untouched atlas costs a
  * decode (tens of milliseconds for a big atlas) instead of nothing.
@@ -158,7 +158,7 @@ bool gui_pack_preview_blocking(tp_id128 atlas_id, const char *exporter_id,
                                char *err, size_t err_cap);
 
 /* Async preview pack (interactive): uses the session-owned Pack handle; result lands in the preview
- * slot at a frame boundary (gui_pack_poll -> GUI_PACK_DONE_PREVIEW_*). false (fills err) if busy. */
+ * slot at a step boundary (gui_actions_step -> GUI_PACK_DONE_PREVIEW_*). false (fills err) if busy. */
 bool gui_pack_preview_async_start(tp_id128 atlas_id, const char *exporter_id,
                                   char *err, size_t err_cap);
 
@@ -249,7 +249,12 @@ bool gui_pack_export_async_start(char *err, size_t err_cap);
 bool gui_refresh_async_start(char *err, size_t err_cap);
 /* Consumes one completion only after host drain + atomic observation classified
  * its envelope. Applies a Pack slot swap only for an accepted result. */
-gui_pack_done gui_pack_poll(gui_pack_result_info *out);
+/* Classifies and consumes one owned result transferred by gui_project_step.
+ * Always destroys/zeros `completion`; NONE still advances the cold-result
+ * store's once-per-step maintenance. */
+gui_pack_done gui_pack_consume_completion(
+    tp_session_job_result *completion,
+    gui_pack_result_info *out);
 bool gui_pack_async_busy(void);
 /* True for real queued/admitted/staged host work; excludes screenshot-only
  * synthetic busy presentation. */

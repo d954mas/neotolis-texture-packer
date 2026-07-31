@@ -223,7 +223,9 @@ bool gui_refresh_async_start(char *err, size_t err_cap) {
         &error, err, err_cap);
 }
 
-gui_pack_done gui_pack_poll(gui_pack_result_info *out) {
+gui_pack_done gui_pack_consume_completion(
+    tp_session_job_result *owned,
+    gui_pack_result_info *out) {
     if (out) {
         memset(out, 0, sizeof *out);
     }
@@ -234,10 +236,12 @@ gui_pack_done gui_pack_poll(gui_pack_result_info *out) {
      * the drain loop the blocking adapters spin -- and the store must be pumped
      * from the one thread that owns it. */
     gui_pack__cold_pump();
-    tp_session_job_result result = {0};
-    if (!gui_project_take_completion(&result)) {
+    if (!owned ||
+        owned->kind == TP_SESSION_JOB_NONE) {
         return GUI_PACK_DONE_NONE;
     }
+    tp_session_job_result result = *owned;
+    *owned = (tp_session_job_result){0};
     const bool publish_result =
         result.rejection ==
         TP_SESSION_JOB_REJECTION_NONE;
@@ -400,20 +404,13 @@ gui_pack_done gui_pack_poll(gui_pack_result_info *out) {
 
 static gui_pack_done drive_host_to_completion(
     gui_pack_result_info *out) {
-    if (gui_project_frame_is_pinned()) {
-        if (out) {
-            (void)snprintf(
-                out->err, sizeof out->err,
-                "blocking Pack/Export is forbidden during a pinned frame");
-        }
-        return GUI_PACK_DONE_PACK_FAIL;
-    }
     for (;;) {
         tp_error error = {{0}};
-        const tp_status drain_status =
-            gui_project_lifecycle_pump(
-                NULL, &error);
-        if (drain_status != TP_STATUS_OK) {
+        gui_project_step_result step = {0};
+        const tp_status step_status =
+            gui_project_step(
+                &step, &error);
+        if (step_status != TP_STATUS_OK) {
             if (out) {
                 (void)snprintf(
                     out->err, sizeof out->err,
@@ -421,29 +418,24 @@ static gui_pack_done drive_host_to_completion(
                     error.msg[0]
                         ? error.msg
                         : tp_status_str(
-                              drain_status));
+                              step_status));
             }
             return GUI_PACK_DONE_PACK_FAIL;
         }
-        const tp_status observe_status =
-            gui_project_frame_begin(&error);
+        if (step.lifecycle_completed !=
+            GUI_PROJECT_LIFECYCLE_NONE) {
+            tp_session_job_result_destroy(
+                &step.completion);
+            if (out) {
+                (void)snprintf(
+                    out->err, sizeof out->err,
+                    "project lifecycle changed while a blocking job was running");
+            }
+            return GUI_PACK_DONE_PACK_FAIL;
+        }
         const gui_pack_done done =
-            observe_status == TP_STATUS_OK
-                ? gui_pack_poll(out)
-                : GUI_PACK_DONE_NONE;
-        gui_project_frame_end();
-        if (observe_status != TP_STATUS_OK) {
-            if (out) {
-                (void)snprintf(
-                    out->err, sizeof out->err,
-                    "%s",
-                    error.msg[0]
-                        ? error.msg
-                        : tp_status_str(
-                              observe_status));
-            }
-            return GUI_PACK_DONE_PACK_FAIL;
-        }
+            gui_pack_consume_completion(
+                &step.completion, out);
         if (done != GUI_PACK_DONE_NONE) {
             return done;
         }

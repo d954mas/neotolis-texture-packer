@@ -14,7 +14,6 @@ char s_save_path[1024];
 void gui_shell_reset_shown_result(void) {}
 
 void pump_action_frame(void) {
-    apply_pending();
     publish_project_frame();
 }
 
@@ -22,12 +21,7 @@ void publish_project_frame(void) {
     tp_error error = {{0}};
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
-        gui_project_lifecycle_pump(NULL, &error));
-    TEST_ASSERT_EQUAL_INT(
-        TP_STATUS_OK,
-        gui_project_frame_begin(&error));
-    gui_actions_poll_host_completion();
-    gui_project_frame_end();
+        gui_actions_step(NULL, &error));
 }
 
 void settle_project_job(void) {
@@ -180,8 +174,7 @@ void apply_foreign_operation(tp_operation *operation,
     tp_txn_result_free(&result);
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
-        gui_project_frame_begin(&error));
-    gui_project_frame_end();
+        gui_actions_step(NULL, &error));
 }
 
 void reset_public_action_state(void) {

@@ -690,17 +690,20 @@ void test_refresh_lifecycle_cancel_drains_before_session_cutover(void) {
          gui_project_lifecycle_state_query() !=
              GUI_PROJECT_LIFECYCLE_ACTIVE;
          ++attempt) {
+        gui_project_step_result result = {0};
         TEST_ASSERT_EQUAL_INT(
             TP_STATUS_OK,
-            gui_project_lifecycle_pump(
-                &completed, NULL));
-        if (gui_project_lifecycle_state_query() ==
-            GUI_PROJECT_LIFECYCLE_NEW_DRAINING) {
-            TEST_ASSERT_EQUAL_INT(
-                TP_STATUS_OK,
-                gui_project_frame_begin(NULL));
-            gui_actions_poll_host_completion();
-            gui_project_frame_end();
+            gui_project_step(
+                &result, NULL));
+        if (result.lifecycle_completed !=
+            GUI_PROJECT_LIFECYCLE_NONE) {
+            completed =
+                result.lifecycle_completed;
+        }
+        tp_session_job_result_destroy(
+            &result.completion);
+        if (gui_project_lifecycle_state_query() !=
+            GUI_PROJECT_LIFECYCLE_ACTIVE) {
             nt_time_sleep(0.001);
         }
     }
@@ -716,10 +719,8 @@ void test_refresh_lifecycle_cancel_drains_before_session_cutover(void) {
 
     gui_pack_done done = GUI_PACK_DONE_NONE;
     gui_pack_result_info info = {0};
-    TEST_ASSERT_TRUE(gui_actions__test_take_refresh_completion(
-        &done, &info));
-    TEST_ASSERT_EQUAL_INT(
-        GUI_PACK_DONE_REFRESH_CANCELLED, done);
+    /* New supersedes the retired session's cancellation receipt; it is
+     * discarded by the project step and never becomes current UI state. */
     TEST_ASSERT_FALSE(gui_actions__test_take_refresh_completion(
         &done, &info));
 

@@ -70,20 +70,10 @@ void gui_project__assert_lifecycle_invariants(void) {
     NT_ASSERT(
         has_live_session ==
         (s_project.session != NULL));
-    NT_ASSERT(!s_project.frame_pinned ||
-              has_live_session);
-    NT_ASSERT(
-        s_project.completion_pending ==
-        (s_project.completion.kind !=
-         TP_SESSION_JOB_NONE));
-    NT_ASSERT(!s_project.completion_pending ||
-              has_live_session);
     NT_ASSERT(!has_live_session ||
               s_project.view != NULL);
     if (state == GUI_PROJECT_LIFECYCLE_CLOSED) {
         NT_ASSERT(s_project.candidate == NULL);
-        NT_ASSERT(!s_project.frame_pinned);
-        NT_ASSERT(!s_project.completion_pending);
         NT_ASSERT(!s_project.refresh_pending);
         return;
     }
@@ -99,7 +89,6 @@ void gui_project__assert_lifecycle_invariants(void) {
     if (lifecycle_is_ready(state)) {
         NT_ASSERT(!tp_session_job_active(
             s_project.session));
-        NT_ASSERT(!s_project.completion_pending);
     }
 }
 
@@ -303,11 +292,6 @@ tp_status gui_project_lifecycle_begin_new(
 
 tp_status gui_project_lifecycle_begin_open(
     const char *path, tp_error *err) {
-    if (s_project.frame_pinned) {
-        return tp_error_set(
-            err, TP_STATUS_INVALID_ARGUMENT,
-            "project Open is unavailable during a pinned frame");
-    }
     const tp_status lifecycle_status =
         require_idle_lifecycle(err);
     if (lifecycle_status != TP_STATUS_OK) {
@@ -371,9 +355,6 @@ tp_status gui_project_lifecycle_begin_shutdown(
 }
 
 void gui_project_lifecycle_force_close(void) {
-    tp_session_job_result_destroy(
-        &s_project.completion);
-    s_project.completion_pending = false;
     tp_session_destroy(s_project.candidate);
     s_project.candidate = NULL;
     if (s_project.session &&
@@ -385,12 +366,11 @@ void gui_project_lifecycle_force_close(void) {
     s_project.session = NULL;
     gui_project__publish_view(NULL);
     s_project.discard_retired_session = false;
-    s_project.frame_pinned = false;
     s_project.refresh_pending = false;
     lifecycle_force_closed();
 }
 
-tp_status gui_project_lifecycle_pump(
+tp_status gui_project__advance_lifecycle(
     gui_project_lifecycle_kind *completed,
     tp_error *err) {
     if (completed) {
@@ -403,11 +383,6 @@ tp_status gui_project_lifecycle_pump(
             err, TP_STATUS_NOT_FOUND,
             "GUI host has no live session");
     }
-    if (s_project.frame_pinned) {
-        return tp_error_set(
-            err, TP_STATUS_INVALID_ARGUMENT,
-            "GUI lifecycle cannot advance during a pinned frame");
-    }
     if (s_project.lifecycle_state ==
         GUI_PROJECT_LIFECYCLE_ACTIVE) {
         return TP_STATUS_OK;
@@ -415,8 +390,7 @@ tp_status gui_project_lifecycle_pump(
     if (!lifecycle_is_ready(
             s_project.lifecycle_state)) {
         if (tp_session_job_active(
-                s_project.session) ||
-            s_project.completion_pending) {
+                s_project.session)) {
             return TP_STATUS_OK;
         }
         lifecycle_transition(

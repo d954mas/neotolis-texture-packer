@@ -290,12 +290,7 @@ static void publish_project_frame(void) {
     tp_error error = {{0}};
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
-        gui_project_lifecycle_pump(NULL, &error));
-    TEST_ASSERT_EQUAL_INT(
-        TP_STATUS_OK,
-        gui_project_frame_begin(&error));
-    gui_actions_poll_host_completion();
-    gui_project_frame_end();
+        gui_actions_step(NULL, &error));
 }
 
 static void settle_project_observation(void) {
@@ -313,27 +308,24 @@ static void settle_project_observation(void) {
 static gui_pack_done pump_pack_frame(
     gui_pack_result_info *info) {
     tp_error error = {{0}};
+    gui_project_step_result step = {0};
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
-        gui_project_lifecycle_pump(NULL, &error));
-    TEST_ASSERT_EQUAL_INT(
-        TP_STATUS_OK,
-        gui_project_frame_begin(&error));
+        gui_project_step(&step, &error));
     const gui_pack_done done =
-        gui_pack_poll(info);
-    gui_project_frame_end();
+        gui_pack_consume_completion(
+            &step.completion, info);
     return done;
 }
 
 static void admit_queued_job(void) {
     tp_error error = {{0}};
+    gui_project_step_result step = {0};
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
-        gui_project_lifecycle_pump(NULL, &error));
-    TEST_ASSERT_EQUAL_INT(
-        TP_STATUS_OK,
-        gui_project_frame_begin(&error));
-    gui_project_frame_end();
+        gui_project_step(&step, &error));
+    tp_session_job_result_destroy(
+        &step.completion);
 }
 
 static void remove_fixture_files(void) {
@@ -799,16 +791,7 @@ void test_preview_pack_admits_with_sources_and_pending_refresh_runs_later(void) 
     TEST_ASSERT_NOT_NULL(
         gui_pack_preview_result(atlas_id));
 
-    tp_error refresh_error = {{0}};
-    TEST_ASSERT_EQUAL_INT(
-        TP_STATUS_OK,
-        gui_project_frame_begin(
-            &refresh_error));
-    TEST_ASSERT_EQUAL_INT(
-        TP_SESSION_JOB_REFRESH,
-        gui_project_job_active_kind());
-    gui_project_frame_end();
-    done = GUI_PACK_DONE_NONE;
+    done = pump_pack_frame(&info);
     for (int i = 0;
          i < 5000 &&
          done == GUI_PACK_DONE_NONE;
@@ -1175,8 +1158,7 @@ void test_controller_guard_rejects_identity_change_before_flush_or_write(void) {
         gui_project_undo_depth());
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
-        gui_project_frame_begin(NULL));
-    gui_project_frame_end();
+        gui_actions_step(NULL, NULL));
     TEST_ASSERT_EQUAL_STRING(
         cross_path, gui_project_path());
 
@@ -1297,9 +1279,6 @@ void test_deleted_pack_target_is_typed_failure_not_cancelled(void) {
 
     /* Host admission captures the target before the model mutation, but
      * observation classification intentionally happens after deletion. */
-    TEST_ASSERT_EQUAL_INT(
-        TP_STATUS_OK,
-        gui_project_lifecycle_pump(NULL, NULL));
     const tp_session_snapshot *snapshot =
         gui_project_snapshot();
     TEST_ASSERT_TRUE(
@@ -2242,8 +2221,7 @@ void test_sprite_edit_rejects_genuinely_stale_captured_revision(void) {
     tp_txn_result_free(&result);
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
-        gui_project_frame_begin(&apply_error));
-    gui_project_frame_end();
+        gui_actions_step(NULL, &apply_error));
     TEST_ASSERT_TRUE(
         gui_text_edit_update("must-not-land"));
     gui_request_gesture_commit();
@@ -2565,8 +2543,7 @@ void test_save_as_recovery_rebind_uses_post_save_identity(void) {
 
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
-        gui_project_frame_begin(NULL));
-    gui_project_frame_end();
+        gui_actions_step(NULL, NULL));
     const tp_session_snapshot *snapshot =
         gui_project_snapshot();
     const tp_snapshot_atlas *atlas =

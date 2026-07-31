@@ -360,8 +360,7 @@ void test_foreign_undo_conflicts_active_atlas_draft(void) {
             gui_project__test_session(), &error));
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
-        gui_project_frame_begin(&error));
-    gui_project_frame_end();
+        gui_actions_step(NULL, &error));
 
     TEST_ASSERT_EQUAL_INT(
         GUI_EDIT_CONFLICTED, gui_draft_phase());
@@ -419,8 +418,7 @@ void test_foreign_model_transaction_conflicts_active_atlas_draft(void) {
 
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
-        gui_project_frame_begin(&error));
-    gui_project_frame_end();
+        gui_actions_step(NULL, &error));
     TEST_ASSERT_EQUAL_INT(
         GUI_EDIT_CONFLICTED,
         gui_draft_phase());
@@ -491,8 +489,7 @@ void test_event_gap_resync_conflicts_active_draft_and_retains_visible_value(
     tp_error error = {{0}};
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
-        gui_project_frame_begin(&error));
-    gui_project_frame_end();
+        gui_actions_step(NULL, &error));
     TEST_ASSERT_EQUAL_INT(
         GUI_EDIT_CONFLICTED, gui_draft_phase());
     TEST_ASSERT_EQUAL_STRING(
@@ -837,7 +834,8 @@ void test_sibling_field_blur_submits_the_active_draft(void) {
         GUI_ATLAS_MARGIN, draft_margin, 0.0F);
     publish_project_frame();
 
-    /* Padding committed; margin is now the one active draft. */
+    /* Padding committed; the first sibling declaration was intentionally not
+     * retargeted across the step. */
     TEST_ASSERT_EQUAL_INT64(
         revision + 1,
         tp_session_snapshot_revision(gui_project_snapshot()));
@@ -845,6 +843,16 @@ void test_sibling_field_blur_submits_the_active_draft(void) {
         draft_padding,
         tp_session_snapshot_atlas_by_id(
             gui_project_snapshot(), atlas_id)->padding);
+    TEST_ASSERT_EQUAL_INT(
+        GUI_EDIT_IDLE, gui_draft_phase());
+    TEST_ASSERT_FALSE(gui_atlas_edit_value(
+        atlas_id, GUI_ATLAS_MARGIN, NULL, NULL));
+
+    gui_edit_atlas_setting(
+        atlas_id,
+        tp_session_snapshot_revision(
+            gui_project_snapshot()),
+        GUI_ATLAS_MARGIN, draft_margin, 0.0F);
     TEST_ASSERT_EQUAL_INT(
         GUI_EDIT_EDITING, gui_draft_phase());
     int effective_margin = 0;
@@ -959,8 +967,7 @@ static tp_id128 begin_conflicted_atlas_name_draft(
     tp_txn_result_free(&result);
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
-        gui_project_frame_begin(&error));
-    gui_project_frame_end();
+        gui_actions_step(NULL, &error));
     TEST_ASSERT_EQUAL_INT(
         GUI_EDIT_CONFLICTED, gui_draft_phase());
     TEST_ASSERT_EQUAL_STRING(

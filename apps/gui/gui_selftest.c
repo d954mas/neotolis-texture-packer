@@ -147,9 +147,8 @@ static void selftest_clear_animation_selection(void) {
 static void selftest_observe_session(void) {
     tp_error error = {{0}};
     NT_ASSERT(
-        gui_project_frame_begin(&error) ==
+        gui_actions_step(NULL, &error) ==
         TP_STATUS_OK);
-    gui_project_frame_end();
 }
 
 static const tp_snapshot_animation *selftest_animation_at(int atlas_index,
@@ -2873,13 +2872,10 @@ void run_selftest(void) {
                   "SELFTEST: async pack must start");
         const clock_t async_deadline = clock() + (clock_t)(60 * CLOCKS_PER_SEC);
         while (gui_pack_async_busy()) {
-            /* Same order the frame loop uses: drain the host queue (which pumps
-             * the worker process), observe, then land the receipt. */
+            /* Same explicit boundary the frame loop uses. */
             tp_error pump_error = {{0}};
-            NT_ASSERT(gui_project_lifecycle_pump(NULL, &pump_error) ==
+            NT_ASSERT(gui_actions_step(NULL, &pump_error) ==
                       TP_STATUS_OK);
-            selftest_observe_session();
-            gui_actions_poll_host_completion();
             NT_ASSERT(clock() < async_deadline &&
                       "SELFTEST: async pack did not finish within 60s");
         }
@@ -3518,7 +3514,7 @@ void selftest_pre_frame(void) {
         }
     } else if (s_st_phase == 13) {
         /* Cancel mid-pack (req 4b): start an async pack over a CLEARED slot with stale set, cancel it
-         * immediately, spin until it lands. gui_pack_poll must DISCARD the worker's result (no slot swap)
+         * immediately, spin until it lands. gui_actions_step must DISCARD the worker's result (no slot swap)
          * and poll_async must NOT clear stale -- the cancel-discard path (gui_pack.c) is otherwise never
          * hit (phase 9 waits for !busy first). */
         g_ui_scale = 1.0F;

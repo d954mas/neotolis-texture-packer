@@ -153,11 +153,6 @@ bool gui_project_observed_input_token(
  * borrowed view consumed until the next step. */
 tp_status gui_project_step(
     gui_project_step_result *out, tp_error *err);
-/* Host-frame observation seam. begin atomically observes/reduces and pins the
- * immutable snapshot; end releases the pin after render/present. */
-tp_status gui_project_frame_begin(tp_error *err);
-void gui_project_frame_end(void);
-bool gui_project_frame_is_pinned(void);
 /* Host-thread admission facade. Request payloads are copied on enqueue; the
  * queue never exposes or retains the mutable session. */
 tp_status gui_project_job_enqueue_pack(
@@ -172,9 +167,6 @@ tp_status gui_project_lifecycle_begin_open(
     const char *path, tp_error *err);
 tp_status gui_project_lifecycle_begin_shutdown(
     bool discard_recovery, tp_error *err);
-tp_status gui_project_lifecycle_pump(
-    gui_project_lifecycle_kind *completed,
-    tp_error *err);
 /* Non-fallible forced teardown for the host's exhausted shutdown budget: the
  * negotiated shutdown is bounded, so the exit path needs a terminal answer that
  * cannot itself fail. It discards the host owner's leases and staged work, kills
@@ -184,10 +176,6 @@ tp_status gui_project_lifecycle_pump(
 void gui_project_lifecycle_force_close(void);
 gui_project_lifecycle_state
 gui_project_lifecycle_state_query(void);
-/* Transfers the one terminal completion produced by the most recent session
- * update. The caller destroys it with tp_session_job_result_destroy. */
-bool gui_project_take_completion(
-    tp_session_job_result *out);
 bool gui_project_job_busy(void);
 tp_session_job_kind gui_project_job_active_kind(void);
 tp_session_job_observed_state gui_project_job_observed_state(void);

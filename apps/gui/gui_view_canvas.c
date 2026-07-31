@@ -72,17 +72,7 @@ static void strip_group_actions(nt_ui_context_t *ctx, bool accent, bool labels, 
         (void)ui_icon_btn(ctx, s_id_btn_pack, &s_ic_refresh, 16.0F, busy, &g_btn_primary, false, 0.0F, h, &g_onaccent);
         if (ui_icon_btn(ctx, s_id_btn_export, &s_ic_x, 16.0F, labels ? "Cancel" : NULL, &g_btn,
                         !gui_pack_async_cancelling(), 0.0F, h, &g_body)) {
-            tp_error error = {{0}};
-            const tp_status status =
-                gui_pack_async_cancel(&error);
-            if (status != TP_STATUS_OK) {
-                set_statusf_ex(
-                    STATUS_ERROR,
-                    "Cancel rejected: %s",
-                    error.msg[0]
-                        ? error.msg
-                        : tp_status_str(status));
-            }
+            gui_request_cancel();
         }
         if (ui_icon_btn(ctx, s_id_btn_refresh, &s_ic_refresh, 16.0F, NULL, &g_btn_ghost, true, 0.0F, h, &g_caption)) {
             gui_request_refresh();

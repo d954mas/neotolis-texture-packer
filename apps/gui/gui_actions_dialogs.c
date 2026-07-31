@@ -485,22 +485,8 @@ void gui_actions__apply_confirm(void) {
     s_modal_action = MODAL_NONE;
 }
 
-void gui_actions_pump_lifecycle(void) {
-    tp_error error = {{0}};
-    gui_project_lifecycle_kind completed =
-        GUI_PROJECT_LIFECYCLE_NONE;
-    const tp_status status =
-        gui_project_lifecycle_pump(
-            &completed, &error);
-    if (status != TP_STATUS_OK) {
-        set_statusf_ex(
-            STATUS_ERROR,
-            "Session lifecycle failed: %s",
-            error.msg[0]
-                ? error.msg
-                : tp_status_str(status));
-        return;
-    }
+void gui_actions__complete_lifecycle(
+    gui_project_lifecycle_kind completed) {
     if (completed ==
         GUI_PROJECT_LIFECYCLE_NONE) {
         return;

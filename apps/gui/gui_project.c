@@ -202,8 +202,7 @@ void gui_project__publish_view(
 bool gui_project__ingress_is_open(void) {
     return s_project.session &&
            s_project.lifecycle_state ==
-               GUI_PROJECT_LIFECYCLE_ACTIVE &&
-           !s_project.frame_pinned;
+               GUI_PROJECT_LIFECYCLE_ACTIVE;
 }
 
 tp_session *gui_project__mutation_session(void) {
@@ -258,8 +257,6 @@ static void admit_pending_refresh(void) {
         s_project.lifecycle_state !=
             GUI_PROJECT_LIFECYCLE_ACTIVE ||
         !s_project.session ||
-        s_project.frame_pinned ||
-        s_project.completion_pending ||
         tp_session_job_active(s_project.session)) {
         return;
     }
@@ -284,13 +281,6 @@ tp_status gui_project_step(
             err, TP_STATUS_NOT_FOUND,
             "GUI host has no live session");
     }
-    if (s_project.frame_pinned ||
-        s_project.completion_pending) {
-        return tp_error_set(
-            err, TP_STATUS_INVALID_ARGUMENT,
-            "GUI project step requires an unpinned host with no legacy completion");
-    }
-
     admit_pending_refresh();
     tp_session_job_result completion = {0};
     const tp_status update_status =
@@ -327,7 +317,7 @@ tp_status gui_project_step(
             gui_project_lifecycle_kind completed =
                 GUI_PROJECT_LIFECYCLE_NONE;
             const tp_status lifecycle_status =
-                gui_project_lifecycle_pump(
+                gui_project__advance_lifecycle(
                     &completed, err);
             if (lifecycle_status != TP_STATUS_OK) {
                 tp_session_job_result_destroy(
@@ -354,54 +344,6 @@ tp_status gui_project_step(
     }
     gui_project__assert_lifecycle_invariants();
     return TP_STATUS_OK;
-}
-
-tp_status gui_project_frame_begin(tp_error *err) {
-    gui_project__assert_lifecycle_invariants();
-    if (!s_project.session ||
-        s_project.frame_pinned) {
-        return tp_error_set(
-            err, TP_STATUS_INVALID_ARGUMENT,
-            "GUI frame begin requires one unpinned live session");
-    }
-    if (s_project.completion_pending) {
-        return tp_error_set(
-            err, TP_STATUS_INVALID_ARGUMENT,
-            "GUI host completion was not consumed before the next frame");
-    }
-    admit_pending_refresh();
-    tp_session_job_result completion = {0};
-    const tp_status status =
-        tp_session_update(
-            s_project.session, &completion, err);
-    if (completion.kind !=
-        TP_SESSION_JOB_NONE) {
-        s_project.completion = completion;
-        s_project.completion_pending = true;
-    }
-    if (status != TP_STATUS_OK) {
-        return status;
-    }
-    gui_project__publish_view(
-        tp_session_view(s_project.session));
-    if (!s_project.view ||
-        !s_project.view->snapshot) {
-        return tp_error_set(
-            err, TP_STATUS_NOT_FOUND,
-            "GUI session has no current view");
-    }
-    gui_project__reduce_view();
-    s_project.frame_pinned = true;
-    return TP_STATUS_OK;
-}
-
-void gui_project_frame_end(void) {
-    s_project.frame_pinned = false;
-    gui_project__assert_lifecycle_invariants();
-}
-
-bool gui_project_frame_is_pinned(void) {
-    return s_project.frame_pinned;
 }
 
 tp_status gui_project_job_enqueue_pack(
@@ -469,19 +411,6 @@ tp_status gui_project_job_enqueue_cancel(
                : tp_error_set(
                      err, TP_STATUS_NOT_FOUND,
                      "GUI host has no live session");
-}
-
-bool gui_project_take_completion(
-    tp_session_job_result *out) {
-    if (!out ||
-        !s_project.completion_pending) {
-        return false;
-    }
-    *out = s_project.completion;
-    s_project.completion =
-        (tp_session_job_result){0};
-    s_project.completion_pending = false;
-    return true;
 }
 
 bool gui_project_job_busy(void) {

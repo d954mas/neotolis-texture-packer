@@ -879,37 +879,14 @@ static bool component_draft_begin(
                 "Finish or discard the active edit before editing another field.");
             return false;
         }
-        /* Settings-panel widgets raise these intents while DECLARING, inside the
-         * pinned observation, where no mutation may run. There the blur is
-         * requested as a gesture commit and lands at the next between-frame
-         * boundary -- the same deferral every other in-frame edit uses. A caller
-         * already at a safe boundary submits immediately. */
-        if (gui_project_frame_is_pinned()) {
-            gui_request_gesture_commit();
-            set_status_ex(
-                STATUS_WARNING,
-                "Submitting the previous edit -- repeat this change once it lands.");
-            return false;
-        }
-        if (!gui_actions__submit_draft()) {
-            set_status_ex(
-                STATUS_WARNING,
-                "Finish or discard the active edit before editing another field.");
-            return false;
-        }
-        /* The blur just advanced the model, so the caller's expected_revision --
-         * read from the snapshot BEFORE this call -- is stale by construction.
-         * The new draft's base is the revision the blur itself produced; keeping
-         * the caller's would conflict the new draft against our own commit. */
-        const int64_t committed_revision =
-            gui_project_committed_revision();
-        if (committed_revision < 0) {
-            set_status_ex(
-                STATUS_WARNING,
-                "No session is available for this edit.");
-            return false;
-        }
-        expected_revision = committed_revision;
+        /* View declaration never mutates the borrowed cut. A sibling blur is a
+         * typed gesture request and lands at the next gui_actions_step; the
+         * repeated edit then starts from the published revision. */
+        gui_request_gesture_commit();
+        set_status_ex(
+            STATUS_WARNING,
+            "Submitting the previous edit -- repeat this change once it lands.");
+        return false;
     }
     if (edit->phase == GUI_EDIT_IDLE) {
         tp_id128 draft_id = tp_id128_nil();

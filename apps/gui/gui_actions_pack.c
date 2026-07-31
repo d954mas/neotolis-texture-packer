@@ -84,6 +84,9 @@ void do_pack_blocking(void) {
  * intent. Completion is applied only after host drain + atomic observation. */
 void do_pack(void) {
     if (!gui_actions__submit_draft()) {
+        gui_actions__record_job_request(
+            GUI_JOB_REQUEST_PACK, false,
+            "the active draft was not submitted");
         return;
     }
     const tp_session_snapshot *snapshot = gui_project_snapshot();
@@ -92,15 +95,27 @@ void do_pack(void) {
         ? tp_session_snapshot_atlas_at(snapshot, atlas_index)
         : NULL;
     if (!a || a->source_count == 0) {
+        gui_actions__record_job_request(
+            GUI_JOB_REQUEST_PACK, false,
+            "the selected atlas has no sources");
         set_status_ex(STATUS_WARNING, "No sources to pack -- add a smart folder or files first.");
         return;
     }
     if (gui_pack_async_busy()) {
+        gui_actions__record_job_request(
+            GUI_JOB_REQUEST_PACK, false,
+            "a task is already running");
         set_status_ex(STATUS_WARNING, "Busy -- a pack or export is already running.");
         return;
     }
     char err[256] = {0};
-    if (gui_pack_async_start(a->id, err, sizeof err)) {
+    const bool admitted =
+        gui_pack_async_start(
+            a->id, err, sizeof err);
+    gui_actions__record_job_request(
+        GUI_JOB_REQUEST_PACK, admitted,
+        admitted ? "" : err);
+    if (admitted) {
         set_status_ex(STATUS_INFO, "Packing\xE2\x80\xA6");   /* result lands via poll_async */
     } else {
         set_statusf_ex(STATUS_ERROR, "Pack failed: %s", err);
@@ -112,14 +127,26 @@ void do_pack(void) {
  * Completion is reported through the classified host receipt. */
 void gui_actions__export(void) {
     if (!gui_actions__submit_draft()) {
+        gui_actions__record_job_request(
+            GUI_JOB_REQUEST_EXPORT, false,
+            "the active draft was not submitted");
         return;
     }
     if (gui_pack_async_busy()) {
+        gui_actions__record_job_request(
+            GUI_JOB_REQUEST_EXPORT, false,
+            "a task is already running");
         set_status_ex(STATUS_WARNING, "Busy -- a pack or export is already running.");
         return;
     }
     char err[256] = {0};
-    if (gui_pack_export_async_start(err, sizeof err)) {
+    const bool admitted =
+        gui_pack_export_async_start(
+            err, sizeof err);
+    gui_actions__record_job_request(
+        GUI_JOB_REQUEST_EXPORT, admitted,
+        admitted ? "" : err);
+    if (admitted) {
         set_status_ex(STATUS_INFO, "Exporting\xE2\x80\xA6"); /* progress + result via poll_async */
     } else {
         set_status_ex(STATUS_WARNING, err);
@@ -182,17 +209,29 @@ void gui_actions__preview_target_start(int combo_index) {
         ? tp_session_snapshot_atlas_at(snapshot, atlas_index)
         : NULL;
     if (!a || a->source_count == 0) {
+        gui_actions__record_job_request(
+            GUI_JOB_REQUEST_PREVIEW, false,
+            "the selected atlas has no sources");
         set_status_ex(STATUS_WARNING, "Add sources first to preview an export target.");
         preview_target_reset();
         return;
     }
     if (gui_pack_async_busy()) {
+        gui_actions__record_job_request(
+            GUI_JOB_REQUEST_PREVIEW, false,
+            "a task is already running");
         set_status_ex(STATUS_WARNING, "Busy -- wait for the current pack or export to finish.");
         preview_target_reset();
         return;
     }
     char err[256] = {0};
-    if (gui_pack_preview_async_start(a->id, e->id, err, sizeof err)) {
+    const bool admitted =
+        gui_pack_preview_async_start(
+            a->id, e->id, err, sizeof err);
+    gui_actions__record_job_request(
+        GUI_JOB_REQUEST_PREVIEW, admitted,
+        admitted ? "" : err);
+    if (admitted) {
         s_preview_target = combo_index;
         set_statusf_ex(STATUS_INFO, "Preview: %s\xE2\x80\xA6", e->display_name ? e->display_name : e->id);
     } else {
@@ -211,12 +250,14 @@ static void preview_target_sync(void) {
 }
 // #endregion
 
-/* Lands a finished async pack/export at a frame boundary: the pack slot swap is done inside
- * gui_pack_poll; here we recompute stale honestly (mark_packed only when the model still matches
- * the packed snapshot) and route the outcome through the severity status. Called from apply_pending. */
-static void poll_async(void) {
+/* Lands one typed completion from gui_project_step, recomputes stale honestly,
+ * and routes the outcome through the presentation status. */
+static void poll_async(
+    tp_session_job_result *completion) {
     gui_pack_result_info info;
-    const gui_pack_done done = gui_pack_poll(&info);
+    const gui_pack_done done =
+        gui_pack_consume_completion(
+            completion, &info);
 #ifdef TP_ENABLE_TEST_SEAMS
     if (done == GUI_PACK_DONE_REFRESH_OK ||
         done == GUI_PACK_DONE_REFRESH_FAIL ||
@@ -358,8 +399,28 @@ static void poll_async(void) {
 // #endregion
 
 
-void gui_actions__poll_pack(void) {
-    poll_async();
-    preview_target_sync();
+void gui_actions__cancel(void) {
+    tp_error error = {{0}};
+    const tp_status status =
+        gui_pack_async_cancel(&error);
+    gui_actions__record_job_request(
+        GUI_JOB_REQUEST_CANCEL,
+        status == TP_STATUS_OK,
+        status == TP_STATUS_OK
+            ? ""
+            : error.msg);
+    if (status != TP_STATUS_OK) {
+        set_statusf_ex(
+            STATUS_ERROR,
+            "Cancel rejected: %s",
+            error.msg[0]
+                ? error.msg
+                : tp_status_str(status));
+    }
 }
 
+void gui_actions__consume_completion(
+    tp_session_job_result *completion) {
+    poll_async(completion);
+    preview_target_sync();
+}
