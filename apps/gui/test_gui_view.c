@@ -1961,41 +1961,6 @@ void test_filter_casefold_matches_realistic_non_ascii_pairs(void) {
         "\xD0\x94\xD1\x83\xD0\xB1"));          /* Дуб */
 }
 
-void test_folder_scan_failure_keeps_other_rows_and_typed_status(void) {
-    const tp_session_snapshot *snapshot = gui_project_snapshot();
-    const tp_snapshot_atlas *atlas =
-        tp_session_snapshot_atlas_at(snapshot, 0);
-    TEST_ASSERT_NOT_NULL(atlas);
-    const tp_id128 atlas_id = atlas->id;
-
-    TEST_ASSERT_EQUAL_INT(
-        GUI_ADD_ADDED,
-        gui_project_add_source_kind(
-            atlas_id, tp_session_snapshot_revision(snapshot), s_pack_dir,
-            TP_SOURCE_KIND_FOLDER));
-    settle_project_observation();
-    snapshot = gui_project_snapshot();
-    TEST_ASSERT_EQUAL_INT(
-        GUI_ADD_ADDED,
-        gui_project_add_source_kind(
-            atlas_id, tp_session_snapshot_revision(snapshot), s_solo,
-            TP_SOURCE_KIND_FILE));
-    settle_project_observation();
-
-    gui_project_refresh_sources();
-    settle_project_observation();
-    tp_scan__test_set_alloc_fail(0);
-    build_rows();
-    tp_scan__test_set_alloc_fail(-1);
-
-    TEST_ASSERT_EQUAL_INT(2, s_row_count);
-    TEST_ASSERT_TRUE(s_rows[0].is_source);
-    TEST_ASSERT_TRUE(s_rows[0].is_folder);
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OOM, s_rows[0].runtime_status);
-    TEST_ASSERT_TRUE(s_rows[1].is_source);
-    TEST_ASSERT_EQUAL_STRING("solo", s_rows[1].sprite_name);
-}
-
 void test_source_probe_failure_is_typed_warning_not_missing(void) {
     const tp_session_snapshot *snapshot = gui_project_snapshot();
     const tp_snapshot_atlas *atlas =
@@ -2017,11 +1982,11 @@ void test_source_probe_failure_is_typed_warning_not_missing(void) {
             TP_SOURCE_KIND_FILE));
     settle_project_observation();
 
+    tp_scan__test_set_stat_error(EACCES);
     gui_project_refresh_sources();
     settle_project_observation();
-    tp_scan__test_set_stat_error(EACCES);
-    build_rows();
     tp_scan__test_set_stat_error(0);
+    build_rows();
 
     TEST_ASSERT_EQUAL_INT(2, s_row_count);
     TEST_ASSERT_TRUE(s_rows[0].is_folder);
@@ -2190,6 +2155,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_canvas_zoom_to_sprite_centers_transformed_region);
     RUN_TEST(test_recycled_click_identity_rejects_remapped_rows);
     RUN_TEST(test_filter_casefold_matches_realistic_non_ascii_pairs);
+    RUN_TEST(test_source_probe_failure_is_typed_warning_not_missing);
     RUN_TEST(test_missing_folder_retains_folder_kind_and_missing_state);
     RUN_TEST(test_canvas_menu_owner_cancels_raw_gesture_and_double_click);
     RUN_TEST(test_empty_canvas_hit_clears_shared_sprite_selection);

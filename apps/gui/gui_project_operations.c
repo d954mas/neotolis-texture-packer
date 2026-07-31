@@ -7,6 +7,19 @@
 #include "tp_core/tp_transaction.h"
 #include "tp_core/tp_id.h"
 
+#ifdef TP_ENABLE_TEST_SEAMS
+static gui_project_operation_test_observer_fn
+    s_test_observer;
+static void *s_test_observer_context;
+
+void gui_project_operation__test_set_observer(
+    gui_project_operation_test_observer_fn observer,
+    void *context) {
+    s_test_observer = observer;
+    s_test_observer_context = context;
+}
+#endif
+
 static char *adapter_dup(const char *text) {
     if (!text) {
         return NULL;
@@ -89,6 +102,15 @@ static tp_status apply_atlas_ops_identified(
         request.id_hex, sizeof request.id_hex,
         "%s", generated_id);
     tp_txn_result result = {0};
+#ifdef TP_ENABLE_TEST_SEAMS
+    if (s_test_observer) {
+        for (int index = 0; index < operation_count; ++index) {
+            s_test_observer(
+                operations[index].kind,
+                s_test_observer_context);
+        }
+    }
+#endif
     tp_status status =
         tp_session_apply(
             client, &request, &result, err);

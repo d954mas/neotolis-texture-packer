@@ -6,6 +6,14 @@
 #include "tp_core/tp_operation.h"
 #include "gui_project.h"
 
+#ifdef TP_ENABLE_TEST_SEAMS
+typedef void (*gui_project_operation_test_observer_fn)(
+    tp_op_kind kind, void *context);
+void gui_project_operation__test_set_observer(
+    gui_project_operation_test_observer_fn observer,
+    void *context);
+#endif
+
 /* Thin stable-ID -> typed-operation -> session adapter for GUI mutations.
  * It never owns or exposes a model/project pointer.
  *

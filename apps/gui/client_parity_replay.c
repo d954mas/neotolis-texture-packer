@@ -14,40 +14,114 @@ static int fail(const char *step, tp_status status, const tp_error *err) {
     return 1;
 }
 
-static int verify_operation_coverage(void) {
-    static const tp_op_kind covered[] = {
-        TP_OP_ATLAS_CREATE,
-        TP_OP_ATLAS_REMOVE,
-        TP_OP_ATLAS_RENAME,
-        TP_OP_ATLAS_SETTINGS_SET,
-        TP_OP_SOURCE_ADD,
-        TP_OP_SOURCE_REMOVE,
-        TP_OP_SPRITE_OVERRIDE_SET,
-        TP_OP_SPRITE_OVERRIDE_CLEAR,
-        TP_OP_SPRITE_NAME_SET,
-        TP_OP_ANIMATION_CREATE,
-        TP_OP_ANIMATION_REMOVE,
-        TP_OP_ANIMATION_SETTINGS_SET,
-        TP_OP_ANIMATION_FRAME_ADD,
-        TP_OP_ANIMATION_FRAME_REMOVE,
-        TP_OP_ANIMATION_FRAME_MOVE,
-        TP_OP_TARGET_CREATE,
-        TP_OP_TARGET_REMOVE,
-        TP_OP_TARGET_SET,
-        TP_OP_ANIMATION_RENAME,
-    };
-    bool seen[TP_OP_KIND_COUNT] = {false};
-    for (size_t i = 0U; i < sizeof covered / sizeof covered[0]; ++i) {
-        const tp_op_kind kind = covered[i];
-        if (kind <= TP_OP_INVALID || kind >= TP_OP_KIND_COUNT ||
-            seen[kind]) {
-            (void)fprintf(
-                stderr,
-                "client parity operation coverage is invalid at kind %d\n",
-                (int)kind);
-            return 1;
+typedef struct replay_family_contract {
+    const char *name;
+    const tp_op_kind *kinds;
+    size_t kind_count;
+} replay_family_contract;
+
+#define FAMILY_KINDS(name, ...) \
+    static const tp_op_kind name[] = {__VA_ARGS__}
+
+FAMILY_KINDS(
+    s_atlas_kinds,
+    TP_OP_ATLAS_CREATE, TP_OP_TARGET_CREATE,
+    TP_OP_ATLAS_RENAME, TP_OP_ATLAS_SETTINGS_SET);
+FAMILY_KINDS(s_atlas_remove_kinds, TP_OP_ATLAS_REMOVE);
+FAMILY_KINDS(s_source_kinds, TP_OP_SOURCE_ADD);
+FAMILY_KINDS(s_source_remove_kinds, TP_OP_SOURCE_REMOVE);
+FAMILY_KINDS(
+    s_sprite_kinds,
+    TP_OP_SPRITE_NAME_SET, TP_OP_SPRITE_OVERRIDE_SET);
+FAMILY_KINDS(
+    s_sprite_clear_kinds,
+    TP_OP_SPRITE_NAME_SET, TP_OP_SPRITE_OVERRIDE_CLEAR);
+FAMILY_KINDS(
+    s_animation_kinds,
+    TP_OP_ANIMATION_CREATE, TP_OP_ANIMATION_FRAME_ADD,
+    TP_OP_ANIMATION_FRAME_MOVE, TP_OP_ANIMATION_FRAME_REMOVE,
+    TP_OP_ANIMATION_SETTINGS_SET, TP_OP_ANIMATION_RENAME);
+FAMILY_KINDS(
+    s_animation_remove_kinds, TP_OP_ANIMATION_REMOVE);
+FAMILY_KINDS(
+    s_target_kinds, TP_OP_TARGET_CREATE, TP_OP_TARGET_SET);
+FAMILY_KINDS(s_target_remove_kinds, TP_OP_TARGET_REMOVE);
+
+#define FAMILY(name, kinds) \
+    {name, kinds, sizeof kinds / sizeof kinds[0]}
+
+static const replay_family_contract s_family_contracts[] = {
+    FAMILY("atlas", s_atlas_kinds),
+    FAMILY("atlas_remove", s_atlas_remove_kinds),
+    FAMILY("source", s_source_kinds),
+    FAMILY("source_remove", s_source_remove_kinds),
+    FAMILY("sprite", s_sprite_kinds),
+    FAMILY("sprite_clear", s_sprite_clear_kinds),
+    FAMILY("animation", s_animation_kinds),
+    FAMILY("animation_remove", s_animation_remove_kinds),
+    FAMILY("target", s_target_kinds),
+    FAMILY("target_remove", s_target_remove_kinds),
+};
+
+static bool s_observed_kinds[TP_OP_KIND_COUNT];
+static bool s_observed_invalid_kind;
+
+static const replay_family_contract *find_family_contract(
+    const char *name) {
+    for (size_t index = 0U;
+         index < sizeof s_family_contracts /
+                     sizeof s_family_contracts[0];
+         ++index) {
+        if (strcmp(s_family_contracts[index].name, name) == 0) {
+            return &s_family_contracts[index];
         }
-        seen[kind] = true;
+    }
+    return NULL;
+}
+
+static void observe_operation_kind(
+    tp_op_kind kind, void *context) {
+    (void)context;
+    if (kind <= TP_OP_INVALID || kind >= TP_OP_KIND_COUNT) {
+        s_observed_invalid_kind = true;
+        return;
+    }
+    s_observed_kinds[kind] = true;
+}
+
+static bool family_contains(
+    const replay_family_contract *family,
+    tp_op_kind kind) {
+    for (size_t index = 0U;
+         index < family->kind_count; ++index) {
+        if (family->kinds[index] == kind) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static int verify_operation_coverage(void) {
+    bool seen[TP_OP_KIND_COUNT] = {false};
+    for (size_t family_index = 0U;
+         family_index < sizeof s_family_contracts /
+                            sizeof s_family_contracts[0];
+         ++family_index) {
+        const replay_family_contract *family =
+            &s_family_contracts[family_index];
+        for (size_t kind_index = 0U;
+             kind_index < family->kind_count; ++kind_index) {
+            const tp_op_kind kind = family->kinds[kind_index];
+            if (kind <= TP_OP_INVALID ||
+                kind >= TP_OP_KIND_COUNT) {
+                (void)fprintf(
+                    stderr,
+                    "client parity family '%s' has invalid kind %d\n",
+                    family->name, (int)kind);
+                return 1;
+            }
+            seen[kind] = true;
+        }
     }
     for (int kind = TP_OP_INVALID + 1;
          kind < TP_OP_KIND_COUNT; ++kind) {
@@ -59,6 +133,31 @@ static int verify_operation_coverage(void) {
                 stderr,
                 "client parity operation coverage is incomplete at kind %d\n",
                 kind);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int verify_family_observation(
+    const replay_family_contract *family) {
+    if (s_observed_invalid_kind) {
+        (void)fprintf(
+            stderr,
+            "client parity family '%s' submitted an invalid operation kind\n",
+            family->name);
+        return 1;
+    }
+    for (int kind = TP_OP_INVALID + 1;
+         kind < TP_OP_KIND_COUNT; ++kind) {
+        const bool expected =
+            family_contains(family, (tp_op_kind)kind);
+        if (s_observed_kinds[kind] != expected) {
+            (void)fprintf(
+                stderr,
+                "client parity family '%s' operation kind %d was %s\n",
+                family->name, kind,
+                expected ? "not submitted" : "unexpectedly submitted");
             return 1;
         }
     }
@@ -858,6 +957,14 @@ static int replay_remove(tp_session *session, const char *family,
 
 static int replay(const char *family, const char *base_path,
                   const char *harvest_path, const char *out_path) {
+    const replay_family_contract *contract =
+        find_family_contract(family);
+    if (!contract) {
+        (void)fprintf(
+            stderr, "client parity unknown replay family '%s'\n",
+            family);
+        return 2;
+    }
     harvest_ids ids;
     memset(&ids, 0, sizeof ids);
     if ((strcmp(family, "atlas") == 0 || strcmp(family, "source") == 0 ||
@@ -872,6 +979,10 @@ static int replay(const char *family, const char *base_path,
         tp_session_destroy(session);
         return 1;
     }
+    memset(s_observed_kinds, 0, sizeof s_observed_kinds);
+    s_observed_invalid_kind = false;
+    gui_project_operation__test_set_observer(
+        observe_operation_kind, NULL);
     int rc = 0;
     if (strcmp(family, "atlas") == 0) rc = replay_atlas(session, &ids, &err);
     else if (strcmp(family, "source") == 0) rc = replay_source(session, &ids, &err);
@@ -880,6 +991,10 @@ static int replay(const char *family, const char *base_path,
     else if (strcmp(family, "animation") == 0) rc = replay_animation(session, &ids, &err);
     else if (strcmp(family, "target") == 0) rc = replay_target(session, &ids, &err);
     else rc = replay_remove(session, family, &err);
+    gui_project_operation__test_set_observer(NULL, NULL);
+    if (rc == 0) {
+        rc = verify_family_observation(contract);
+    }
     if (rc == 0) rc = save_replay(session, out_path, &err);
     replay_client_detach();
     tp_session_destroy(session);

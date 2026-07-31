@@ -297,6 +297,7 @@ tp_add_gui_test(NAME client_parity_replay TARGET tp_client_parity_replay
         client_parity_replay.c
         gui_project_operations.c
     LIBS tp_build
+    SEAMS
     NO_CTEST)
 
 add_test(NAME tp_client_parity_real COMMAND ${CMAKE_COMMAND}
