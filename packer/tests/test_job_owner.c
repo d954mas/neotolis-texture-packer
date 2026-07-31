@@ -38,6 +38,15 @@ static int fill_rng(void *ctx, uint8_t *out, size_t len) {
 
 static void fake_cancel(tp_session_owned_job *owner) { (void)owner; }
 
+static bool fake_request_cancel(tp_session_owned_job *owner) {
+    (void)owner;
+    return true;
+}
+
+static void fake_compact(tp_session_owned_job *owner) {
+    (void)owner;
+}
+
 static void fake_destroy(tp_session_owned_job *owner) {
     fake_job *job = (fake_job *)owner;
     atomic_fetch_add_explicit(&job->destroyed, 1, memory_order_relaxed);
@@ -166,6 +175,8 @@ void test_process_spawn_failure_is_unpublished_but_has_reserved_identity(void) {
     tp_session_owned_job_init(&job.owner, fake_cancel, fake_destroy);
     const tp_session_job_descriptor descriptor = {
         .kind = TP_SESSION_JOB_PACK,
+        .request_cancel = fake_request_cancel,
+        .compact = fake_compact,
     };
     tp_session_owned_job_configure_observation(
         &job.owner, &descriptor, fake_observe);

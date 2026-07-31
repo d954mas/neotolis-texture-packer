@@ -6,14 +6,22 @@
 
 #include "tinycthread.h"
 
+#include "core/nt_assert.h"
 #include "tp_job_owner_internal.h"
 #include "tp_source_runtime_internal.h"
+
+typedef enum tp_refresh_terminal_claim {
+    TP_REFRESH_TERMINAL_OPEN = 0,
+    TP_REFRESH_TERMINAL_CANCEL_REQUESTED,
+    TP_REFRESH_TERMINAL_CLAIMED
+} tp_refresh_terminal_claim;
 
 typedef struct tp_refresh_job {
     tp_session_owned_job owner;
     thrd_t thread;
     bool thread_started;
     _Atomic bool cancel_requested;
+    _Atomic int terminal_claim;
     _Atomic int state;
     tp_session_snapshot *snapshot;
     tp_source_runtime_projection *previous;
@@ -23,10 +31,26 @@ typedef struct tp_refresh_job {
 static bool refresh_request_cancel(
     tp_session_owned_job *owned) {
     tp_refresh_job *job = (tp_refresh_job *)owned;
-    bool expected = false;
-    return atomic_compare_exchange_strong_explicit(
-        &job->cancel_requested, &expected, true,
-        memory_order_acq_rel, memory_order_acquire);
+    int expected = TP_REFRESH_TERMINAL_OPEN;
+    if (!atomic_compare_exchange_strong_explicit(
+            &job->terminal_claim, &expected,
+            TP_REFRESH_TERMINAL_CANCEL_REQUESTED,
+            memory_order_acq_rel, memory_order_acquire)) {
+        return false;
+    }
+    atomic_store_explicit(
+        &job->cancel_requested, true, memory_order_release);
+    return true;
+}
+
+static bool refresh_claim_terminal(tp_refresh_job *job) {
+    const int previous = atomic_exchange_explicit(
+        &job->terminal_claim, TP_REFRESH_TERMINAL_CLAIMED,
+        memory_order_acq_rel);
+    NT_ASSERT(
+        previous == TP_REFRESH_TERMINAL_OPEN ||
+        previous == TP_REFRESH_TERMINAL_CANCEL_REQUESTED);
+    return previous == TP_REFRESH_TERMINAL_CANCEL_REQUESTED;
 }
 
 static void refresh_cancel(tp_session_owned_job *owned) {
@@ -111,8 +135,7 @@ static int refresh_thread(void *context) {
         refresh_cancel_requested, job};
     tp_status status = tp_source_runtime_build(
         job->snapshot, &projection, &cancel, &error);
-    const bool cancelled = atomic_load_explicit(
-        &job->cancel_requested, memory_order_acquire);
+    const bool cancelled = refresh_claim_terminal(job);
     memset(&job->terminal, 0, sizeof job->terminal);
     job->terminal.kind = TP_SESSION_JOB_REFRESH;
     if (cancelled) {
@@ -173,6 +196,8 @@ tp_status tp_session_refresh_start(
         &job->owner, refresh_cancel, refresh_destroy);
     job->owner.release_payload = refresh_release_payload;
     atomic_init(&job->cancel_requested, false);
+    atomic_init(
+        &job->terminal_claim, TP_REFRESH_TERMINAL_OPEN);
     atomic_init(&job->state, TP_SESSION_JOB_RUNNING);
     tp_status status = tp_session_snapshot_create(
         session, &job->snapshot, err);

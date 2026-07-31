@@ -28,7 +28,9 @@ typedef enum tp_client_capability {
      * name only optional asynchronous session jobs, which foundation does not
      * implement or imply. */
     TP_CLIENT_CAPABILITY_INSPECT_ASYNC_JOB = 8,
-    TP_CLIENT_CAPABILITY_VALIDATE_ASYNC_JOB = 9
+    TP_CLIENT_CAPABILITY_VALIDATE_ASYNC_JOB = 9,
+    TP_CLIENT_CAPABILITY_SOURCE_REFRESH_JOB = 10,
+    TP_CLIENT_CAPABILITY_COUNT
 } tp_client_capability;
 
 typedef enum tp_client_capability_availability {

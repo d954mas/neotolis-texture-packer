@@ -808,6 +808,8 @@ void tp_session_owned_job_configure_observation(
     NT_ASSERT(
         descriptor->target_count == 0U ||
         descriptor->targets != NULL);
+    NT_ASSERT(descriptor->request_cancel != NULL);
+    NT_ASSERT(descriptor->compact != NULL);
     NT_ASSERT(observe != NULL);
     job->observation_descriptor = *descriptor;
     job->observe = observe;
@@ -853,11 +855,13 @@ tp_status tp_session_job_start_internal(
     if (!job->observe ||
         job->observation_descriptor.kind ==
             TP_SESSION_JOB_NONE ||
+        !job->observation_descriptor.request_cancel ||
+        !job->observation_descriptor.compact ||
         (job->observation_descriptor.target_count > 0U &&
          !job->observation_descriptor.targets)) {
         return tp_error_set(
             err, TP_STATUS_INVALID_ARGUMENT,
-            "job start requires descriptor and observe callback");
+            "job start requires complete descriptor and observe callback");
     }
     /* Reserve the request identity before process creation so the exact
      * admitted identity is encoded into the child request. A failed spawn may

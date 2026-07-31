@@ -6,6 +6,11 @@ tp_add_test(NAME name_map LIBS tp_core unity PRIVATE_SRC)
 # enum value so a rename can't slip through without failing here.
 tp_add_test(NAME status_id LIBS tp_core unity)
 
+# Current client capability rows are executable typed contracts. In particular,
+# live Source Refresh is available to GUI/headless sessions and deliberately
+# not applicable to the one-shot saved-file CLI.
+tp_add_test(NAME client_capability LIBS tp_core unity)
+
 # F1-00 project identity: 128-bit runtime ID + injectable RNG seam (deterministic).
 # PRIVATE_SRC: tp_hex.h (shared drift-guard encoder).
 tp_add_test(NAME identity_id LIBS tp_core unity PRIVATE_SRC)

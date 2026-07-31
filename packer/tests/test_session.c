@@ -31,6 +31,7 @@
 #include "tp_project_internal.h"
 #include "tp_project_mutation_internal.h"
 #include "tp_recovery_internal.h"
+#include "tp_job_owner_internal.h"
 #include "tp_session_internal.h"
 #include "tp_source_plan_internal.h"
 #include "tp_test_seams.h"
@@ -165,6 +166,48 @@ void test_refresh_generic_cancel_and_compact_use_concrete_owner(void) {
         TP_SESSION_JOB_CANCELLED, completion.state);
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_CANCELLED, completion.status);
+
+    tp_session_job_result_destroy(&completion);
+    tp_session_destroy(session);
+}
+
+void test_refresh_rejects_cancel_after_worker_claims_terminal(void) {
+    tp_session *session = make_session();
+    tp_error err = {{0}};
+    const tp_refresh_job_request request = {0};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_session_refresh_start(session, &request, &err));
+
+    tp_session_owned_job *owned =
+        tp_session_job_acquire_internal(session);
+    TEST_ASSERT_NOT_NULL(owned);
+    tp_session_job_sample sample = {0};
+    do {
+        TEST_ASSERT_TRUE(owned->observe(owned, &sample));
+        if (sample.state == TP_SESSION_JOB_RUNNING) {
+            thrd_yield();
+        }
+    } while (sample.state == TP_SESSION_JOB_RUNNING);
+    TEST_ASSERT_EQUAL_INT(
+        TP_SESSION_JOB_SUCCEEDED, sample.state);
+    tp_session_job_release_internal(owned);
+
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_INVALID_ARGUMENT,
+        tp_session_job_cancel(session, &err));
+
+    tp_session_job_result completion = {0};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_session_update(session, &completion, &err));
+    TEST_ASSERT_EQUAL_INT(
+        TP_SESSION_JOB_REFRESH, completion.kind);
+    TEST_ASSERT_EQUAL_INT(
+        TP_SESSION_JOB_SUCCEEDED, completion.state);
+    TEST_ASSERT_EQUAL_INT(
+        TP_SESSION_JOB_REJECTION_NONE, completion.rejection);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, completion.status);
 
     tp_session_job_result_destroy(&completion);
     tp_session_destroy(session);
@@ -3836,6 +3879,8 @@ int main(int argc, char **argv) {
     UNITY_BEGIN();
     RUN_TEST(
         test_refresh_generic_cancel_and_compact_use_concrete_owner);
+    RUN_TEST(
+        test_refresh_rejects_cancel_after_worker_claims_terminal);
     RUN_TEST(test_refresh_normalizes_folder_and_file_source_keys);
     RUN_TEST(test_refresh_reports_canonical_source_key_collision);
     RUN_TEST(test_refresh_retains_source_local_diagnostic);
