@@ -351,7 +351,7 @@ void filter_type_pump(void) {
     if (!s_filter_active || nt_ui_input_any_focused(s_ctx)) {
         return; /* not armed, or an engine text field owns typed chars this frame */
     }
-    if (s_confirm_open || s_about_open || s_export_open || s_recovery_open ||
+    if (gui_actions_lifecycle_active() || s_about_open || s_export_open || gui_actions_recovery_active() ||
         gui_draft_phase() != GUI_EDIT_IDLE) {
         return; /* a modal / inline-rename owns the keyboard -- don't steal its chars into the filter */
     }

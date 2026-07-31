@@ -44,29 +44,37 @@ bool gui_actions__test_take_refresh_completion(
 /* Blocking pack of the selected atlas (deterministic path for selftest + --shot). Interactive
  * Pack starts the same session job and polls its typed result at frame boundaries. */
 void do_pack_blocking(void) {
+    const tp_session_snapshot *snapshot =
+        gui_project_snapshot();
+    const int atlas_index =
+        gui_view_atlas_index(snapshot);
+    const tp_snapshot_atlas *atlas =
+        snapshot
+            ? tp_session_snapshot_atlas_at(
+                  snapshot, atlas_index)
+            : NULL;
+    const tp_id128 atlas_id =
+        atlas ? atlas->id : tp_id128_nil();
+    const int source_count =
+        atlas ? atlas->source_count : 0;
     if (!gui_actions__submit_draft()) {
         return;
     }
-    const tp_session_snapshot *snapshot = gui_project_snapshot();
-    const int atlas_index = gui_view_atlas_index(snapshot);
-    const tp_snapshot_atlas *a = snapshot
-        ? tp_session_snapshot_atlas_at(snapshot, atlas_index)
-        : NULL;
-    if (!a || a->source_count == 0) {
+    if (tp_id128_is_nil(atlas_id) ||
+        source_count == 0) {
         set_status_ex(STATUS_WARNING, "No sources to pack -- add a smart folder or files first.");
         return;
     }
     /* The blocking job advances the session and may replace the borrowed
      * snapshot before it returns. Carry only the stable identity across that
      * boundary. */
-    const tp_id128 atlas_id = a->id;
     char err[256] = {0};
     char note[128] = {0};
     double ms = 0.0;
     if (gui_pack_atlas(atlas_id, &ms, err, sizeof err, note, sizeof note)) {
         gui_project_mark_packed(); /* clears preview_stale for the current model */
-        s_last_pack_ms = ms;
-        s_last_pack_atlas_id = atlas_id;
+        s_actions.last_pack_ms = ms;
+        s_actions.last_pack_atlas_id = atlas_id;
         /* the per-frame canvas<->atlas sync (frame()) picks up the new result pointer and uploads. */
         const tp_result *r = gui_pack_result(atlas_id);
         const double shown_ms = s_status_fixed_time ? 0.0 : ms;
@@ -83,10 +91,18 @@ void do_pack_blocking(void) {
 /* Interactive Pack (Ctrl+P / strip / stale chip): enqueues immutable host
  * intent. Completion is applied only after host drain + atomic observation. */
 void do_pack(void) {
+    const bool submitted_draft =
+        gui_draft_phase() != GUI_EDIT_IDLE;
     if (!gui_actions__submit_draft()) {
         gui_actions__record_job_request(
             GUI_JOB_REQUEST_PACK, false,
             "the active draft was not submitted");
+        return;
+    }
+    if (submitted_draft) {
+        /* Draft submission ended the current observation cut. The stable Pack
+         * intent resumes after gui_actions_step publishes the committed echo. */
+        gui_request_pack();
         return;
     }
     const tp_session_snapshot *snapshot = gui_project_snapshot();
@@ -126,10 +142,16 @@ void do_pack(void) {
  * owned worker process (per-atlas failures remain non-fatal).
  * Completion is reported through the classified host receipt. */
 void gui_actions__export(void) {
+    const bool submitted_draft =
+        gui_draft_phase() != GUI_EDIT_IDLE;
     if (!gui_actions__submit_draft()) {
         gui_actions__record_job_request(
             GUI_JOB_REQUEST_EXPORT, false,
             "the active draft was not submitted");
+        return;
+    }
+    if (submitted_draft) {
+        gui_request_export();
         return;
     }
     if (gui_pack_async_busy()) {
@@ -252,9 +274,10 @@ static void preview_target_sync(void) {
 
 /* Lands one typed completion from gui_project_step, recomputes stale honestly,
  * and routes the outcome through the presentation status. */
-static void poll_async(
-    tp_session_job_result *completion) {
-    gui_pack_result_info info;
+static gui_pack_done poll_async(
+    tp_session_job_result *completion,
+    gui_pack_result_info *out) {
+    gui_pack_result_info info = {0};
     const gui_pack_done done =
         gui_pack_consume_completion(
             completion, &info);
@@ -274,8 +297,8 @@ static void poll_async(
             if (!info.input_changed) {
                 gui_project_mark_packed();
             }
-            s_last_pack_ms = info.ms;
-            s_last_pack_atlas_id = info.atlas_id;
+            s_actions.last_pack_ms = info.ms;
+            s_actions.last_pack_atlas_id = info.atlas_id;
             const tp_result *r = gui_pack_result(info.atlas_id);
             const char *stale = info.input_changed ? " -- inputs changed, stale" : "";
             if (r && info.note[0] != '\0') {
@@ -354,8 +377,15 @@ static void poll_async(
                 preview_target_reset();
                 set_status_ex(STATUS_WARNING,
                               "Preview inputs changed -- run Preview again.");
-            } else if (s_preview_target == 0) {
-                gui_pack_preview_clear(); /* selection reset/changed while packing -> drop the orphan slot */
+            } else if (
+                s_preview_target == 0 &&
+                !tp_id128_eq(
+                    info.atlas_id,
+                    gui_view_atlas_id())) {
+                /* A selection change orphaned this result. A blocking adapter
+                 * for the still-selected atlas is also driven through this
+                 * controller, so retain that legitimate result for its caller. */
+                gui_pack_preview_clear();
             } else {
                 /* The degradation chip is width-gated (STRIP_CHIP_MIN_W) and drops on common window
                  * sizes, so the pill also carries the summary -- it is width-independent. */
@@ -395,6 +425,10 @@ static void poll_async(
     if (gui_project_take_op_error(op_err, sizeof op_err)) {
         set_statusf_ex(STATUS_WARNING, "Edit rejected: %s", op_err);
     }
+    if (out) {
+        *out = info;
+    }
+    return done;
 }
 // #endregion
 
@@ -419,8 +453,11 @@ void gui_actions__cancel(void) {
     }
 }
 
-void gui_actions__consume_completion(
-    tp_session_job_result *completion) {
-    poll_async(completion);
+gui_pack_done gui_actions__consume_completion(
+    tp_session_job_result *completion,
+    gui_pack_result_info *out) {
+    const gui_pack_done done =
+        poll_async(completion, out);
     preview_target_sync();
+    return done;
 }

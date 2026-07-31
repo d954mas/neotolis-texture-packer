@@ -272,7 +272,8 @@ bool gui_pack_async_cancelling(void);
 void gui_pack_debug_force_busy(gui_pack_async_kind kind);
 #endif
 
-#if defined(TP_ENABLE_TEST_SEAMS) && \
+#if (defined(TP_ENABLE_TEST_SEAMS) || \
+     defined(NTPACKER_GUI_SELFTEST)) && \
     !defined(NTPACKER_GUI_PACK_IMPLEMENTATION)
 /* Tests may address fixture atlases by frame-local index. Production entry
  * points remain stable-ID-only; these adapters resolve immediately and never

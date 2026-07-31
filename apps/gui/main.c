@@ -70,6 +70,7 @@
 #include "gui_state.h"
 #include "gui_widgets.h"
 #include "gui_actions.h"
+#include "gui_actions_driver.h"
 #include "gui_rows.h"
 #include "gui_pack.h"
 #include "gui_project.h"
@@ -141,8 +142,8 @@ static const nt_ui_events_cfg_t s_canvas_dbl_cfg = {
 };
 #define CANVAS_DRAG_THRESHOLD 4.0F
 
-/* The deferred-intent queue (enqueued through gui_request_*), the new/open/exit confirm-flow flags (s_after_confirm/
- * s_confirm_open/s_modal_action) and the last-pack timing (s_last_pack_*) live in gui_actions. The
+/* The deferred-intent queue and typed new/open/exit lifecycle FSM live in
+ * gui_actions. The last-pack timing (s_last_pack_*) lives there too. The
  * modal open flags (s_about_open / s_export_open) live in gui_state (shared with the selftest); so
  * does s_blur_inputs -- set here by frame(), read by the settings-panel field widgets in the view TU. */
 
@@ -233,8 +234,8 @@ static void handle_canvas_input(void) {
      * the blur-request block before nt_ui_begin). */
     const bool transient_owner =
         gui_canvas_get_mode(&s_canvas) != GUI_CANVAS_ATLAS ||
-        !gui_canvas_has_atlas(&s_canvas) || s_confirm_open || s_about_open ||
-        s_export_open || s_recovery_open ||
+        !gui_canvas_has_atlas(&s_canvas) || gui_actions_lifecycle_active() || s_about_open ||
+        s_export_open || gui_actions_recovery_active() ||
         gui_draft_phase() != GUI_EDIT_IDLE;
     if (gui_canvas_input_blocked(&s_canvas_input,
                                  gui_view_chrome_any_menu_open(),
@@ -329,8 +330,8 @@ static void handle_canvas_input(void) {
 static void handle_canvas_double_click(void) {
     const bool transient_owner =
         gui_canvas_get_mode(&s_canvas) != GUI_CANVAS_ATLAS ||
-        !gui_canvas_has_atlas(&s_canvas) || s_confirm_open || s_about_open ||
-        s_export_open || s_recovery_open ||
+        !gui_canvas_has_atlas(&s_canvas) || gui_actions_lifecycle_active() || s_about_open ||
+        s_export_open || gui_actions_recovery_active() ||
         gui_draft_phase() != GUI_EDIT_IDLE;
     if (gui_canvas_input_blocked(&s_canvas_input,
                                  gui_view_chrome_any_menu_open(),
@@ -385,7 +386,7 @@ static void handle_shortcuts(void) {
         return; /* headless capture/probe: the user's live typing must not trigger hotkeys mid-run */
     }
     if (nt_ui_input_any_focused(s_ctx) || gui_view_chrome_any_menu_open() ||
-        s_confirm_open || s_about_open || s_export_open || s_recovery_open) {
+        gui_actions_lifecycle_active() || s_about_open || s_export_open || gui_actions_recovery_active()) {
         return;
     }
     /* Preview + editor accelerators (each also a button; §3.3e). */
@@ -450,7 +451,7 @@ static void handle_list_nav(void) {
         return;
     }
     if (nt_ui_input_any_focused(s_ctx) || gui_view_chrome_any_menu_open() ||
-        s_confirm_open || s_about_open || s_export_open || s_recovery_open ||
+        gui_actions_lifecycle_active() || s_about_open || s_export_open || gui_actions_recovery_active() ||
         gui_draft_phase() != GUI_EDIT_IDLE) {
         return;
     }
@@ -610,12 +611,10 @@ static void frame(void) {
             s_export_open = false;
         } else if (s_about_open) {
             s_about_open = false;
-        } else if (s_recovery_open) {
-            s_recovery_open = false; /* Esc = "Later": leave every orphan on disk, no data loss */
-        } else if (s_confirm_open) {
-            s_confirm_open = false;
-            s_confirm_draft = false;
-            s_after_confirm = GUI_LIFECYCLE_REQUEST_NONE;
+        } else if (gui_actions_recovery_active()) {
+            gui_actions_recovery_dismiss();
+        } else if (gui_actions_lifecycle_active()) {
+            gui_actions_lifecycle_dismiss();
         } else if (s_filter_active || gui_rows_filter_active()) {
             gui_rows_set_filter(""); /* Esc clears the sprite-tree speed-search. */
             s_filter_active = false;
@@ -1115,7 +1114,8 @@ static int gui_main_utf8(int argc, char *argv[]) {
      * status clobbers a recovery warning already up (recovery_warn_shown). A genuine open ERROR still shows. */
     if (proj_arg != NULL) {
         char err[256];
-        const bool recovery_pending = s_recovery_open;
+        const bool recovery_pending =
+            gui_actions_recovery_active();
         switch (gui_startup_decide(true, tp_scan_exists(proj_arg), recovery_pending)) {
         case GUI_STARTUP_DEFER:
             /* The startup recovery modal is up and can Save-to-original the very file named on the CLI.
@@ -1133,14 +1133,8 @@ static int gui_main_utf8(int argc, char *argv[]) {
         case GUI_STARTUP_OPEN: { /* block scope: a label may not be followed by a declaration (C17) */
             tp_error open_error = {{0}};
             tp_status open_status =
-                gui_project_lifecycle_begin_open(
+                gui_actions_host_open(
                     proj_arg, &open_error);
-            if (open_status == TP_STATUS_OK) {
-                open_status =
-                    gui_actions_step(
-                        NULL,
-                        &open_error);
-            }
             if (open_status == TP_STATUS_OK &&
                 gui_project_lifecycle_state_query() ==
                     GUI_PROJECT_LIFECYCLE_ACTIVE) {
@@ -1202,44 +1196,21 @@ static int gui_main_utf8(int argc, char *argv[]) {
          * DRAINING spin with no budget. */
         bool iteration_failed = false;
         nt_window_poll();
-        if (gui_project_lifecycle_state_query() ==
-            GUI_PROJECT_LIFECYCLE_ACTIVE) {
-            const tp_status begin_status =
-                gui_project_lifecycle_begin_shutdown(
-                    false, &shutdown_error);
-            if (begin_status != TP_STATUS_OK) {
-                iteration_failed = true;
-                if (shutdown_failures %
-                        k_shutdown_log_every ==
-                    0) {
-                    nt_log_error(
-                        "GUI host shutdown request failed: %s",
-                        shutdown_error.msg[0]
-                            ? shutdown_error.msg
-                            : tp_status_str(
-                                  begin_status));
-                }
-            }
-        }
-        if (!iteration_failed &&
-            gui_project_lifecycle_state_query() !=
-                GUI_PROJECT_LIFECYCLE_CLOSED) {
-            const tp_status step_status =
-                gui_actions_step(
-                    NULL,
-                    &shutdown_error);
-            if (step_status != TP_STATUS_OK) {
-                iteration_failed = true;
-                if (shutdown_failures %
-                        k_shutdown_log_every ==
-                    0) {
-                    nt_log_error(
-                        "GUI host shutdown step failed: %s",
-                        shutdown_error.msg[0]
-                            ? shutdown_error.msg
-                            : tp_status_str(
-                                  step_status));
-                }
+        bool closed = false;
+        const tp_status shutdown_status =
+            gui_actions_host_shutdown_step(
+                &closed, &shutdown_error);
+        if (shutdown_status != TP_STATUS_OK) {
+            iteration_failed = true;
+            if (shutdown_failures %
+                    k_shutdown_log_every ==
+                0) {
+                nt_log_error(
+                    "GUI host shutdown step failed: %s",
+                    shutdown_error.msg[0]
+                        ? shutdown_error.msg
+                        : tp_status_str(
+                              shutdown_status));
             }
         }
         if (!iteration_failed) {

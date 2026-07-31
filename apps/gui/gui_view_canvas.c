@@ -436,14 +436,16 @@ void declare_canvas(nt_ui_context_t *ctx) {
                 tv += r->sprites[i].vert_count;
             }
             const char *sep = "  \xC2\xB7  "; /* U+00B7 middle dot (now baked) */
+            const gui_last_pack_view last_pack =
+                gui_actions_last_pack_view();
             if (tp_id128_eq(
-                    s_last_pack_atlas_id,
+                    last_pack.atlas_id,
                     gui_view_atlas_id()) &&
-                s_last_pack_ms > 0.0) {
+                last_pack.duration_ms > 0.0) {
                 (void)snprintf(label, sizeof label,
                                "%d sprites%s%d pages%s%dx%d%s%.0f%% filled%s%d verts%spacked %.0f ms", r->sprite_count,
                                sep, r->page_count, sep, pw, ph, sep, (double)atlas_fill_pct(r), sep, tv, sep,
-                               s_last_pack_ms);
+                               last_pack.duration_ms);
             } else {
                 (void)snprintf(label, sizeof label, "%d sprites%s%d pages%s%dx%d%s%.0f%% filled%s%d verts",
                                r->sprite_count, sep, r->page_count, sep, pw, ph, sep, (double)atlas_fill_pct(r), sep,

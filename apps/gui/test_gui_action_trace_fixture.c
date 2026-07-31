@@ -182,10 +182,8 @@ void reset_public_action_state(void) {
         GUI_LIFECYCLE_REQUEST_NONE;
     gui_actions__clear_pending();
     gui_actions__discard_deferred_edits();
-    s_after_confirm = GUI_LIFECYCLE_REQUEST_NONE;
-    s_confirm_open = false;
-    s_confirm_draft = false;
-    s_modal_action = MODAL_NONE;
+    s_actions.lifecycle =
+        (gui_lifecycle_flow){0};
 }
 
 void setUp(void) {

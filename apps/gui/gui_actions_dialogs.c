@@ -40,28 +40,43 @@ bool gui_actions__open_dialog(void) {
     return true;
 }
 
-bool gui_actions__save_as(void) {
-    static const char *filt[] = {"*.ntpacker_project"};
-    const char *def = gui_project_has_path() ? gui_project_path() : "untitled.ntpacker_project";
-    const char *path = tinyfd_saveFileDialog("Save Project As", def, 1, filt, "ntpacker project");
-    if (!path) {
-        return false;
-    }
-    char full[TP_IDENTITY_PATH_MAX];
-    if (!gui_paths_project_file(path, full, sizeof full)) {
-        set_status_ex(STATUS_ERROR,
-                      "Save path is invalid or exceeds the supported path limit.");
-        return false;
-    }
-    char err[256];
-    const tp_status preflight =
-        gui_project_save_as_preflight(
-            full, err, sizeof err);
-    if (preflight != TP_STATUS_OK) {
-        set_statusf_ex(
-            STATUS_ERROR, "Save failed: %s",
-            err[0] ? err : tp_status_str(preflight));
-        return false;
+bool gui_actions__save_as(
+    const gui_project_save_as_plan *prepared) {
+    char err[256] = {0};
+    gui_project_save_as_plan plan = {0};
+    if (prepared) {
+        plan = *prepared;
+    } else {
+        static const char *filt[] = {"*.ntpacker_project"};
+        const char *def =
+            gui_project_has_path()
+                ? gui_project_path()
+                : "untitled.ntpacker_project";
+        const char *path =
+            tinyfd_saveFileDialog(
+                "Save Project As", def, 1, filt,
+                "ntpacker project");
+        if (!path) {
+            return false;
+        }
+        char full[TP_IDENTITY_PATH_MAX];
+        if (!gui_paths_project_file(
+                path, full, sizeof full)) {
+            set_status_ex(
+                STATUS_ERROR,
+                "Save path is invalid or exceeds the supported path limit.");
+            return false;
+        }
+        const tp_status preflight =
+            gui_project_save_as_prepare(
+                full, &plan, err, sizeof err);
+        if (preflight != TP_STATUS_OK) {
+            set_statusf_ex(
+                STATUS_ERROR, "Save failed: %s",
+                err[0] ? err
+                       : tp_status_str(preflight));
+            return false;
+        }
     }
 
     const tp_session_snapshot *before =
@@ -73,18 +88,25 @@ bool gui_actions__save_as(void) {
         !gui_actions__submit_draft()) {
         return false;
     }
-    const tp_session_snapshot *after =
-        gui_project_snapshot();
     const int64_t revision_after =
-        after ? tp_session_snapshot_revision(after)
-              : -1;
+        gui_project_committed_revision();
     if (revision_before >= 0 &&
         revision_after >= 0) {
         gui_actions__rebase_deferred_edits(
             revision_before, revision_after);
     }
-    (void)gui_actions__intent_drain(GUI_INTENT_PHASE_EDIT);
-    if (gui_project_save_as(full, err, sizeof err) == TP_STATUS_OK) {
+    if (gui_project_snapshot() == NULL) {
+        const gui_intent retry = {
+            .kind = GUI_INTENT_SAVE_AS,
+            .payload.save_as = {
+                .plan = plan,
+                .prepared = true,
+            },
+        };
+        return gui_actions__intent_push(&retry);
+    }
+    if (gui_project_save_as_execute(
+            &plan, err, sizeof err) == TP_STATUS_OK) {
         char notice[256];
         if (gui_project_take_save_notice(notice, sizeof notice)) {
             set_statusf_ex(STATUS_WARNING, "%s", notice);
@@ -100,7 +122,7 @@ bool gui_actions__save_as(void) {
 
 bool gui_actions__save(void) {
     if (!gui_project_has_path()) {
-        return gui_actions__save_as();
+        return gui_actions__save_as(NULL);
     }
     if (!gui_actions__submit_draft()) {
         return false;
@@ -219,7 +241,13 @@ void gui_actions__add_files(void) {
 /* Save dialog for a target's output path, relativized to the project like sources. Atlas-explicit so
  * the Export dialog (which spans all atlases) can browse any target, not just the selected atlas's. */
 void gui_actions__browse_target(const gui_target_ref *queued) {
+    const bool submitted_draft =
+        gui_draft_phase() != GUI_EDIT_IDLE;
     if (!gui_actions__submit_draft()) {
+        return;
+    }
+    if (submitted_draft) {
+        gui_request_browse_target_ref(queued);
         return;
     }
     const tp_session_snapshot *snapshot = gui_project_snapshot();
@@ -325,8 +353,9 @@ void request_exit(void) {
     s_actions.pending_lifecycle_request =
         GUI_LIFECYCLE_REQUEST_EXIT;
 }
-/* Open routes through the same unsaved-changes confirm as New/Exit (no silent discard). The actual
- * OS open dialog runs as a GUI_INTENT_OPEN, either now (clean) or after the modal resolves. */
+/* Open routes through the same unsaved-changes confirm as New/Exit (no silent
+ * discard). The OS dialog is an explicit lifecycle phase, not an ordinary
+ * intent that could lose exclusive ownership between controller ticks. */
 void request_open(void) {
     s_actions.pending_lifecycle_request =
         GUI_LIFECYCLE_REQUEST_OPEN;
@@ -367,6 +396,13 @@ static bool begin_exit(void) {
 }
 
 bool gui_actions__apply_lifecycle_request(void) {
+    if (s_actions.lifecycle.phase !=
+        GUI_LIFECYCLE_IDLE) {
+        /* The active tagged flow owns its continuation until one typed choice
+         * resolves it. A later request remains queued; it cannot replace the
+         * question currently shown to the operator. */
+        return false;
+    }
     const gui_lifecycle_request request =
         s_actions.pending_lifecycle_request;
     s_actions.pending_lifecycle_request =
@@ -383,15 +419,17 @@ bool gui_actions__apply_lifecycle_request(void) {
         return false;
     }
     if (gui_draft_phase() != GUI_EDIT_IDLE) {
-        s_after_confirm = request;
-        s_confirm_draft = true;
-        s_confirm_open = true;
+        s_actions.lifecycle = (gui_lifecycle_flow){
+            .phase = GUI_LIFECYCLE_RESOLVE_DRAFT,
+            .request = request,
+        };
         return false;
     }
     if (gui_project_is_dirty()) {
-        s_after_confirm = request;
-        s_confirm_draft = false;
-        s_confirm_open = true;
+        s_actions.lifecycle = (gui_lifecycle_flow){
+            .phase = GUI_LIFECYCLE_RESOLVE_DIRTY,
+            .request = request,
+        };
         return false;
     }
     if (request ==
@@ -402,25 +440,30 @@ bool gui_actions__apply_lifecycle_request(void) {
         GUI_LIFECYCLE_REQUEST_EXIT) {
         return begin_exit();
     }
-    gui_actions__request_open_dialog();
+    s_actions.lifecycle = (gui_lifecycle_flow){
+        .phase = GUI_LIFECYCLE_OPEN_DIALOG,
+        .request = GUI_LIFECYCLE_REQUEST_OPEN,
+    };
     return false;
 }
-static void confirm_perform(void) {
-    if (s_after_confirm == GUI_LIFECYCLE_REQUEST_NEW) {
+static void confirm_perform(
+    gui_lifecycle_request request) {
+    if (request == GUI_LIFECYCLE_REQUEST_NEW) {
         (void)begin_new();
-    } else if (s_after_confirm == GUI_LIFECYCLE_REQUEST_EXIT) {
+    } else if (request == GUI_LIFECYCLE_REQUEST_EXIT) {
         (void)begin_exit();
-    } else if (s_after_confirm == GUI_LIFECYCLE_REQUEST_OPEN) {
-        gui_actions__request_open_dialog(); /* runs the open dialog next frame */
+    } else if (request == GUI_LIFECYCLE_REQUEST_OPEN) {
+        s_actions.lifecycle = (gui_lifecycle_flow){
+            .phase = GUI_LIFECYCLE_OPEN_DIALOG,
+            .request = GUI_LIFECYCLE_REQUEST_OPEN,
+        };
     }
-    s_after_confirm = GUI_LIFECYCLE_REQUEST_NONE;
 }
 
-static void confirm_continue(void) {
+static void confirm_continue(
+    gui_lifecycle_request request) {
     s_actions.pending_lifecycle_request =
-        s_after_confirm;
-    s_after_confirm =
-        GUI_LIFECYCLE_REQUEST_NONE;
+        request;
     /* A committed draft publishes into the borrowed GUI view at the following
      * frame boundary. Re-enter the lifecycle gate next frame so dirty/identity
      * decisions read that one common observation. */
@@ -429,8 +472,20 @@ static void confirm_continue(void) {
 
 
 void gui_actions__apply_confirm(void) {
-    if (s_confirm_draft) {
-        if (s_modal_action == MODAL_SAVE) {
+    const gui_lifecycle_phase phase =
+        s_actions.lifecycle.phase;
+    const gui_lifecycle_request request =
+        s_actions.lifecycle.request;
+    const gui_lifecycle_choice choice =
+        s_actions.lifecycle.choice;
+    if (phase == GUI_LIFECYCLE_IDLE ||
+        choice == GUI_LIFECYCLE_CHOICE_NONE) {
+        return;
+    }
+    s_actions.lifecycle.choice =
+        GUI_LIFECYCLE_CHOICE_NONE;
+    if (phase == GUI_LIFECYCLE_RESOLVE_DRAFT) {
+        if (choice == GUI_LIFECYCLE_CHOICE_ACCEPT) {
             const bool applied =
                 gui_draft_phase() ==
                         GUI_EDIT_CONFLICTED
@@ -439,50 +494,68 @@ void gui_actions__apply_confirm(void) {
             if (applied &&
                 gui_draft_phase() ==
                     GUI_EDIT_IDLE) {
-                s_confirm_open = false;
-                s_confirm_draft = false;
-                confirm_continue();
+                s_actions.lifecycle =
+                    (gui_lifecycle_flow){0};
+                confirm_continue(request);
             } else {
                 /* Keep the explicit choice open after validation, OOM, a
                  * deleted target, or another conflict. The draft and outer
                  * lifecycle request remain intact for retry, Discard, or
                  * Cancel. */
-                s_confirm_open = true;
-                s_confirm_draft = true;
+                s_actions.lifecycle.phase =
+                    GUI_LIFECYCLE_RESOLVE_DRAFT;
             }
-        } else if (s_modal_action == MODAL_DISCARD) {
+        } else if (
+            choice ==
+            GUI_LIFECYCLE_CHOICE_DISCARD) {
             gui_draft_discard();
             if (gui_draft_phase() ==
                 GUI_EDIT_IDLE) {
-                s_confirm_open = false;
-                s_confirm_draft = false;
-                confirm_continue();
+                s_actions.lifecycle =
+                    (gui_lifecycle_flow){0};
+                confirm_continue(request);
             }
-        } else if (s_modal_action == MODAL_CANCEL) {
-            s_confirm_open = false;
-            s_confirm_draft = false;
-            s_after_confirm =
-                GUI_LIFECYCLE_REQUEST_NONE;
+        } else if (
+            choice ==
+            GUI_LIFECYCLE_CHOICE_CANCEL) {
+            s_actions.lifecycle =
+                (gui_lifecycle_flow){0};
         }
-        s_modal_action = MODAL_NONE;
         return;
     }
-    if (s_modal_action == MODAL_SAVE) {
+    if (choice == GUI_LIFECYCLE_CHOICE_ACCEPT) {
         const bool saved = gui_actions__save();
-        s_confirm_open = false;
+        s_actions.lifecycle =
+            (gui_lifecycle_flow){0};
         if (saved) {
-            confirm_perform();
-        } else {
-            s_after_confirm = GUI_LIFECYCLE_REQUEST_NONE;
+            confirm_perform(request);
         }
-    } else if (s_modal_action == MODAL_DISCARD) {
-        s_confirm_open = false;
-        confirm_perform();
-    } else if (s_modal_action == MODAL_CANCEL) {
-        s_confirm_open = false;
-        s_after_confirm = GUI_LIFECYCLE_REQUEST_NONE;
+    } else if (
+        choice == GUI_LIFECYCLE_CHOICE_DISCARD) {
+        s_actions.lifecycle =
+            (gui_lifecycle_flow){0};
+        confirm_perform(request);
+    } else if (
+        choice == GUI_LIFECYCLE_CHOICE_CANCEL) {
+        s_actions.lifecycle =
+            (gui_lifecycle_flow){0};
     }
-    s_modal_action = MODAL_NONE;
+}
+
+void gui_actions__run_open_lifecycle_dialog(void) {
+    if (s_actions.lifecycle.phase !=
+            GUI_LIFECYCLE_OPEN_DIALOG ||
+        s_actions.lifecycle.request !=
+            GUI_LIFECYCLE_REQUEST_OPEN) {
+        return;
+    }
+    /* tinyfd is synchronous. Keep the tagged lifecycle owner active for the
+     * entire call, then release it only after selection/cancel/error is
+     * terminal. A successful selection has already transferred ownership to
+     * gui_project's replacement FSM before this state is cleared. */
+    (void)gui_actions__open_dialog();
+    s_actions.lifecycle =
+        (gui_lifecycle_flow){0};
 }
 
 void gui_actions__complete_lifecycle(

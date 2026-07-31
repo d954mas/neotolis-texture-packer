@@ -39,6 +39,25 @@ static void current_session_semantics(
     tp_session_snapshot_destroy(snapshot);
 }
 
+void test_dev_settle_rejects_failed_automatic_refresh_admission(void) {
+    const uint64_t generation_before =
+        gui_project_source_runtime_generation();
+    gui_project_refresh_sources();
+    tp_refresh_job__test_fail_next_start();
+
+    tp_error error = {{0}};
+    TEST_ASSERT_FALSE(
+        gui_actions_dev_settle_task(&error));
+    TEST_ASSERT_NOT_NULL(
+        strstr(error.msg,
+               "Refresh job allocation failed"));
+    TEST_ASSERT_FALSE(gui_project_job_busy());
+    TEST_ASSERT_NOT_NULL(gui_project_snapshot());
+    TEST_ASSERT_EQUAL_UINT64(
+        generation_before,
+        gui_project_source_runtime_generation());
+}
+
 static void assert_refresh_completion(
     gui_pack_done expected_done, int expected_added, int expected_removed,
     int expected_changed, int expected_unavailable) {
@@ -542,17 +561,16 @@ void test_refresh_retains_external_change_when_source_is_removed(void) {
     TEST_ASSERT_EQUAL_size_t(1U, fwrite("b", 1U, 1U, source));
     TEST_ASSERT_EQUAL_INT(0, fclose(source));
 
-    TEST_ASSERT_EQUAL_INT(
-        GUI_ADD_ADDED,
-        gui_project_add_source_kind(
-            atlas_id, tp_session_snapshot_revision(snapshot), first_path,
-            TP_SOURCE_KIND_FILE));
-    snapshot = gui_project_snapshot();
-    TEST_ASSERT_EQUAL_INT(
-        GUI_ADD_ADDED,
-        gui_project_add_source_kind(
-            atlas_id, gui_project_committed_revision(), second_path,
-            TP_SOURCE_KIND_FILE));
+    const char *paths[] = {first_path, second_path};
+    int added = 0;
+    int duplicates = 0;
+    TEST_ASSERT_TRUE(
+        gui_project_add_sources(
+            atlas_id, tp_session_snapshot_revision(snapshot),
+            paths, 2, TP_SOURCE_KIND_FILE,
+            &added, &duplicates));
+    TEST_ASSERT_EQUAL_INT(2, added);
+    TEST_ASSERT_EQUAL_INT(0, duplicates);
     TEST_ASSERT_TRUE(
         gui_actions_refresh_diff_headless(NULL, NULL, NULL, NULL));
     snapshot = gui_project_snapshot();
@@ -575,7 +593,7 @@ void test_refresh_retains_external_change_when_source_is_removed(void) {
     current_session_semantics(
         &revision_before, &dirty_before, &history_before);
 
-    int added = -1;
+    added = -1;
     int removed = -1;
     int changed = -1;
     const bool refreshed =
@@ -599,23 +617,59 @@ void test_refresh_retains_external_change_when_source_is_removed(void) {
 }
 
 void test_user_refresh_returns_async_busy_and_publishes_terminal_once(void) {
-    gui_actions__test_reset_refresh_completion();
-    gui_request_refresh();
-    gui_actions__test_drain_intents();
+    const tp_session_snapshot *snapshot =
+        gui_project_snapshot();
+    const tp_snapshot_atlas *atlas =
+        tp_session_snapshot_atlas_at(snapshot, 0);
+    TEST_ASSERT_NOT_NULL(atlas);
+    char folder_path[1200];
+    char source_path[1280];
+    TEST_ASSERT_TRUE(snprintf(
+        folder_path, sizeof folder_path,
+        "%s/user-refresh", TP_GUI_TRACE_TEST_DIR) > 0);
+    TEST_ASSERT_TRUE(snprintf(
+        source_path, sizeof source_path,
+        "%s/source.png", folder_path) > 0);
+    tp_mkdirs(folder_path);
+    FILE *source = fopen(source_path, "wb");
+    TEST_ASSERT_NOT_NULL(source);
+    TEST_ASSERT_EQUAL_size_t(
+        1U, fwrite("x", 1U, 1U, source));
+    TEST_ASSERT_EQUAL_INT(0, fclose(source));
+    TEST_ASSERT_EQUAL_INT(
+        GUI_ADD_ADDED,
+        gui_project_add_source_kind(
+            atlas->id,
+            tp_session_snapshot_revision(snapshot),
+            folder_path, TP_SOURCE_KIND_FOLDER));
+    settle_project_job();
 
+    gui_actions__test_reset_refresh_completion();
+    tp_scan__test_arm_walk_gate();
+    gui_request_refresh();
+    pump_action_frame();
+    for (int attempt = 0;
+         attempt < 5000 &&
+         !tp_scan__test_walk_gate_entered();
+         ++attempt) {
+        nt_time_sleep(0.001);
+    }
+
+    TEST_ASSERT_TRUE(tp_scan__test_walk_gate_entered());
     TEST_ASSERT_TRUE(gui_project_job_busy());
     TEST_ASSERT_EQUAL_INT(
-        TP_SESSION_JOB_NONE,
+        TP_SESSION_JOB_REFRESH,
         gui_project_job_active_kind());
     TEST_ASSERT_EQUAL_INT(STATUS_INFO, s_status_sev);
     TEST_ASSERT_EQUAL_STRING("Refreshing sources...", s_status);
 
     gui_request_refresh();
-    gui_actions__test_drain_intents();
+    pump_action_frame();
     TEST_ASSERT_TRUE(gui_project_job_busy());
     TEST_ASSERT_EQUAL_INT(STATUS_WARNING, s_status_sev);
     TEST_ASSERT_NOT_NULL(strstr(s_status, "Busy"));
 
+    tp_scan__test_release_walk_gate();
     settle_project_job();
     gui_pack_done done = GUI_PACK_DONE_NONE;
     gui_pack_result_info info = {0};
@@ -632,6 +686,8 @@ void test_user_refresh_returns_async_busy_and_publishes_terminal_once(void) {
     publish_project_frame();
     TEST_ASSERT_FALSE(gui_actions__test_take_refresh_completion(
         &done, &info));
+    TEST_ASSERT_EQUAL_INT(0, remove(source_path));
+    TEST_ASSERT_EQUAL_INT(0, refresh_test_rmdir(folder_path));
 }
 
 void test_refresh_lifecycle_cancel_drains_before_session_cutover(void) {
@@ -660,6 +716,7 @@ void test_refresh_lifecycle_cancel_drains_before_session_cutover(void) {
             atlas->id,
             tp_session_snapshot_revision(snapshot),
             folder_path, TP_SOURCE_KIND_FOLDER));
+    publish_project_frame();
 
     tp_scan__test_arm_walk_gate();
     gui_request_refresh();
@@ -755,6 +812,7 @@ void test_refresh_lifecycle_deadline_retires_blocked_worker(void) {
             atlas->id,
             tp_session_snapshot_revision(snapshot),
             folder_path, TP_SOURCE_KIND_FOLDER));
+    publish_project_frame();
 
     tp_scan__test_arm_walk_gate();
     gui_request_refresh();
@@ -827,6 +885,8 @@ int main(int argc, char **argv) {
         return tp_build_worker_main();
     }
     UNITY_BEGIN();
+    RUN_TEST(
+        test_dev_settle_rejects_failed_automatic_refresh_admission);
     RUN_TEST(test_refresh_reports_source_stat_failure);
     RUN_TEST(
         test_first_refresh_stat_failure_invalidates_runtime_and_preview);

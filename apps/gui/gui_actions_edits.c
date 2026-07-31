@@ -1367,12 +1367,8 @@ static bool submit_draft(bool apply_mine) {
         &terminal, &error);
 
     if (edit->phase == GUI_EDIT_SUBMITTING) {
-        const tp_session_snapshot *after =
-            gui_project_snapshot();
         const int64_t current_revision =
-            after
-                ? tp_session_snapshot_revision(after)
-                : edit->base_revision;
+            gui_project_committed_revision();
         tp_error reduce_error = {{0}};
         const bool exact_owner =
             terminal.transaction_id[0] != '\0' &&

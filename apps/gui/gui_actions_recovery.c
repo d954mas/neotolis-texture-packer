@@ -8,37 +8,86 @@
 #include "tinyfiledialogs.h"
 // #region R6b startup crash-recovery modal glue
 void gui_actions_open_recovery(const gui_recovery_list *list) {
+    s_actions.recovery = (gui_recovery_flow){
+        .pending_row = -1,
+    };
     if (!list || list->count == 0U) {
-        s_recovery_open = false;
         return;
     }
-    s_actions.recovery_list = *list; /* value copy of the fixed-size struct */
-    s_actions.recovery_pending_row = -1;
-    s_recovery_open = true;
+    s_actions.recovery.list = *list;
+    s_actions.recovery.phase =
+        GUI_RECOVERY_CHOOSE;
 }
-int gui_actions_recovery_count(void) { return (int)s_actions.recovery_list.count; }
-bool gui_actions_recovery_has_more(void) { return s_actions.recovery_list.has_more; }
+
+gui_recovery_view gui_actions_recovery_view(void) {
+    return (gui_recovery_view){
+        .phase = s_actions.recovery.phase,
+        .count =
+            (int)s_actions.recovery.list.count,
+        .has_more =
+            s_actions.recovery.list.has_more,
+    };
+}
+
+bool gui_actions_recovery_active(void) {
+    return s_actions.recovery.phase !=
+           GUI_RECOVERY_IDLE;
+}
+
 const gui_recovery_entry *gui_actions_recovery_at(int i) {
-    if (i < 0 || (size_t)i >= s_actions.recovery_list.count) {
+    if (i < 0 ||
+        (size_t)i >=
+            s_actions.recovery.list.count) {
         return NULL;
     }
-    return &s_actions.recovery_list.items[i];
+    return &s_actions.recovery.list.items[i];
 }
-void gui_actions_recovery_request(int row, int action) {
-    s_actions.recovery_pending_row = row;
-    s_actions.recovery_pending_action = action;
+
+bool gui_actions_recovery_request(
+    int row, gui_recovery_action action) {
+    const gui_recovery_entry *entry =
+        gui_actions_recovery_at(row);
+    if (s_actions.recovery.phase !=
+            GUI_RECOVERY_CHOOSE ||
+        !entry ||
+        action < GUI_RECOVERY_DISCARD ||
+        action > GUI_RECOVERY_SAVE_AS ||
+        (!entry->adoptable &&
+         action != GUI_RECOVERY_DISCARD) ||
+        (action == GUI_RECOVERY_SAVE_ORIGINAL &&
+         entry->original_path[0] == '\0')) {
+        return false;
+    }
+    s_actions.recovery.phase =
+        GUI_RECOVERY_RESOLVING;
+    s_actions.recovery.pending_row = row;
+    s_actions.recovery.pending_action = action;
+    return true;
+}
+
+void gui_actions_recovery_dismiss(void) {
+    s_actions.recovery =
+        (gui_recovery_flow){
+            .pending_row = -1,
+        };
 }
 /* Drop a resolved row (shift-down); close the modal when the list empties. */
 static void recovery_remove_row(int row) {
-    if (row < 0 || (size_t)row >= s_actions.recovery_list.count) {
+    if (row < 0 ||
+        (size_t)row >=
+            s_actions.recovery.list.count) {
         return;
     }
-    for (size_t i = (size_t)row; i + 1U < s_actions.recovery_list.count; ++i) {
-        s_actions.recovery_list.items[i] = s_actions.recovery_list.items[i + 1];
+    for (size_t i = (size_t)row;
+         i + 1U < s_actions.recovery.list.count;
+         ++i) {
+        s_actions.recovery.list.items[i] =
+            s_actions.recovery.list.items[i + 1];
     }
-    s_actions.recovery_list.count--;
-    if (s_actions.recovery_list.count == 0U && !s_actions.recovery_list.has_more) {
-        s_recovery_open = false;
+    s_actions.recovery.list.count--;
+    if (s_actions.recovery.list.count == 0U &&
+        !s_actions.recovery.list.has_more) {
+        gui_actions_recovery_dismiss();
     }
 }
 // #endregion
@@ -47,10 +96,15 @@ void gui_actions__apply_recovery(void) {
     /* R6b: harvest a per-row recovery decision requested last frame. Runs here (same spot the confirm
      * harvest lands do_save()->tinyfd_*) so the Save-As dialog + disk-mutating resolve run outside
      * nt_ui_begin/end. NON-DESTRUCTIVE ON FAILURE: a failed save leaves the journal + the row for a retry. */
-    if (s_actions.recovery_pending_row >= 0) {
-        const int row = s_actions.recovery_pending_row;
-        const int action = s_actions.recovery_pending_action;
-        s_actions.recovery_pending_row = -1;
+    if (s_actions.recovery.phase ==
+        GUI_RECOVERY_RESOLVING) {
+        const int row =
+            s_actions.recovery.pending_row;
+        const gui_recovery_action action =
+            s_actions.recovery.pending_action;
+        s_actions.recovery.phase =
+            GUI_RECOVERY_CHOOSE;
+        s_actions.recovery.pending_row = -1;
         const gui_recovery_entry *e = gui_actions_recovery_at(row);
         if (e != NULL) {
             /* Copy the typed row before the list may compact after resolution. */
@@ -92,7 +146,7 @@ void gui_actions__apply_recovery(void) {
             }
             if (proceed) {
                 char err[256];
-                tp_status st = gui_recovery_resolve_entry(&entry, (gui_recovery_action)action, target, err, sizeof err);
+                tp_status st = gui_recovery_resolve_entry(&entry, action, target, err, sizeof err);
                 if (st == TP_STATUS_OK) {
                     recovery_remove_row(row);
                     if (action == GUI_RECOVERY_DISCARD) {

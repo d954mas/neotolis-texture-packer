@@ -27,7 +27,8 @@
 #include "tp_core/tp_session_snapshot_query.h"
 #include "tp_core/tp_utf8.h"     /* tp_utf8_is_valid_c_string (validate --bench-perf=path) */
 
-#include "gui_actions.h" /* do_pack_blocking */
+#include "gui_actions.h"
+#include "gui_actions_dev.h" /* host-driving benchmark adapter */
 #include "gui_pack.h"    /* gui_pack_result / gui_pack_async_start / gui_pack_worker_active + GUI_PACK_ASYNC_* */
 #include "gui_project.h" /* gui_project_* (snapshot / edit / undo / redo / refresh / dirty) */
 #include "gui_rows.h"    /* build_rows / select_row_for_region */
@@ -324,11 +325,19 @@ static void bench_run_probes(void) {
             continue;
         }
         const double u0 = bench_now_ms();
-        const bool undo_ok = gui_project_undo();
+        gui_request_undo();
+        tp_error undo_error = {{0}};
+        const bool undo_ok =
+            gui_actions_step(
+                NULL, &undo_error) == TP_STATUS_OK;
         const double u1 = bench_now_ms();
         bench_samples_record(&undo, undo_ok, u1 - u0);
         const double r0 = bench_now_ms();
-        const bool redo_ok = gui_project_redo();
+        gui_request_redo();
+        tp_error redo_error = {{0}};
+        const bool redo_ok =
+            gui_actions_step(
+                NULL, &redo_error) == TP_STATUS_OK;
         const double r1 = bench_now_ms();
         bench_samples_record(&redo, redo_ok, r1 - r0);
     }

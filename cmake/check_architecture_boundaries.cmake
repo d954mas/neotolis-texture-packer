@@ -59,6 +59,9 @@ set(_arch_view_files
 # here, and a registered path that comes back is a deletion regression.
 set(_arch_deleted_files
     apps/gui/gui_project_pending.c
+    apps/gui/gui_scan.c
+    apps/gui/gui_scan.h
+    apps/gui/tp_bench_gui_rows.c
     apps/gui/client_parity_manifest.c
     apps/gui/client_parity_manifest.h
     apps/gui/gui_host_binding.c
@@ -585,6 +588,21 @@ _arch_report_debt(VIEW_MODEL_POLICY "PV-settings/RESULT-INDEX"
 _arch_assert_rule(CORE_FRONTEND "A1a/A1b")
 _arch_assert_rule(ASYNC_RAW_SESSION "A1c/A2b")
 
+# The zero-only guards and their embedded negative fixtures share this token
+# matcher. The fixtures use header includes because a forbidden driver reached
+# through a header is exactly as callable as one included by a .c file.
+function(_arch_source_contains source symbol out_contains)
+    set(_source "${source}")
+    string(REGEX REPLACE "/\\*([^*]|\\*+[^*/])*\\*+/" " " _source "${_source}")
+    string(REGEX REPLACE "//[^\r\n]*" " " _source "${_source}")
+    if(_source MATCHES
+       "(^|[^A-Za-z0-9_])${symbol}([^A-Za-z0-9_]|$)")
+        set(${out_contains} true PARENT_SCOPE)
+    else()
+        set(${out_contains} false PARENT_SCOPE)
+    endif()
+endfunction()
+
 # Zero-only deletion guard. Behavioral tests prove presence and sequencing;
 # this gate only prevents a removed path from returning.
 function(_arch_assert_absent relative_path symbol remove_in)
@@ -603,14 +621,43 @@ function(_arch_assert_absent relative_path symbol remove_in)
             "_arch_deleted_files if the deletion is intentional.")
     endif()
     file(READ "${_path}" _source)
-    string(REGEX REPLACE "/\\*([^*]|\\*+[^*/])*\\*+/" " " _source "${_source}")
-    string(REGEX REPLACE "//[^\r\n]*" " " _source "${_source}")
-    if(_source MATCHES
-       "(^|[^A-Za-z0-9_])${symbol}([^A-Za-z0-9_]|$)")
+    _arch_source_contains("${_source}" "${symbol}" _contains)
+    if(_contains)
         message(FATAL_ERROR
             "${remove_in} deletion regressed: ${relative_path} contains ${symbol}")
     endif()
 endfunction()
+
+# Local negative fixtures for the two transitive-header holes guarded below.
+# Keep them in this checker: no production fixture file should need to carry a
+# deliberately forbidden include merely to prove the boundary walker sees it.
+_arch_source_contains(
+    "#include \"gui_actions_driver.h\"\n"
+    "gui_actions_driver[.]h" _seed_view_driver)
+if(NOT _seed_view_driver)
+    message(FATAL_ERROR
+        "A7-selftest: view-header fixture escaped gui_actions_driver.h detection")
+endif()
+string(CONCAT _arch_seed_project_driver_source
+    "#include \"gui_project_test_driver.h\"\n"
+    "static bool second_driver(void) { return gui_project_test_new() }\n")
+_arch_source_contains(
+    "${_arch_seed_project_driver_source}"
+    "gui_project_test_driver[.]h" _seed_project_driver)
+if(NOT _seed_project_driver)
+    message(FATAL_ERROR
+        "A2d-selftest: wrapper-based project-driver fixture escaped detection")
+endif()
+string(CONCAT _arch_seed_project_fixture_source
+    "#include \"test_gui_action_trace_fixture.h\"\n"
+    "static bool second_driver(void) { return gui_project_test_new() }\n")
+_arch_source_contains(
+    "${_arch_seed_project_fixture_source}"
+    "test_gui_[A-Za-z0-9_]*[.]h" _seed_project_fixture)
+if(NOT _seed_project_fixture)
+    message(FATAL_ERROR
+        "A2d-selftest: transitive GUI test-fixture include escaped detection")
+endif()
 
 # Completed A1c/A2b worker and host-admission cuts.
 foreach(_entry IN ITEMS
@@ -646,6 +693,8 @@ _arch_assert_absent("apps/gui/main.c" "gui_pack_poll" "A2b")
 file(GLOB _gui_shipping_sources LIST_DIRECTORIES false
     "${_arch_root}/apps/gui/gui*.c"
     "${_arch_root}/apps/gui/main.c")
+file(GLOB _gui_shipping_headers LIST_DIRECTORIES false
+    "${_arch_root}/apps/gui/*.h")
 
 foreach(_source IN LISTS _gui_shipping_sources)
     cmake_path(GET _source FILENAME _filename)
@@ -772,12 +821,18 @@ foreach(_source IN LISTS _gui_shipping_sources)
     cmake_path(RELATIVE_PATH _source BASE_DIRECTORY "${_arch_root}"
                OUTPUT_VARIABLE _relative)
     if(NOT _filename STREQUAL "gui_project.c"
-       AND NOT _filename STREQUAL "gui_actions.c"
-       AND NOT _filename STREQUAL "gui_pack_jobs.c"
-       AND NOT _filename STREQUAL "gui_selftest.c")
+       AND NOT _filename STREQUAL "gui_actions.c")
         _arch_assert_absent(
             "${_relative}" "gui_project_step"
             "A2d one internal project FSM driver")
+    endif()
+    if(NOT _filename STREQUAL "gui_selftest.c")
+        _arch_assert_absent(
+            "${_relative}" "gui_project_test_driver[.]h"
+            "A2d shipping sources cannot import the test project driver")
+        _arch_assert_absent(
+            "${_relative}" "test_gui_[A-Za-z0-9_]*[.]h"
+            "A2d shipping sources cannot import GUI test fixtures")
     endif()
     if(_filename MATCHES "^gui_view_.*\\.c$")
         _arch_assert_absent(
@@ -804,6 +859,68 @@ foreach(_source IN LISTS _gui_shipping_sources)
             "A2d/A7 deleted manual lifecycle protocol")
     endforeach()
 endforeach()
+
+# A view header is part of the view's compile-time surface: including a driver
+# there exposes it transitively to every implementing TU. Scan the complete,
+# explicitly declared view role (both .c and .h), not only shipping .c files.
+foreach(_view IN LISTS _arch_view_files)
+    _arch_assert_absent(
+        "${_view}" "gui_actions_driver[.]h"
+        "A7 views cannot include the actions FSM driver")
+    _arch_assert_absent(
+        "${_view}" "gui_actions_dev[.]h"
+        "A7 views cannot include dev host adapters")
+endforeach()
+
+# Header-transitive project drivers are equally real drivers. The four owners
+# below are explicit: the project driver declares the primitive, the actions
+# and project internals expose it only to their implementations, and the test
+# driver is a test-only inline harness. Every other production GUI header is
+# forbidden from naming the primitive or importing either driver header.
+set(_gui_project_driver_header_owners
+    gui_actions_internal.h
+    gui_project_driver.h
+    gui_project_internal.h
+    gui_project_test_driver.h)
+foreach(_header IN LISTS _gui_shipping_headers)
+    cmake_path(GET _header FILENAME _filename)
+    if(_filename MATCHES "^test_.*[.]h$")
+        continue()
+    endif()
+    if(_filename IN_LIST _gui_project_driver_header_owners)
+        continue()
+    endif()
+    cmake_path(RELATIVE_PATH _header BASE_DIRECTORY "${_arch_root}"
+               OUTPUT_VARIABLE _relative)
+    _arch_assert_absent(
+        "${_relative}" "gui_project_step"
+        "A2d production headers cannot introduce a second project FSM driver")
+    _arch_assert_absent(
+        "${_relative}" "gui_project_driver[.]h"
+        "A2d production headers cannot import the project FSM driver")
+    _arch_assert_absent(
+        "${_relative}" "gui_project_test_driver[.]h"
+        "A2d production headers cannot import the test project driver")
+    _arch_assert_absent(
+        "${_relative}" "test_gui_[A-Za-z0-9_]*[.]h"
+        "A2d production headers cannot import GUI test fixtures")
+endforeach()
+foreach(_symbol IN ITEMS
+        gui_actions_step
+        gui_actions_host_open
+        gui_actions_host_shutdown_step
+        gui_actions_shutdown
+        do_pack_blocking
+        do_undo
+        do_redo
+        gui_actions_refresh_diff_headless)
+    _arch_assert_absent(
+        "apps/gui/gui_actions.h" "${_symbol}"
+        "A7 view ingress cannot expose FSM drivers or direct executors")
+endforeach()
+_arch_assert_absent(
+    "apps/gui/gui_pack_jobs.c" "gui_project_driver[.]h"
+    "A7 blocking adapters drive the actions FSM, never the project FSM")
 foreach(_symbol IN ITEMS
         gui_project__session_client
         gui_project__host_queue)

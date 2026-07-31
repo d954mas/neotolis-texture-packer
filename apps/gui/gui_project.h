@@ -123,7 +123,9 @@ tp_status gui_recovery_resolve_entry(const gui_recovery_entry *entry, gui_recove
                                      const char *target_path, char *err_out, size_t err_cap);
 
 /* --- accessors --- */
-/* Immutable read view borrowed from the active session and pinned per frame. */
+/* Immutable read view borrowed from the active session. Any mutable session
+ * call ends this observation cut; accessors return unavailable until the sole
+ * gui_actions_step/gui_project_step boundary publishes the next cut. */
 const tp_session_snapshot *gui_project_snapshot(void);
 const tp_source_runtime_projection *gui_project_sources(void);
 /* Changes whenever the client publishes or releases a model snapshot.
@@ -332,10 +334,21 @@ bool gui_project_redo(void);
 /* --- file operations (paths explicit; dialogs live in the UI layer) --- */
 /* Saves to the current path (must exist). Clears project_dirty. */
 tp_status gui_project_save(char *err_out, size_t err_cap);
-/* Read-only Save As feasibility check. Canonicalizes the destination, refreshes
- * the observed session identity, and rejects an identity change while the
- * host-owned controller status port reports an attached controller. It never
- * submits or flushes a draft and performs no file write. */
+typedef struct gui_project_save_as_plan {
+    char canonical_path[TP_IDENTITY_PATH_MAX];
+    uint64_t instance_generation;
+} gui_project_save_as_plan;
+/* Read-only Save As preparation. It resolves every view-dependent decision
+ * before a draft can mutate the session. Execution revalidates the controller
+ * guard and requires the same live session instance. */
+tp_status gui_project_save_as_prepare(
+    const char *path, gui_project_save_as_plan *out,
+    char *err_out, size_t err_cap);
+tp_status gui_project_save_as_execute(
+    const gui_project_save_as_plan *plan,
+    char *err_out, size_t err_cap);
+/* Compatibility convenience for callers that do not cross another session
+ * boundary between preparation and execution. */
 tp_status gui_project_save_as_preflight(
     const char *path, char *err_out, size_t err_cap);
 /* Saves to `path`, remembers it, clears project_dirty. Promotes structural ids FIRST

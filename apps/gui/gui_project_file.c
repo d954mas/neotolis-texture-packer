@@ -232,6 +232,7 @@ static tp_status begin_candidate(
     lifecycle_begin_drain(draining_state);
     if (tp_session_job_active(s_project.session)) {
         tp_error cancel_error = {{0}};
+        gui_project__invalidate_observation();
         (void)tp_session_job_cancel(
             s_project.session, &cancel_error);
     }
@@ -393,6 +394,7 @@ tp_status gui_project_lifecycle_begin_shutdown(
         GUI_PROJECT_LIFECYCLE_SHUTDOWN_DRAINING);
     if (tp_session_job_active(s_project.session)) {
         tp_error cancel_error = {{0}};
+        gui_project__invalidate_observation();
         (void)tp_session_job_cancel(
             s_project.session, &cancel_error);
     }
@@ -547,6 +549,7 @@ bool gui_project_undo(void) {
         return false;
     }
     tp_error e = {0};
+    gui_project__invalidate_observation();
     const tp_status st = tp_session_undo(
         s_project.session, &e);
     if (st != TP_STATUS_OK) {
@@ -565,6 +568,7 @@ bool gui_project_redo(void) {
         return false;
     }
     tp_error e = {0};
+    gui_project__invalidate_observation();
     const tp_status st = tp_session_redo(
         s_project.session, &e);
     if (st != TP_STATUS_OK) {
@@ -601,14 +605,9 @@ tp_status gui_project_save(char *err_out, size_t err_cap) {
         }
         return TP_STATUS_INVALID_ARGUMENT;
     }
-    if (!gui_project_has_path()) {
-        if (err_out && err_cap) {
-            (void)snprintf(err_out, err_cap, "no path (use Save As)");
-        }
-        return TP_STATUS_INVALID_ARGUMENT;
-    }
     tp_error err = {0};
     tp_session_save_result result;
+    gui_project__invalidate_observation();
     const tp_status st = tp_session_save(
         s_project.session, &result, &err);
     if (st != TP_STATUS_OK) {
@@ -672,25 +671,69 @@ static tp_status save_as_preflight(
     return TP_STATUS_OK;
 }
 
-tp_status gui_project_save_as_preflight(
-    const char *path, char *err_out, size_t err_cap) {
-    char canonical_path[TP_IDENTITY_PATH_MAX];
-    return save_as_preflight(
-        path, canonical_path, err_out, err_cap);
+tp_status gui_project_save_as_prepare(
+    const char *path, gui_project_save_as_plan *out,
+    char *err_out, size_t err_cap) {
+    if (!out) {
+        if (err_out && err_cap) {
+            (void)snprintf(
+                err_out, err_cap,
+                "Save As preparation requires output");
+        }
+        return TP_STATUS_INVALID_ARGUMENT;
+    }
+    *out = (gui_project_save_as_plan){0};
+    const tp_status status = save_as_preflight(
+        path, out->canonical_path, err_out, err_cap);
+    if (status == TP_STATUS_OK) {
+        out->instance_generation =
+            s_project.instance_generation;
+    }
+    return status;
 }
 
-tp_status gui_project_save_as(const char *path, char *err_out, size_t err_cap) {
-    char canonical_path[TP_IDENTITY_PATH_MAX];
-    const tp_status preflight_status =
-        save_as_preflight(
-            path, canonical_path, err_out, err_cap);
-    if (preflight_status != TP_STATUS_OK) {
-        return preflight_status;
+tp_status gui_project_save_as_execute(
+    const gui_project_save_as_plan *plan,
+    char *err_out, size_t err_cap) {
+    if (!gui_project__ingress_is_open() || !plan ||
+        plan->canonical_path[0] == '\0') {
+        if (err_out && err_cap) {
+            (void)snprintf(
+                err_out, err_cap,
+                "Save As requires a prepared destination");
+        }
+        return TP_STATUS_INVALID_ARGUMENT;
+    }
+    if (plan->instance_generation !=
+        s_project.instance_generation) {
+        if (err_out && err_cap) {
+            (void)snprintf(
+                err_out, err_cap,
+                "Save As plan belongs to a replaced project session");
+        }
+        return TP_STATUS_INVALID_ARGUMENT;
+    }
+    char revalidated_path[TP_IDENTITY_PATH_MAX];
+    const tp_status preflight = save_as_preflight(
+        plan->canonical_path, revalidated_path,
+        err_out, err_cap);
+    if (preflight != TP_STATUS_OK) {
+        return preflight;
+    }
+    if (strcmp(revalidated_path,
+               plan->canonical_path) != 0) {
+        if (err_out && err_cap) {
+            (void)snprintf(
+                err_out, err_cap,
+                "Save As destination identity changed after preparation");
+        }
+        return TP_STATUS_INVALID_ARGUMENT;
     }
     tp_error err = {0};
     tp_session_save_result result;
+    gui_project__invalidate_observation();
     const tp_status st = tp_session_save_as(
-        s_project.session, canonical_path,
+        s_project.session, plan->canonical_path,
         &result, &err);
     if (st != TP_STATUS_OK) {
         if (err_out && err_cap) {
@@ -712,5 +755,23 @@ tp_status gui_project_save_as(const char *path, char *err_out, size_t err_cap) {
             "Saved, but storage durability could not be confirmed");
     }
     return TP_STATUS_OK;
+}
+
+tp_status gui_project_save_as_preflight(
+    const char *path, char *err_out, size_t err_cap) {
+    gui_project_save_as_plan plan;
+    return gui_project_save_as_prepare(
+        path, &plan, err_out, err_cap);
+}
+
+tp_status gui_project_save_as(const char *path, char *err_out, size_t err_cap) {
+    gui_project_save_as_plan plan;
+    const tp_status status =
+        gui_project_save_as_prepare(
+            path, &plan, err_out, err_cap);
+    return status == TP_STATUS_OK
+               ? gui_project_save_as_execute(
+                     &plan, err_out, err_cap)
+               : status;
 }
 // #endregion

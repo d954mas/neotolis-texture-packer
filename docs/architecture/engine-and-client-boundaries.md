@@ -79,20 +79,49 @@ writer produces `project_live`.
 ## Native GUI
 
 The GUI owns one small session host. Views only declare drafts or call typed
-`gui_request_*` ingress. The top-level controller calls `gui_actions_step`
-once between frames; that one function drains intents, advances the internal
-project FSM, consumes typed task/lifecycle terminals, and reconciles
-presentation against the newly borrowed view. Cancel is a deferred request,
-not a direct view-to-session mutation.
+`gui_request_*` ingress from `gui_actions.h`. The host alone includes
+`gui_actions_driver.h` and calls `gui_actions_step` once between frames; that
+one function drains intents, advances the internal project FSM, consumes typed
+task/lifecycle terminals, and reconciles presentation against the newly
+borrowed view. Dev/test blocking adapters are isolated in `gui_actions_dev.h`
+and also drive this actions step. Cancel is a deferred request, not a direct
+view-to-session mutation.
+
+Intent drain is observation-aware: the first mutable session call closes the
+borrowed cut and ends that drain pass. Remaining inputs stay owned by the
+actions controller, `gui_project_step` publishes the next cut, and a later
+controller tick resumes them. This sequencing is internal state, not knowledge
+required from views, dev tooling, or other callers.
+
+The New/Open/Exit confirmation flow is a tagged FSM owned by the actions
+controller: `idle`, `resolve-draft`, `resolve-dirty`, and `open-dialog`. The
+view receives a passive state value and returns one typed choice (`accept`,
+`discard`, or `cancel`) only for a resolve phase. The synchronous OS picker is
+the terminal input for `open-dialog`; that tagged phase retains exclusive
+controller ownership from the Open request through picker selection or cancel.
+Startup recovery is a second typed modal FSM (`idle`, `choose`,
+`resolving`) with passive row access and one typed recovery choice. Neither flow
+has public continuation, modal, or mailbox flags. Host bootstrap, shutdown, and
+blocking dev/test operations use action-controller helpers, so they do not
+reproduce the begin/step/consume sequence.
+
+An active or pending lifecycle flow owns the whole action-controller tick, not
+only its dialog phase. Edit drafts, semantic intents, history requests, file
+dialogs, and jobs remain queued until the typed lifecycle choice reaches a
+terminal and its resulting observation cut is published. Blocking adapters
+likewise wait for a controller step that both enters and leaves with the task
+slot idle; an automatic Refresh queued behind another task is admitted first,
+and either admission or terminal failure is propagated rather than treated as
+quiescence.
 
 `gui_project_step` is an internal host primitive and the sole live-session
 update driver. The project host owns `tp_session_update`, task completion, and
 active/candidate lifecycle cutover. Its explicit states are closed, active,
 intent-specific draining, and ready-to-cutover. A caller never assembles
 apply/pump/poll/end phases and never reconstructs lifecycle state from pointer
-and flag combinations. Architecture gates keep the project step out of the
-public GUI interface, session update/admission out of other GUI modules, and
-host stepping out of views.
+and flag combinations. Architecture gates keep the project step callable only
+by the actions controller, session update/admission out of other GUI modules,
+and both host-driving headers out of views.
 
 The thin mutation adapter still submits one typed operation batch. Source rows
 are rendered from the session-owned immutable runtime projection; the GUI does

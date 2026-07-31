@@ -17,6 +17,7 @@ typedef struct gui_project_state {
     uint64_t observed_source_generation;
     int64_t observed_revision;
     bool snapshot_published;
+    bool observation_valid;
     bool refresh_pending;
     bool discard_retired_session;
     double drain_started_at;
@@ -49,6 +50,7 @@ tp_status gui_project__prepare_candidate_recovery(
     tp_session *session, tp_error *err);
 bool gui_project__ingress_is_open(void);
 tp_session *gui_project__mutation_session(void);
+void gui_project__invalidate_observation(void);
 void gui_project__assert_lifecycle_invariants(void);
 tp_status gui_project__advance_lifecycle(
     gui_project_lifecycle_kind *completed,

@@ -258,6 +258,7 @@ void gui_request_open_preview(const gui_animation_ref *animation) {
 
 /* Creates an animation from the current multi-selection: frames natural-sorted, id from the common
  * prefix (auto "animN" when there is none). Selects the new animation (opens its editor). */
+#ifdef NTPACKER_GUI_SELFTEST
 int create_animation_from_selection(void) {
     if (s_multi_sel_count <= 0) {
         return -1;
@@ -274,10 +275,12 @@ int create_animation_from_selection(void) {
                                          ? tp_session_snapshot_atlas_at(snapshot,
                                                                         atlas_index)
                                          : NULL;
+    const tp_id128 atlas_id =
+        atlas ? atlas->id : tp_id128_nil();
     const gui_project_create_result created =
         atlas
             ? gui_project_create_animation(
-                  atlas->id,
+                  atlas_id,
                   tp_session_snapshot_revision(snapshot),
                   base[0] ? base : NULL,
                   s_sel_sort_refs, n)
@@ -285,25 +288,38 @@ int create_animation_from_selection(void) {
                   .visible_index = -1,
               };
     if (created.committed) {
-        gui_view_select_animation(created.created_id);
-        const tp_session_snapshot *after = gui_project_snapshot();
-        const tp_snapshot_atlas *a = after
-            ? tp_session_snapshot_atlas_by_id(
-                  after, gui_view_atlas_id())
-            : NULL;
-        const tp_snapshot_animation *created_animation =
-            a
-                ? tp_session_snapshot_animation_by_id(
-                      after, a->id, created.created_id)
-                : NULL;
-        set_statusf("Created animation '%s' with %d frame(s) (Ctrl+Z to undo).",
-                    created_animation
-                        ? created_animation->name
-                        : "?",
-                    n);
+        gui_actions__record_created_animation(
+            atlas_id, created.created_id, n, true);
     }
-    return created.visible_index;
+    tp_error error = {{0}};
+    if (gui_actions_step(NULL, &error) !=
+        TP_STATUS_OK) {
+        return -1;
+    }
+    if (!created.committed) {
+        return -1;
+    }
+    snapshot = gui_project_snapshot();
+    atlas = snapshot
+                ? tp_session_snapshot_atlas_by_id(
+                      snapshot, atlas_id)
+                : NULL;
+    for (int index = 0;
+         atlas && index < atlas->animation_count;
+         ++index) {
+        const tp_snapshot_animation *animation =
+            tp_session_snapshot_animation_at(
+                snapshot, atlas_id, index);
+        if (animation &&
+            tp_id128_eq(
+                animation->id,
+                created.created_id)) {
+            return index;
+        }
+    }
+    return -1;
 }
+#endif
 
 /* Appends the current multi-selection (natural-sorted) as frames of one stable animation.
  * DEFERRED: this is called from declare_animation_editor, which holds live
@@ -335,10 +351,16 @@ void open_preview_ref(const gui_animation_ref *ref) {
         return;
     }
     /* Opening the preview is an outer action, so the active draft is SUBMITTED
-     * first and the action continues only on a terminal success -- it must never
-     * silently discard the user's edit (same ordering class as
-     * gui_actions__browse_target). The snapshot is read after the submit. */
+     * first and the action continues only on a terminal success. A real submit
+     * invalidates the borrowed cut, so the stable ref is promoted back to the
+     * intent queue only after project step publishes the next cut. */
+    const bool submitted_draft =
+        gui_draft_phase() != GUI_EDIT_IDLE;
     if (!gui_actions__submit_draft()) {
+        return;
+    }
+    if (submitted_draft) {
+        gui_request_open_preview(ref);
         return;
     }
     const tp_session_snapshot *snapshot = gui_project_snapshot();

@@ -23,7 +23,8 @@
 #include "tp_core/tp_identity.h"
 #include "tp_core/tp_utf8.h"
 
-#include "gui_actions.h" /* do_pack_blocking */
+#include "gui_actions.h"
+#include "gui_actions_dev.h" /* host-driving screenshot adapter */
 #include "gui_canvas.h"  /* s_canvas ops + GUI_CANVAS_ATLAS */
 #include "gui_pack.h"    /* gui_pack_result / gui_pack_debug_force_busy / gui_pack_preview_blocking */
 #include "gui_project.h" /* gui_project_mark_stale / snapshot generation */

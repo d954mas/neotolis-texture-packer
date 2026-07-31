@@ -3,7 +3,6 @@
 
 #include "gui_actions.h"
 #include "gui_actions_internal.h"
-#include "gui_project_driver.h"
 
 #include "gui_defs.h" /* S() -- the compact-strip stop that folds the preview selector away */
 #include "gui_state.h"
@@ -15,9 +14,8 @@
 #include "tinyfiledialogs.h"
 
 #include "clipboard/nt_clipboard.h"
-#if defined(NTPACKER_GUI_DEV_SEAMS) || defined(TP_ENABLE_TEST_SEAMS)
+#include "log/nt_log.h"
 #include "time/nt_time.h"
-#endif
 #include "tp_core/tp_export.h" /* tp_exporter_at -> the preview selector's exporter list */
 #include "tp_core/tp_id.h"
 #include "tp_core/tp_names.h"  /* tp_names_common_prefix (anim id from selection) */
@@ -41,18 +39,45 @@ static gui_pending_history_action s_pending_history_action;
 
 /* Presentation-only mapping from the active stable animation to one Pack result. */
 
-gui_lifecycle_request s_after_confirm;
-bool s_confirm_open;
-bool s_confirm_draft;
-int s_modal_action;
-/* R6b: startup crash-recovery modal glue. The orphan list lives here; the modal reads it via the
- * count/at accessors and requests a per-row action, deferred to gui_actions_step so the
- * Save-As dialog + disk-mutating gui_recovery_resolve run outside nt_ui_begin/end, like s_pending_save_as. */
-bool s_recovery_open;
-double s_last_pack_ms;      /* wall-clock ms of the last successful pack (for the stats line) */
-tp_id128 s_last_pack_atlas_id;
+gui_actions_state s_actions = {
+    .recovery = {.pending_row = -1},
+};
 
-gui_actions_state s_actions = {.recovery_pending_row = -1};
+gui_last_pack_view gui_actions_last_pack_view(void) {
+    return (gui_last_pack_view){
+        .duration_ms = s_actions.last_pack_ms,
+        .atlas_id = s_actions.last_pack_atlas_id,
+    };
+}
+
+gui_lifecycle_view gui_actions_lifecycle_view(void) {
+    return (gui_lifecycle_view){
+        .phase = s_actions.lifecycle.phase,
+        .request = s_actions.lifecycle.request,
+    };
+}
+
+bool gui_actions_lifecycle_active(void) {
+    return s_actions.lifecycle.phase !=
+           GUI_LIFECYCLE_IDLE;
+}
+
+void gui_actions_lifecycle_choose(
+    gui_lifecycle_choice choice) {
+    if ((s_actions.lifecycle.phase !=
+             GUI_LIFECYCLE_RESOLVE_DRAFT &&
+         s_actions.lifecycle.phase !=
+             GUI_LIFECYCLE_RESOLVE_DIRTY) ||
+        choice == GUI_LIFECYCLE_CHOICE_NONE) {
+        return;
+    }
+    s_actions.lifecycle.choice = choice;
+}
+
+void gui_actions_lifecycle_dismiss(void) {
+    gui_actions_lifecycle_choose(
+        GUI_LIFECYCLE_CHOICE_CANCEL);
+}
 
 bool gui_actions_copy_text_available(void) {
     return nt_clipboard_available();
@@ -74,12 +99,9 @@ static tp_id128 selected_animation_id(void) {
 static void undo_redo_settle(tp_id128 animation_id) {
     gui_shell_reset_shown_result();
     cancel_edit();
-    gui_view_reconcile_observation(gui_project_snapshot());
-    if (tp_id128_is_nil(animation_id) ||
-        gui_view_animation_index(
-            gui_project_snapshot()) < 0) {
-        gui_view_select_animation(tp_id128_nil());
-    }
+    s_actions.pending_history_reconcile.animation_id =
+        animation_id;
+    s_actions.pending_history_reconcile.present = true;
     if (s_preview_active) {
         preview_stop();
     }
@@ -153,6 +175,58 @@ bool gui_actions_refresh_should_mark_stale(tp_status status,
     return status == TP_STATUS_OK || sources_invalidated;
 }
 
+bool gui_actions_dev_settle_task(tp_error *err) {
+    const double deadline =
+        nt_time_now() + 120.0;
+    while (nt_time_now() < deadline) {
+        const bool busy_before =
+            gui_project_job_busy();
+        gui_actions_step_result step = {0};
+        const tp_status status =
+            gui_actions_step(&step, err);
+        if (status != TP_STATUS_OK) {
+            return false;
+        }
+        if (step.job_completion_present &&
+            (step.job_completion.kind ==
+                 GUI_PACK_DONE_REFRESH_FAIL ||
+             step.job_completion.kind ==
+                 GUI_PACK_DONE_REFRESH_CANCELLED)) {
+            const tp_status refresh_status =
+                step.job_completion.status !=
+                        TP_STATUS_OK
+                    ? step.job_completion.status
+                    : (step.job_completion.kind ==
+                               GUI_PACK_DONE_REFRESH_CANCELLED
+                           ? TP_STATUS_CANCELLED
+                           : TP_STATUS_BUILDER_FAILED);
+            (void)tp_error_set(
+                err, refresh_status, "%s",
+                step.job_completion.err[0]
+                    ? step.job_completion.err
+                    : "pending source Refresh did not complete");
+            return false;
+        }
+        const bool busy_after =
+            gui_project_job_busy();
+        if (!busy_before && !busy_after) {
+            /* This step ENTERED with a free slot. Therefore any coalesced
+             * automatic Refresh was either admitted and completed here or
+             * there was no controller-owned task left to admit. A busy->idle
+             * terminal is not enough: Refresh admission happens before the
+             * old task is updated to terminal. */
+            return true;
+        }
+        if (busy_after) {
+            nt_time_sleep(0.001);
+        }
+    }
+    (void)tp_error_set(
+        err, TP_STATUS_BUSY,
+        "controller tasks did not reach a confirmed idle boundary");
+    return false;
+}
+
 /* Admit source I/O as the third kind of the session's one task slot. */
 void gui_actions__refresh(void) {
     if (gui_pack_async_busy()) {
@@ -186,55 +260,97 @@ void gui_actions__refresh(void) {
 bool gui_actions_refresh_diff_headless(int *out_added, int *out_removed,
                                        int *out_changed,
                                        int *out_unavailable) {
-#ifdef TP_ENABLE_TEST_SEAMS
-    gui_actions__test_reset_refresh_completion();
-#else
-    const uint64_t before = gui_project_source_runtime_generation();
-#endif
-    char start_error[256] = {0};
-    if (!gui_refresh_async_start(
-            start_error, sizeof start_error)) {
-        return false;
-    }
-#ifdef TP_ENABLE_TEST_SEAMS
-    gui_pack_done done = GUI_PACK_DONE_NONE;
-    gui_pack_result_info info = {0};
-    for (int attempt = 0;
-         attempt < 5000 && done == GUI_PACK_DONE_NONE;
-         ++attempt) {
-        tp_error update_error = {{0}};
-        if (gui_actions_step(
-                NULL, &update_error) != TP_STATUS_OK) {
+    bool reuse_active_refresh =
+        gui_project_job_busy() &&
+        gui_pack_async_active_kind() ==
+            GUI_PACK_ASYNC_REFRESH;
+    for (int run = 0; run < 2; ++run) {
+        if (!reuse_active_refresh) {
+            tp_error settle_error = {{0}};
+            if (gui_project_job_busy() &&
+                !gui_actions_dev_settle_task(
+                    &settle_error)) {
+                nt_log_error(
+                    "gui_actions_refresh_diff_headless: existing task failed to settle: %s",
+                    settle_error.msg[0]
+                        ? settle_error.msg
+                        : "unknown error");
+                return false;
+            }
+            char start_error[256] = {0};
+            if (!gui_refresh_async_start(
+                    start_error,
+                    sizeof start_error)) {
+                nt_log_error(
+                    "gui_actions_refresh_diff_headless: start failed: %s",
+                    start_error[0]
+                        ? start_error
+                        : "unknown error");
+                return false;
+            }
+        }
+        const double deadline =
+            nt_time_now() + 120.0;
+        while (nt_time_now() < deadline) {
+            tp_error update_error = {{0}};
+            gui_actions_step_result step = {0};
+            if (gui_actions_step(
+                    &step, &update_error) !=
+                TP_STATUS_OK) {
+                nt_log_error(
+                    "gui_actions_refresh_diff_headless: actions step failed: %s",
+                    update_error.msg[0]
+                        ? update_error.msg
+                        : "unknown error");
+                return false;
+            }
+            if (step.job_completion_present) {
+                const gui_pack_result_info *info =
+                    &step.job_completion;
+                if (info->kind ==
+                    GUI_PACK_DONE_REFRESH_OK) {
+                    if (out_added) {
+                        *out_added = info->added;
+                    }
+                    if (out_removed) {
+                        *out_removed = info->removed;
+                    }
+                    if (out_changed) {
+                        *out_changed = info->changed;
+                    }
+                    if (out_unavailable) {
+                        *out_unavailable =
+                            info->unavailable;
+                    }
+                    return true;
+                }
+                if (reuse_active_refresh) {
+                    /* A stale/cancelled automatic Refresh cannot satisfy this
+                     * explicit blocking request. Its terminal is consumed;
+                     * run one fresh Refresh without exposing the retry
+                     * sequence to the caller. */
+                    reuse_active_refresh = false;
+                    break;
+                }
+                return false;
+            }
+            if (gui_project_job_busy()) {
+                nt_time_sleep(0.001);
+            } else {
+                nt_log_error(
+                    "gui_actions_refresh_diff_headless: task ended without a classified terminal");
+                return false;
+            }
+        }
+        if (gui_project_job_busy()) {
+            nt_log_error(
+                "gui_actions_refresh_diff_headless: timed out while the task remained active");
             return false;
         }
-        if (!gui_actions__test_take_refresh_completion(
-                &done, &info) &&
-            gui_project_job_busy()) {
-            nt_time_sleep(0.001);
-        }
     }
-    if (done == GUI_PACK_DONE_NONE) {
-        return false;
-    }
-    if (out_added) *out_added = info.added;
-    if (out_removed) *out_removed = info.removed;
-    if (out_changed) *out_changed = info.changed;
-    if (out_unavailable) *out_unavailable = info.unavailable;
-    return done == GUI_PACK_DONE_REFRESH_OK;
-#else
-    while (gui_project_job_busy()) {
-        tp_error update_error = {{0}};
-        if (gui_actions_step(
-                NULL, &update_error) != TP_STATUS_OK) {
-            return false;
-        }
-    }
-    (void)out_added;
-    (void)out_removed;
-    (void)out_changed;
-    (void)out_unavailable;
-    return gui_project_source_runtime_generation() > before;
-#endif
+    nt_log_error(
+        "gui_actions_refresh_diff_headless: refresh ended without a usable terminal");
+    return false;
 }
 #endif
 
@@ -246,6 +362,34 @@ static void gui_actions__drain_intents(void) {
         GUI_PROJECT_LIFECYCLE_ACTIVE) {
         return;
     }
+    if (gui_actions_lifecycle_active()) {
+        /* A tagged lifecycle flow exclusively owns this controller tick. A
+         * resolve phase consumes only its typed choice; open-dialog consumes
+         * only the OS dialog terminal. No edit, gesture, history action, other
+         * dialog, or job request can mutate the session behind either owner.
+         * Deferred inputs resume on a later published observation cut. */
+        if (s_actions.lifecycle.phase ==
+            GUI_LIFECYCLE_OPEN_DIALOG) {
+            gui_actions__run_open_lifecycle_dialog();
+        } else {
+            gui_actions__apply_confirm();
+        }
+        return;
+    }
+    if (s_actions.pending_lifecycle_request !=
+        GUI_LIFECYCLE_REQUEST_NONE) {
+        if (!gui_project_observation_is_valid()) {
+            /* A prerequisite draft/history terminal already closed the cut.
+             * Publish its dirty/identity echo before deciding which lifecycle
+             * question the pending request requires. */
+            return;
+        }
+        /* Establish the lifecycle question before considering any request
+         * queued beside or after it. The caller does not need to order
+         * request_new/open/exit against ordinary semantic ingress. */
+        (void)gui_actions__apply_lifecycle_request();
+        return;
+    }
     const bool save_as_requires_preflight =
         gui_draft_phase() != GUI_EDIT_IDLE &&
         (gui_actions__intent_queued(GUI_INTENT_SAVE_AS) ||
@@ -253,8 +397,10 @@ static void gui_actions__drain_intents(void) {
           !gui_project_has_path()));
     if (save_as_requires_preflight) {
         s_actions.gesture_commit = false;
-        (void)gui_actions__intent_drain(GUI_INTENT_PHASE_DIALOG);
-        gui_actions__clear_pending();
+        gui_actions__intent_drain(GUI_INTENT_PHASE_DIALOG);
+        if (gui_project_observation_is_valid()) {
+            gui_actions__clear_pending();
+        }
         return;
     }
     const tp_session_snapshot *before_atlas =
@@ -283,57 +429,55 @@ static void gui_actions__drain_intents(void) {
             return;
         }
     }
-    const tp_session_snapshot *after_atlas =
-        gui_project_snapshot();
     const int64_t revision_after_atlas =
-        after_atlas
-            ? gui_project_committed_revision()
-            : -1;
+        gui_project_committed_revision();
     if (revision_before_atlas >= 0 &&
         revision_after_atlas >= 0) {
         gui_actions__rebase_deferred_edits(
             revision_before_atlas,
             revision_after_atlas);
     }
+    if (!gui_project_observation_is_valid()) {
+        s_actions.gesture_commit = false;
+        return;
+    }
 
     /* The atlas draft is the prerequisite for the remaining edits in this
      * frame. Only after it reaches a terminal success may dependent edit
      * queues mutate the session. */
-    (void)gui_actions__intent_drain(GUI_INTENT_PHASE_EDIT);
+    gui_actions__intent_drain(GUI_INTENT_PHASE_EDIT);
 
     s_actions.gesture_commit = false;
-
-    if (gui_actions__apply_lifecycle_request() &&
-        gui_project_lifecycle_state_query() !=
-            GUI_PROJECT_LIFECYCLE_ACTIVE) {
+    if (!gui_project_observation_is_valid()) {
         return;
     }
 
     apply_pending_history_action();
-
-    gui_actions__apply_confirm();
-    if (gui_project_lifecycle_state_query() !=
-        GUI_PROJECT_LIFECYCLE_ACTIVE) {
-        return;
-    }
-    if (s_actions.pending_lifecycle_request !=
-        GUI_LIFECYCLE_REQUEST_NONE) {
-        /* A draft terminal is already committed, but its view echo belongs to
-         * project step below. Preserve the lifecycle request for the next
-         * between-frame gate instead of clearing or executing it on stale
-         * dirty state. */
+    if (!gui_project_observation_is_valid()) {
         return;
     }
 
     gui_actions__apply_recovery();
-
-    if (gui_actions__intent_drain(GUI_INTENT_PHASE_DIALOG)) {
-        gui_actions__clear_pending();
+    if (!gui_project_observation_is_valid()) {
         return;
     }
-    (void)gui_actions__intent_drain(GUI_INTENT_PHASE_STRUCTURAL);
-    (void)gui_actions__intent_drain(GUI_INTENT_PHASE_REFRESH);
-    (void)gui_actions__intent_drain(GUI_INTENT_PHASE_PACK);
+
+    gui_actions__intent_drain(GUI_INTENT_PHASE_DIALOG);
+    if (!gui_project_observation_is_valid()) {
+        return;
+    }
+    gui_actions__intent_drain(GUI_INTENT_PHASE_STRUCTURAL);
+    if (!gui_project_observation_is_valid()) {
+        return;
+    }
+    gui_actions__intent_drain(GUI_INTENT_PHASE_REFRESH);
+    if (!gui_project_observation_is_valid()) {
+        return;
+    }
+    gui_actions__intent_drain(GUI_INTENT_PHASE_PACK);
+    if (!gui_project_observation_is_valid()) {
+        return;
+    }
 
     gui_actions__clear_pending();
 }
@@ -341,6 +485,11 @@ static void gui_actions__drain_intents(void) {
 void gui_actions_shutdown(void) {
     gui_actions__intent_shutdown();
     gui_actions__preview_shutdown();
+    s_actions.lifecycle =
+        (gui_lifecycle_flow){0};
+    s_actions.pending_lifecycle_request =
+        GUI_LIFECYCLE_REQUEST_NONE;
+    gui_actions_recovery_dismiss();
 }
 
 void gui_actions__record_job_request(
@@ -381,13 +530,57 @@ tp_status gui_actions_step(
         }
         return status;
     }
-    gui_actions__consume_completion(
-        &project_result.completion);
+    const gui_pack_done completion =
+        gui_actions__consume_completion(
+            &project_result.completion,
+            &result.job_completion);
+    result.job_completion_present =
+        completion != GUI_PACK_DONE_NONE;
     gui_actions__complete_lifecycle(
         project_result.lifecycle_completed);
     gui_actions__reconcile_observation();
     if (out) {
         *out = result;
+    }
+    return TP_STATUS_OK;
+}
+
+tp_status gui_actions_host_open(
+    const char *path, tp_error *err) {
+    const tp_status begin =
+        gui_project_lifecycle_begin_open(
+            path, err);
+    return begin == TP_STATUS_OK
+               ? gui_actions_step(NULL, err)
+               : begin;
+}
+
+tp_status gui_actions_host_shutdown_step(
+    bool *out_closed, tp_error *err) {
+    if (out_closed) {
+        *out_closed = false;
+    }
+    if (gui_project_lifecycle_state_query() ==
+        GUI_PROJECT_LIFECYCLE_ACTIVE) {
+        const tp_status begin =
+            gui_project_lifecycle_begin_shutdown(
+                false, err);
+        if (begin != TP_STATUS_OK) {
+            return begin;
+        }
+    }
+    if (gui_project_lifecycle_state_query() !=
+        GUI_PROJECT_LIFECYCLE_CLOSED) {
+        const tp_status step =
+            gui_actions_step(NULL, err);
+        if (step != TP_STATUS_OK) {
+            return step;
+        }
+    }
+    if (out_closed) {
+        *out_closed =
+            gui_project_lifecycle_state_query() ==
+            GUI_PROJECT_LIFECYCLE_CLOSED;
     }
     return TP_STATUS_OK;
 }

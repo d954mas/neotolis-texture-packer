@@ -52,8 +52,26 @@ view request / typed draft
 ```
 
 Views never pump the session, poll jobs, cancel a job directly, or assemble
-lifecycle phases. The actions controller is the public between-frame ingress;
-the project step is an internal host primitive enforced by architecture gates.
+lifecycle phases. `gui_actions.h` contains only typed input and passive state;
+the host-only `gui_actions_driver.h` exposes the one between-frame actions
+step, and `gui_actions_dev.h` isolates blocking test/dev adapters. The project
+step is an internal primitive callable only by the actions controller, enforced
+by architecture gates.
+New/Open/Exit confirmation is one tagged actions state (`idle`,
+`resolve-draft`, `resolve-dirty`, or `open-dialog`) plus a typed user choice
+for resolve phases. The Open file picker is the terminal input of its own
+exclusive phase, so ordinary queued inputs cannot run between confirmation and
+the selected/cancelled dialog terminal. Views read passive state and submit a
+choice; they do not coordinate modal flags or carry the continuation
+themselves. Startup recovery likewise exposes
+one passive `idle`/`choose`/`resolving` state and typed choices, not a public
+modal flag or mailbox. Startup, shutdown, and blocking test/dev adapters enter
+through action-controller helpers and use the same step, rather than driving a
+second host loop.
+Any mutable session call closes the current borrowed observation cut. The
+controller retains unconsumed typed inputs, publishes a fresh cut through the
+project step, and resumes them on a later tick; callers still use only
+`request -> gui_actions_step -> view`.
 
 ## Current and target boundaries
 

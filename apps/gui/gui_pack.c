@@ -583,7 +583,8 @@ int gui_pack_find_sprite_ref(tp_id128 atlas_id, tp_id128 source_id,
     return -1;
 }
 
-#ifdef TP_ENABLE_TEST_SEAMS
+#if defined(TP_ENABLE_TEST_SEAMS) || \
+    defined(NTPACKER_GUI_SELFTEST)
 static tp_id128 gui_pack_test_atlas_id(int atlas_index) {
     if (atlas_index < 0) {
         return tp_id128_nil();

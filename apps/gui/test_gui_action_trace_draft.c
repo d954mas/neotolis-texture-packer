@@ -981,12 +981,15 @@ void test_conflicted_atlas_rename_new_cancel_preserves_draft(void) {
 
     request_new();
     pump_action_frame();
-    TEST_ASSERT_TRUE(s_confirm_open);
-    TEST_ASSERT_TRUE(s_confirm_draft);
-    s_modal_action = MODAL_CANCEL;
+    TEST_ASSERT_EQUAL_INT(
+        GUI_LIFECYCLE_RESOLVE_DRAFT,
+        gui_actions_lifecycle_view().phase);
+    gui_actions_lifecycle_choose(
+        GUI_LIFECYCLE_CHOICE_CANCEL);
     pump_action_frame();
 
-    TEST_ASSERT_FALSE(s_confirm_open);
+    TEST_ASSERT_FALSE(
+        gui_actions_lifecycle_active());
     TEST_ASSERT_EQUAL_INT(
         GUI_EDIT_CONFLICTED, gui_draft_phase());
     TEST_ASSERT_EQUAL_STRING(
@@ -1001,14 +1004,16 @@ void test_conflicted_atlas_rename_new_discard_continues_without_submit(void) {
 
     request_new();
     pump_action_frame();
-    s_modal_action = MODAL_DISCARD;
+    gui_actions_lifecycle_choose(
+        GUI_LIFECYCLE_CHOICE_DISCARD);
     pump_action_frame();
     pump_action_frame();
 
     TEST_ASSERT_EQUAL_INT(
         GUI_EDIT_IDLE, gui_draft_phase());
-    TEST_ASSERT_TRUE(s_confirm_open);
-    TEST_ASSERT_FALSE(s_confirm_draft);
+    TEST_ASSERT_EQUAL_INT(
+        GUI_LIFECYCLE_RESOLVE_DIRTY,
+        gui_actions_lifecycle_view().phase);
     TEST_ASSERT_EQUAL_INT(
         GUI_PROJECT_LIFECYCLE_ACTIVE,
         gui_project_lifecycle_state_query());
@@ -1018,7 +1023,8 @@ void test_conflicted_atlas_rename_new_discard_continues_without_submit(void) {
     TEST_ASSERT_NOT_NULL(atlas);
     TEST_ASSERT_EQUAL_STRING(
         "foreign-name", atlas->name);
-    s_modal_action = MODAL_CANCEL;
+    gui_actions_lifecycle_choose(
+        GUI_LIFECYCLE_CHOICE_CANCEL);
     pump_action_frame();
 }
 
@@ -1029,21 +1035,24 @@ void test_conflicted_atlas_rename_new_apply_mine_precedes_dirty_choice(void) {
 
     request_new();
     pump_action_frame();
-    s_modal_action = MODAL_SAVE;
+    gui_actions_lifecycle_choose(
+        GUI_LIFECYCLE_CHOICE_ACCEPT);
     pump_action_frame();
     pump_action_frame();
 
     TEST_ASSERT_EQUAL_INT(
         GUI_EDIT_IDLE, gui_draft_phase());
-    TEST_ASSERT_TRUE(s_confirm_open);
-    TEST_ASSERT_FALSE(s_confirm_draft);
+    TEST_ASSERT_EQUAL_INT(
+        GUI_LIFECYCLE_RESOLVE_DIRTY,
+        gui_actions_lifecycle_view().phase);
     const tp_snapshot_atlas *atlas =
         tp_session_snapshot_atlas_by_id(
             gui_project_snapshot(), atlas_id);
     TEST_ASSERT_NOT_NULL(atlas);
     TEST_ASSERT_EQUAL_STRING(
         "mine-to-apply", atlas->name);
-    s_modal_action = MODAL_CANCEL;
+    gui_actions_lifecycle_choose(
+        GUI_LIFECYCLE_CHOICE_CANCEL);
     pump_action_frame();
 }
 

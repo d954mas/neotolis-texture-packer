@@ -12,7 +12,8 @@
 #include "tp_core/tp_scan.h"
 
 #include "gui_paths.h"
-#include "gui_project_driver.h"
+#include "gui_actions_dev.h"
+#include "gui_project.h"
 
 #define GUI_PACK_MAX_ATLASES 64
 
@@ -166,16 +167,6 @@ bool gui_pack_async_start(tp_id128 atlas_id, char *err, size_t err_cap) {
         }
         return false;
     }
-    const tp_session_snapshot *snapshot = gui_project_snapshot();
-    const tp_snapshot_atlas *atlas =
-        snapshot ? tp_session_snapshot_atlas_by_id(snapshot, atlas_id) : NULL;
-    if (!atlas) {
-        if (err) {
-            (void)snprintf(err, err_cap, "no such atlas");
-        }
-        return false;
-    }
-
     tp_error error = {{0}};
     return report_job_start(
         gui_project_job_enqueue_pack(
@@ -406,11 +397,16 @@ static gui_pack_done drive_host_to_completion(
     gui_pack_result_info *out) {
     for (;;) {
         tp_error error = {{0}};
-        gui_project_step_result step = {0};
+        gui_actions_step_result step = {0};
         const tp_status step_status =
-            gui_project_step(
+            gui_actions_step(
                 &step, &error);
         if (step_status != TP_STATUS_OK) {
+            nt_log_error(
+                "gui_pack blocking adapter: actions step failed: %s",
+                error.msg[0]
+                    ? error.msg
+                    : tp_status_str(step_status));
             if (out) {
                 (void)snprintf(
                     out->err, sizeof out->err,
@@ -422,22 +418,11 @@ static gui_pack_done drive_host_to_completion(
             }
             return GUI_PACK_DONE_PACK_FAIL;
         }
-        if (step.lifecycle_completed !=
-            GUI_PROJECT_LIFECYCLE_NONE) {
-            tp_session_job_result_destroy(
-                &step.completion);
+        if (step.job_completion_present) {
             if (out) {
-                (void)snprintf(
-                    out->err, sizeof out->err,
-                    "project lifecycle changed while a blocking job was running");
+                *out = step.job_completion;
             }
-            return GUI_PACK_DONE_PACK_FAIL;
-        }
-        const gui_pack_done done =
-            gui_pack_consume_completion(
-                &step.completion, out);
-        if (done != GUI_PACK_DONE_NONE) {
-            return done;
+            return step.job_completion.kind;
         }
         if (!gui_project_job_busy()) {
             if (out) {
@@ -448,6 +433,25 @@ static gui_pack_done drive_host_to_completion(
         }
         nt_time_sleep(0.001);
     }
+}
+
+/* Translate the shared dev-controller adapter to the legacy text error shape
+ * used by the synchronous Pack/Export helpers. */
+static bool drive_existing_task_to_idle(
+    char *err, size_t err_cap) {
+    tp_error step_error = {{0}};
+    if (gui_actions_dev_settle_task(
+            &step_error)) {
+        return true;
+    }
+    if (err && err_cap > 0U) {
+        (void)snprintf(
+            err, err_cap, "%s",
+            step_error.msg[0]
+                ? step_error.msg
+                : "existing task did not reach a terminal state");
+    }
+    return false;
 }
 
 bool gui_pack_async_busy(void) {
@@ -536,7 +540,9 @@ void gui_pack_debug_force_busy(gui_pack_async_kind kind) {
 
 bool gui_pack_preview_blocking(tp_id128 atlas_id, const char *exporter_id,
                                char *err, size_t err_cap) {
-    if (!gui_pack_preview_async_start(atlas_id, exporter_id, err, err_cap)) {
+    if (!drive_existing_task_to_idle(err, err_cap) ||
+        !gui_pack_preview_async_start(
+            atlas_id, exporter_id, err, err_cap)) {
         return false;
     }
     gui_pack_result_info info;
@@ -567,15 +573,6 @@ bool gui_pack_preview_async_start(tp_id128 atlas_id, const char *exporter_id,
         }
         return false;
     }
-    const tp_session_snapshot *snapshot = gui_project_snapshot();
-    const tp_snapshot_atlas *atlas =
-        snapshot ? tp_session_snapshot_atlas_by_id(snapshot, atlas_id) : NULL;
-    if (!atlas) {
-        if (err) {
-            (void)snprintf(err, err_cap, "no such atlas");
-        }
-        return false;
-    }
     tp_error error = {{0}};
     return report_job_start(
         gui_project_job_enqueue_pack(
@@ -598,7 +595,9 @@ void gui_pack_shutdown(void) {
 
 bool gui_pack_atlas(tp_id128 atlas_id, double *out_ms, char *err,
                     size_t err_cap, char *notice, size_t notice_cap) {
-    if (!gui_pack_async_start(atlas_id, err, err_cap)) {
+    if (!drive_existing_task_to_idle(err, err_cap) ||
+        !gui_pack_async_start(
+            atlas_id, err, err_cap)) {
         return false;
     }
     gui_pack_result_info info;
@@ -624,16 +623,9 @@ bool gui_pack_atlas(tp_id128 atlas_id, double *out_ms, char *err,
 bool gui_pack_export(tp_id128 atlas_id, int *out_targets, int *out_notices,
                      char *err, size_t err_cap, char *notice,
                      size_t notice_cap) {
-    const tp_session_snapshot *snapshot = gui_project_snapshot();
-    const tp_snapshot_atlas *atlas =
-        snapshot ? tp_session_snapshot_atlas_by_id(snapshot, atlas_id) : NULL;
-    if (!atlas) {
-        if (err) {
-            (void)snprintf(err, err_cap, "no such atlas");
-        }
-        return false;
-    }
-    if (!export_start(atlas_id, err, err_cap)) {
+    if (!drive_existing_task_to_idle(err, err_cap) ||
+        !export_start(
+            atlas_id, err, err_cap)) {
         return false;
     }
     gui_pack_result_info info;

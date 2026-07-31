@@ -24,6 +24,7 @@
 #endif
 
 #include "gui_actions.h"
+#include "gui_actions_dev.h"
 #include "gui_canvas.h"
 #include "gui_canvas_internal.h"
 #include "gui_left_layout.h"

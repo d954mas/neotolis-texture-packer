@@ -590,7 +590,7 @@ tp_recovery_internal    tp_recovery|tp_recovery_state_internal|tp_recovery_claim
 tp_recovery_state_internal tp_recovery|tp_recovery_claim|tp_recovery_scan|tp_recovery_store
 tp_job_owner_internal   tp_session|tp_job|tp_refresh_job
 tp_source_runtime_internal tp_source_runtime|tp_refresh_job|tp_session
-tp_project_owned_internal tp_project_owned|tp_project_clone|tp_diff_entity
+tp_project_owned_internal tp_project_owned|tp_project|tp_project_clone|tp_diff_entity
 tp_source_plan_internal tp_source_plan|tp_op_validate|tp_op_validate_source_sprite
 tp_source_path_text_internal tp_source_path_text|tp_op_validate|tp_project|tp_project_identity|tp_project_parse|tp_source_plan
 tp_srckey_internal      tp_srckey|tp_project_identity|tp_op_validate_animation|tp_validate_source|tp_validate_sprite
@@ -1316,6 +1316,66 @@ else
         hit "R24-selftest" "R24 ignored its exact debt allowance"
     rm -rf "$_r24_dir"
     trap - EXIT
+fi
+
+# 25. The GUI has one explicit host driver. Only gui_actions.c advances the
+#     private project FSM; main/dev adapters advance gui_actions_step, and views
+#     can only include the typed ingress/passive-state header.
+_gui_project_step_call='(^|[^A-Za-z0-9_])gui_project_step[[:space:]]*\('
+r25_project=$(find apps/gui -maxdepth 1 -type f \
+    \( -name 'gui*.c' -o -name 'main.c' \) \
+    ! -name 'gui_actions.c' ! -name 'gui_project.c' \
+    ! -name 'gui_selftest.c' |
+    xargs grep -nE "$_gui_project_step_call" 2>/dev/null)
+[ -n "$r25_project" ] &&
+    hit "R25 multiple GUI project FSM drivers" "$r25_project"
+
+_gui_project_test_driver_include='#include[[:space:]]+"gui_project_test_driver[.]h"'
+_gui_test_fixture_include='#include[[:space:]]+"test_gui_[A-Za-z0-9_]*[.]h"'
+r25_shipping_test_driver=$(find apps/gui -maxdepth 1 -type f \
+    \( -name 'gui*.c' -o -name 'main.c' \) \
+    ! -name 'gui_selftest.c' |
+    xargs grep -nE "${_gui_project_test_driver_include}|${_gui_test_fixture_include}" 2>/dev/null)
+[ -n "$r25_shipping_test_driver" ] &&
+    hit "R25 shipping GUI source imports a test driver or fixture" \
+        "$r25_shipping_test_driver"
+
+_gui_view_driver_include='#include[[:space:]]+"gui_actions_(driver|dev)[.]h"'
+r25_view=$(grep -nE "$_gui_view_driver_include" \
+    apps/gui/gui_view_*.c apps/gui/gui_view_*.h 2>/dev/null)
+[ -n "$r25_view" ] &&
+    hit "R25 view includes a host-driving actions contract" "$r25_view"
+
+# A production helper header can otherwise smuggle the project driver into a
+# shipping TU without putting the forbidden call in that TU. Only the concrete
+# driver declaration, the two owning internal surfaces, and the test-only
+# inline driver may name/import it.
+_gui_project_driver_header_include='#include[[:space:]]+"gui_project_(driver|test_driver)[.]h"'
+r25_header=$(find apps/gui -maxdepth 1 -type f -name '*.h' \
+    ! -name 'test_*.h' \
+    ! -name 'gui_actions_internal.h' \
+    ! -name 'gui_project_driver.h' \
+    ! -name 'gui_project_internal.h' \
+    ! -name 'gui_project_test_driver.h' |
+    xargs grep -nE "${_gui_project_step_call}|${_gui_project_driver_header_include}|${_gui_test_fixture_include}" 2>/dev/null)
+[ -n "$r25_header" ] &&
+    hit "R25 production header introduces a project FSM driver" "$r25_header"
+
+if ! printf '    gui_project_step(&result, &error);\n' |
+    grep -qE "$_gui_project_step_call"; then
+    hit "R25-selftest" "R25 failed to catch a seeded second project driver"
+fi
+if ! printf '#include "gui_actions_driver.h"\n' |
+    grep -qE "$_gui_view_driver_include"; then
+    hit "R25-selftest" "R25 failed to catch a seeded view-header driver include"
+fi
+if ! printf '#include "gui_project_test_driver.h"\nstatic bool second_driver(void) { return gui_project_test_new(); }\n' |
+    grep -qE "$_gui_project_test_driver_include"; then
+    hit "R25-selftest" "R25 failed to catch a seeded wrapper-based project driver"
+fi
+if ! printf '#include "test_gui_action_trace_fixture.h"\nstatic bool second_driver(void) { return gui_project_test_new(); }\n' |
+    grep -qE "$_gui_test_fixture_include"; then
+    hit "R25-selftest" "R25 failed to catch a seeded transitive GUI test fixture"
 fi
 
 if [ "$fail" -eq 0 ]; then

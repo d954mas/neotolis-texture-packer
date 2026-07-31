@@ -133,12 +133,32 @@ available for a later `update` retry.
 The GUI client converts typed requests and explicit edit drafts into operations
 in its local `gui_project_operations` lowering module, submits them to the
 session, then renders from the borrowed current view. `gui_actions_step` is the
-one public between-frame boundary. It calls the internal `gui_project_step`,
-which alone updates the active session and receives the owned terminal payload;
-operation lowering, persistence, recovery queries, and views never perform a
-second observation. Typed step receipts report task admission and lifecycle
-completion without exposing a pump sequence. This is not a session adapter or
-client mirror. Drafts are UI state, not a second hidden project copy.
+one host-facing between-frame boundary in `gui_actions_driver.h`; view-facing
+`gui_actions.h` exposes only typed inputs and passive FSM state. The actions
+step calls the internal `gui_project_step`, which alone updates the active
+session and receives the owned terminal payload; operation lowering,
+persistence, recovery queries, and views never perform a second observation.
+Typed step receipts report task admission and lifecycle completion without
+exposing a pump sequence. A failed automatic Refresh admission is a structured
+step error; it is never collapsed into an idle observation that could allow a
+later Pack or Export to run against the old source projection. This is not a
+session adapter or client mirror. Drafts are UI state, not a second hidden
+project copy.
+
+A mutable session call closes the current GUI observation cut immediately.
+Snapshot and source accessors are unavailable until `gui_project_step`
+publishes the next borrowed view. The actions controller therefore stops the
+current drain at that boundary and retains every unconsumed typed input. Later
+calls to the single public `gui_actions_step` resume those inputs only after a
+fresh view has been published. Callers submit inputs and tick one controller;
+they never remember or reconstruct an apply/update/poll sequence.
+
+Several edits captured from the same published revision are also sequenced by
+that controller. After an accepted one-revision transaction, it rebases only
+the retained dependent edit intents from that exact cut; already-stale inputs
+and larger foreign revision jumps remain stale and are rejected normally.
+Save As preparation is bound to the current session instance and revalidates
+the controller/identity guard at execution.
 
 The file CLI uses immutable load/apply-preview facilities for queries and dry
 runs, and a short-lived writable session for saved-file mutations.

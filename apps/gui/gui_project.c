@@ -187,6 +187,7 @@ void gui_project__publish_view(
         ++s_project.snapshot_lifetime_generation;
     }
     s_project.view = view;
+    s_project.observation_valid = view != NULL;
     s_project.snapshot_published =
         publishes_snapshot;
     s_project.published_instance_generation =
@@ -211,14 +212,26 @@ tp_session *gui_project__mutation_session(void) {
                : NULL;
 }
 
+void gui_project__invalidate_observation(void) {
+    s_project.observation_valid = false;
+}
+
+bool gui_project_observation_is_valid(void) {
+    return s_project.observation_valid;
+}
+
 const tp_session_snapshot *gui_project_snapshot(void) {
-    return s_project.view
+    return s_project.observation_valid &&
+                   s_project.view
                ? s_project.view->snapshot
                : NULL;
 }
 
 const tp_source_runtime_projection *gui_project_sources(void) {
-    return s_project.view ? s_project.view->sources : NULL;
+    return s_project.observation_valid &&
+                   s_project.view
+               ? s_project.view->sources
+               : NULL;
 }
 
 uint64_t gui_project_snapshot_lifetime_generation(void) {
@@ -252,24 +265,28 @@ bool gui_project_observed_input_token(
     return true;
 }
 
-static void admit_pending_refresh(void) {
+static tp_status admit_pending_refresh(tp_error *err) {
     if (!s_project.refresh_pending ||
         s_project.lifecycle_state !=
             GUI_PROJECT_LIFECYCLE_ACTIVE ||
         !s_project.session ||
         tp_session_job_active(s_project.session)) {
-        return;
+        return TP_STATUS_OK;
     }
     tp_error error = {{0}};
     const tp_status status =
         gui_project_job_enqueue_refresh(&error);
     if (status == TP_STATUS_OK ||
         status == TP_STATUS_BUSY) {
-        return;
+        return TP_STATUS_OK;
     }
     s_project.refresh_pending = false;
     gui_project__note_session_reject(
         status, &error);
+    if (err) {
+        *err = error;
+    }
+    return status;
 }
 
 tp_status gui_project_step(
@@ -281,7 +298,20 @@ tp_status gui_project_step(
             err, TP_STATUS_NOT_FOUND,
             "GUI host has no live session");
     }
-    admit_pending_refresh();
+    const tp_status refresh_admission_status =
+        admit_pending_refresh(err);
+    if (refresh_admission_status != TP_STATUS_OK) {
+        /* Refresh start invalidates the borrowed observation before entering
+         * the session. A rejected start did not mutate the session, so publish
+         * that same authoritative view again while propagating the structured
+         * admission failure to the sole actions driver. */
+        gui_project__publish_view(
+            tp_session_view(s_project.session));
+        if (out) {
+            *out = result;
+        }
+        return refresh_admission_status;
+    }
     tp_session_job_result completion = {0};
     const tp_status update_status =
         tp_session_update(
@@ -362,6 +392,7 @@ tp_status gui_project_job_enqueue_pack(
         .preview_exporter_id =
             preview_exporter_id,
     };
+    gui_project__invalidate_observation();
     return tp_session_pack_job_start(
         s_project.session, &request, err);
 }
@@ -380,6 +411,7 @@ tp_status gui_project_job_enqueue_export(
             s_project.instance_generation,
         .atlas_id = atlas_id,
     };
+    gui_project__invalidate_observation();
     return tp_session_export_start(
         s_project.session, &request, err);
 }
@@ -394,6 +426,7 @@ tp_status gui_project_job_enqueue_refresh(tp_error *err) {
         .session_instance_generation =
             s_project.instance_generation,
     };
+    gui_project__invalidate_observation();
     const tp_status status =
         tp_session_refresh_start(
         s_project.session, &request, err);
@@ -405,12 +438,14 @@ tp_status gui_project_job_enqueue_refresh(tp_error *err) {
 
 tp_status gui_project_job_enqueue_cancel(
     tp_error *err) {
-    return s_project.session
-               ? tp_session_job_cancel(
-                     s_project.session, err)
-               : tp_error_set(
-                     err, TP_STATUS_NOT_FOUND,
-                     "GUI host has no live session");
+    if (!s_project.session) {
+        return tp_error_set(
+            err, TP_STATUS_NOT_FOUND,
+            "GUI host has no live session");
+    }
+    gui_project__invalidate_observation();
+    return tp_session_job_cancel(
+        s_project.session, err);
 }
 
 bool gui_project_job_busy(void) {
@@ -430,7 +465,8 @@ gui_project_job_active_kind(void) {
 
 tp_session_job_observed_state
 gui_project_job_observed_state(void) {
-    return s_project.view
+    return s_project.observation_valid &&
+                   s_project.view
                ? s_project.view->task
                : (tp_session_job_observed_state){0};
 }

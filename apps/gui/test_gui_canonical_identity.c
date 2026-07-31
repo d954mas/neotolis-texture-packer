@@ -14,6 +14,7 @@
 #endif
 
 #include "gui_actions.h"
+#include "gui_actions_dev.h"
 #include "gui_canvas.h"
 #include "gui_pack.h"
 #include "gui_pack_internal.h"
@@ -1105,6 +1106,7 @@ void test_controller_guard_rejects_identity_change_before_flush_or_write(void) {
         gui_project_save_as(
             first_path, error,
             sizeof error));
+    publish_project_frame();
     snapshot = gui_project_snapshot();
     atlas = tp_session_snapshot_atlas_at(
         snapshot, 0);
@@ -1221,6 +1223,36 @@ void test_save_as_preflight_success_does_not_submit_or_write(void) {
     (void)remove(path);
 }
 
+void test_save_as_plan_cannot_cross_a_session_replacement(void) {
+    char path[TP_IDENTITY_PATH_MAX];
+    (void)snprintf(
+        path, sizeof path,
+        "%s/stale-save-plan.ntpacker_project",
+        TP_GUI_IDENTITY_TEST_DIR);
+    (void)remove(path);
+    gui_project_save_as_plan plan = {0};
+    char error[256] = {0};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_project_save_as_prepare(
+            path, &plan, error, sizeof error));
+    const uint64_t prepared_generation =
+        plan.instance_generation;
+
+    TEST_ASSERT_TRUE(gui_project_test_new());
+    TEST_ASSERT_NOT_EQUAL(
+        prepared_generation,
+        gui_project_session_instance_generation());
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_INVALID_ARGUMENT,
+        gui_project_save_as_execute(
+            &plan, error, sizeof error));
+    TEST_ASSERT_NOT_NULL(
+        strstr(error, "replaced project session"));
+    TEST_ASSERT_FALSE(tp_scan_exists(path));
+    (void)remove(path);
+}
+
 void test_open_current_canonical_identity_rejects_before_replacement(void) {
     char path[TP_IDENTITY_PATH_MAX];
     (void)snprintf(
@@ -1276,6 +1308,7 @@ void test_deleted_pack_target_is_typed_failure_not_cancelled(void) {
     TEST_ASSERT_TRUE(
         gui_pack_async_start(
             1, error, sizeof error));
+    admit_queued_job();
 
     /* Host admission captures the target before the model mutation, but
      * observation classification intentionally happens after deletion. */
@@ -2273,6 +2306,7 @@ void test_delayed_animation_context_ref_never_retargets_after_index_shift(void) 
 
     gui_request_remove_animation_ref(&captured_second);
     gui_actions__test_drain_intents();
+    publish_project_frame();
 
     snapshot = gui_project_snapshot();
     TEST_ASSERT_NOT_NULL(tp_session_snapshot_animation_by_id(
@@ -2285,8 +2319,8 @@ void test_delayed_animation_context_ref_never_retargets_after_index_shift(void) 
     TEST_ASSERT_EQUAL_INT(2, after->animation_count);
     char error[256];
     error[0] = '\0';
-    TEST_ASSERT_TRUE(gui_project_take_op_error(error, sizeof error));
-    TEST_ASSERT_NOT_NULL(strstr(error, "revision"));
+    TEST_ASSERT_NOT_NULL(strstr(s_status, "Edit rejected"));
+    TEST_ASSERT_NOT_NULL(strstr(s_status, "revision"));
 }
 
 void test_delayed_target_context_ref_never_retargets_after_index_shift(void) {
@@ -2322,6 +2356,7 @@ void test_delayed_target_context_ref_never_retargets_after_index_shift(void) {
 
     gui_request_remove_target_ref(&captured_second);
     gui_actions__test_drain_intents();
+    publish_project_frame();
 
     snapshot = gui_project_snapshot();
     TEST_ASSERT_NOT_NULL(tp_session_snapshot_target_by_id(
@@ -2331,10 +2366,8 @@ void test_delayed_target_context_ref_never_retargets_after_index_shift(void) {
     atlas = tp_session_snapshot_atlas_by_id(snapshot, atlas_id);
     TEST_ASSERT_NOT_NULL(atlas);
     TEST_ASSERT_EQUAL_INT(2, atlas->target_count);
-    char error[256] = {0};
-    TEST_ASSERT_TRUE(
-        gui_project_take_op_error(error, sizeof error));
-    TEST_ASSERT_NOT_NULL(strstr(error, "revision"));
+    TEST_ASSERT_NOT_NULL(strstr(s_status, "Edit rejected"));
+    TEST_ASSERT_NOT_NULL(strstr(s_status, "revision"));
 }
 
 void test_required_recovery_without_root_warns_but_allows_edit_undo_redo(void) {
@@ -2626,10 +2659,9 @@ void test_save_as_projects_clean_identity_only_at_common_frame_observation(void)
         gui_project_save_as(
             save_path, error, sizeof error));
 
-    /* The save terminal is synchronous, but presentation remains pinned to the
-     * prior borrowed view until the common frame observation. */
-    TEST_ASSERT_TRUE(gui_project_is_dirty());
-    TEST_ASSERT_FALSE(gui_project_has_path());
+    /* The save terminal is synchronous and invalidates the old borrowed cut.
+     * Presentation becomes readable again only at the common observation. */
+    TEST_ASSERT_FALSE(gui_project_observation_is_valid());
     publish_project_frame();
     TEST_ASSERT_FALSE(gui_project_is_dirty());
     TEST_ASSERT_TRUE(gui_project_has_path());
@@ -2789,6 +2821,8 @@ int main(int argc, char **argv) {
         test_controller_guard_rejects_identity_change_before_flush_or_write);
     RUN_TEST(
         test_save_as_preflight_success_does_not_submit_or_write);
+    RUN_TEST(
+        test_save_as_plan_cannot_cross_a_session_replacement);
     RUN_TEST(
         test_open_current_canonical_identity_rejects_before_replacement);
     RUN_TEST(test_required_recovery_without_root_warns_but_allows_edit_undo_redo);
