@@ -354,6 +354,19 @@ static int check_pack(const cJSON *root, int argc, char **argv) {
             return fail("pack: a page is missing w/h or occupancy_pct out of (0,100]");
         }
     }
+    const cJSON *report_atlas = NULL;
+    cJSON_ArrayForEach(report_atlas, atlases) {
+        const cJSON *report_targets =
+            cJSON_GetObjectItemCaseSensitive(report_atlas, "targets");
+        const cJSON *report_target = NULL;
+        cJSON_ArrayForEach(report_target, report_targets) {
+            if (!cJSON_IsBool(cJSON_GetObjectItemCaseSensitive(
+                    report_target, "publication_uncertain"))) {
+                return fail(
+                    "pack: target missing/!bool: publication_uncertain");
+            }
+        }
+    }
     const cJSON *totals = cJSON_GetObjectItemCaseSensitive(root, "totals");
     const cJSON *tok = cJSON_GetObjectItemCaseSensitive(totals, "targets_ok");
     const cJSON *tfail = cJSON_GetObjectItemCaseSensitive(totals, "targets_failed");

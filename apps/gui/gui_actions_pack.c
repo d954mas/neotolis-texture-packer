@@ -220,7 +220,7 @@ void gui_actions__preview_target_start(int combo_index) {
         preview_target_reset();
         return;
     }
-    const tp_exporter *e = tp_exporter_at(combo_index - 1);
+    const tp_format_descriptor *e = tp_format_at(combo_index - 1);
     if (!e) {
         preview_target_reset();
         return;
@@ -249,14 +249,14 @@ void gui_actions__preview_target_start(int combo_index) {
     char err[256] = {0};
     const bool admitted =
         gui_pack_preview_async_start(
-            a->id, e->format->id, err, sizeof err);
+            a->id, e->id, err, sizeof err);
     gui_actions__record_job_request(
         GUI_JOB_REQUEST_PREVIEW, admitted,
         admitted ? "" : err);
     if (admitted) {
         s_preview_target = combo_index;
         set_statusf_ex(STATUS_INFO, "Preview: %s\xE2\x80\xA6",
-                       e->format->display_name ? e->format->display_name : e->format->id);
+                       e->display_name ? e->display_name : e->id);
     } else {
         preview_target_reset();
         set_statusf_ex(STATUS_ERROR, "Preview failed: %s", err);
@@ -390,20 +390,20 @@ static gui_pack_done poll_async(
             } else {
                 /* The degradation chip is width-gated (STRIP_CHIP_MIN_W) and drops on common window
                  * sizes, so the pill also carries the summary -- it is width-independent. */
-                const tp_exporter *pe = tp_exporter_at(s_preview_target - 1);
+                const tp_format_descriptor *pe = tp_format_at(s_preview_target - 1);
                 if (pe) {
                     char chip[96] = {0};
                     char tip[256] = {0};
                     const int nd = gui_pack_preview_diff(
                         gui_view_atlas_id(),
-                        pe->format->id, chip, sizeof chip,
+                        pe->id, chip, sizeof chip,
                         tip, sizeof tip);
                     if (nd > 0) {
                         set_statusf_ex(STATUS_WARNING, "Previewing %s export: %s",
-                                       pe->format->display_name ? pe->format->display_name : pe->format->id, chip);
+                                       pe->display_name ? pe->display_name : pe->id, chip);
                     } else {
                         set_statusf_ex(STATUS_SUCCESS, "Previewing %s export: same layout rules as native.",
-                                       pe->format->display_name ? pe->format->display_name : pe->format->id);
+                                       pe->display_name ? pe->display_name : pe->id);
                     }
                 }
             }

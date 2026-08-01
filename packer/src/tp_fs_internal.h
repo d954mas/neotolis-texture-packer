@@ -47,9 +47,9 @@ bool tp_fs_write_file(const char *path_utf8, const void *data, size_t size);
 /* ------------------------------------------------------------------ */
 /*
  * The publisher (tp_export_publish) owns the policy; this module
- * owns the three names it needs and the cross-run reaper. Every private name is
- * "<something>.tp-<role>-<hexpid>-<hexserial>", so a leftover always says which
- * process owned it and the reaper can decide by liveness alone.
+ * owns the three names it needs. Every private name is
+ * "<something>.tp-<role>-<hexpid>-<hexserial>" and belongs only to the call that
+ * created it; later exports never scan, adopt, restore, or delete leftovers.
  *
  * Staging is a SIBLING of the output directory on purpose: promotion must be a
  * pure rename, which requires the same volume, and the caller's request/work dir

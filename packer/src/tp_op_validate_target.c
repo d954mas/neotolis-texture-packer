@@ -39,7 +39,7 @@ tp_status tp_op_validate_target_family(
             if (exporter_status != TP_STATUS_OK) {
                 return exporter_status;
             }
-            if (!tp_exporter_find(t->exporter_id)) {
+            if (!tp_format_find(t->exporter_id)) {
                 return tp_op__reject(rej, TP_STATUS_NOT_FOUND, "exporter_id", "unknown exporter id '%s'",
                                      t->exporter_id ? t->exporter_id : "");
             }
@@ -72,7 +72,7 @@ tp_status tp_op_validate_target_family(
                 if (exporter_status != TP_STATUS_OK) {
                     return exporter_status;
                 }
-                if (!tp_exporter_find(t->exporter_id)) {
+                if (!tp_format_find(t->exporter_id)) {
                     return tp_op__reject(
                         rej, TP_STATUS_NOT_FOUND, "exporter_id",
                         "unknown exporter id '%s'", t->exporter_id);

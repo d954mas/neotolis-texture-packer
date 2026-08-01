@@ -27,10 +27,10 @@
 #include "tp_core/tp_arena.h"
 #include "tp_core/tp_export.h"
 #include "tp_core/tp_identity.h"
+#include "tp_export_internal.h"
+#include "tp_file_lease.h"
 #include "tp_fs_internal.h"
 #include "unity.h"
-
-#define tp_export_prepared tp_export_ir
 
 /* A pid no host can have running: below INT_MAX so POSIX kill(pid, 0) probes it
  * at all, above every platform's pid ceiling, and not a multiple of four so
@@ -148,19 +148,18 @@ static tp_status publish(const char *const *outputs, int count,
     };
     tp_exporter exporter = {.format = &format, .serialize = plan_serialize};
     tp_export_page ir_page = {.artifact_id = 0, .w = 1, .h = 1};
-    tp_export_prepared ir = {
+    tp_export_ir ir = {
         .version = TP_EXPORT_IR_VERSION,
-        .target_id = "test-set-publish",
         .atlas_name = "set-publish",
         .pixels_per_unit = 1.0F,
         .pages = &ir_page,
         .page_count = 1,
-        .scale = 1.0F,
     };
     uint8_t pixel[4] = {1, 2, 3, 255};
     tp_page page = {.image_name = "page", .w = 1, .h = 1, .rgba = pixel};
     tp_result packed = {.pages = &page, .page_count = 1};
     tp_export_artifact_plan plan = {
+        .format_id = format.id,
         .out_path_base = g_base,
         .artifacts = artifacts,
         .artifact_count = document_count + 1,
@@ -238,21 +237,19 @@ static tp_status publish_page_set(const char *base, tp_page *pages,
                                   tp_arena *arena,
                                   tp_export_artifact_plan *out_plan,
                                   tp_error *err) {
-    tp_export_prepared ir = {
+    tp_export_ir ir = {
         .version = TP_EXPORT_IR_VERSION,
-        .target_id = "test-pages",
         .atlas_name = "page-set",
         .pixels_per_unit = 1.0F,
         .pages = ir_pages,
         .page_count = page_count,
-        .scale = 1.0F,
     };
     tp_result packed = {
         .atlas_name = "page-set", .pixels_per_unit = 1.0F,
         .pages = pages, .page_count = page_count,
     };
     tp_status status = tp_export_artifact_plan_build(
-        &g_page_set_exporter, &ir, base, arena, out_plan, err);
+        g_page_set_exporter.format, &ir, base, arena, out_plan, err);
     return status == TP_STATUS_OK
                ? tp_export_publish(&g_page_set_exporter, &ir, &packed,
                                    out_plan, NULL, NULL, NULL, err)
@@ -300,6 +297,86 @@ static void test_listed_set_publishes(void) {
                               "a published set must not keep its rollback copies");
 
     tp_export_notices_free(&notices);
+    (void)tp_fs_remove_file(primary);
+    (void)tp_fs_remove_file(page);
+}
+
+/* A destination lease is the publication ownership boundary: overlap is a
+ * typed rejection before the serializer, while the permanent sidecar becomes
+ * reusable as soon as the live handle closes. */
+static void test_live_destination_lease_blocks_before_serializer(void) {
+    char primary[TP_IDENTITY_PATH_MAX];
+    char page[TP_IDENTITY_PATH_MAX];
+    char lock_path[TP_FS_STAGE_PATH_MAX];
+    AT_BASE(primary, ".json");
+    AT_BASE(page, "-0.png");
+    TEST_ASSERT_TRUE(snprintf(lock_path, sizeof lock_path,
+                              "%s.ntpacker-export.lock", primary) > 0);
+    seed(primary, "OLD-META");
+    seed(page, "OLD-PAGE");
+
+    tp_file_lease *lease = NULL;
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_file_lease_acquire(lock_path, TP_STATUS_EXPORT_BUSY,
+                              "fixture destination", primary, &lease, &error),
+        error.msg);
+
+    plan_add(".json");
+    const char *outputs[2] = {primary, page};
+    bool writer_ran = true;
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_EXPORT_BUSY,
+        publish(outputs, 2, NULL, &writer_ran, &error), error.msg);
+    TEST_ASSERT_FALSE(writer_ran);
+    TEST_ASSERT_TRUE(file_holds(primary, "OLD-META"));
+    TEST_ASSERT_TRUE(file_holds(page, "OLD-PAGE"));
+    TEST_ASSERT_FALSE(any_entry_containing(".tp-stage-"));
+    TEST_ASSERT_FALSE(any_entry_containing(".tp-old-"));
+
+    tp_file_lease_release(lease);
+    writer_ran = false;
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK, publish(outputs, 2, NULL, &writer_ran, &error),
+        error.msg);
+    TEST_ASSERT_TRUE(writer_ran);
+    TEST_ASSERT_TRUE(file_holds(primary, "NEW"));
+
+    (void)tp_fs_remove_file(primary);
+    (void)tp_fs_remove_file(page);
+}
+
+/* An unrelated destination in the same directory must not serialize all
+ * exports through a directory-wide lock. */
+static void test_disjoint_destination_lease_does_not_block(void) {
+    char primary[TP_IDENTITY_PATH_MAX];
+    char page[TP_IDENTITY_PATH_MAX];
+    char foreign[TP_IDENTITY_PATH_MAX];
+    char lock_path[TP_FS_STAGE_PATH_MAX];
+    AT_BASE(primary, ".json");
+    AT_BASE(page, "-0.png");
+    IN_DIR(foreign, "unrelated.json");
+    TEST_ASSERT_TRUE(snprintf(lock_path, sizeof lock_path,
+                              "%s.ntpacker-export.lock", foreign) > 0);
+
+    tp_file_lease *lease = NULL;
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_file_lease_acquire(lock_path, TP_STATUS_EXPORT_BUSY,
+                              "fixture destination", foreign, &lease, &error),
+        error.msg);
+
+    plan_add(".json");
+    const char *outputs[2] = {primary, page};
+    bool writer_ran = false;
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK, publish(outputs, 2, NULL, &writer_ran, &error),
+        error.msg);
+    TEST_ASSERT_TRUE(writer_ran);
+
+    tp_file_lease_release(lease);
     (void)tp_fs_remove_file(primary);
     (void)tp_fs_remove_file(page);
 }
@@ -355,14 +432,12 @@ static void test_publisher_rejects_a_mutated_typed_plan_before_serializer(void) 
     uint8_t pixel[4] = {10, 20, 30, 255};
     tp_page page = {.image_name = "p0", .w = 1, .h = 1, .rgba = pixel};
     tp_export_page ir_page = {.artifact_id = 0, .w = 1, .h = 1};
-    tp_export_prepared ir = {
+    tp_export_ir ir = {
         .version = TP_EXPORT_IR_VERSION,
-        .target_id = "test-pages",
         .atlas_name = "page-set",
         .pixels_per_unit = 1.0F,
         .pages = &ir_page,
         .page_count = 1,
-        .scale = 1.0F,
     };
     tp_result packed = {
         .atlas_name = "page-set", .pixels_per_unit = 1.0F,
@@ -374,9 +449,19 @@ static void test_publisher_rejects_a_mutated_typed_plan_before_serializer(void) 
     TEST_ASSERT_NOT_NULL(arena);
     TEST_ASSERT_EQUAL_INT_MESSAGE(
         TP_STATUS_OK,
-        tp_export_artifact_plan_build(&g_page_set_exporter, &ir, base, arena,
+        tp_export_artifact_plan_build(g_page_set_exporter.format, &ir, base, arena,
                                       &plan, &error),
         error.msg);
+    const char *format_id = plan.format_id;
+    plan.format_id = "other-format";
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_INVALID_ARGUMENT,
+        tp_export_publish(&g_page_set_exporter, &ir, &packed, &plan, NULL,
+                          NULL, NULL, &error));
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        0, g_write_calls,
+        "publisher must reject a plan bound to another format before serialization");
+    plan.format_id = format_id;
     plan.artifacts[1].kind = TP_EXPORT_ARTIFACT_DOCUMENT;
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_INVALID_ARGUMENT,
@@ -394,10 +479,10 @@ static void test_publisher_rejects_a_null_plan_path_before_dereference(void) {
     uint8_t pixel[4] = {10, 20, 30, 255};
     tp_page page = {.image_name = "p0", .w = 1, .h = 1, .rgba = pixel};
     tp_export_page ir_page = {.artifact_id = 0, .w = 1, .h = 1};
-    tp_export_prepared ir = {
-        .version = TP_EXPORT_IR_VERSION, .target_id = "test-pages",
+    tp_export_ir ir = {
+        .version = TP_EXPORT_IR_VERSION,
         .atlas_name = "page-set", .pixels_per_unit = 1.0F,
-        .pages = &ir_page, .page_count = 1, .scale = 1.0F,
+        .pages = &ir_page, .page_count = 1,
     };
     tp_result packed = {
         .atlas_name = "page-set", .pixels_per_unit = 1.0F,
@@ -409,7 +494,7 @@ static void test_publisher_rejects_a_null_plan_path_before_dereference(void) {
     TEST_ASSERT_NOT_NULL(arena);
     TEST_ASSERT_EQUAL_INT_MESSAGE(
         TP_STATUS_OK,
-        tp_export_artifact_plan_build(&g_page_set_exporter, &ir, base, arena,
+        tp_export_artifact_plan_build(g_page_set_exporter.format, &ir, base, arena,
                                       &plan, &error),
         error.msg);
     plan.artifacts[1].path = NULL;
@@ -427,10 +512,10 @@ static void test_publisher_revalidates_ir_before_serializer(void) {
     uint8_t pixel[4] = {10, 20, 30, 255};
     tp_page page = {.image_name = "p0", .w = 1, .h = 1, .rgba = pixel};
     tp_export_page ir_page = {.artifact_id = 0, .w = 1, .h = 1};
-    tp_export_prepared ir = {
-        .version = TP_EXPORT_IR_VERSION, .target_id = "test-pages",
+    tp_export_ir ir = {
+        .version = TP_EXPORT_IR_VERSION,
         .atlas_name = "page-set", .pixels_per_unit = 1.0F,
-        .pages = &ir_page, .page_count = 1, .scale = 1.0F,
+        .pages = &ir_page, .page_count = 1,
     };
     tp_result packed = {
         .atlas_name = "page-set", .pixels_per_unit = 1.0F,
@@ -442,7 +527,7 @@ static void test_publisher_revalidates_ir_before_serializer(void) {
     TEST_ASSERT_NOT_NULL(arena);
     TEST_ASSERT_EQUAL_INT_MESSAGE(
         TP_STATUS_OK,
-        tp_export_artifact_plan_build(&g_page_set_exporter, &ir, base, arena,
+        tp_export_artifact_plan_build(g_page_set_exporter.format, &ir, base, arena,
                                       &plan, &error),
         error.msg);
     ir.sprite_count = 1;
@@ -461,10 +546,10 @@ static void test_publisher_validates_ir_counts_before_plan_arithmetic(void) {
     uint8_t pixel[4] = {10, 20, 30, 255};
     tp_page page = {.image_name = "p0", .w = 1, .h = 1, .rgba = pixel};
     tp_export_page ir_page = {.artifact_id = 0, .w = 1, .h = 1};
-    tp_export_prepared ir = {
-        .version = TP_EXPORT_IR_VERSION, .target_id = "test-pages",
+    tp_export_ir ir = {
+        .version = TP_EXPORT_IR_VERSION,
         .atlas_name = "page-set", .pixels_per_unit = 1.0F,
-        .pages = &ir_page, .page_count = 1, .scale = 1.0F,
+        .pages = &ir_page, .page_count = 1,
     };
     tp_result packed = {
         .atlas_name = "page-set", .pixels_per_unit = 1.0F,
@@ -476,7 +561,7 @@ static void test_publisher_validates_ir_counts_before_plan_arithmetic(void) {
     TEST_ASSERT_NOT_NULL(arena);
     TEST_ASSERT_EQUAL_INT_MESSAGE(
         TP_STATUS_OK,
-        tp_export_artifact_plan_build(&g_page_set_exporter, &ir, base, arena,
+        tp_export_artifact_plan_build(g_page_set_exporter.format, &ir, base, arena,
                                       &plan, &error),
         error.msg);
     ir.page_count = INT_MAX;
@@ -938,6 +1023,8 @@ int main(int argc, char **argv) {
     }
     UNITY_BEGIN();
     RUN_TEST(test_listed_set_publishes);
+    RUN_TEST(test_live_destination_lease_blocks_before_serializer);
+    RUN_TEST(test_disjoint_destination_lease_does_not_block);
     RUN_TEST(test_page_count_shrink_preserves_files_outside_the_new_plan);
     RUN_TEST(test_publisher_rejects_a_mutated_typed_plan_before_serializer);
     RUN_TEST(test_publisher_rejects_a_null_plan_path_before_dereference);

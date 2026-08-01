@@ -21,13 +21,11 @@
 #include "tp_core/tp_arena.h"
 #include "tp_core/tp_export.h"
 #include "tp_core/tp_pack_result.h"
+#include "tp_export_internal.h"
 #include "tp_name_map.h"
 #include "tp_pack_read.h"
 #include "unity.h"
 
-#define tp_export_prepared tp_export_ir
-#define tp_normalize(result, opts, arena, out, err) \
-    tp_export_ir_build((result), (opts), "json-test", (arena), (out), (err))
 
 #include "tp_fixtures.h"
 
@@ -45,7 +43,7 @@ static tp_name_map *g_names;
 static const char *g_dir;
 
 static tp_status publish_json(const tp_result *result,
-                              const tp_export_prepared *ir,
+                              const tp_export_ir *ir,
                               const tp_export_caps *caps, const char *base,
                               tp_export_notices *notices, tp_error *err) {
     static const tp_format_artifact_decl artifacts[] = {
@@ -59,7 +57,8 @@ static tp_status publish_json(const tp_result *result,
         .format = &format, .serialize = tp_export_json_neotolis_serialize,
     };
     tp_export_artifact_plan plan;
-    tp_status st = tp_export_artifact_plan_build(&exporter, ir, base, g_arena,
+    tp_status st = tp_export_artifact_plan_build(exporter.format, ir, base,
+                                                 g_arena,
                                                   &plan, err);
     return st == TP_STATUS_OK
                ? tp_export_publish(&exporter, ir, result, &plan, notices, NULL,
@@ -128,9 +127,9 @@ static cJSON *sprite_by_name(cJSON *root, const char *name) {
 
 /* Exports one case to its own base; leaves the parsed cJSON to the caller. */
 static bool export_case(jc *j) {
-    tp_export_prepared prep;
+    tp_export_ir prep;
     tp_error e = {{0}};
-    if (tp_normalize(j->res, NULL, g_arena, &prep, &e) != TP_STATUS_OK) {
+    if (tp_export_ir_build(j->res, NULL, g_arena, &prep, &e) != TP_STATUS_OK) {
         (void)fprintf(stderr, "normalize failed for %s: %s\n", j->cs->name, e.msg);
         return false;
     }
@@ -354,9 +353,9 @@ void test_determinism_reexport(void) {
             TEST_ASSERT_NOT_NULL_MESSAGE(pg1[p], "page png snapshot");
         }
 
-        tp_export_prepared prep;
+        tp_export_ir prep;
         tp_error e = {{0}};
-        TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_normalize(g[i].res, NULL, g_arena, &prep, &e));
+        TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_export_ir_build(g[i].res, NULL, g_arena, &prep, &e));
         tp_export_caps caps = tp_export_caps_full();
         tp_export_notices notices;
         tp_export_notices_init(&notices);
@@ -388,7 +387,7 @@ void test_determinism_reexport(void) {
 }
 
 void test_metadata_path_above_legacy_limit_reaches_the_filesystem_boundary(void) {
-    tp_export_prepared prep;
+    tp_export_ir prep;
     tp_export_caps caps = tp_export_caps_full();
     char base[1200];
     const int prefix = snprintf(base, sizeof base, "%s/missing-long-path/", g_dir);
@@ -397,10 +396,10 @@ void test_metadata_path_above_legacy_limit_reaches_the_filesystem_boundary(void)
     base[1100] = '\0';
     tp_error err = {{0}};
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
-                          tp_normalize(g[0].res, NULL, g_arena, &prep, &err));
+                          tp_export_ir_build(g[0].res, NULL, g_arena, &prep, &err));
 
     TEST_ASSERT_EQUAL_INT(
-        TP_STATUS_BAD_PROJECT,
+        TP_STATUS_PATH_RESOLVE_FAILED,
         publish_json(g[0].res, &prep, &caps, base, NULL, &err));
     TEST_ASSERT_TRUE(strlen(err.msg) > 0U);
 }

@@ -36,6 +36,7 @@
 #include "tp_core/tp_arena.h"
 #include "tp_core/tp_export.h"
 #include "tp_core/tp_export_run.h"
+#include "tp_export_job_internal.h"
 #include "tp_core/tp_identity.h"
 #include "tp_core/tp_input.h"
 #include "tp_core/tp_operation.h"

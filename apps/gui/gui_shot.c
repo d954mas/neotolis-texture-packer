@@ -19,7 +19,7 @@
 #include "ui/nt_ui.h"         /* nt_ui_get_bbox / nt_ui_bbox_t */
 #include "window/nt_window.h" /* g_nt_window (framebuffer dims) */
 
-#include "tp_core/tp_export.h" /* tp_exporter_count/at -> map --shot-preview id to a selector index */
+#include "tp_core/tp_export.h" /* tp_format_count/at -> map --shot-preview id to a selector index */
 #include "tp_core/tp_identity.h"
 #include "tp_core/tp_utf8.h"
 
@@ -232,15 +232,15 @@ void gui_shot_tick(void) {
                 gui_view_atlas_id(), s_shot_preview,
                 perr, sizeof perr)) {
             int idx = -1;
-            for (int i = 0; i < tp_exporter_count(); i++) {
-                const tp_exporter *e = tp_exporter_at(i);
-                if (e && strcmp(e->format->id, s_shot_preview) == 0) {
+            for (int i = 0; i < tp_format_count(); i++) {
+                const tp_format_descriptor *e = tp_format_at(i);
+                if (e && strcmp(e->id, s_shot_preview) == 0) {
                     idx = i;
                     break;
                 }
             }
             if (idx >= 0) {
-                s_preview_target = idx + 1; /* 0 = Native; k = exporter k-1 */
+                s_preview_target = idx + 1; /* 0 = Native; k = format k-1 */
             }
         } else {
             nt_log_error("SHOT: preview '%s' failed: %s", s_shot_preview, perr);

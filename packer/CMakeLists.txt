@@ -20,7 +20,7 @@ add_library(tp_core STATIC
     src/tp_export_defold.c
     # Project identity, canonical paths, leases, source plans, and recovery.
     src/tp_id.c src/tp_identity.c src/tp_identity_session.c src/tp_source_path_text.c src/tp_source_plan.c
-    src/tp_project_lease.c src/tp_recovery.c src/tp_recovery_store.c src/tp_recovery_claim.c src/tp_recovery_scan.c
+    src/tp_file_lease.c src/tp_project_lease.c src/tp_recovery.c src/tp_recovery_store.c src/tp_recovery_claim.c src/tp_recovery_scan.c
     # Latching producer side of tp_cancel_token over a destructive-read channel.
     src/tp_cancel_source.c
     # Fixed client capability vocabulary and matrix.

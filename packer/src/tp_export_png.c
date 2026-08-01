@@ -5,6 +5,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "tp_file_lease.h"
+#include "tp_export_internal.h"
 #include "tp_fs_internal.h"
 
 /* Vendored builder-only writer, linked directly into tp_core (NOT via
@@ -112,9 +114,96 @@ typedef struct publish_entry {
     bool promoted;      /* the staged file was renamed onto the destination      */
 } publish_entry;
 
-static void publish_entries_free(publish_entry *entries, int count) {
-    (void)count;
-    free(entries);
+#define TP_EXPORT_LEASE_SUFFIX ".ntpacker-export.lock"
+
+typedef struct publish_lease {
+    char path[TP_FS_STAGE_PATH_MAX];
+    const char *destination;
+    tp_file_lease *file;
+} publish_lease;
+
+static int publish_lease_compare(const void *left, const void *right) {
+    const publish_lease *a = (const publish_lease *)left;
+    const publish_lease *b = (const publish_lease *)right;
+    return strcmp(a->path, b->path);
+}
+
+static bool publish_has_suffix(const char *value, const char *suffix) {
+    const size_t value_len = strlen(value);
+    const size_t suffix_len = strlen(suffix);
+    if (value_len < suffix_len) {
+        return false;
+    }
+    const char *tail = value + value_len - suffix_len;
+    for (size_t i = 0; i < suffix_len; ++i) {
+        const char left = tail[i] >= 'A' && tail[i] <= 'Z'
+                              ? (char)(tail[i] - 'A' + 'a')
+                              : tail[i];
+        const char right = suffix[i] >= 'A' && suffix[i] <= 'Z'
+                               ? (char)(suffix[i] - 'A' + 'a')
+                               : suffix[i];
+        if (left != right) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static void publish_leases_release(publish_lease *leases, int count) {
+    if (!leases) {
+        return;
+    }
+    for (int i = 0; i < count; ++i) {
+        tp_file_lease_release(leases[i].file);
+    }
+    free(leases);
+}
+
+/* Own every destination slot before the serializer or staging writer runs.
+ * Sorting gives overlapping sets one stable acquisition order. The permanent
+ * sidecar is only a rendezvous name; the live OS handle is the ownership. */
+static tp_status publish_leases_acquire(const publish_entry *entries, int count,
+                                        publish_lease **out, tp_error *err) {
+    *out = NULL;
+    publish_lease *leases =
+        (publish_lease *)calloc((size_t)count, sizeof *leases);
+    if (!leases) {
+        return tp_error_set(err, TP_STATUS_OOM,
+                            "export publish: OOM allocating destination leases");
+    }
+    for (int i = 0; i < count; ++i) {
+        if (publish_has_suffix(entries[i].destination,
+                               TP_EXPORT_LEASE_SUFFIX)) {
+            free(leases);
+            return tp_error_set(
+                err, TP_STATUS_INVALID_ARGUMENT,
+                "export output '%s' uses the reserved publication-lease suffix",
+                entries[i].destination);
+        }
+        const int length = snprintf(leases[i].path, sizeof leases[i].path,
+                                    "%s%s", entries[i].destination,
+                                    TP_EXPORT_LEASE_SUFFIX);
+        if (length < 0 || (size_t)length >= sizeof leases[i].path) {
+            free(leases);
+            return tp_error_set(
+                err, TP_STATUS_OUT_OF_BOUNDS,
+                "export publication lease path exceeds the canonical path limit for '%s'",
+                entries[i].destination);
+        }
+        leases[i].destination = entries[i].destination;
+    }
+    qsort(leases, (size_t)count, sizeof *leases, publish_lease_compare);
+    for (int i = 0; i < count; ++i) {
+        const tp_status status = tp_file_lease_acquire(
+            leases[i].path, TP_STATUS_EXPORT_BUSY, "export destination",
+            leases[i].destination, &leases[i].file, err);
+        if (status != TP_STATUS_OK) {
+            publish_leases_release(leases, count);
+            return status;
+        }
+    }
+    *out = leases;
+    return TP_STATUS_OK;
 }
 
 static bool publish_is_sep(char c) {
@@ -195,12 +284,12 @@ static const char *publish_rollback_clause(int unrestored, char *buf, size_t cap
 }
 
 /* The complete listed set is verified BEFORE the first irreversible rename:
- * every staged file present, no destination an existing directory, and no staged
- * file the list missed. */
+ * every file the common publisher wrote is present and no destination is an
+ * existing directory. Serializers are memory-only and cannot create unlisted
+ * staging files. */
 static tp_status publish_verify_staged_set(const tp_exporter *exp,
                                            const publish_entry *entries,
-                                           int count, const char *staging,
-                                           tp_error *err) {
+                                           int count, tp_error *err) {
     for (int f = 0; f < count; f++) {
         if (!tp_fs_exists(entries[f].staged)) {
             return tp_error_set(err, TP_STATUS_BAD_PROJECT,
@@ -216,52 +305,6 @@ static tp_status publish_verify_staged_set(const tp_exporter *exp,
         }
     }
 
-    /* A staged file the enumeration missed is an output that would silently
-     * vanish with the staging dir, so it is a verdict, not a cleanup discovery.
-     * An unreadable staging dir fails CLOSED: an unverified set is exactly the
-     * set this scan exists to reject. */
-    tp_fs_dir *dir = tp_fs_dir_open(staging);
-    if (!dir) {
-        return tp_error_set(err, TP_STATUS_BAD_PROJECT,
-                            "exporter '%s': the export staging directory could "
-                            "not be read, so its output set could not be "
-                            "verified; nothing was published (existing outputs "
-                            "are untouched)",
-                            exp->format->id);
-    }
-    char leftover[TP_FS_NAME_MAX];
-    leftover[0] = '\0';
-    tp_fs_dir_entry entry;
-    tp_fs_dir_result step = TP_FS_DIR_END;
-    while (leftover[0] == '\0' &&
-           (step = tp_fs_dir_next(dir, &entry)) == TP_FS_DIR_ENTRY) {
-        bool listed = false;
-        for (int f = 0; f < count && !listed; f++) {
-            listed = strcmp(entries[f].leaf, entry.name) == 0;
-        }
-        if (!listed) {
-            (void)snprintf(leftover, sizeof leftover, "%s", entry.name);
-        }
-    }
-    /* TP_FS_DIR_END is the only clean way out; TP_FS_DIR_ERROR means the scan
-     * stopped early and the remaining entries were never compared. */
-    const bool unreadable = step == TP_FS_DIR_ERROR;
-    tp_fs_dir_close(dir);
-    if (unreadable) {
-        return tp_error_set(err, TP_STATUS_BAD_PROJECT,
-                            "exporter '%s': the export staging directory could "
-                            "not be enumerated to its end, so its output set "
-                            "could not be verified; nothing was published "
-                            "(existing outputs are untouched)",
-                            exp->format->id);
-    }
-    if (leftover[0] != '\0') {
-        return tp_error_set(err, TP_STATUS_BAD_PROJECT,
-                            "exporter '%s' produced '%s' outside its declared "
-                            "output list; nothing was published (existing "
-                            "outputs are untouched)",
-                            exp->format->id, leftover);
-    }
     return TP_STATUS_OK;
 }
 
@@ -346,11 +389,11 @@ tp_status tp_export_publish(const tp_exporter *exp,
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
                             "export publish requires a matching exporter, IR, packed pages, and artifact plan");
     }
-    tp_status validation = tp_export_ir_validate(ir, err);
+    tp_status validation = tp_export_format_admit(exp->format, ir, err);
     if (validation != TP_STATUS_OK) {
         return validation;
     }
-    if (strcmp(ir->target_id, exp->format->id) != 0 ||
+    if (!plan->format_id || strcmp(plan->format_id, exp->format->id) != 0 ||
         !plan->out_path_base || !plan->artifacts ||
         plan->document_count < 0 ||
         plan->artifact_count < plan->document_count ||
@@ -411,7 +454,7 @@ tp_status tp_export_publish(const tp_exporter *exp,
                 "cannot cover it, so nothing was written",
                 exp->format->id, plan->artifacts[f].path,
                 cut > 0 ? out_dir : ".");
-            publish_entries_free(entries, output_file_count);
+            free(entries);
             return st;
         }
     }
@@ -426,7 +469,7 @@ tp_status tp_export_publish(const tp_exporter *exp,
                 "('%s' and '%s' differ only by ASCII case, which Windows and "
                 "macOS resolve to one file); nothing was written",
                 exp->format->id, f, g, entries[f].leaf, entries[g].leaf);
-            publish_entries_free(entries, output_file_count);
+            free(entries);
             return st;
         }
     }
@@ -445,7 +488,7 @@ tp_status tp_export_publish(const tp_exporter *exp,
             tp_export_output_path(out_path_base, decl->suffix, expected, err) !=
                 TP_STATUS_OK ||
             strcmp(artifact->path, expected) != 0) {
-            publish_entries_free(entries, output_file_count);
+            free(entries);
             return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
                                 "export document plan entry %d does not match format '%s'",
                                 d, exp->format->id);
@@ -469,21 +512,30 @@ tp_status tp_export_publish(const tp_exporter *exp,
             packed->pages[p].w != ir->pages[p].w ||
             packed->pages[p].h != ir->pages[p].h ||
             packed->pages[p].premultiplied != ir->pages[p].premultiplied) {
-            publish_entries_free(entries, output_file_count);
+            free(entries);
             return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
                                 "export page plan entry %d does not match IR and packed page",
                                 p);
         }
     }
 
+    publish_lease *leases = NULL;
+    tp_status st =
+        publish_leases_acquire(entries, output_file_count, &leases, err);
+    if (st != TP_STATUS_OK) {
+        free(entries);
+        return st;
+    }
+
     char staging[TP_FS_STAGE_PATH_MAX];
     if (!tp_fs_stage_dir_create(out_dir, staging, sizeof staging)) {
-        const tp_status st = tp_error_set(
+        st = tp_error_set(
             err, TP_STATUS_BAD_PROJECT,
             "cannot create the export staging directory under '%s' (existing "
             "outputs are untouched)",
             cut > 0 ? out_dir : ".");
-        publish_entries_free(entries, output_file_count);
+        publish_leases_release(leases, output_file_count);
+        free(entries);
         return st;
     }
 
@@ -496,12 +548,13 @@ tp_status tp_export_publish(const tp_exporter *exp,
     }
     if (!mapped) {
         tp_fs_remove_tree(staging);
-        const tp_status st = tp_error_set(
+        st = tp_error_set(
             err, TP_STATUS_OUT_OF_BOUNDS,
             "exporter '%s': the staged form of its output set exceeds the "
             "canonical path limit, so nothing was written",
             exp->format->id);
-        publish_entries_free(entries, output_file_count);
+        publish_leases_release(leases, output_file_count);
+        free(entries);
         return st;
     }
 
@@ -509,7 +562,8 @@ tp_status tp_export_publish(const tp_exporter *exp,
         (size_t)plan->document_count, sizeof *documents);
     if (!documents) {
         tp_fs_remove_tree(staging);
-        publish_entries_free(entries, output_file_count);
+        publish_leases_release(leases, output_file_count);
+        free(entries);
         return tp_error_set(err, TP_STATUS_OOM,
                             "export publish: OOM allocating serializer documents");
     }
@@ -522,7 +576,7 @@ tp_status tp_export_publish(const tp_exporter *exp,
     if (out_serializer_ran) {
         *out_serializer_ran = true;
     }
-    tp_status st = exp->serialize(&ctx, documents, plan->document_count, err);
+    st = exp->serialize(&ctx, documents, plan->document_count, err);
     for (int d = 0; st == TP_STATUS_OK && d < plan->document_count; ++d) {
         if (!documents[d].data || documents[d].size == 0U) {
             st = tp_error_set(err, TP_STATUS_BAD_PROJECT,
@@ -548,14 +602,14 @@ tp_status tp_export_publish(const tp_exporter *exp,
     }
     free(documents);
     if (st == TP_STATUS_OK) {
-        st = publish_verify_staged_set(exp, entries, output_file_count, staging,
-                                       err);
+        st = publish_verify_staged_set(exp, entries, output_file_count, err);
     }
     if (st == TP_STATUS_OK) {
         st = publish_swap(entries, output_file_count,
                           out_publication_uncertain, err);
     }
     tp_fs_remove_tree(staging);
-    publish_entries_free(entries, output_file_count);
+    publish_leases_release(leases, output_file_count);
+    free(entries);
     return st;
 }

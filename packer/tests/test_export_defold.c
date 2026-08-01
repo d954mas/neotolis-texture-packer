@@ -42,14 +42,11 @@
 #include "tp_pack_read.h"
 #include "tp_core/tp_project.h"
 #include "tp_core/tp_build_worker.h"
+#include "tp_export_internal.h"
+#include "tp_export_job_internal.h"
 #include "tp_project_mutation_internal.h"
 #include "unity.h"
 
-#define tp_export_prepared tp_export_ir
-#define tp_normalize_opts tp_export_ir_opts
-#define tp_normalize_opts_defaults tp_export_ir_opts_defaults
-#define tp_normalize(result, opts, arena, out, err) \
-    tp_export_ir_build((result), (opts), "defold-test", (arena), (out), (err))
 
 #include "tp_fixtures.h"
 
@@ -101,7 +98,7 @@ static const tp_export_caps *defold_caps(void) {
 }
 
 static tp_status publish_defold(const tp_result *result,
-                                const tp_export_prepared *ir,
+                                const tp_export_ir *ir,
                                 const tp_export_caps *caps, const char *base,
                                 tp_export_notices *notices, tp_arena *arena,
                                 tp_error *err) {
@@ -117,7 +114,7 @@ static tp_status publish_defold(const tp_result *result,
         .format = &format, .serialize = tp_export_defold_serialize,
     };
     tp_export_artifact_plan plan;
-    tp_status st = tp_export_artifact_plan_build(&exporter, ir, base, arena,
+    tp_status st = tp_export_artifact_plan_build(exporter.format, ir, base, arena,
                                                   &plan, err);
     return st == TP_STATUS_OK
                ? tp_export_publish(&exporter, ir, result, &plan, notices, NULL,
@@ -460,16 +457,16 @@ void test_golden_bytes(void) {
                               .playback = 1,
                               .flip_h = true,
                               .flip_v = false};
-    tp_normalize_opts opts;
-    tp_normalize_opts_defaults(&opts);
+    tp_export_ir_opts opts;
+    tp_export_ir_opts_defaults(&opts);
     opts.animations = &spin;
     opts.animation_count = 1;
     opts.sprite_refs = sprite_refs;
     opts.sprite_ref_count = 2;
 
-    tp_export_prepared prep;
+    tp_export_ir prep;
     tp_error e = {{0}};
-    TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_OK, tp_normalize(&r, &opts, ar, &prep, &e), e.msg);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_OK, tp_export_ir_build(&r, &opts, ar, &prep, &e), e.msg);
 
     tp_export_notices notices;
     tp_export_notices_init(&notices);
@@ -554,9 +551,9 @@ void test_rotated_geometry(void) {
     r.sprites = &s;
     r.sprite_count = 1;
 
-    tp_export_prepared prep;
+    tp_export_ir prep;
     tp_error e = {{0}};
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_normalize(&r, NULL, ar, &prep, &e));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_export_ir_build(&r, NULL, ar, &prep, &e));
     tp_export_notices notices;
     tp_export_notices_init(&notices);
     char proj[1024];
@@ -643,9 +640,9 @@ void test_hull_untrimmed_space(void) {
     r.sprites = &s;
     r.sprite_count = 1;
 
-    tp_export_prepared prep;
+    tp_export_ir prep;
     tp_error e = {{0}};
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_normalize(&r, NULL, ar, &prep, &e));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_export_ir_build(&r, NULL, ar, &prep, &e));
     tp_export_notices notices;
     tp_export_notices_init(&notices);
     char base[1024];
@@ -721,9 +718,9 @@ static bool export_trivial(const char *base, tp_arena *ar, tp_export_notices *no
     r.page_count = 1;
     r.sprites = &s;
     r.sprite_count = 1;
-    tp_export_prepared prep;
+    tp_export_ir prep;
     tp_error e = {{0}};
-    if (tp_normalize(&r, NULL, ar, &prep, &e) != TP_STATUS_OK) {
+    if (tp_export_ir_build(&r, NULL, ar, &prep, &e) != TP_STATUS_OK) {
         return false;
     }
     return publish_defold(&r, &prep, defold_caps(), base, notices, ar, &e) ==
@@ -814,15 +811,15 @@ void test_tpatlas_referential_integrity(void) {
                               .playback = 1,
                               .flip_h = false,
                               .flip_v = false};
-    tp_normalize_opts opts;
-    tp_normalize_opts_defaults(&opts);
+    tp_export_ir_opts opts;
+    tp_export_ir_opts_defaults(&opts);
     opts.animations = &spin;
     opts.animation_count = 1;
     opts.sprite_refs = sprite_refs;
     opts.sprite_ref_count = 2;
-    tp_export_prepared prep;
+    tp_export_ir prep;
     tp_error e = {{0}};
-    TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_OK, tp_normalize(&r, &opts, ar, &prep, &e), e.msg);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_OK, tp_export_ir_build(&r, &opts, ar, &prep, &e), e.msg);
     tp_export_notices notices;
     tp_export_notices_init(&notices);
     char base[1024];
@@ -866,8 +863,8 @@ static bool export_fixture(const char *case_name, const char *base, tp_arena *ar
     if (tp_pack_read_file(pack, names, ar, &results, &count, e) != TP_STATUS_OK || count != 1) {
         return false;
     }
-    tp_export_prepared prep;
-    if (tp_normalize(results[0], NULL, ar, &prep, e) != TP_STATUS_OK) {
+    tp_export_ir prep;
+    if (tp_export_ir_build(results[0], NULL, ar, &prep, e) != TP_STATUS_OK) {
         return false;
     }
     tp_export_notices notices;
@@ -1088,16 +1085,16 @@ void test_playback_enum_and_flags(void) {
     in[6].id = "p6"; in[6].playback = 6;
     in[7].id = "pX"; in[7].playback = 99; in[7].flip_h = true; in[7].flip_v = true;
 
-    tp_normalize_opts opts;
-    tp_normalize_opts_defaults(&opts);
+    tp_export_ir_opts opts;
+    tp_export_ir_opts_defaults(&opts);
     opts.animations = in;
     opts.sprite_refs = sprite_refs;
     opts.sprite_ref_count = 1;
     opts.animation_count = 8;
 
-    tp_export_prepared prep;
+    tp_export_ir prep;
     tp_error e = {{0}};
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_normalize(&r, &opts, ar, &prep, &e));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_export_ir_build(&r, &opts, ar, &prep, &e));
     tp_export_notices notices;
     tp_export_notices_init(&notices);
     char base[1024];
@@ -1213,8 +1210,8 @@ static bool pack_demo_atlas(const demo_atlas *da, tp_arena *ar) {
             }
         }
 
-        tp_normalize_opts opts;
-        tp_normalize_opts_defaults(&opts);
+        tp_export_ir_opts opts;
+        tp_export_ir_opts_defaults(&opts);
         const tp_id128 demo_source = {{4}};
         tp_export_sprite_ref_in *demo_refs = (tp_export_sprite_ref_in *)tp_arena_alloc(
             ar, (size_t)da->file_count * sizeof *demo_refs);
@@ -1249,9 +1246,9 @@ static bool pack_demo_atlas(const demo_atlas *da, tp_arena *ar) {
             opts.animation_count = 1;
         }
         /* Explicit project animations only; no filename auto-grouping. */
-        tp_export_prepared prep;
+        tp_export_ir prep;
         if (ok) {
-            ok = tp_normalize(res, &opts, ar, &prep, &e) == TP_STATUS_OK;
+            ok = tp_export_ir_build(res, &opts, ar, &prep, &e) == TP_STATUS_OK;
         }
         if (ok) {
             char b[1024];
@@ -1390,14 +1387,12 @@ void test_demo_atlases(void) {
 
 void test_defold_output_listing_rejects_suffix_overflow_atomically(void) {
     tp_export_page page = {.artifact_id = 0, .w = 1, .h = 1};
-    tp_export_prepared prep = {
+    tp_export_ir prep = {
         .version = TP_EXPORT_IR_VERSION,
-        .target_id = "defold",
         .atlas_name = "long-path",
         .pixels_per_unit = 1.0F,
         .pages = &page,
         .page_count = 1,
-        .scale = 1.0F,
     };
     char base[TP_IDENTITY_PATH_MAX];
     const size_t base_len = TP_IDENTITY_PATH_MAX - strlen(".tpatlas");
@@ -1410,32 +1405,25 @@ void test_defold_output_listing_rejects_suffix_overflow_atomically(void) {
 
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OUT_OF_BOUNDS,
-        tp_export_artifact_plan_build(tp_exporter_find("defold"), &prep, base,
+        tp_export_artifact_plan_build(tp_exporter_find("defold")->format, &prep, base,
                                       arena, &plan, &err));
     TEST_ASSERT_TRUE(strlen(err.msg) > 0U);
     tp_arena_destroy(arena);
 }
 
-void test_artifact_plan_rejects_wrong_target_and_unsupported_transform(void) {
+void test_artifact_plan_rejects_unsupported_transform(void) {
     tp_export_page page = {.artifact_id = 0, .w = 1, .h = 1};
-    tp_export_prepared prep = {
+    tp_export_ir prep = {
         .version = TP_EXPORT_IR_VERSION,
-        .target_id = "json-neotolis",
         .atlas_name = "plan-boundary",
         .pixels_per_unit = 1.0F,
         .pages = &page,
         .page_count = 1,
-        .scale = 1.0F,
     };
     tp_arena *arena = tp_arena_create(0);
     tp_error error = {{0}};
     tp_export_artifact_plan plan;
     TEST_ASSERT_NOT_NULL(arena);
-    TEST_ASSERT_EQUAL_INT(
-        TP_STATUS_INVALID_ARGUMENT,
-        tp_export_artifact_plan_build(tp_exporter_find("defold"), &prep,
-                                      "plan-boundary", arena, &plan, &error));
-
     tp_export_sprite sprite = {0};
     sprite.final_name = "hero";
     sprite.data.name = "hero";
@@ -1450,12 +1438,11 @@ void test_artifact_plan_rejects_wrong_target_and_unsupported_transform(void) {
     sprite.data.pivot.y = 0.5F;
     sprite.data.alias_of = -1;
     sprite.data.transform = TP_TRANSFORM_FLIP_H;
-    prep.target_id = "defold";
     prep.sprites = &sprite;
     prep.sprite_count = 1;
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_INVALID_ARGUMENT,
-        tp_export_artifact_plan_build(tp_exporter_find("defold"), &prep,
+        tp_export_artifact_plan_build(tp_exporter_find("defold")->format, &prep,
                                       "plan-boundary", arena, &plan, &error));
     tp_arena_destroy(arena);
 }
@@ -1469,7 +1456,7 @@ void test_defold_metadata_path_above_legacy_limit_reaches_the_filesystem_boundar
     };
     tp_arena *arena = tp_arena_create(0);
     TEST_ASSERT_NOT_NULL(arena);
-    tp_export_prepared prep;
+    tp_export_ir prep;
     tp_export_caps caps = tp_export_caps_full();
     char base[1200];
     const int prefix = snprintf(base, sizeof base, "%s/missing-long-path/", g_dir);
@@ -1478,10 +1465,10 @@ void test_defold_metadata_path_above_legacy_limit_reaches_the_filesystem_boundar
     base[1100] = '\0';
     tp_error err = {{0}};
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
-                          tp_normalize(&result, NULL, arena, &prep, &err));
+                          tp_export_ir_build(&result, NULL, arena, &prep, &err));
 
     TEST_ASSERT_EQUAL_INT(
-        TP_STATUS_BAD_PROJECT,
+        TP_STATUS_PATH_RESOLVE_FAILED,
         publish_defold(&result, &prep, &caps, base, NULL, arena, &err));
     TEST_ASSERT_TRUE(strlen(err.msg) > 0U);
     tp_arena_destroy(arena);
@@ -1510,7 +1497,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_playback_enum_and_flags);
     RUN_TEST(test_demo_atlases);
     RUN_TEST(test_defold_output_listing_rejects_suffix_overflow_atomically);
-    RUN_TEST(test_artifact_plan_rejects_wrong_target_and_unsupported_transform);
+    RUN_TEST(test_artifact_plan_rejects_unsupported_transform);
     RUN_TEST(test_defold_metadata_path_above_legacy_limit_reaches_the_filesystem_boundary);
     return UNITY_END();
 }

@@ -18,8 +18,9 @@ through a shared core rather than separate GUI and automation models.
 - full-fidelity `json-neotolis` export;
 - Defold export with explicit capability adaptation and loss notices;
 - target-capability adaptation with structured loss notices;
-- versioned immutable Export IR, native format descriptors, deterministic
-  artifact plans, and rollback-backed common publication for handled failures;
+- target-neutral versioned immutable Export IR reused per effective pack result,
+  native format descriptors, deterministic artifact plans, and rollback-backed
+  common publication with destination ownership for handled failures;
 - semantic revision, dirty state, Undo/Redo, durable Save, and best-effort
   recovery;
 - worker-process containment for fallible builder work;
@@ -48,7 +49,7 @@ Given the same:
 
 - canonical project state;
 - normalized decoded source pixels;
-- target exporter/profile and effective settings;
+- target format and effective settings;
 - packer/format implementation versions;
 
 the persistent outputs and structured non-timing report fields are

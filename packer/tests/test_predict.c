@@ -1,10 +1,8 @@
 /* Degradation-prediction consistency. Proves tp_export_predict_loss
  * is the single source of truth the GUI chip and CLI dry-run both read:
- *   - project-knowable axes (transform/polygon/slice9/pivot) are enumerated from the
- *     project with a NULL prep;
- *   - pack-dependent axes (alias/multipage) appear only with a prep;
- *   - every writer-emitted project-knowable notice field_id is ALSO predicted
- *     (narrowed superset) -- so predict never under-reports what a real export drops. */
+ *   - project-only GUI preview enumerates transform/polygon/slice9/pivot;
+ *   - actual execution takes pivot/slice9/alias from the packed IR;
+ *   - dry and wet orchestration share this one capability-loss owner. */
 
 #define _CRT_SECURE_NO_WARNINGS
 
@@ -19,10 +17,11 @@
 #include "tp_core/tp_pack.h"
 #include "tp_core/tp_project.h"
 #include "tp_core/tp_build_worker.h"
+#include "tp_export_internal.h"
+#include "tp_export_job_internal.h"
 #include "tp_project_mutation_internal.h"
 #include "unity.h"
 
-#define tp_export_prepared tp_export_ir
 
 void setUp(void) {}
 void tearDown(void) {}
@@ -146,75 +145,77 @@ void test_exporter_registry_enforces_exact_canonical_id_bound(void) {
                           tp_exporter_find(g_boundary_exporter_id));
 }
 
-void test_predict_alias_with_prep(void) {
-    /* A prep whose sprite "b" dedups to "a" -- exactly what duplicate images pack to.
-     * A caps.aliases=false target must predict the dropped alias, but only WITH a prep
-     * (a NULL-prep predict cannot know aliases exist). */
+void test_predict_alias_with_ir(void) {
+    /* An IR whose sprite "b" dedups to "a" -- exactly what duplicate images
+     * pack to. An aliases=false target can predict that loss only from an IR. */
     tp_project *p = tp_project_create();
     tp_export_sprite sprs[2] = {
         {.final_name = "a", .data = {.alias_of = -1}},
         {.final_name = "b", .data = {.alias_of = 0}},
     };
-    tp_result r;
-    memset(&r, 0, sizeof r);
-    r.atlas_name = "t";
-    r.pixels_per_unit = 1.0F;
-    r.page_count = 1;
-    tp_export_prepared prep;
-    memset(&prep, 0, sizeof prep);
-    prep.page_count = r.page_count;
-    prep.sprites = sprs;
-    prep.sprite_count = 2;
-    prep.scale = 1.0F;
+    tp_export_ir ir = {.sprites = sprs, .sprite_count = 2};
 
     tp_export_caps caps = tp_export_caps_full();
     caps.aliases = false;
     tp_error e = {{0}};
 
-    tp_export_notices with_prep;
-    tp_export_notices_init(&with_prep);
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_export_predict_loss(p, 0, &caps, "t", &prep, &with_prep, &e));
-    TEST_ASSERT_TRUE_MESSAGE(has_field(&with_prep, TP_NOTICE_FIELD_ALIAS), "opt_prep predict covers the alias axis");
+    tp_export_notices with_ir;
+    tp_export_notices_init(&with_ir);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_export_predict_loss(p, 0, &caps, "t", &ir, &with_ir, &e));
+    TEST_ASSERT_TRUE_MESSAGE(has_field(&with_ir, TP_NOTICE_FIELD_ALIAS),
+                             "IR-aware prediction covers the alias axis");
 
-    tp_export_notices no_prep;
-    tp_export_notices_init(&no_prep);
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_export_predict_loss(p, 0, &caps, "t", NULL, &no_prep, &e));
-    TEST_ASSERT_FALSE_MESSAGE(has_field(&no_prep, TP_NOTICE_FIELD_ALIAS), "alias axis excluded when prep == NULL");
+    tp_export_notices no_ir;
+    tp_export_notices_init(&no_ir);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_export_predict_loss(p, 0, &caps, "t", NULL, &no_ir, &e));
+    TEST_ASSERT_FALSE_MESSAGE(has_field(&no_ir, TP_NOTICE_FIELD_ALIAS),
+                              "alias axis is unavailable without an IR");
 
-    tp_export_notices_free(&with_prep);
-    tp_export_notices_free(&no_prep);
+    tp_export_notices_free(&with_ir);
+    tp_export_notices_free(&no_ir);
     tp_project_destroy(p);
 }
 
-void test_predict_multipage_with_prep(void) {
-    tp_project *p = tp_project_create();
-    tp_result r;
-    memset(&r, 0, sizeof r);
-    r.atlas_name = "t";
-    r.pixels_per_unit = 1.0F;
-    r.page_count = 2; /* multi-page */
-    tp_export_prepared prep;
-    memset(&prep, 0, sizeof prep);
-    prep.page_count = r.page_count;
-    prep.scale = 1.0F;
-
-    tp_export_caps caps = tp_export_caps_full();
-    caps.multipage = false;
+void test_single_page_format_rejects_multipage_ir_before_planning(void) {
+    tp_export_page pages[2] = {
+        {.artifact_id = 0, .w = 8, .h = 8},
+        {.artifact_id = 1, .w = 8, .h = 8},
+    };
+    tp_export_ir ir = {
+        .version = TP_EXPORT_IR_VERSION,
+        .atlas_name = "two-pages",
+        .pixels_per_unit = 1.0F,
+        .pages = pages,
+        .page_count = 2,
+    };
+    char format_id[] = "test-single-page";
+    tp_format_descriptor format = {
+        .id = format_id,
+        .display_name = "single page",
+        .caps = tp_export_caps_full(),
+        .artifacts = g_json_artifact,
+        .artifact_count = 1,
+    };
+    format.caps.multipage = false;
+    tp_arena *arena = tp_arena_create(0);
+    TEST_ASSERT_NOT_NULL(arena);
+    tp_export_artifact_plan plan;
     tp_error e = {{0}};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_INVALID_ARGUMENT,
+        tp_export_artifact_plan_build(&format, &ir, "two-pages", arena,
+                                      &plan, &e));
+    TEST_ASSERT_NOT_NULL(strstr(e.msg, "single-page"));
 
-    tp_export_notices with_prep;
-    tp_export_notices_init(&with_prep);
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_export_predict_loss(p, 0, &caps, "t", &prep, &with_prep, &e));
-    TEST_ASSERT_TRUE_MESSAGE(has_field(&with_prep, TP_NOTICE_FIELD_MULTIPAGE), "opt_prep predict covers multipage");
-
-    tp_export_notices no_prep;
-    tp_export_notices_init(&no_prep);
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_export_predict_loss(p, 0, &caps, "t", NULL, &no_prep, &e));
-    TEST_ASSERT_FALSE_MESSAGE(has_field(&no_prep, TP_NOTICE_FIELD_MULTIPAGE), "multipage excluded when prep == NULL");
-
-    tp_export_notices_free(&with_prep);
-    tp_export_notices_free(&no_prep);
-    tp_project_destroy(p);
+    format.caps.multipage = true;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_export_artifact_plan_build(&format, &ir, "two-pages", arena,
+                                      &plan, &e));
+    TEST_ASSERT_EQUAL_STRING("test-single-page", plan.format_id);
+    format_id[0] = 'X';
+    TEST_ASSERT_EQUAL_STRING("test-single-page", plan.format_id);
+    tp_arena_destroy(arena);
 }
 
 void test_consistency_restrict(void) {
@@ -246,7 +247,7 @@ void test_consistency_restrict(void) {
     TEST_ASSERT_TRUE_MESSAGE(has_field(&pn, TP_NOTICE_FIELD_SLICE9), "predict must flag slice9");
     TEST_ASSERT_TRUE_MESSAGE(has_field(&pn, TP_NOTICE_FIELD_PIVOT), "predict must flag pivot");
     assert_writer_subset_predict(&wn, &pn);
-    /* NULL prep -> no pack-dependent axes. */
+    /* NULL IR -> no pack-dependent axes. */
     TEST_ASSERT_FALSE(has_field(&pn, TP_NOTICE_FIELD_ALIAS));
     TEST_ASSERT_FALSE(has_field(&pn, TP_NOTICE_FIELD_MULTIPAGE));
 
@@ -321,8 +322,8 @@ int main(int argc, char **argv) {
 
     UNITY_BEGIN();
     RUN_TEST(test_exporter_registry_enforces_exact_canonical_id_bound);
-    RUN_TEST(test_predict_alias_with_prep);
-    RUN_TEST(test_predict_multipage_with_prep);
+    RUN_TEST(test_predict_alias_with_ir);
+    RUN_TEST(test_single_page_format_rejects_multipage_ir_before_planning);
     RUN_TEST(test_consistency_restrict);
     RUN_TEST(test_consistency_defold);
     return UNITY_END();

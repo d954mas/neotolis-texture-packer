@@ -5,14 +5,15 @@
 #include <string.h>
 
 #include "tp_export_geom.h"
+#include "tp_export_internal.h"
 #include "tp_strutil.h" /* shared tp_path_basename (one core definition) */
 
 #include "tp_core/tp_sb.h"
 
 /* Full-fidelity json-neotolis writer. Deterministic (tp_project.c conventions:
  * "version" first then ascending keys, 2-space indent, LF, %.9g, trailing
- * newline). Capability-driven: emits only what `caps` can hold and raises a
- * metadata-loss notice for a genuine drop (never a hard error). Schema:
+ * newline). Capability-driven: unsupported optional metadata is omitted after
+ * the common capability owner records any required notices. Schema:
  * docs/formats/json-neotolis.md. */
 
 /* ------------------------------------------------------------------ */
@@ -48,35 +49,27 @@ static void transform_str(uint8_t t, char *buf, size_t cap) {
     }
 }
 
-static void emit_scaled(tp_sb *sb, long v, float scale) {
-    if (scale == 1.0F) {
-        tp_sb_int(sb, v);
-    } else {
-        tp_sb_num(sb, (double)v * (double)scale);
-    }
-}
-
 /* ------------------------------------------------------------------ */
 /* per-section emitters                                               */
 /* ------------------------------------------------------------------ */
 
-static void emit_frame(tp_sb *sb, int depth, int x, int y, int w, int h, float scale) {
+static void emit_frame(tp_sb *sb, int depth, int x, int y, int w, int h) {
     tp_sb_char(sb, '{');
     bool first = true;
     tp_obj_key(sb, depth + 1, &first, "h");
-    emit_scaled(sb, h, scale);
+    tp_sb_int(sb, h);
     tp_obj_key(sb, depth + 1, &first, "w");
-    emit_scaled(sb, w, scale);
+    tp_sb_int(sb, w);
     tp_obj_key(sb, depth + 1, &first, "x");
-    emit_scaled(sb, x, scale);
+    tp_sb_int(sb, x);
     tp_obj_key(sb, depth + 1, &first, "y");
-    emit_scaled(sb, y, scale);
+    tp_sb_int(sb, y);
     tp_sb_str(sb, "\n");
     tp_sb_indent(sb, depth);
     tp_sb_char(sb, '}');
 }
 
-static void emit_polygon(tp_sb *sb, int depth, const tp_sprite *s, float scale) {
+static void emit_polygon(tp_sb *sb, int depth, const tp_sprite *s) {
     tp_sb_char(sb, '{');
     bool first = true;
     tp_obj_key(sb, depth + 1, &first, "indices");
@@ -92,9 +85,9 @@ static void emit_polygon(tp_sb *sb, int depth, const tp_sprite *s, float scale) 
         tp_sb_str(sb, i == 0 ? "\n" : ",\n");
         tp_sb_indent(sb, depth + 2);
         tp_sb_char(sb, '[');
-        emit_scaled(sb, s->verts[i].x, scale);
+        tp_sb_int(sb, s->verts[i].x);
         tp_sb_str(sb, ", ");
-        emit_scaled(sb, s->verts[i].y, scale);
+        tp_sb_int(sb, s->verts[i].y);
         tp_sb_char(sb, ']');
     }
     tp_sb_str(sb, "\n");
@@ -105,36 +98,26 @@ static void emit_polygon(tp_sb *sb, int depth, const tp_sprite *s, float scale) 
     tp_sb_char(sb, '}');
 }
 
-/* Emits one sprite object. `caps` gates optional fields; a genuine drop of
- * non-default metadata raises a notice. */
-static tp_status emit_sprite(tp_sb *sb, int depth, const tp_export_ir *prep, const tp_export_sprite *es,
-                             const tp_export_caps *caps, tp_export_notices *notices) {
+/* `caps` gates optional fields; common orchestration owns loss notices. */
+static void emit_sprite(tp_sb *sb, int depth, const tp_export_ir *ir,
+                        const tp_export_sprite *es,
+                        const tp_export_caps *caps) {
     const tp_sprite *s = &es->data;
-    float scale = prep->scale;
     tp_sb_char(sb, '{');
     bool first = true;
 
     if (caps->aliases) {
         tp_obj_key(sb, depth + 1, &first, "alias_of");
         if (s->alias_of >= 0) {
-            tp_sb_json_string(sb, prep->sprites[s->alias_of].final_name);
+            tp_sb_json_string(sb, ir->sprites[s->alias_of].final_name);
         } else {
             tp_sb_str(sb, "null");
-        }
-    } else if (s->alias_of >= 0 && notices) {
-        /* target unknown to the writer (id lives on the descriptor); the run/predict layer fills it. */
-        tp_status status = tp_export_notice_add_ex(
-            notices, TP_NOTICE_FIELD_ALIAS, TP_NOTICE_REASON_CAPS_UNSUPPORTED,
-            es->final_name, NULL,
-            "alias link dropped for '%s' (target has no alias support)",
-            es->final_name);
-        if (status != TP_STATUS_OK) {
-            return status;
         }
     }
 
     tp_obj_key(sb, depth + 1, &first, "frame");
-    emit_frame(sb, depth + 1, s->frame.x, s->frame.y, s->frame.w, s->frame.h, scale);
+    emit_frame(sb, depth + 1, s->frame.x, s->frame.y, s->frame.w,
+               s->frame.h);
 
     tp_obj_key(sb, depth + 1, &first, "name");
     tp_sb_json_string(sb, es->final_name);
@@ -151,15 +134,6 @@ static tp_status emit_sprite(tp_sb *sb, int depth, const tp_export_ir *prep, con
             tp_sb_str(sb, ", ");
             tp_sb_num(sb, (double)s->pivot.y);
             tp_sb_char(sb, ']');
-        } else if (notices) {
-            tp_status status = tp_export_notice_add_ex(
-                notices, TP_NOTICE_FIELD_PIVOT,
-                TP_NOTICE_REASON_CAPS_UNSUPPORTED, es->final_name, NULL,
-                "pivot dropped for '%s' (target has no pivot support)",
-                es->final_name);
-            if (status != TP_STATUS_OK) {
-                return status;
-            }
         }
     }
 
@@ -167,16 +141,7 @@ static tp_status emit_sprite(tp_sb *sb, int depth, const tp_export_ir *prep, con
     if (has_poly) {
         if (caps->polygons) {
             tp_obj_key(sb, depth + 1, &first, "polygon");
-            emit_polygon(sb, depth + 1, s, scale);
-        } else if (notices) {
-            tp_status status = tp_export_notice_add_ex(
-                notices, TP_NOTICE_FIELD_POLYGON,
-                TP_NOTICE_REASON_CAPS_UNSUPPORTED, es->final_name, NULL,
-                "polygon flattened to rect for '%s' (target stores quads only)",
-                es->final_name);
-            if (status != TP_STATUS_OK) {
-                return status;
-            }
+            emit_polygon(sb, depth + 1, s);
         }
     }
 
@@ -190,15 +155,6 @@ static tp_status emit_sprite(tp_sb *sb, int depth, const tp_export_ir *prep, con
                 tp_sb_uint(sb, (unsigned long)s->slice9_lrtb[k]);
             }
             tp_sb_char(sb, ']');
-        } else if (notices) {
-            tp_status status = tp_export_notice_add_ex(
-                notices, TP_NOTICE_FIELD_SLICE9,
-                TP_NOTICE_REASON_CAPS_UNSUPPORTED, es->final_name, NULL,
-                "slice9 dropped for '%s' (target has no 9-slice support)",
-                es->final_name);
-            if (status != TP_STATUS_OK) {
-                return status;
-            }
         }
     }
 
@@ -207,17 +163,18 @@ static tp_status emit_sprite(tp_sb *sb, int depth, const tp_export_ir *prep, con
     {
         bool f2 = true;
         tp_obj_key(sb, depth + 2, &f2, "h");
-        emit_scaled(sb, s->sourceSize.h, scale);
+        tp_sb_int(sb, s->sourceSize.h);
         tp_obj_key(sb, depth + 2, &f2, "w");
-        emit_scaled(sb, s->sourceSize.w, scale);
+        tp_sb_int(sb, s->sourceSize.w);
     }
     tp_sb_str(sb, "\n");
     tp_sb_indent(sb, depth + 1);
     tp_sb_char(sb, '}');
 
     tp_obj_key(sb, depth + 1, &first, "spriteSourceSize");
-    emit_frame(sb, depth + 1, s->spriteSourceSize.x, s->spriteSourceSize.y, s->spriteSourceSize.w,
-               s->spriteSourceSize.h, scale);
+    emit_frame(sb, depth + 1, s->spriteSourceSize.x,
+               s->spriteSourceSize.y, s->spriteSourceSize.w,
+               s->spriteSourceSize.h);
 
     if (s->transform != 0) {
         if ((caps->transform_mask & TP_EXPORT_TRANSFORM_BIT(s->transform)) != 0U) {
@@ -227,22 +184,12 @@ static tp_status emit_sprite(tp_sb *sb, int depth, const tp_export_ir *prep, con
             tp_sb_int(sb, (long)s->transform);
             tp_obj_key(sb, depth + 1, &first, "transformStr");
             tp_sb_json_string(sb, tbuf);
-        } else if (notices) {
-            tp_status status = tp_export_notice_add_ex(
-                notices, TP_NOTICE_FIELD_TRANSFORM,
-                TP_NOTICE_REASON_CAPS_UNSUPPORTED, es->final_name, NULL,
-                "transform dropped for '%s' (target cannot rotate/flip)",
-                es->final_name);
-            if (status != TP_STATUS_OK) {
-                return status;
-            }
         }
     }
 
     tp_sb_str(sb, "\n");
     tp_sb_indent(sb, depth);
     tp_sb_char(sb, '}');
-    return TP_STATUS_OK;
 }
 
 static void emit_anim(tp_sb *sb, int depth, const tp_export_anim *a) {
@@ -275,22 +222,22 @@ static void emit_anim(tp_sb *sb, int depth, const tp_export_anim *a) {
     tp_sb_char(sb, '}');
 }
 
-static tp_status emit_root(tp_sb *sb, const tp_export_ir *prep, const tp_export_caps *caps,
-                           const tp_export_artifact_plan *plan,
-                           tp_export_notices *notices, tp_error *err) {
+static void emit_root(tp_sb *sb, const tp_export_ir *ir,
+                      const tp_export_caps *caps,
+                      const tp_export_artifact_plan *plan) {
     tp_sb_char(sb, '{');
     bool first = true;
 
     tp_obj_key(sb, 1, &first, "version");
     tp_sb_int(sb, (long)TP_JSON_NEOTOLIS_SCHEMA_VERSION);
 
-    if (prep->animation_count > 0) {
+    if (ir->animation_count > 0) {
         tp_obj_key(sb, 1, &first, "animations");
         tp_sb_char(sb, '[');
-        for (int i = 0; i < prep->animation_count; i++) {
+        for (int i = 0; i < ir->animation_count; i++) {
             tp_sb_str(sb, i == 0 ? "\n" : ",\n");
             tp_sb_indent(sb, 2);
-            emit_anim(sb, 2, &prep->animations[i]);
+            emit_anim(sb, 2, &ir->animations[i]);
         }
         tp_sb_str(sb, "\n");
         tp_sb_indent(sb, 1);
@@ -298,14 +245,14 @@ static tp_status emit_root(tp_sb *sb, const tp_export_ir *prep, const tp_export_
     }
 
     tp_obj_key(sb, 1, &first, "atlas");
-    tp_sb_json_string(sb, prep->atlas_name ? prep->atlas_name : "");
+    tp_sb_json_string(sb, ir->atlas_name ? ir->atlas_name : "");
 
     tp_obj_key(sb, 1, &first, "pages");
-    if (prep->page_count == 0) {
+    if (ir->page_count == 0) {
         tp_sb_str(sb, "[]");
     } else {
         tp_sb_char(sb, '[');
-        for (int p = 0; p < prep->page_count; p++) {
+        for (int p = 0; p < ir->page_count; p++) {
             tp_sb_str(sb, p == 0 ? "\n" : ",\n");
             tp_sb_indent(sb, 2);
             tp_sb_char(sb, '{');
@@ -315,11 +262,11 @@ static tp_status emit_root(tp_sb *sb, const tp_export_ir *prep, const tp_export_
             tp_obj_key(sb, 3, &f2, "file");
             tp_sb_json_string(sb, tp_path_basename(page->path));
             tp_obj_key(sb, 3, &f2, "h");
-            tp_sb_int(sb, (long)prep->pages[p].h);
+            tp_sb_int(sb, (long)ir->pages[p].h);
             tp_obj_key(sb, 3, &f2, "premultiplied");
-            tp_sb_str(sb, prep->pages[p].premultiplied ? "true" : "false");
+            tp_sb_str(sb, ir->pages[p].premultiplied ? "true" : "false");
             tp_obj_key(sb, 3, &f2, "w");
-            tp_sb_int(sb, (long)prep->pages[p].w);
+            tp_sb_int(sb, (long)ir->pages[p].w);
             tp_sb_str(sb, "\n");
             tp_sb_indent(sb, 2);
             tp_sb_char(sb, '}');
@@ -328,32 +275,18 @@ static tp_status emit_root(tp_sb *sb, const tp_export_ir *prep, const tp_export_
         tp_sb_indent(sb, 1);
         tp_sb_char(sb, ']');
     }
-    if (prep->page_count > 1 && !caps->multipage && notices) {
-        tp_status status = tp_export_notice_add_ex(
-            notices, TP_NOTICE_FIELD_MULTIPAGE,
-            TP_NOTICE_REASON_CAPS_UNSUPPORTED, NULL, NULL,
-            "atlas '%s' has %d pages but the target is single-page",
-            prep->atlas_name ? prep->atlas_name : "", prep->page_count);
-        if (status != TP_STATUS_OK) {
-            return status;
-        }
-    }
-
     tp_obj_key(sb, 1, &first, "pixels_per_unit");
-    tp_sb_num(sb, (double)prep->pixels_per_unit);
+    tp_sb_num(sb, (double)ir->pixels_per_unit);
 
     tp_obj_key(sb, 1, &first, "sprites");
-    if (prep->sprite_count == 0) {
+    if (ir->sprite_count == 0) {
         tp_sb_str(sb, "[]");
     } else {
         tp_sb_char(sb, '[');
-        for (int i = 0; i < prep->sprite_count; i++) {
+        for (int i = 0; i < ir->sprite_count; i++) {
             tp_sb_str(sb, i == 0 ? "\n" : ",\n");
             tp_sb_indent(sb, 2);
-            tp_status st = emit_sprite(sb, 2, prep, &prep->sprites[i], caps, notices);
-            if (st != TP_STATUS_OK) {
-                return st;
-            }
+            emit_sprite(sb, 2, ir, &ir->sprites[i], caps);
         }
         tp_sb_str(sb, "\n");
         tp_sb_indent(sb, 1);
@@ -363,7 +296,6 @@ static tp_status emit_root(tp_sb *sb, const tp_export_ir *prep, const tp_export_
     tp_sb_str(sb, "\n");
     tp_sb_char(sb, '}');
     tp_sb_char(sb, '\n'); /* trailing newline */
-    return TP_STATUS_OK;
 }
 
 /* ------------------------------------------------------------------ */
@@ -379,15 +311,9 @@ tp_status tp_export_json_neotolis_serialize(const tp_export_serialize_ctx *ctx,
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
                             "json-neotolis: incomplete serialize context");
     }
-    const tp_export_ir *prep = ctx->ir;
+    const tp_export_ir *ir = ctx->ir;
     tp_sb sb = {0};
-    tp_status st = emit_root(&sb, prep, &ctx->format->caps, ctx->plan,
-                             ctx->notices, err);
-    if (st != TP_STATUS_OK) {
-        free(sb.buf);
-        return tp_error_set(err, st,
-                            "json-neotolis: could not record export notice");
-    }
+    emit_root(&sb, ir, &ctx->format->caps, ctx->plan);
     if (sb.oom) {
         free(sb.buf);
         return tp_error_set(err, TP_STATUS_OOM, "json-neotolis: OOM building JSON");

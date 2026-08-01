@@ -19,7 +19,6 @@ void tp_export_ir_opts_defaults(tp_export_ir_opts *out) {
     memset(out, 0, sizeof *out);
     out->strip_extension = true;
     out->strip_folders = false;
-    out->scale = 1.0F;
 }
 
 static const char *override_for(const tp_export_ir_opts *o, const char *raw) {
@@ -80,7 +79,7 @@ static tp_status validate_build_inputs(const tp_result *result,
     if (!result->atlas_name || result->atlas_name[0] == '\0' ||
         !isfinite(result->pixels_per_unit) || result->pixels_per_unit <= 0.0F) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
-                            "tp_export_ir_build: invalid atlas identity or scale");
+                            "tp_export_ir_build: invalid atlas identity or pixels-per-unit");
     }
     if (result->page_count <= 0 || result->page_count > TP_PACK_MAX_PAGES ||
         !result->pages) {
@@ -203,14 +202,14 @@ static int cmp_anim_id(const void *a, const void *b) {
     return strcmp(aa->id, ab->id);
 }
 
-/* Copies the explicit animations from opts into arena-owned prepared anims,
+/* Copies the explicit animations from opts into arena-owned Export IR animations,
  * sorted ascending by id (determinism). Frames are stored in override-KEY space
  * (ext-stripped, folder-kept -- the GUI-row identity); each is resolved to its
  * FINAL export name through the packed sprite set, so a rename flows into the
- * frames automatically (the prepared sprite's final_name already reflects it).
+ * frames automatically (the IR sprite's final_name already reflects it).
  * A frame that matches no packed sprite is a dangling frame -> hard error naming
  * the animation + frame. */
-static tp_status build_animations(const tp_export_ir *prep, const tp_export_ir_opts *o, tp_arena *arena,
+static tp_status build_animations(const tp_export_ir *ir, const tp_export_ir_opts *o, tp_arena *arena,
                                   tp_export_anim **out_anims, int *out_count, tp_error *err) {
     int total = o->animation_count;
     tp_export_anim *anims = NULL;
@@ -221,7 +220,7 @@ static tp_status build_animations(const tp_export_ir *prep, const tp_export_ir_o
         }
     }
 
-    int n = prep->sprite_count;
+    int n = ir->sprite_count;
 
     for (int i = 0; i < o->animation_count; i++) {
         const tp_export_anim_in *in = &o->animations[i];
@@ -255,9 +254,9 @@ static tp_status build_animations(const tp_export_ir *prep, const tp_export_ir_o
                 }
                 const char *fin = NULL;
                 for (int s = 0; raw_name && s < n; s++) {
-                    if (prep->sprites[s].data.name &&
-                        strcmp(prep->sprites[s].data.name, raw_name) == 0) {
-                        fin = prep->sprites[s].final_name;
+                    if (ir->sprites[s].data.name &&
+                        strcmp(ir->sprites[s].data.name, raw_name) == 0) {
+                        fin = ir->sprites[s].final_name;
                         break;
                     }
                 }
@@ -288,12 +287,12 @@ static tp_status build_animations(const tp_export_ir *prep, const tp_export_ir_o
 /* entry                                                                    */
 /* ======================================================================== */
 
-tp_status tp_export_ir_build(const tp_result *result, const tp_export_ir_opts *opts,
-                             const char *target_id, tp_arena *arena,
+tp_status tp_export_ir_build(const tp_result *result,
+                             const tp_export_ir_opts *opts, tp_arena *arena,
                              tp_export_ir *out, tp_error *err) {
-    if (!result || !target_id || target_id[0] == '\0' || !arena || !out) {
+    if (!result || !arena || !out) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
-                            "tp_export_ir_build: invalid result/target/arena/out");
+                            "tp_export_ir_build: invalid result/arena/out");
     }
     tp_export_ir_opts defaults;
     if (!opts) {
@@ -307,11 +306,9 @@ tp_status tp_export_ir_build(const tp_result *result, const tp_export_ir_opts *o
 
     memset(out, 0, sizeof *out);
     out->version = TP_EXPORT_IR_VERSION;
-    out->target_id = tp_arena_strdup(arena, target_id);
     out->atlas_name = tp_arena_strdup(arena, result->atlas_name ? result->atlas_name : "");
     out->pixels_per_unit = result->pixels_per_unit;
-    out->scale = (opts->scale != 0.0F) ? opts->scale : 1.0F;
-    if (!out->target_id || !out->atlas_name) {
+    if (!out->atlas_name) {
         return tp_error_set(err, TP_STATUS_OOM, "tp_export_ir_build: OOM (identity)");
     }
 
@@ -407,7 +404,7 @@ tp_status tp_export_ir_build(const tp_result *result, const tp_export_ir_opts *o
         }
     }
 
-    /* Remap alias_of (result index) -> prepared (final-name-sorted) index. */
+    /* Remap alias_of (result index) -> Export IR (final-name-sorted) index. */
     if (n > 0) {
         int *pos = (int *)tp_arena_alloc(arena, (size_t)n * sizeof(int));
         if (!pos) {
@@ -458,15 +455,13 @@ tp_status tp_export_ir_validate(const tp_export_ir *ir, tp_error *err) {
                             "tp_export_ir_validate: unsupported version %u",
                             (unsigned)ir->version);
     }
-    if (tp_exporter_id_validate(ir->target_id, err) != TP_STATUS_OK ||
-        !ir->atlas_name || ir->atlas_name[0] == '\0') {
+    if (!ir->atlas_name || ir->atlas_name[0] == '\0') {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
-                            "tp_export_ir_validate: invalid target or atlas identity");
+                            "tp_export_ir_validate: invalid atlas identity");
     }
-    if (!isfinite(ir->pixels_per_unit) || ir->pixels_per_unit <= 0.0F ||
-        !isfinite(ir->scale) || ir->scale <= 0.0F) {
+    if (!isfinite(ir->pixels_per_unit) || ir->pixels_per_unit <= 0.0F) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
-                            "tp_export_ir_validate: invalid scale metadata");
+                            "tp_export_ir_validate: invalid pixels-per-unit");
     }
     if (ir->page_count <= 0 || ir->page_count > TP_PACK_MAX_PAGES ||
         !ir->pages) {

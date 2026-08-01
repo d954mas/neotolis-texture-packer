@@ -249,6 +249,8 @@ static void emit_target(tp_sb *sb, int depth, const tp_export_report_target *rt,
     tp_sb_int(sb, rt->pack_run);
     tp_obj_key(sb, depth + 1, &tf, "status");
     tp_sb_json_string(sb, rt->ok ? "ok" : "failed");
+    tp_obj_key(sb, depth + 1, &tf, "publication_uncertain");
+    tp_sb_str(sb, rt->publication_uncertain ? "true" : "false");
     if (!rt->ok) {
         tp_obj_key(sb, depth + 1, &tf, "error");
         tp_sb_json_string(sb, rt->error ? rt->error

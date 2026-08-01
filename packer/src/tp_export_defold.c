@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "tp_export_geom.h"
+#include "tp_export_internal.h"
 #include "tp_fs_internal.h"
 #include "tp_strutil.h" /* shared tp_path_basename (one core definition) */
 
@@ -225,10 +226,9 @@ static void emit_size(tp_sb *sb, int depth, const char *key, long w, long h) {
 /* .tpinfo                                                            */
 /* ------------------------------------------------------------------ */
 
-static tp_status emit_sprite(tp_sb *sb, int depth, const tp_export_ir *prep,
-                             const tp_export_sprite *es,
-                             const tp_export_caps *caps,
-                             tp_export_notices *notices) {
+static void emit_sprite(tp_sb *sb, int depth, const tp_export_ir *ir,
+                        const tp_export_sprite *es,
+                        const tp_export_caps *caps) {
     const tp_sprite *s = &es->data;
 
     /* Rotation: only the one representable 90-degree CW mask maps to rotated:true.
@@ -239,14 +239,6 @@ static tp_status emit_sprite(tp_sb *sb, int depth, const tp_export_ir *prep,
         if ((caps->transform_mask & TP_EXPORT_TRANSFORM_BIT(s->transform)) != 0U &&
             s->transform == TP_DEFOLD_ROTATED_MASK) {
             rotated = true;
-        } else if (notices) {
-            tp_status status = tp_export_notice_add_ex(
-                notices, TP_NOTICE_FIELD_TRANSFORM, TP_NOTICE_REASON_CAPS_UNSUPPORTED, es->final_name, NULL,
-                "transform %d dropped for '%s' (.tpinfo encodes only a 90-degree rotation)", (int)s->transform,
-                es->final_name);
-            if (status != TP_STATUS_OK) {
-                return status;
-            }
         }
     }
 
@@ -273,16 +265,6 @@ static tp_status emit_sprite(tp_sb *sb, int depth, const tp_export_ir *prep,
 
     bool poly = (s->vert_count > 0 && !tp_export_is_rect_quad(s));
     if (poly && !caps->polygons) {
-        if (notices) {
-            tp_status status = tp_export_notice_add_ex(
-                notices, TP_NOTICE_FIELD_POLYGON,
-                TP_NOTICE_REASON_CAPS_UNSUPPORTED, es->final_name, NULL,
-                "polygon flattened to rect for '%s' (target stores quads only)",
-                es->final_name);
-            if (status != TP_STATUS_OK) {
-                return status;
-            }
-        }
         poly = false;
     }
 
@@ -300,34 +282,10 @@ static tp_status emit_sprite(tp_sb *sb, int depth, const tp_export_ir *prep,
          * untrimmed sourceSize). Centered default -> dim/2, matching upstream. */
         emit_point_f(sb, depth + 1, "pivot", (double)s->pivot.x * (double)s->sourceSize.w,
                      (double)s->pivot.y * (double)s->sourceSize.h);
-    } else if ((s->pivot.x != 0.5F || s->pivot.y != 0.5F) && notices) {
-        tp_status status = tp_export_notice_add_ex(
-            notices, TP_NOTICE_FIELD_PIVOT,
-            TP_NOTICE_REASON_CAPS_UNSUPPORTED, es->final_name, NULL,
-            "pivot dropped for '%s' (target has no pivot support)",
-            es->final_name);
-        if (status != TP_STATUS_OK) {
-            return status;
-        }
     }
 
     emit_rect(sb, depth + 1, "frame_rect", s->frame.x, s->frame.y, foot_w, foot_h);
     emit_size(sb, depth + 1, "untrimmed_size", s->sourceSize.w, s->sourceSize.h);
-
-    /* .tpinfo has no 9-slice field. A non-default border set is genuine metadata
-     * loss -> notice (caps.slice9 is always false for this format; the branch is
-     * future-proof if a slice9-carrying variant is ever added). */
-    if (!caps->slice9 && (s->slice9_lrtb[0] || s->slice9_lrtb[1] || s->slice9_lrtb[2] || s->slice9_lrtb[3]) &&
-        notices) {
-        tp_status status = tp_export_notice_add_ex(
-            notices, TP_NOTICE_FIELD_SLICE9,
-            TP_NOTICE_REASON_CAPS_UNSUPPORTED, es->final_name, NULL,
-            "slice9 dropped for '%s' (target has no 9-slice support)",
-            es->final_name);
-        if (status != TP_STATUS_OK) {
-            return status;
-        }
-    }
 
     if (poly) {
         /* Hull, trim-local -> untrimmed source space (add the trim offset sx,sy;
@@ -357,55 +315,39 @@ static tp_status emit_sprite(tp_sb *sb, int depth, const tp_export_ir *prep,
 
     tp_sb_indent(sb, depth);
     tp_sb_str(sb, "}\n");
-    return TP_STATUS_OK;
 }
 
-static tp_status emit_tpinfo(tp_sb *sb, const tp_export_ir *prep, const tp_export_caps *caps,
-                             const tp_export_artifact_plan *plan,
-                             tp_export_notices *notices, tp_error *err) {
+static void emit_tpinfo(tp_sb *sb, const tp_export_ir *ir,
+                        const tp_export_caps *caps,
+                        const tp_export_artifact_plan *plan) {
     tp_sb_str(sb, "# Exported by neotolis-texture-packer\n");
     tp_sb_str(sb, "# Format: Defold extension-texturepacker .tpinfo (protobuf text)\n\n");
     kv_str(sb, 0, "version", TP_DEFOLD_TPINFO_VERSION);
     kv_str(sb, 0, "description", TP_DEFOLD_DESCRIPTION);
 
-    for (int p = 0; p < prep->page_count; p++) {
+    for (int p = 0; p < ir->page_count; p++) {
         tp_sb_str(sb, "pages {\n");
         const tp_export_artifact *page =
             &plan->artifacts[plan->document_count + p];
         kv_str(sb, 1, "name", tp_path_basename(page->path));
-        emit_size(sb, 1, "size", prep->pages[p].w, prep->pages[p].h);
-        /* prep->sprites is final-name sorted; filtering by page keeps that order. */
-        for (int i = 0; i < prep->sprite_count; i++) {
-            if (prep->sprites[i].data.page != p) {
+        emit_size(sb, 1, "size", ir->pages[p].w, ir->pages[p].h);
+        /* IR sprites are final-name sorted; filtering by page keeps that order. */
+        for (int i = 0; i < ir->sprite_count; i++) {
+            if (ir->sprites[i].data.page != p) {
                 continue;
             }
-            tp_status status = emit_sprite(
-                sb, 1, prep, &prep->sprites[i], caps, notices);
-            if (status != TP_STATUS_OK) {
-                return status;
-            }
+            emit_sprite(sb, 1, ir, &ir->sprites[i], caps);
         }
         tp_sb_str(sb, "}\n");
     }
 
-    if (prep->page_count > 1 && !caps->multipage && notices) {
-        tp_status status = tp_export_notice_add_ex(
-            notices, TP_NOTICE_FIELD_MULTIPAGE,
-            TP_NOTICE_REASON_CAPS_UNSUPPORTED, NULL, NULL,
-            "atlas '%s' has %d pages but the target is single-page",
-            prep->atlas_name ? prep->atlas_name : "", prep->page_count);
-        if (status != TP_STATUS_OK) {
-            return status;
-        }
-    }
-    return TP_STATUS_OK;
 }
 
 /* ------------------------------------------------------------------ */
 /* .tpatlas                                                           */
 /* ------------------------------------------------------------------ */
 
-static tp_status emit_tpatlas(tp_sb *sb, const tp_export_ir *prep,
+static tp_status emit_tpatlas(tp_sb *sb, const tp_export_ir *ir,
                               const char *tpinfo_ref,
                               tp_export_notices *notices) {
     /* file: project-absolute Defold resource path ("/dir/base.tpinfo") when a
@@ -414,8 +356,8 @@ static tp_status emit_tpatlas(tp_sb *sb, const tp_export_ir *prep,
     kv_str(sb, 0, "file", tpinfo_ref);
     kv_str(sb, 0, "rename_patterns", "");
 
-    for (int i = 0; i < prep->animation_count; i++) {
-        const tp_export_anim *a = &prep->animations[i];
+    for (int i = 0; i < ir->animation_count; i++) {
+        const tp_export_anim *a = &ir->animations[i];
         tp_sb_str(sb, "animations {\n");
         kv_str(sb, 1, "id", a->id);
         for (int f = 0; f < a->frame_count; f++) {
@@ -464,7 +406,7 @@ tp_status tp_export_defold_serialize(const tp_export_serialize_ctx *ctx,
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
                             "defold: incomplete serialize context");
     }
-    const tp_export_ir *prep = ctx->ir;
+    const tp_export_ir *ir = ctx->ir;
     tp_export_notices *notices = ctx->notices;
 
     /* Page/tpinfo files sit next to the .tpatlas; bob resolves page `name` and the
@@ -475,19 +417,14 @@ tp_status tp_export_defold_serialize(const tp_export_serialize_ctx *ctx,
     const char *base = tp_path_basename(ctx->plan->out_path_base);
 
     tp_sb info = {0};
-    tp_status st = emit_tpinfo(&info, prep, &ctx->format->caps, ctx->plan,
-                               notices, err);
-    if (st != TP_STATUS_OK) {
-        free(info.buf);
-        return tp_error_set(err, st,
-                            "defold: could not record export notice");
-    }
+    emit_tpinfo(&info, ir, &ctx->format->caps, ctx->plan);
     if (info.oom) {
         free(info.buf);
         return tp_error_set(err, TP_STATUS_OOM, "defold: OOM building .tpinfo");
     }
 
     char tpinfo_ref[TP_DEFOLD_PATH_MAX];
+    tp_status st = TP_STATUS_OK;
     if (!resolve_tpatlas_file_ref(ctx->plan->out_path_base, base, tpinfo_ref,
                                  sizeof tpinfo_ref) && notices) {
         st = tp_export_notice_addf(
@@ -502,7 +439,7 @@ tp_status tp_export_defold_serialize(const tp_export_serialize_ctx *ctx,
         }
     }
     tp_sb atlas = {0};
-    st = emit_tpatlas(&atlas, prep, tpinfo_ref, notices);
+    st = emit_tpatlas(&atlas, ir, tpinfo_ref, notices);
     if (st != TP_STATUS_OK) {
         free(info.buf);
         free(atlas.buf);

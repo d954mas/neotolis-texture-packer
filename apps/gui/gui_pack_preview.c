@@ -23,7 +23,7 @@ static preview_slot s_preview;
 static uint64_t s_next_preview_version;
 
 typedef struct {
-    const tp_exporter *exporter;
+    const tp_format_descriptor *exporter;
     tp_id128 atlas_id;
     uint64_t model_generation;
     uint64_t snapshot_lifetime;
@@ -159,7 +159,7 @@ int gui_pack_preview_diff(tp_id128 atlas_id, const char *exporter_id, char *chip
     if (tip && tip_cap) {
         tip[0] = '\0';
     }
-    const tp_exporter *exporter = tp_exporter_find(exporter_id);
+    const tp_format_descriptor *exporter = tp_format_find(exporter_id);
     if (!exporter) {
         return 0;
     }
@@ -196,7 +196,7 @@ int gui_pack_preview_diff(tp_id128 atlas_id, const char *exporter_id, char *chip
     s_preview_diff_rebuilds++;
 #endif
     if (tp_export_predict_loss_snapshot(snapshot, atlas->id,
-                                        &exporter->format->caps,
+                                        &exporter->caps,
                                         exporter_id, NULL, &notices,
                                         &error) != TP_STATUS_OK) {
         tp_export_notices_free(&notices);

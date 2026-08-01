@@ -84,6 +84,7 @@ replace the exact mask.
       "exporter_id": "json-neotolis",
       "out_path": "C:/project/out/animals",
       "status": "ok",
+      "publication_uncertain": false,
       "pack_run": 0,
       "written_files": [
         "C:/project/out/animals.json",
@@ -107,8 +108,13 @@ Timings are intentionally environment-dependent; the rest of the report is
 deterministic.
 
 A failed target has `status: "failed"` and `error`; other targets continue.
+Every target has the mandatory boolean `publication_uncertain`. It is `true`
+only when publication failed and rollback could not confirm the complete prior
+artifact set. Clients must surface that outcome and must not retry as if no
+artifact could have been published. Successful targets and dry runs report
+`false`.
 After all requested atlases are processed, any success combined with any
-failure exits 6. With no successful target, pack/normalization failure exits 4;
+failure exits 6. With no successful target, Pack/Export-IR failure exits 4;
 otherwise an all-export-failed run exits 5.
 
 Skipped atlases retain a human `note` and structured atlas notice. Stable skip
@@ -128,7 +134,9 @@ clean up its private scratch request directory and temporary `.ntpack`:
 
 `--atlas` selects one atlas. `--target` filters by exporter ID; filtering all
 targets away is a successful empty result. `--out-dir` re-roots relative target
-paths under the supplied directory while leaving absolute paths unchanged.
+paths under the supplied directory while leaving absolute paths unchanged. A
+relative target that would escape that directory through parent traversal is
+invalid, as are ambiguous drive-relative or root-relative target spellings.
 
 ## Inspect: schema 4
 

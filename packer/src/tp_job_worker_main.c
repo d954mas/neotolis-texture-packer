@@ -374,9 +374,9 @@ static tp_status run_pack(const tp_job_worker_proto_request *request,
     }
     if (request->preview_exporter_id &&
         request->preview_exporter_id[0]) {
-        const tp_exporter *exporter =
-            tp_exporter_find(request->preview_exporter_id);
-        if (!exporter) {
+        const tp_format_descriptor *format =
+            tp_format_find(request->preview_exporter_id);
+        if (!format) {
             tp_pack_input_free(&input);
             return tp_error_set(
                 err, TP_STATUS_NOT_FOUND,
@@ -385,7 +385,7 @@ static tp_status run_pack(const tp_job_worker_proto_request *request,
         }
         tp_pack_settings effective = {0};
         status = tp_export_effective_settings(
-            &settings, &exporter->format->caps, &effective);
+            &settings, &format->caps, &effective);
         if (status != TP_STATUS_OK) {
             tp_pack_input_free(&input);
             return status;

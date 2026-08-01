@@ -17,7 +17,7 @@ enum {
 
 static unsigned target_issue_mask(const char *exporter_id, bool enabled,
                                   const char *out_path, bool path_shared) {
-    unsigned mask = tp_exporter_find(exporter_id)
+    unsigned mask = tp_format_find(exporter_id)
                         ? 0U
                         : TARGET_ISSUE_UNKNOWN_EXPORTER;
     if (enabled) {
@@ -110,7 +110,7 @@ void validate_target_settings_domain(
     validation_builder *fs, const tp_project *p, int ai,
     const tp_project_atlas *a, const target_path_index *target_paths) {
     /* (f) target integrity.
-     *   unknown_exporter   [error]   exporter id tp_exporter_find cannot resolve -- a broken id is bad
+     *   unknown_exporter   [error]   exporter id tp_format_find cannot resolve -- a broken id is bad
      *                                 data regardless of enable state, so reported for EVERY target.
      *   target_no_out_path [error]   an ENABLED target with an empty/NULL out_path can produce no file.
      *   duplicate_out_path [warning] an ENABLED target whose out_path is ALSO another ENABLED target's

@@ -8,6 +8,7 @@
 #include "tp_core/tp_project.h"
 #include "tp_core/tp_arena.h"
 #include "tp_core/tp_utf8.h"
+#include "tp_export_internal.h"
 #include "tp_session_internal.h"
 
 /* nt_atlas_shape_t: 0 = RECT (see tp_pack.h shape). Kept as a literal so this
@@ -327,32 +328,26 @@ const tp_exporter *tp_exporter_find(const char *id) {
     return NULL;
 }
 
-tp_status tp_export_artifact_plan_build(const tp_exporter *exp,
-                                        const tp_export_ir *ir,
-                                        const char *out_path_base,
-                                        tp_arena *arena,
-                                        tp_export_artifact_plan *out,
-                                        tp_error *err) {
-    if (!exp || !exp->format || !exp->serialize || !ir || !out_path_base ||
-        !arena || !out) {
+tp_status tp_export_format_admit(const tp_format_descriptor *format,
+                                 const tp_export_ir *ir, tp_error *err) {
+    if (!format || !ir) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
-                            "artifact plan requires exporter, IR, base, arena, and output");
+                            "format admission requires a format and Export IR");
     }
     tp_status st = tp_export_ir_validate(ir, err);
     if (st != TP_STATUS_OK) {
         return st;
     }
-    const tp_format_descriptor *format = exp->format;
     if (tp_exporter_id_validate(format->id, err) != TP_STATUS_OK ||
-        !format->display_name || format->artifact_count <= 0 ||
-        !format->artifacts) {
+        (format->caps.transform_mask & TP_EXPORT_TRANSFORMS_IDENTITY) == 0U) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
-                            "format descriptor is incomplete");
+                            "format descriptor has invalid identity or transform capabilities");
     }
-    if (strcmp(ir->target_id, format->id) != 0) {
-        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
-                            "Export IR target '%s' does not match format '%s'",
-                            ir->target_id, format->id);
+    if (!format->caps.multipage && ir->page_count > 1) {
+        return tp_error_set(
+            err, TP_STATUS_INVALID_ARGUMENT,
+            "format '%s' is single-page but Export IR contains %d pages",
+            format->id, ir->page_count);
     }
     for (int i = 0; i < ir->sprite_count; ++i) {
         const uint8_t transform = ir->sprites[i].data.transform;
@@ -364,6 +359,29 @@ tp_status tp_export_artifact_plan_build(const tp_exporter *exp,
                 format->id, (unsigned)transform,
                 ir->sprites[i].final_name);
         }
+    }
+    return TP_STATUS_OK;
+}
+
+tp_status tp_export_artifact_plan_build(const tp_format_descriptor *format,
+                                         const tp_export_ir *ir,
+                                         const char *out_path_base,
+                                         tp_arena *arena,
+                                         tp_export_artifact_plan *out,
+                                         tp_error *err) {
+    if (!format || !ir || !out_path_base || !arena || !out) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "artifact plan requires format, IR, base, arena, and output");
+    }
+    memset(out, 0, sizeof *out);
+    tp_status st = tp_export_format_admit(format, ir, err);
+    if (st != TP_STATUS_OK) {
+        return st;
+    }
+    if (!format->display_name || format->artifact_count <= 0 ||
+        !format->artifacts) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "format descriptor is incomplete");
     }
     const int total = format->artifact_count + ir->page_count;
     tp_export_artifact *items = (tp_export_artifact *)tp_arena_alloc(
@@ -429,12 +447,14 @@ tp_status tp_export_artifact_plan_build(const tp_exporter *exp,
                                 "artifact plan: OOM copying page artifact");
         }
     }
+    out->format_id = tp_arena_strdup(arena, format->id);
     out->out_path_base = tp_arena_strdup(arena, out_path_base);
     out->artifacts = items;
     out->artifact_count = total;
     out->document_count = format->artifact_count;
-    if (!out->out_path_base) {
-        return tp_error_set(err, TP_STATUS_OOM, "artifact plan: OOM copying base");
+    if (!out->format_id || !out->out_path_base) {
+        return tp_error_set(err, TP_STATUS_OOM,
+                            "artifact plan: OOM copying binding or base");
     }
     return TP_STATUS_OK;
 }
@@ -459,6 +479,18 @@ const tp_exporter *tp_exporter_at(int index) {
 #else
     return NULL;
 #endif
+}
+
+const tp_format_descriptor *tp_format_find(const char *id) {
+    const tp_exporter *exporter = tp_exporter_find(id);
+    return exporter ? exporter->format : NULL;
+}
+
+int tp_format_count(void) { return tp_exporter_count(); }
+
+const tp_format_descriptor *tp_format_at(int index) {
+    const tp_exporter *exporter = tp_exporter_at(index);
+    return exporter ? exporter->format : NULL;
 }
 
 #ifdef TP_ENABLE_TEST_SEAMS
@@ -549,19 +581,35 @@ tp_status tp_export_predict_loss(const struct tp_project *project, int atlas_ind
         PREDICT_ADD(TP_NOTICE_FIELD_POLYGON, NULL,
                     "polygon hulls flattened to rectangles -- this format stores quads only");
     }
-    if (!caps->slice9 && atlas_uses_slice9(a)) {
-        PREDICT_ADD(TP_NOTICE_FIELD_SLICE9, NULL, "9-slice borders dropped -- this format does not store them");
-    }
-    if (!caps->pivot && atlas_uses_pivot(a)) {
-        PREDICT_ADD(TP_NOTICE_FIELD_PIVOT, NULL, "per-sprite pivots dropped -- this format does not store them");
-    }
-
-    /* Pack-dependent axes exist only once packed -- the CLI dry-run supplies the
-     * prep; the GUI chip passes NULL (project-only preview). */
-    if (opt_ir) {
-        if (!caps->multipage && opt_ir->page_count > 1) {
-            PREDICT_ADD(TP_NOTICE_FIELD_MULTIPAGE, NULL, "atlas has %d pages but the target is single-page",
-                        opt_ir->page_count);
+    if (!opt_ir) {
+        if (!caps->slice9 && atlas_uses_slice9(a)) {
+            PREDICT_ADD(TP_NOTICE_FIELD_SLICE9, NULL,
+                        "9-slice borders dropped -- this format does not store them");
+        }
+        if (!caps->pivot && atlas_uses_pivot(a)) {
+            PREDICT_ADD(TP_NOTICE_FIELD_PIVOT, NULL,
+                        "per-sprite pivots dropped -- this format does not store them");
+        }
+    } else {
+        /* Execution uses only metadata that survived source resolution and was
+         * actually packed. Stale project overrides therefore cannot create a
+         * notice for a sprite absent from the Export IR. */
+        for (int i = 0; i < opt_ir->sprite_count; ++i) {
+            const tp_export_sprite *entry = &opt_ir->sprites[i];
+            const tp_sprite *sprite = &entry->data;
+            if (!caps->pivot &&
+                (sprite->pivot.x != 0.5F || sprite->pivot.y != 0.5F)) {
+                PREDICT_ADD(TP_NOTICE_FIELD_PIVOT, entry->final_name,
+                            "pivot dropped for '%s' (target has no pivot support)",
+                            entry->final_name);
+            }
+            if (!caps->slice9 &&
+                (sprite->slice9_lrtb[0] || sprite->slice9_lrtb[1] ||
+                 sprite->slice9_lrtb[2] || sprite->slice9_lrtb[3])) {
+                PREDICT_ADD(TP_NOTICE_FIELD_SLICE9, entry->final_name,
+                            "slice9 dropped for '%s' (target has no 9-slice support)",
+                            entry->final_name);
+            }
         }
         if (!caps->aliases) {
             for (int i = 0; i < opt_ir->sprite_count; i++) {

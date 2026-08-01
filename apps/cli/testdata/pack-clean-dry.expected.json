@@ -21,6 +21,7 @@
           "out_path": "<PACK_ROOT>/out/clean.json",
           "pack_run": 0,
           "status": "ok",
+          "publication_uncertain": false,
           "written_files": [],
           "would_write": [
             "<PACK_ROOT>/out/clean.json.json",

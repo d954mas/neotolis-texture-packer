@@ -100,11 +100,11 @@ uint32_t gui_stable_entity_ui_id(const char *scope,
 
 /* --- export-target preview (packet EXP-PREVIEW): a view-only overlay that shows what a chosen exporter
  * would produce from the CURRENT settings, without touching the native session pack. `s_preview_target`
- * is the strip selector's choice: 0 = Native (session pack, default); k >= 1 selects registered exporter
- * (k-1) via tp_exporter_at. The actual clamped result lives in gui_pack's preview slot; these fields track
+ * is the strip selector's choice: 0 = Native (session pack, default); k >= 1 selects a registered format
+ * (k-1) via tp_format_at. The actual clamped result lives in gui_pack's preview slot; these fields track
  * intent + when to drop it. Shared with the canvas view (selector + chip), actions (start/reset/bind),
  * the selftest and the shot seam, so they can never be view-local. --- */
-extern int s_preview_target;       /* 0 = Native; else 1 + tp_exporter_at index */
+extern int s_preview_target;       /* 0 = Native; else 1 + tp_format_at index */
 
 /* Animation preview player (canvas ANIM mode). s_preview_time is the master clock; the frame index is
  * a pure function of it (gui_canvas_anim_frame_at), so play/pause/step all reduce to moving the clock. */

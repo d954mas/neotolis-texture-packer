@@ -56,13 +56,15 @@ if(DEFINED EXIST_FILES)
     endforeach()
 endif()
 
-# EXACT_FILES_ROOT + EXACT_FILES: assert the complete regular-file set below
-# one output root. Paths in EXACT_FILES are relative to EXACT_FILES_ROOT.
+# EXACT_FILES_ROOT + EXACT_FILES: assert the complete exported-artifact set below
+# one output root. Persistent publication lease sidecars are coordination state,
+# not format artifacts. Paths in EXACT_FILES are relative to EXACT_FILES_ROOT.
 if(DEFINED EXACT_FILES_ROOT)
     file(GLOB_RECURSE _exact_actual
         LIST_DIRECTORIES FALSE
         RELATIVE "${_exact_root}"
         "${_exact_root}/*")
+    list(FILTER _exact_actual EXCLUDE REGEX "\\.ntpacker-export\\.lock$")
     set(_exact_expected ${EXACT_FILES})
     list(SORT _exact_actual)
     list(SORT _exact_expected)

@@ -29,30 +29,45 @@ timeout, protocol error, and invalid binary output into `tp_status` diagnostics.
 
 The native registry is fixed to built-in formats. Production does not accept
 runtime C exporters; custom formats belong to the later template/Lua layer.
+Public clients enumerate descriptor metadata only; native serializer bindings,
+the publisher, and raw project/sprite orchestration remain internal boundaries.
 Each built-in binds two separate pieces:
 
 - a descriptor with stable ID, display name, exact D4 transform mask, other
   capabilities, and declared document artifacts;
 - a memory-only serializer for those declared documents.
 
-The shared layer materializes and validates immutable Export IR v1 with final
-names, page facts, geometry, transforms, aliases, and explicit animations. Raw
-page pixels are not serializer-visible. It then creates the artifact plan, which
-is the sole authority for concrete filenames. Serializers consume the IR and
-plan and return memory documents; they do not write files or enumerate outputs.
+The shared layer materializes and validates target-neutral immutable Export IR
+v1 with final names, page facts, geometry, transforms, aliases, and explicit
+animations. Raw page pixels are not serializer-visible. One IR is built for each
+distinct effective pack result and reused by every compatible target. The format
+descriptor is bound separately into the artifact plan, which is the sole
+authority for concrete filenames. Serializers consume the IR and plan and return
+memory documents; they do not write files or enumerate outputs.
 The bundled Defold serializer retains one explicit exception: a bounded,
 read-only upward probe for `game.project` used to form its resource reference.
 That trusted built-in environment lookup is not a general handler capability and
 does not grant future template/Lua drivers filesystem access.
 
+After full preflight, the core acquires non-blocking OS-backed leases for the
+plan's destination files in stable path order. A partially overlapping Export
+returns `export_busy` before serialization; disjoint output sets remain
+independent. Permanent `.ntpacker-export.lock` sidecars provide rendezvous names,
+while ownership is the live OS handle and therefore ends automatically when a
+process exits. Sidecars are coordination infrastructure, never artifact content,
+and are not removed or inferred from later.
+
 The core writes every planned document and page PNG into sibling staging,
 verifies the complete planned set, and publishes it with rollback for handled
 failures. Abrupt process termination may leave private staging/backup entries;
-later exports do not infer ownership of or clean them. Files outside the current
-plan remain untouched. Capability
-adaptation also lives here: the project boolean expands to an internal D4 mask,
-the format mask is intersected before pack grouping, and the exact effective
-mask reaches neotolis-engine.
+later exports do not infer ownership of or clean them. Apart from the permanent
+lease sidecars, files outside the current plan remain untouched. Capability
+adaptation and loss reporting also have one shared owner: the project boolean
+expands to an internal D4 mask, the format mask is intersected before pack
+grouping, the exact effective mask reaches neotolis-engine, and dry/wet exports
+analyze the same effective settings and IR. A descriptor that declares
+single-page output rejects a multi-page IR before its serializer runs;
+serializers do not reimplement capability policy.
 
 `json-neotolis` and `defold` both use this path. The production registry has no
 generic native registration API; test binaries may compile a narrow injection

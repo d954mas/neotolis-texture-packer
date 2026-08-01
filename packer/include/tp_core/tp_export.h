@@ -6,10 +6,11 @@
  * (docs/architecture/engine-and-client-boundaries.md). Everything here lives
  * in tp_core (GUI-linkable, NO nt_builder):
  *   - capability flags (what a target FORMAT can hold),
- *   - built-in descriptors + memory-only native serializers,
+ *   - built-in format descriptors,
  *   - the capability -> pack-settings clamp (per-target packing, §5h),
  *   - versioned Export IR materialization, artifact planning, and publication,
- *   - metadata-loss notices (never a hard error for a capability gap).
+ *   - metadata-loss notices for representable degradation; a format that
+ *     cannot produce the requested artifact shape is rejected before writing.
  *
  * Per-target ORCHESTRATION (pack per target with effective settings) needs the
  * builder and lives in tp_build (tp_export_run.h), not here.
@@ -122,11 +123,6 @@ tp_status tp_export_notice_add_ex(tp_export_notices *n, int field_id, int reason
                                   const char *target, const char *fmt, ...) TP_PRINTF_ATTR(6, 7);
 void tp_export_notices_free(tp_export_notices *n);
 
-#ifdef TP_ENABLE_TEST_SEAMS
-/* Makes exactly the next notice-list growth fail with TP_STATUS_OOM. */
-void tp_export_notices__test_fail_next_reserve(void);
-#endif
-
 /* ------------------------------------------------------------------ */
 /* Immutable Export IR v1. */
 /* ------------------------------------------------------------------ */
@@ -169,7 +165,6 @@ typedef struct tp_export_sprite_ref_in {
 typedef struct tp_export_ir_opts {
     bool strip_extension; /* default true: drop a trailing ".ext" from the name */
     bool strip_folders;   /* default false: keep only the basename after '/'    */
-    float scale;          /* default 1.0: multiplier applied to emitted geometry */
 
     /* Per-sprite rename overrides (applied BEFORE any munging; verbatim). */
     const tp_export_name_override *overrides;
@@ -216,7 +211,6 @@ typedef struct tp_export_anim {
  * serializers never observe tp_result or its raw page pixels. */
 typedef struct tp_export_ir {
     uint32_t version;
-    const char *target_id;
     const char *atlas_name;
     float pixels_per_unit;
     tp_export_page *pages;
@@ -225,7 +219,6 @@ typedef struct tp_export_ir {
     int sprite_count; /* sorted ascending by final_name */
     tp_export_anim *animations;
     int animation_count; /* sorted ascending by id */
-    float scale;         /* emitted-geometry scale (default 1.0) */
 } tp_export_ir;
 
 /* Builds `out` from `result` + `opts`. Final names are computed (override ->
@@ -234,9 +227,10 @@ typedef struct tp_export_ir {
  * animations (sorted by id). A final-name collision after munging (e.g. a.png
  * + a.jpg -> "a", or an override colliding with another final name) is a
  * TP_STATUS_INVALID_ARGUMENT with a clear message. */
-tp_status tp_export_ir_build(const tp_result *result, const tp_export_ir_opts *opts,
-                             const char *target_id, struct tp_arena *arena,
-                             tp_export_ir *out, tp_error *err);
+tp_status tp_export_ir_build(const tp_result *result,
+                             const tp_export_ir_opts *opts,
+                             struct tp_arena *arena, tp_export_ir *out,
+                             tp_error *err);
 tp_status tp_export_ir_validate(const tp_export_ir *ir, tp_error *err);
 
 /* ------------------------------------------------------------------ */
@@ -270,10 +264,12 @@ bool tp_export_settings_equal(const tp_pack_settings *a, const tp_pack_settings 
  *   - TRANSFORM: the requested and effective D4 masks differ;
  *   - POLYGON:   a polygon atlas shape a non-polygon target flattens to rect;
  *   - SLICE9 / PIVOT: the atlas carries a 9-slice / pivot a target can't store.
- * `opt_ir` (nullable) adds PACK-DEPENDENT axes that only exist once packed --
- *   ALIAS and MULTIPAGE. The GUI chip passes NULL (project-only preview); the
- *   CLI dry-run passes the Export IR for the full picture. `target_id` (nullable)
- *   is recorded on each emitted notice. */
+ * When `opt_ir` is present, PIVOT and SLICE9 are instead read from the actual
+ * packed sprites and ALIAS is added from the actual alias table. This is the
+ * execution path used identically by dry and wet exports. The GUI chip passes
+ * NULL for its project-only preview. `target_id` (nullable) is recorded on each
+ * emitted notice. A multi-page IR for a single-page format is not a loss notice:
+ * format admission rejects it as an error before serialization. */
 tp_status tp_export_predict_loss(const struct tp_project *project, int atlas_index, const tp_export_caps *caps,
                                  const char *target_id, const tp_export_ir *opt_ir, tp_export_notices *out,
                                  tp_error *err);
@@ -293,7 +289,7 @@ tp_status tp_export_page_path(const char *out_path_base, int page,
                               char out[TP_IDENTITY_PATH_MAX], tp_error *err);
 
 /* ------------------------------------------------------------------ */
-/* Native format descriptor, artifact plan, and serializer documents. */
+/* Native format descriptor and artifact plan. */
 /* ------------------------------------------------------------------ */
 
 typedef struct tp_format_artifact_decl {
@@ -309,6 +305,12 @@ typedef struct tp_format_descriptor {
     int artifact_count;
 } tp_format_descriptor;
 
+/* Descriptor-only discovery for public clients. Native serializers remain an
+ * internal implementation detail of the fixed built-in registry. */
+const tp_format_descriptor *tp_format_find(const char *id);
+int tp_format_count(void);
+const tp_format_descriptor *tp_format_at(int index);
+
 typedef enum tp_export_artifact_kind {
     TP_EXPORT_ARTIFACT_DOCUMENT = 1,
     TP_EXPORT_ARTIFACT_PAGE = 2,
@@ -322,126 +324,25 @@ typedef struct tp_export_artifact {
 } tp_export_artifact;
 
 typedef struct tp_export_artifact_plan {
+    const char *format_id;    /* arena-owned descriptor binding */
     const char *out_path_base;
     tp_export_artifact *artifacts;
     int artifact_count;
     int document_count;
 } tp_export_artifact_plan;
 
-/* Serializer output is memory-only. The serializer transfers each malloc-owned
- * buffer to the caller; the common publisher frees it on every path. */
-typedef struct tp_export_document {
-    void *data;
-    size_t size;
-} tp_export_document;
+/* Validates a target-neutral IR against the format's non-lossy admission
+ * requirements. Unsupported packed transforms and a multi-page IR presented to
+ * a single-page format are hard errors; metadata gaps remain notices. */
+tp_status tp_export_format_admit(const tp_format_descriptor *format,
+                                 const tp_export_ir *ir, tp_error *err);
 
-typedef struct tp_export_serialize_ctx {
-    const tp_export_ir *ir;
-    const tp_format_descriptor *format;
-    const tp_export_artifact_plan *plan;
-    tp_export_notices *notices;
-} tp_export_serialize_ctx;
-
-typedef tp_status (*tp_export_serialize_fn)(const tp_export_serialize_ctx *ctx,
-                                            tp_export_document *documents,
-                                            int document_count,
-                                            tp_error *err);
-
-typedef struct tp_exporter {
-    const tp_format_descriptor *format;
-    tp_export_serialize_fn serialize;
-} tp_exporter;
-
-tp_status tp_export_artifact_plan_build(const tp_exporter *exp,
+tp_status tp_export_artifact_plan_build(const tp_format_descriptor *format,
                                         const tp_export_ir *ir,
                                         const char *out_path_base,
                                         struct tp_arena *arena,
                                         tp_export_artifact_plan *out,
                                         tp_error *err);
-
-/* Common-core PNG sink for one already-planned page artifact. The caller owns
- * the exact path; this function never derives a filename. */
-tp_status tp_export_write_page_artifact(const tp_page *page, int page_id,
-                                        const char *path, bool premultiply,
-                                        tp_error *err);
-
-/* Publishes a target's whole output SET or none of it.
- *
- * `plan` is the complete output contract, checked before serialization:
- *
- *   1. Every entry must be a direct child of out_path_base's own directory.
- *      A path outside that directory (including any deeper subdirectory) or one
- *      whose staged form would exceed the path limit is a structured error --
- *      the serializer never runs and nothing on disk is touched. Arbitrarily placed
- *      outputs are out of scope, and publishing part of a set is not an
- *      acceptable substitute for saying so.
- *   2. No two entries may name the same file, comparing ASCII case-INSENSITIVELY.
- *      Windows and macOS resolve "Atlas.png" and "atlas.png" to one file, so a
- *      list that collides on case cannot describe a set on those hosts and is
- *      rejected everywhere, keeping the contract host-independent. Non-ASCII
- *      case collisions (Turkish dotted I, full-width forms) are out of scope.
- *      The error names both colliding entries.
- *
- * Then a private staging directory is created as a SIBLING of the output
- * directory (same volume, so every publish step is a pure rename). The serializer
- * returns one memory document per declared format artifact; the core writes them
- * and every planned page PNG, then verifies the complete staged set. The scan is
- * part of the guarantee, so a staging
- * directory that cannot be opened or cannot be enumerated to its end fails
- * CLOSED -- an unverified set is exactly what this rejects.
- *
- * Publication itself is a two-phase swap with rollback. Phase one renames each
- * existing destination aside to a ".tp-old-" sibling; phase two renames each
- * staged file onto its destination. Any failure returned by either phase rolls
- * the whole thing back -- every displaced file returns to its destination and
- * every already-promoted file is removed -- so a completed call sees either all
- * current artifact-plan entries or the previous contents of those same
- * destinations, never a mix. Files absent from the current plan are never
- * scanned, inferred, or removed. On success the displaced copies are deleted.
- * If rollback itself cannot complete, the error reports publication uncertainty
- * instead of claiming a clean failure.
- *
- * Abrupt process termination is outside that rollback guarantee. It can leave
- * private staging/backup names and a partially swapped planned set. Later
- * exports do not scan, infer ownership of, restore, or delete those leftovers;
- * doing so safely would require an explicit transaction record.
- *
- * `out_serializer_ran` (nullable) reports whether `exp->serialize` was invoked,
- * so a caller's report can distinguish a rejected output list from a failed
- * writer. `out_publication_uncertain` (nullable) is true only if rollback could
- * not prove that the previous destination set was restored. The staging dir is
- * removed on every path. */
-tp_status tp_export_publish(const tp_exporter *exp,
-                            const tp_export_ir *ir,
-                            const tp_result *packed,
-                            const tp_export_artifact_plan *plan,
-                            tp_export_notices *notices,
-                            bool *out_serializer_ran,
-                            bool *out_publication_uncertain,
-                            tp_error *err);
-
-#ifdef TP_ENABLE_TEST_SEAMS
-/* Fails the `nth` (0-based) rename the two-phase swap performs, counting the
- * displace and promote phases together in execution order, so the rollback path
- * is constructible without a real filesystem fault. Negative disarms. */
-void tp_export_publish__test_fail_rename_at(int nth);
-#endif
-
-/* Lookup by id in the fixed built-in native registry. NULL on miss. */
-const tp_exporter *tp_exporter_find(const char *id);
-
-/* Enumeration for GUI/CLI dropdowns. */
-int tp_exporter_count(void);
-const tp_exporter *tp_exporter_at(int index);
-
-#ifdef TP_ENABLE_TEST_SEAMS
-tp_status tp_exporter_register(const tp_exporter *e);
-#endif
-
-tp_status tp_export_json_neotolis_serialize(const tp_export_serialize_ctx *ctx,
-                                            tp_export_document *documents,
-                                            int document_count,
-                                            tp_error *err);
 
 /* json-neotolis schema version emitted in the "version" field. */
 #define TP_JSON_NEOTOLIS_SCHEMA_VERSION 1
@@ -450,13 +351,6 @@ tp_status tp_export_json_neotolis_serialize(const tp_export_serialize_ctx *ctx,
  * docs/formats/defold-tpinfo.md). Public so the CLI version manifest can report
  * it from one source instead of a duplicated literal. */
 #define TP_DEFOLD_TPINFO_VERSION "2.0"
-
-/* Defold memory serializer for extension-texturepacker `.tpinfo` + `.tpatlas`.
- * Page PNGs and all filenames remain common-core responsibilities. */
-tp_status tp_export_defold_serialize(const tp_export_serialize_ctx *ctx,
-                                     tp_export_document *documents,
-                                     int document_count,
-                                     tp_error *err);
 
 #ifdef __cplusplus
 }

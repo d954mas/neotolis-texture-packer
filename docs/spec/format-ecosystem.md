@@ -9,7 +9,8 @@ documented in
 
 The current native export core is the foundation, not a package system. It owns:
 
-- immutable, versioned Export IR;
+- target-neutral immutable, versioned Export IR, materialized once per distinct
+  effective pack result;
 - exact capability projection before packing;
 - declared artifacts and concrete artifact planning;
 - common PNG writing, staging, verification, and rollback-backed publication;
@@ -45,8 +46,16 @@ additional files. The common core writes all documents and page PNGs and
 publishes every current plan entry or leaves the previous contents of those same
 destinations intact when the operation returns a handled failure. Abrupt process
 termination is not auto-recovered and may leave private staging/backup entries.
-Files absent from the current plan are not owned, scanned, restored, or removed
-by Export.
+Destination ownership is coordinated by permanent `.ntpacker-export.lock`
+sidecars whose live OS leases prevent overlapping publications. Other files
+absent from the current plan are not owned, scanned, restored, or removed by
+Export.
+
+Capability policy is descriptor-driven and owned by the common core. Compatible
+metadata loss produces the same structured notices for dry and wet execution;
+an artifact-shape mismatch such as multiple pages for a single-page descriptor
+is rejected before handler invocation. Handlers encode the admitted projection
+and do not recreate capability adaptation rules.
 
 Exact template/Lua descriptor storage and discovery are deliberately deferred.
 No `format.json`, archive manifest, package installer, or version matrix is

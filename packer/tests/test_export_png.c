@@ -20,6 +20,7 @@
 #include "tp_core/tp_pack.h"
 #include "tp_core/tp_scan.h"
 #include "tp_core/tp_build_worker.h"
+#include "../src/tp_export_internal.h"
 #include "../src/tp_fs_internal.h"
 #include "unity.h"
 
