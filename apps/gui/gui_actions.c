@@ -16,7 +16,7 @@
 #include "clipboard/nt_clipboard.h"
 #include "log/nt_log.h"
 #include "time/nt_time.h"
-#include "tp_core/tp_export.h" /* tp_exporter_at -> the preview selector's exporter list */
+#include "tp_core/tp_export.h" /* tp_format_at -> the preview selector's format list */
 #include "tp_core/tp_id.h"
 #include "tp_core/tp_names.h"  /* tp_names_common_prefix (anim id from selection) */
 

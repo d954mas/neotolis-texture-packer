@@ -128,26 +128,43 @@ static tp_status session_refresh_sources(tp_session *session, tp_error *err) {
 }
 
 void test_refresh_generic_cancel_and_compact_use_concrete_owner(void) {
-    tp_session *session = make_session();
+    char root[1024];
+    (void)snprintf(root, sizeof root, "%s/refresh_generic_cancel", g_scratch);
+    tp_fs_remove_tree(root);
+    tp_mkdirs(root);
+    const char *paths[] = {root};
+    const tp_source_kind kinds[] = {TP_SOURCE_KIND_FOLDER};
+    tp_session *session = make_refresh_session(paths, kinds, 1);
+    tp_scan__test_arm_walk_gate();
     tp_error err = {{0}};
     const tp_refresh_job_request request = {0};
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
         tp_session_refresh_start(session, &request, &err));
+    int spins = 0;
+    while (!tp_scan__test_walk_gate_entered() && spins++ < 1000000) {
+        thrd_yield();
+    }
+    TEST_ASSERT_TRUE_MESSAGE(
+        tp_scan__test_walk_gate_entered(),
+        "Refresh did not enter the deterministic scan gate");
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
         tp_session_job_cancel(session, &err));
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_INVALID_ARGUMENT,
         tp_session_job_cancel(session, &err));
+    tp_scan__test_release_walk_gate();
 
     tp_session_job_result completion = {0};
-    while (tp_session_job_active(session)) {
+    spins = 0;
+    while (tp_session_job_active(session) && spins++ < 1000000) {
         TEST_ASSERT_EQUAL_INT(
             TP_STATUS_OK,
             tp_session_update(session, &completion, &err));
         thrd_yield();
     }
+    TEST_ASSERT_FALSE(tp_session_job_active(session));
     TEST_ASSERT_EQUAL_INT(
         TP_SESSION_JOB_REFRESH, completion.kind);
     TEST_ASSERT_EQUAL_INT(
@@ -169,6 +186,7 @@ void test_refresh_generic_cancel_and_compact_use_concrete_owner(void) {
 
     tp_session_job_result_destroy(&completion);
     tp_session_destroy(session);
+    tp_fs_remove_tree(root);
 }
 
 void test_refresh_rejects_cancel_after_worker_claims_terminal(void) {

@@ -25,7 +25,9 @@
 #include "tp_core/tp_project.h"
 #include "tp_core/tp_session.h"
 #include "tp_core/tp_build_worker.h"
+#include "tp_export_internal.h"
 #include "tp_fs_internal.h"
+#include "tp_export_job_internal.h"
 #include "tp_project_mutation_internal.h"
 #include "tp_test_seams.h"
 #include "unity.h"
@@ -50,7 +52,42 @@ static tp_exporter g_norot;
 static tp_exporter g_list_error;
 static tp_exporter g_write_error;
 static tp_exporter g_stray;
+static tp_exporter g_capture;
+static tp_format_descriptor g_nopivot_format;
+static tp_format_descriptor g_norot_format;
+static tp_format_descriptor g_list_error_format;
+static tp_format_descriptor g_write_error_format;
+static tp_format_descriptor g_stray_format;
+static tp_format_descriptor g_capture_format;
+static const tp_export_ir *g_nopivot_ir;
+static const tp_export_ir *g_capture_ir;
+static bool cancel_export_run(void *ctx);
+static const tp_format_artifact_decl g_json_artifact[] = {
+    {.id = "metadata", .suffix = ".json"},
+};
+static const tp_format_artifact_decl g_bad_artifact[] = {
+    {.id = "metadata", .suffix = "/bad"},
+};
+static const tp_format_artifact_decl g_stray_artifact[] = {
+    {.id = "metadata", .suffix = ".json/sub/stray.json"},
+};
 static int g_list_error_write_calls;
+
+static tp_status nopivot_serialize(const tp_export_serialize_ctx *ctx,
+                                   tp_export_document *documents,
+                                   int document_count, tp_error *err) {
+    g_nopivot_ir = ctx->ir;
+    return tp_export_json_neotolis_serialize(ctx, documents, document_count,
+                                             err);
+}
+
+static tp_status capture_serialize(const tp_export_serialize_ctx *ctx,
+                                   tp_export_document *documents,
+                                   int document_count, tp_error *err) {
+    g_capture_ir = ctx->ir;
+    return tp_export_json_neotolis_serialize(ctx, documents, document_count,
+                                             err);
+}
 
 void setUp(void) { tp_export_run__test_reset_all(); }
 void tearDown(void) { tp_export_run__test_reset_all(); }
@@ -64,25 +101,23 @@ static void fill(uint8_t *p, int n, uint8_t r, uint8_t g, uint8_t b) {
     }
 }
 
-static tp_status list_error_write(const tp_export_write_ctx *ctx, tp_error *err) {
+static tp_status list_error_serialize(const tp_export_serialize_ctx *ctx,
+                                      tp_export_document *documents,
+                                      int document_count, tp_error *err) {
     (void)ctx;
+    (void)documents;
+    (void)document_count;
     (void)err;
     g_list_error_write_calls++;
     return TP_STATUS_OK;
 }
 
-static tp_status list_error_outputs(const tp_export_prepared *prep, const char *out_path_base,
-                                    tp_export_path_sink sink, void *ud, tp_error *err) {
-    (void)prep;
-    (void)out_path_base;
-    (void)sink;
-    (void)ud;
-    return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS, "test exporter output path overflow");
-}
-
-static tp_status write_error_write(const tp_export_write_ctx *ctx,
-                                   tp_error *err) {
+static tp_status write_error_serialize(const tp_export_serialize_ctx *ctx,
+                                       tp_export_document *documents,
+                                       int document_count, tp_error *err) {
     (void)ctx;
+    (void)documents;
+    (void)document_count;
     return tp_error_set(err, TP_STATUS_PATH_RESOLVE_FAILED,
                         "test writer failed after its publication attempt");
 }
@@ -91,25 +126,12 @@ static tp_status write_error_write(const tp_export_write_ctx *ctx,
  * directory -- a set the whole-set publication cannot cover. */
 static int g_stray_write_calls;
 
-static tp_status stray_outputs(const tp_export_prepared *prep, const char *out_path_base,
-                               tp_export_path_sink sink, void *ud, tp_error *err) {
-    (void)prep;
-    char primary[TP_IDENTITY_PATH_MAX];
-    char stray[TP_IDENTITY_PATH_MAX];
-    const int pn = snprintf(primary, sizeof primary, "%s.json", out_path_base);
-    const int sn = snprintf(stray, sizeof stray, "%s/sub/stray.json", out_path_base);
-    if (pn <= 0 || (size_t)pn >= sizeof primary || sn <= 0 ||
-        (size_t)sn >= sizeof stray) {
-        return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
-                            "test exporter output path overflow");
-    }
-    sink(ud, primary);
-    sink(ud, stray);
-    return TP_STATUS_OK;
-}
-
-static tp_status stray_write(const tp_export_write_ctx *ctx, tp_error *err) {
+static tp_status stray_serialize(const tp_export_serialize_ctx *ctx,
+                                 tp_export_document *documents,
+                                 int document_count, tp_error *err) {
     (void)ctx;
+    (void)documents;
+    (void)document_count;
     (void)err;
     g_stray_write_calls++;
     return TP_STATUS_OK;
@@ -240,6 +262,85 @@ void test_nopivot_drops_pivot_with_notice(void) {
         }
     }
     TEST_ASSERT_TRUE_MESSAGE(found, "dropping a non-default pivot must raise a notice");
+}
+
+void test_targets_in_one_pack_group_share_one_export_ir(void) {
+    tp_project *project = tp_project_create();
+    TEST_ASSERT_NOT_NULL(project);
+    tp_project_atlas *atlas = tp_project_get_atlas(project, 0);
+    atlas->shape = 0;
+    atlas->allow_transform = false;
+    atlas->power_of_two = false;
+    atlas->padding = 0;
+    atlas->margin = 0;
+    atlas->alpha_threshold = 1;
+    atlas->max_size = 1024;
+    atlas->pixels_per_unit = 1.0F;
+    char first[1024];
+    char second[1024];
+    TEST_ASSERT_TRUE(snprintf(first, sizeof first, "%s/shared_ir_a", g_dir) > 0);
+    TEST_ASSERT_TRUE(snprintf(second, sizeof second, "%s/shared_ir_b", g_dir) > 0);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_atlas_add_target(atlas, g_nopivot_format.id, first, NULL));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_atlas_add_target(atlas, g_capture_format.id, second, NULL));
+    tp_pack_sprite_desc sprite = {
+        .name = "shared", .rgba = g_piv, .w = 30, .h = 20,
+        .origin_x = 0.5F, .origin_y = 0.5F,
+    };
+    tp_arena *arena = tp_arena_create(0);
+    tp_export_notices notices;
+    tp_export_notices_init(&notices);
+    tp_error error = {{0}};
+    int runs = 0;
+    g_nopivot_ir = NULL;
+    g_capture_ir = NULL;
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_export_run(project, 0, &sprite, 1, g_dir, arena, &notices,
+                      &runs, &error),
+        error.msg);
+    TEST_ASSERT_EQUAL_INT(1, runs);
+    TEST_ASSERT_NOT_NULL(g_nopivot_ir);
+    TEST_ASSERT_EQUAL_PTR(g_nopivot_ir, g_capture_ir);
+    tp_export_notices_free(&notices);
+    tp_arena_destroy(arena);
+    tp_project_destroy(project);
+}
+
+void test_capability_notice_allocation_failure_is_fatal(void) {
+    tp_export_page page = {.artifact_id = 0, .w = 8, .h = 8};
+    tp_export_sprite sprite = {
+        .final_name = "hero",
+        .data = {
+            .name = "hero", .page = 0, .alias_of = -1,
+            .frame = {.w = 8, .h = 8},
+            .sourceSize = {.w = 8, .h = 8},
+            .spriteSourceSize = {.w = 8, .h = 8},
+            .pivot = {.x = 0.25F, .y = 0.75F},
+        },
+    };
+    tp_export_ir ir = {
+        .version = TP_EXPORT_IR_VERSION,
+        .atlas_name = "notice-oom",
+        .pixels_per_unit = 1.0F,
+        .pages = &page,
+        .page_count = 1,
+        .sprites = &sprite,
+        .sprite_count = 1,
+    };
+    tp_export_notices notices;
+    tp_export_notices_init(&notices);
+    tp_error error = {{0}};
+    tp_export_notices__test_fail_next_reserve();
+    const tp_status status = tp_export_predict_loss(
+        g_proj, 0, &g_nopivot_format.caps, g_nopivot_format.id, &ir,
+        &notices, &error);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OOM, status);
+    TEST_ASSERT_EQUAL_INT(0, notices.count);
+    tp_export_notices_free(&notices);
 }
 
 void test_rename_and_anim_through_run(void) {
@@ -462,68 +563,45 @@ static bool setup_all(const char *dir) {
     tp_export_notices_init(&g_notices);
 
     /* register test-only descriptors over the json writer. */
-    g_nopivot = (tp_exporter){.id = "test-nopivot",
-                              .display_name = "test nopivot",
-                              .extension = "json",
-                              .caps = {.rotate90 = true,
-                                       .flips = true,
-                                       .polygons = true,
-                                       .pivot = false,
-                                       .slice9 = true,
-                                       .multipage = true,
-                                       .aliases = true},
-                              .write = tp_export_json_neotolis_write};
-    g_norot = (tp_exporter){.id = "test-norot",
-                            .display_name = "test norot",
-                            .extension = "json",
-                            .caps = {.rotate90 = false,
-                                     .flips = false,
-                                     .polygons = true,
-                                     .pivot = true,
-                                     .slice9 = true,
-                                     .multipage = true,
-                                     .aliases = true},
-                            .write = tp_export_json_neotolis_write};
-    g_list_error = (tp_exporter){.id = "test-list-error",
-                                 .display_name = "test list error",
-                                 .extension = "bad",
-                                 .caps = {.rotate90 = true,
-                                          .flips = true,
-                                          .polygons = true,
-                                          .pivot = true,
-                                          .slice9 = true,
-                                          .multipage = true,
-                                          .aliases = true},
-                                 .write = list_error_write,
-                                 .list_outputs = list_error_outputs};
-    g_write_error = (tp_exporter){.id = "test-write-error",
-                                  .display_name = "test write error",
-                                  .extension = "bad",
-                                  .caps = {.rotate90 = true,
-                                           .flips = true,
-                                           .polygons = true,
-                                           .pivot = true,
-                                           .slice9 = true,
-                                           .multipage = true,
-                                           .aliases = true},
-                                  .write = write_error_write};
-    g_stray = (tp_exporter){.id = "test-stray-output",
-                            .display_name = "test stray output",
-                            .extension = "json",
-                            .caps = {.rotate90 = true,
-                                     .flips = true,
-                                     .polygons = true,
-                                     .pivot = true,
-                                     .slice9 = true,
-                                     .multipage = true,
-                                     .aliases = true},
-                            .write = stray_write,
-                            .list_outputs = stray_outputs};
+    tp_export_caps full = tp_export_caps_full();
+    g_nopivot_format = (tp_format_descriptor){
+        .id = "test-nopivot", .display_name = "test nopivot", .caps = full,
+        .artifacts = g_json_artifact, .artifact_count = 1};
+    g_nopivot_format.caps.pivot = false;
+    g_nopivot = (tp_exporter){.format = &g_nopivot_format,
+                              .serialize = nopivot_serialize};
+    g_capture_format = (tp_format_descriptor){
+        .id = "test-capture", .display_name = "test IR capture", .caps = full,
+        .artifacts = g_json_artifact, .artifact_count = 1};
+    g_capture = (tp_exporter){.format = &g_capture_format,
+                              .serialize = capture_serialize};
+    g_norot_format = (tp_format_descriptor){
+        .id = "test-norot", .display_name = "test norot", .caps = full,
+        .artifacts = g_json_artifact, .artifact_count = 1};
+    g_norot_format.caps.transform_mask = TP_EXPORT_TRANSFORMS_IDENTITY;
+    g_norot = (tp_exporter){.format = &g_norot_format,
+                            .serialize = tp_export_json_neotolis_serialize};
+    g_list_error_format = (tp_format_descriptor){
+        .id = "test-list-error", .display_name = "test list error", .caps = full,
+        .artifacts = g_bad_artifact, .artifact_count = 1};
+    g_list_error = (tp_exporter){.format = &g_list_error_format,
+                                 .serialize = list_error_serialize};
+    g_write_error_format = (tp_format_descriptor){
+        .id = "test-write-error", .display_name = "test write error", .caps = full,
+        .artifacts = g_json_artifact, .artifact_count = 1};
+    g_write_error = (tp_exporter){.format = &g_write_error_format,
+                                  .serialize = write_error_serialize};
+    g_stray_format = (tp_format_descriptor){
+        .id = "test-stray-output", .display_name = "test stray output", .caps = full,
+        .artifacts = g_stray_artifact, .artifact_count = 1};
+    g_stray = (tp_exporter){.format = &g_stray_format,
+                            .serialize = stray_serialize};
     if (tp_exporter_register(&g_nopivot) != TP_STATUS_OK ||
         tp_exporter_register(&g_norot) != TP_STATUS_OK ||
         tp_exporter_register(&g_list_error) != TP_STATUS_OK ||
         tp_exporter_register(&g_write_error) != TP_STATUS_OK ||
-        tp_exporter_register(&g_stray) != TP_STATUS_OK) {
+        tp_exporter_register(&g_stray) != TP_STATUS_OK ||
+        tp_exporter_register(&g_capture) != TP_STATUS_OK) {
         return false;
     }
 
@@ -657,7 +735,9 @@ static void test_dry_run(void) {
     a->pixels_per_unit = 1.0F;
     char dbase[1024];
     (void)snprintf(dbase, sizeof dbase, "%s/dryrun_base", g_dir);
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_target(a, "json-neotolis", dbase, NULL));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_atlas_add_target(
+                              a, g_nopivot_format.id, dbase, NULL));
 
     /* --- wet run: files land; capture the report scalars + the file list --- */
     tp_arena *arw = tp_arena_create(0);
@@ -688,9 +768,6 @@ static void test_dry_run(void) {
         }
         (void)snprintf(paths[f], sizeof paths[f], "%s", wt->written_files[f]);
     }
-    tp_export_notices_free(&nw);
-    tp_arena_destroy(arw);
-
     /* delete the wet outputs so "absent after dry-run" is unambiguous. */
     for (int f = 0; f < npaths; f++) {
         (void)remove(paths[f]);
@@ -725,9 +802,35 @@ static void test_dry_run(void) {
             (void)fclose(fp);
         }
     }
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        nw.count, nd.count,
+        "dry and wet capability notices must be identical");
+    for (int i = 0; i < nw.count; ++i) {
+        TEST_ASSERT_EQUAL_INT(nw.items[i].field_id, nd.items[i].field_id);
+        TEST_ASSERT_EQUAL_INT(nw.items[i].reason_id, nd.items[i].reason_id);
+        TEST_ASSERT_EQUAL_STRING(nw.items[i].target, nd.items[i].target);
+        TEST_ASSERT_EQUAL_STRING(nw.items[i].sprite, nd.items[i].sprite);
+        TEST_ASSERT_EQUAL_STRING(nw.items[i].msg, nd.items[i].msg);
+    }
+    tp_export_notices_free(&nw);
+    tp_arena_destroy(arw);
     tp_export_notices_free(&nd);
     tp_arena_destroy(ard);
     tp_project_destroy(proj);
+}
+
+static void test_wet_run_reports_pack_transform_adaptation(void) {
+    bool found = false;
+    for (int i = 0; i < g_notices.count; ++i) {
+        if (g_notices.items[i].field_id == TP_NOTICE_FIELD_TRANSFORM &&
+            g_notices.items[i].target &&
+            strcmp(g_notices.items[i].target, "test-norot") == 0) {
+            found = true;
+            break;
+        }
+    }
+    TEST_ASSERT_TRUE_MESSAGE(
+        found, "wet export must report the transform mask disabled before repack");
 }
 
 /* Every output artifact must fit the canonical path contract, including the
@@ -827,11 +930,13 @@ static void test_custom_output_listing_failure_prevents_wet_write_and_matches_dr
         tp_error err = {{0}};
 
         TEST_ASSERT_EQUAL_INT(
-            TP_STATUS_OUT_OF_BOUNDS,
+            TP_STATUS_INVALID_ARGUMENT,
             tp_export_run_ex(proj, 0, &sprite, 1, g_dir, arena, &notices, NULL, &opts, &err));
         TEST_ASSERT_EQUAL_INT(1, report.target_count);
         TEST_ASSERT_FALSE(report.targets[0].ok);
-        TEST_ASSERT_EQUAL_STRING("test exporter output path overflow", report.targets[0].error);
+        TEST_ASSERT_EQUAL_STRING(
+            "format 'test-list-error' has invalid artifact declaration 0",
+            report.targets[0].error);
         TEST_ASSERT_EQUAL_INT(TP_EXPORT_WRITER_NOT_ATTEMPTED,
                               report.targets[0].writer_outcome);
         tp_export_notices_free(&notices);
@@ -924,6 +1029,9 @@ static void test_failed_writer_error_falls_back_when_error_copy_fails(void) {
                              report.targets[0].error);
     TEST_ASSERT_EQUAL_INT(TP_EXPORT_WRITER_FAILED,
                           report.targets[0].writer_outcome);
+    TEST_ASSERT_FALSE_MESSAGE(
+        report.targets[0].publication_uncertain,
+        "a serializer failure before staging cannot make publication uncertain");
 
     tp_export_notices_free(&notices);
     tp_arena_destroy(arena);
@@ -977,7 +1085,8 @@ static void test_uncoverable_output_list_is_refused_before_the_writer_runs(void)
                                   report.targets[0].writer_outcome,
                                   "a rejected output list is not a writer failure");
     TEST_ASSERT_EQUAL_INT(0, g_stray_write_calls);
-    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(report.targets[0].error, "stray.json"),
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(report.targets[0].error,
+                                        "invalid artifact declaration"),
                                  report.targets[0].error);
     TEST_ASSERT_FALSE_MESSAGE(tp_fs_exists(primary),
                               "a refused output list must write nothing");
@@ -1038,6 +1147,16 @@ static void test_snapshot_report_marks_nonempty_input_ready_before_output_resolu
     tp_export_notices_init(&notices);
     tp_export_report report;
     memset(&report, 0, sizeof report);
+    const tp_cancel_token cancel = {cancel_export_run, NULL};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_CANCELLED,
+        tp_export_snapshot_job_run_atlas_ex_cancellable(
+            job, 0, arena, &notices, &report, NULL, NULL, NULL, &cancel,
+            &error));
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_EXPORT_INPUT_NOT_EVALUATED, report.input_outcome,
+        "cancelled source admission must not be reported as an input failure");
+
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OUT_OF_BOUNDS,
         tp_export_snapshot_job_run_atlas_ex(
@@ -1639,6 +1758,50 @@ static void test_export_run_honors_cancel_before_safe_pack_phase(void) {
     tp_arena_destroy(arena);
 }
 
+static void test_snapshot_job_rejects_relative_reroot(void) {
+    const tp_export_snapshot_job_opts opts = {.out_dir = "relative-output"};
+    tp_export_snapshot_job *job = NULL;
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_PATH_NOT_ABSOLUTE,
+        tp_export_project_job_create_internal(g_proj, g_dir, &opts, &job,
+                                              &error));
+    TEST_ASSERT_NULL(job);
+}
+
+static void assert_snapshot_job_rejects_reroot_target(const char *out_path,
+                                                       tp_status expected) {
+    tp_project *project = tp_project_create();
+    TEST_ASSERT_NOT_NULL(project);
+    tp_project_atlas *atlas = tp_project_get_atlas(project, 0);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_atlas_add_target(atlas, TP_EXPORTER_ID_JSON_NEOTOLIS,
+                                    out_path, NULL));
+    const tp_export_snapshot_job_opts opts = {.out_dir = g_dir};
+    tp_export_snapshot_job *job = NULL;
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT(
+        expected,
+        tp_export_project_job_create_internal(project, g_dir, &opts, &job,
+                                              &error));
+    TEST_ASSERT_NULL(job);
+    tp_project_destroy(project);
+}
+
+static void test_snapshot_job_rejects_target_that_escapes_reroot(void) {
+    assert_snapshot_job_rejects_reroot_target("../outside/atlas",
+                                              TP_STATUS_INVALID_ARGUMENT);
+    assert_snapshot_job_rejects_reroot_target("..\\outside\\atlas",
+                                              TP_STATUS_INVALID_ARGUMENT);
+#ifdef _WIN32
+    assert_snapshot_job_rejects_reroot_target("C:..\\outside\\atlas",
+                                              TP_STATUS_PATH_DRIVE_RELATIVE);
+    assert_snapshot_job_rejects_reroot_target("\\outside\\atlas",
+                                              TP_STATUS_PATH_NOT_ABSOLUTE);
+#endif
+}
+
 int main(int argc, char **argv) {
     if (tp_build_is_worker_invocation(argc, argv)) {
         return tp_build_worker_main();
@@ -1649,14 +1812,17 @@ int main(int argc, char **argv) {
     }
     UNITY_BEGIN();
     RUN_TEST(test_shared_run_count);
+    RUN_TEST(test_targets_in_one_pack_group_share_one_export_ir);
     RUN_TEST(test_full_target_has_diagonal);
     RUN_TEST(test_norot_target_is_identity);
     RUN_TEST(test_nopivot_drops_pivot_with_notice);
+    RUN_TEST(test_capability_notice_allocation_failure_is_fatal);
     RUN_TEST(test_rename_and_anim_through_run);
     RUN_TEST(test_dangling_frame_through_run);
     RUN_TEST(test_duplicate_source_keys_export_the_canonical_animation_frame);
     RUN_TEST(test_report_ex);
     RUN_TEST(test_dry_run);
+    RUN_TEST(test_wet_run_reports_pack_transform_adaptation);
     RUN_TEST(test_dry_run_rejects_the_same_output_path_overflow_as_wet_export);
     RUN_TEST(test_custom_output_listing_failure_prevents_wet_write_and_matches_dry_run);
     RUN_TEST(test_unknown_exporter_error_falls_back_when_error_copy_fails);
@@ -1668,6 +1834,8 @@ int main(int argc, char **argv) {
     RUN_TEST(test_atomic_export_overwrite_publishes_the_new_content);
     RUN_TEST(test_atomic_export_replace_failure_keeps_the_old_file);
     RUN_TEST(test_export_set_failure_leaves_previous_outputs_byte_identical);
+    RUN_TEST(test_snapshot_job_rejects_relative_reroot);
+    RUN_TEST(test_snapshot_job_rejects_target_that_escapes_reroot);
     RUN_TEST(test_export_run_honors_cancel_before_safe_pack_phase);
     RUN_TEST(test_export_run_cancels_the_pack_worker_before_artifact_publication);
     RUN_TEST(test_snapshot_export_polls_cancel_before_each_output_directory_creation);

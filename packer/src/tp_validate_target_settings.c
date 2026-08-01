@@ -17,7 +17,7 @@ enum {
 
 static unsigned target_issue_mask(const char *exporter_id, bool enabled,
                                   const char *out_path, bool path_shared) {
-    unsigned mask = tp_exporter_find(exporter_id)
+    unsigned mask = tp_format_find(exporter_id)
                         ? 0U
                         : TARGET_ISSUE_UNKNOWN_EXPORTER;
     if (enabled) {
@@ -110,7 +110,7 @@ void validate_target_settings_domain(
     validation_builder *fs, const tp_project *p, int ai,
     const tp_project_atlas *a, const target_path_index *target_paths) {
     /* (f) target integrity.
-     *   unknown_exporter   [error]   exporter id tp_exporter_find cannot resolve -- a broken id is bad
+     *   unknown_exporter   [error]   exporter id tp_format_find cannot resolve -- a broken id is bad
      *                                 data regardless of enable state, so reported for EVERY target.
      *   target_no_out_path [error]   an ENABLED target with an empty/NULL out_path can produce no file.
      *   duplicate_out_path [warning] an ENABLED target whose out_path is ALSO another ENABLED target's
@@ -206,12 +206,13 @@ void validate_target_settings_domain(
                     "alpha_threshold = %d is out of range [0..%d]",
                     a->alpha_threshold, TP_PACK_ALPHA_MAX);
     }
-    if (atlas_facts.max_vertices_out_of_range) {
+    if (!tp_project_max_vertices_valid(a->max_vertices)) {
         add_finding(fs, TP_VALIDATION_ERROR,
                     TP_VALIDATION_CODE_SETTING_OUT_OF_RANGE,
                     context_atlas(a),
-                    "max_vertices = %d is out of range [1..%d]",
-                    a->max_vertices, TP_PACK_MAX_VERTICES);
+                    "max_vertices = %d is out of range [%d..%d]",
+                    a->max_vertices, TP_PROJECT_MIN_VERTICES,
+                    TP_PROJECT_MAX_VERTICES);
     }
     if (atlas_facts.shape_out_of_range) {
         add_finding(fs, TP_VALIDATION_ERROR,

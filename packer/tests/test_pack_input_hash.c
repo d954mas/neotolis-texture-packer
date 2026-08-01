@@ -96,7 +96,7 @@ static tp_id128 compute(const tp_pack_settings *s, const char *exporter,
 void test_version_byte_pinned(void) {
     /* A change to either constant is a visible cache-invalidating change and
      * must be a deliberate edit here. */
-    TEST_ASSERT_EQUAL_UINT8(1U, TP_PACK_INPUT_HASH_VERSION);
+    TEST_ASSERT_EQUAL_UINT8(2U, TP_PACK_INPUT_HASH_VERSION);
     TEST_ASSERT_EQUAL_UINT32(1U, TP_PACK_ALGO_VERSION);
 }
 

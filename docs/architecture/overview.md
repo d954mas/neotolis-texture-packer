@@ -23,7 +23,8 @@ saved project / live operator
 
 - `packer/tp_core` owns the project model, canonical identity, validation,
   operation catalog, transactions, session, snapshots, persistence, history,
-  recovery, source scanning, exporter descriptors, and pack-result metadata.
+  recovery, source scanning, immutable Export IR, native format descriptors,
+  artifact planning/publication, and pack-result metadata.
 - `packer/tp_build` owns fallible builder execution, worker-process transport,
   packing, parse-back, and export orchestration.
 - `apps/cli` parses saved-file commands and renders human or versioned JSON
@@ -80,9 +81,11 @@ in-process live-headless session capability shape. MCP and Dev API transports
 are not implemented. Their target contract is in
 [`../spec/automation.md`](../spec/automation.md).
 
-Current format support is two built-in exporters plus runtime C exporter
-registration. The unified package registry, Import/Export IR, linked atlas
-sources, templates, and sandboxed Lua are target architecture, documented in
+Current format support is two fixed built-in native exporters over Export IR v1
+and the common artifact planner/publisher. There is no production runtime C
+registration surface. Template and sandboxed Lua export handlers are later
+target architecture; Import and linked-atlas ingestion are outside this slice.
+The future export-handler contract is documented in
 [`../spec/format-ecosystem.md`](../spec/format-ecosystem.md).
 
 ## Primary durable contracts

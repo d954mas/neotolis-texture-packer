@@ -21,15 +21,11 @@
 #include "tp_core/tp_arena.h"
 #include "tp_core/tp_export.h"
 #include "tp_core/tp_pack_result.h"
+#include "tp_export_internal.h"
 #include "tp_name_map.h"
 #include "tp_pack_read.h"
 #include "unity.h"
 
-/* Direct-drive context for the writer contract (tp_core/tp_export.h): a golden
- * test wants the files exactly where they will be published, so the write base
- * and the published base are the same path. Production splits them -- the
- * publisher hands the writer a staging base with the same basename. */
-#define DIRECT_CTX(prep_ptr, caps_ptr, base_path, notices_ptr)                     &(const tp_export_write_ctx) {                                                     .prep = (prep_ptr), .caps = (caps_ptr),                                        .write_path_base = (base_path), .out_path_base = (base_path),                  .notices = (notices_ptr)                                                   }
 
 #include "tp_fixtures.h"
 
@@ -45,6 +41,30 @@ static int gn;
 static tp_arena *g_arena;
 static tp_name_map *g_names;
 static const char *g_dir;
+
+static tp_status publish_json(const tp_result *result,
+                              const tp_export_ir *ir,
+                              const tp_export_caps *caps, const char *base,
+                              tp_export_notices *notices, tp_error *err) {
+    static const tp_format_artifact_decl artifacts[] = {
+        {.id = "metadata", .suffix = ".json"},
+    };
+    const tp_format_descriptor format = {
+        .id = "json-test", .display_name = "JSON test", .caps = *caps,
+        .artifacts = artifacts, .artifact_count = 1,
+    };
+    const tp_exporter exporter = {
+        .format = &format, .serialize = tp_export_json_neotolis_serialize,
+    };
+    tp_export_artifact_plan plan;
+    tp_status st = tp_export_artifact_plan_build(exporter.format, ir, base,
+                                                 g_arena,
+                                                  &plan, err);
+    return st == TP_STATUS_OK
+               ? tp_export_publish(&exporter, ir, result, &plan, notices, NULL,
+                                   NULL, err)
+               : st;
+}
 
 void setUp(void) {}
 void tearDown(void) {}
@@ -107,16 +127,16 @@ static cJSON *sprite_by_name(cJSON *root, const char *name) {
 
 /* Exports one case to its own base; leaves the parsed cJSON to the caller. */
 static bool export_case(jc *j) {
-    tp_export_prepared prep;
+    tp_export_ir prep;
     tp_error e = {{0}};
-    if (tp_normalize(j->res, NULL, g_arena, &prep, &e) != TP_STATUS_OK) {
+    if (tp_export_ir_build(j->res, NULL, g_arena, &prep, &e) != TP_STATUS_OK) {
         (void)fprintf(stderr, "normalize failed for %s: %s\n", j->cs->name, e.msg);
         return false;
     }
     tp_export_caps caps = tp_export_caps_full();
     tp_export_notices notices;
     tp_export_notices_init(&notices);
-    tp_status st = tp_export_json_neotolis_write(DIRECT_CTX(&prep, &caps, j->base, &notices), &e);
+    tp_status st = publish_json(j->res, &prep, &caps, j->base, &notices, &e);
     /* full caps => zero metadata-loss notices. */
     bool no_notices = (notices.count == 0);
     tp_export_notices_free(&notices);
@@ -333,13 +353,15 @@ void test_determinism_reexport(void) {
             TEST_ASSERT_NOT_NULL_MESSAGE(pg1[p], "page png snapshot");
         }
 
-        tp_export_prepared prep;
+        tp_export_ir prep;
         tp_error e = {{0}};
-        TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_normalize(g[i].res, NULL, g_arena, &prep, &e));
+        TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_export_ir_build(g[i].res, NULL, g_arena, &prep, &e));
         tp_export_caps caps = tp_export_caps_full();
         tp_export_notices notices;
         tp_export_notices_init(&notices);
-        TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_export_json_neotolis_write(DIRECT_CTX(&prep, &caps, g[i].base, &notices), &e));
+        TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                              publish_json(g[i].res, &prep, &caps, g[i].base,
+                                           &notices, &e));
         tp_export_notices_free(&notices);
 
         size_t n2 = 0;
@@ -365,8 +387,7 @@ void test_determinism_reexport(void) {
 }
 
 void test_metadata_path_above_legacy_limit_reaches_the_filesystem_boundary(void) {
-    tp_result result = {.atlas_name = "long-path", .page_count = 0};
-    tp_export_prepared prep = {.result = &result};
+    tp_export_ir prep;
     tp_export_caps caps = tp_export_caps_full();
     char base[1200];
     const int prefix = snprintf(base, sizeof base, "%s/missing-long-path/", g_dir);
@@ -374,10 +395,12 @@ void test_metadata_path_above_legacy_limit_reaches_the_filesystem_boundary(void)
     memset(base + prefix, 'a', 1100U - (size_t)prefix);
     base[1100] = '\0';
     tp_error err = {{0}};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_export_ir_build(g[0].res, NULL, g_arena, &prep, &err));
 
     TEST_ASSERT_EQUAL_INT(
-        TP_STATUS_BAD_PROJECT,
-        tp_export_json_neotolis_write(DIRECT_CTX(&prep, &caps, base, NULL), &err));
+        TP_STATUS_PATH_RESOLVE_FAILED,
+        publish_json(g[0].res, &prep, &caps, base, NULL, &err));
     TEST_ASSERT_TRUE(strlen(err.msg) > 0U);
 }
 // #endregion

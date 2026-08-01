@@ -164,7 +164,11 @@ typedef enum tp_status {
     TP_STATUS_CANCELLED,
 
     /* A session already owns one transient Refresh, Pack, or Export task. */
-    TP_STATUS_BUSY
+    TP_STATUS_BUSY,
+
+    /* Another process owns at least one destination slot in this export's
+     * artifact plan. No serializer or publication side effect has run. */
+    TP_STATUS_EXPORT_BUSY
 } tp_status;
 
 /* No heap and no borrowed pointers, so a plain struct copy of a tp_error stays
@@ -342,7 +346,8 @@ static inline const char *tp_file_io_phase_id(tp_file_io_phase phase) {
     X(FILE_IO_FAILED, "project file I/O failed", "file_io_failed")                 \
     X(BUILDER_CRASHED, "builder crashed", "builder_crashed")                       \
     X(CANCELLED, "cancelled", "cancelled")                                          \
-    X(BUSY, "session task is busy", "busy")
+    X(BUSY, "session task is busy", "busy")                                        \
+    X(EXPORT_BUSY, "export destination is busy", "export_busy")
 
 static inline const char *tp_status_str(tp_status status) {
     switch (status) {

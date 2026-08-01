@@ -1,36 +1,34 @@
 /* Export output-SET publication contract (tp_core/tp_export.h).
  *
- * Drives tp_export_write_and_publish_set directly over a fixture exporter: none
+ * Drives tp_export_publish directly over a fixture exporter: none
  * of the properties below needs a real pack, and the publish seam is where all
  * of them are decided.
  *   - the declared output list is a CONTRACT, checked before the writer runs:
  *     an output outside the export directory and a case-insensitive duplicate
  *     are both structured rejections, not degraded publications;
- *   - an output the writer produced but the enumeration missed blocks the WHOLE
- *     publication, before the first irreversible rename;
+ *   - serializer overproduction and missing declared documents block the WHOLE
+ *     publication before the first irreversible rename;
  *   - the two-phase swap rolls back completely, so the caller sees either the
  *     whole new set or the whole old set;
- *   - private leftovers of a process that died mid-export are reclaimed by
- *     owner liveness, including finishing or undoing an interrupted swap.
+ *   - files outside the current artifact plan remain untouched, including
+ *     names that resemble the publisher's private staging/backup names.
  */
 
 #define _CRT_SECURE_NO_WARNINGS
 
+#include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-#ifdef _WIN32
-#include <process.h>
-#define test_getpid _getpid
-#else
-#include <unistd.h>
-#define test_getpid getpid
-#endif
+#include "stb_image.h"
 
+#include "tp_core/tp_arena.h"
 #include "tp_core/tp_export.h"
 #include "tp_core/tp_identity.h"
+#include "tp_export_internal.h"
+#include "tp_file_lease.h"
 #include "tp_fs_internal.h"
 #include "unity.h"
 
@@ -42,9 +40,7 @@
 static const char *g_dir;
 static char g_base[TP_IDENTITY_PATH_MAX];
 
-/* Suffixes the fixture writer appends to the base it is GIVEN. The writer must
- * use ctx->write_path_base, so a plan entry lands in the staging dir during a
- * real publication and next to the outputs when driven directly. */
+/* Fixture document count/content returned by the memory-only serializer. */
 #define PLAN_MAX 4
 static const char *g_plan[PLAN_MAX];
 static int g_plan_count;
@@ -60,31 +56,37 @@ static void plan_add(const char *suffix) {
     g_plan[g_plan_count++] = suffix;
 }
 
-static tp_status plan_write(const tp_export_write_ctx *ctx, tp_error *err) {
+static tp_status plan_serialize(const tp_export_serialize_ctx *ctx,
+                                tp_export_document *documents,
+                                int document_count, tp_error *err) {
+    (void)ctx;
     g_write_calls++;
+    if (g_plan_count > document_count) {
+        return tp_error_set(err, TP_STATUS_BAD_PROJECT,
+                            "fixture serializer produced '%s' outside its declared output list",
+                            g_plan[document_count]);
+    }
     for (int i = 0; i < g_plan_count; i++) {
-        char path[TP_IDENTITY_PATH_MAX];
-        if (snprintf(path, sizeof path, "%s%s", ctx->write_path_base,
-                     g_plan[i]) <= 0) {
-            return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
-                                "fixture writer path overflow");
+        documents[i].data = malloc(3U);
+        if (!documents[i].data) {
+            return tp_error_set(err, TP_STATUS_OOM, "fixture serializer OOM");
         }
-        if (!tp_fs_write_file(path, "NEW", 3U)) {
-            return tp_error_set(err, TP_STATUS_BAD_PROJECT,
-                                "fixture writer could not write '%s'", path);
-        }
+        memcpy(documents[i].data, "NEW", 3U);
+        documents[i].size = 3U;
     }
     return TP_STATUS_OK;
 }
 
-static const tp_exporter g_exp = {.id = "test-set-publish",
-                                  .display_name = "set publish fixture",
-                                  .extension = "json",
-                                  .write = plan_write};
-
 void setUp(void) { plan_reset(); }
 
-void tearDown(void) { tp_export_publish__test_fail_rename_at(-1); }
+void tearDown(void) {
+    char page[TP_IDENTITY_PATH_MAX];
+    tp_export_publish__test_fail_rename_at(-1);
+    if (g_base[0] != '\0' &&
+        snprintf(page, sizeof page, "%s-0.png", g_base) > 0) {
+        (void)tp_fs_remove_file(page);
+    }
+}
 
 /* ------------------------------------------------------------------ */
 /* helpers                                                            */
@@ -93,10 +95,78 @@ void tearDown(void) { tp_export_publish__test_fail_rename_at(-1); }
 static tp_status publish(const char *const *outputs, int count,
                          tp_export_notices *notices, bool *writer_ran,
                          tp_error *err) {
-    tp_export_prepared prep;
-    memset(&prep, 0, sizeof prep);
-    return tp_export_write_and_publish_set(&g_exp, &prep, g_base, outputs,
-                                           count, notices, writer_ran, err);
+    tp_format_artifact_decl declarations[PLAN_MAX];
+    tp_export_artifact artifacts[PLAN_MAX + 1];
+    char ids[PLAN_MAX][32];
+    char suffixes[PLAN_MAX][TP_IDENTITY_PATH_MAX];
+    char page_path[TP_IDENTITY_PATH_MAX];
+    TEST_ASSERT_TRUE(count >= 0 && count <= PLAN_MAX);
+    TEST_ASSERT_TRUE(snprintf(page_path, sizeof page_path, "%s-0.png",
+                              g_base) > 0);
+    int page_input = -1;
+    for (int i = 0; i < count; ++i) {
+        if (strcmp(outputs[i], page_path) == 0) {
+            page_input = i;
+            break;
+        }
+    }
+    int document_count = 0;
+    for (int i = 0; i < count; ++i) {
+        if (i == page_input) {
+            continue;
+        }
+        TEST_ASSERT_TRUE(snprintf(ids[document_count], sizeof ids[0],
+                                  "fixture-%d", document_count) > 0);
+        const size_t base_len = strlen(g_base);
+        const char *suffix = strncmp(outputs[i], g_base, base_len) == 0
+                                 ? outputs[i] + base_len
+                                 : ".fixture";
+        TEST_ASSERT_TRUE(snprintf(suffixes[document_count], sizeof suffixes[0],
+                                  "%s", suffix) > 0);
+        declarations[document_count] = (tp_format_artifact_decl){
+            .id = ids[document_count], .suffix = suffixes[document_count]};
+        artifacts[document_count] = (tp_export_artifact){
+            .kind = TP_EXPORT_ARTIFACT_DOCUMENT,
+            .logical_id = document_count,
+            .id = ids[document_count],
+            .path = outputs[i],
+        };
+        ++document_count;
+    }
+    artifacts[document_count] = (tp_export_artifact){
+        .kind = TP_EXPORT_ARTIFACT_PAGE,
+        .logical_id = 0,
+        .id = "page-0",
+        .path = page_path,
+    };
+    tp_format_descriptor format = {
+        .id = "test-set-publish",
+        .display_name = "set publish fixture",
+        .caps = tp_export_caps_full(),
+        .artifacts = declarations,
+        .artifact_count = document_count,
+    };
+    tp_exporter exporter = {.format = &format, .serialize = plan_serialize};
+    tp_export_page ir_page = {.artifact_id = 0, .w = 1, .h = 1};
+    tp_export_ir ir = {
+        .version = TP_EXPORT_IR_VERSION,
+        .atlas_name = "set-publish",
+        .pixels_per_unit = 1.0F,
+        .pages = &ir_page,
+        .page_count = 1,
+    };
+    uint8_t pixel[4] = {1, 2, 3, 255};
+    tp_page page = {.image_name = "page", .w = 1, .h = 1, .rgba = pixel};
+    tp_result packed = {.pages = &page, .page_count = 1};
+    tp_export_artifact_plan plan = {
+        .format_id = format.id,
+        .out_path_base = g_base,
+        .artifacts = artifacts,
+        .artifact_count = document_count + 1,
+        .document_count = document_count,
+    };
+    return tp_export_publish(&exporter, &ir, &packed, &plan, notices,
+                             writer_ran, NULL, err);
 }
 
 static bool file_holds(const char *path, const char *text) {
@@ -130,6 +200,62 @@ static void seed(const char *path, const char *text) {
     TEST_ASSERT_TRUE(tp_fs_write_file(path, text, strlen(text)));
 }
 
+static tp_status page_set_serialize(const tp_export_serialize_ctx *ctx,
+                                    tp_export_document *documents,
+                                    int document_count, tp_error *err) {
+    (void)ctx;
+    g_write_calls++;
+    if (document_count != 1) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "page fixture needs one document");
+    }
+    documents[0].data = malloc(4U);
+    if (!documents[0].data) {
+        return tp_error_set(err, TP_STATUS_OOM, "page fixture OOM");
+    }
+    memcpy(documents[0].data, "META", 4U);
+    documents[0].size = 4U;
+    return TP_STATUS_OK;
+}
+
+static const tp_format_artifact_decl g_page_set_declarations[] = {
+    {.id = "metadata", .suffix = ".meta"},
+};
+static const tp_format_descriptor g_page_set_format = {
+    .id = "test-pages", .display_name = "page set fixture",
+    .caps = {.transform_mask = TP_EXPORT_TRANSFORMS_ALL,
+             .polygons = true, .pivot = true, .slice9 = true,
+             .multipage = true, .aliases = true},
+    .artifacts = g_page_set_declarations, .artifact_count = 1,
+};
+static const tp_exporter g_page_set_exporter = {
+    .format = &g_page_set_format, .serialize = page_set_serialize,
+};
+
+static tp_status publish_page_set(const char *base, tp_page *pages,
+                                  tp_export_page *ir_pages, int page_count,
+                                  tp_arena *arena,
+                                  tp_export_artifact_plan *out_plan,
+                                  tp_error *err) {
+    tp_export_ir ir = {
+        .version = TP_EXPORT_IR_VERSION,
+        .atlas_name = "page-set",
+        .pixels_per_unit = 1.0F,
+        .pages = ir_pages,
+        .page_count = page_count,
+    };
+    tp_result packed = {
+        .atlas_name = "page-set", .pixels_per_unit = 1.0F,
+        .pages = pages, .page_count = page_count,
+    };
+    tp_status status = tp_export_artifact_plan_build(
+        g_page_set_exporter.format, &ir, base, arena, out_plan, err);
+    return status == TP_STATUS_OK
+               ? tp_export_publish(&g_page_set_exporter, &ir, &packed,
+                                   out_plan, NULL, NULL, NULL, err)
+               : status;
+}
+
 /* "<g_dir>/<name>" into a caller buffer. */
 #define IN_DIR(buf, name) \
     TEST_ASSERT_TRUE(snprintf((buf), sizeof(buf), "%s/%s", g_dir, (name)) > 0)
@@ -153,7 +279,6 @@ static void test_listed_set_publishes(void) {
     (void)tp_fs_remove_file(page);
 
     plan_add(".json");
-    plan_add("-0.png");
     const char *outputs[2] = {primary, page};
 
     tp_export_notices notices;
@@ -165,7 +290,7 @@ static void test_listed_set_publishes(void) {
         error.msg);
     TEST_ASSERT_TRUE(writer_ran);
     TEST_ASSERT_TRUE(file_holds(primary, "NEW"));
-    TEST_ASSERT_TRUE(file_holds(page, "NEW"));
+    TEST_ASSERT_TRUE(tp_fs_exists(page));
     TEST_ASSERT_EQUAL_INT(0, notices.count);
     TEST_ASSERT_FALSE(any_entry_containing(".tp-stage-"));
     TEST_ASSERT_FALSE_MESSAGE(any_entry_containing(".tp-old-"),
@@ -174,6 +299,309 @@ static void test_listed_set_publishes(void) {
     tp_export_notices_free(&notices);
     (void)tp_fs_remove_file(primary);
     (void)tp_fs_remove_file(page);
+}
+
+/* A destination lease is the publication ownership boundary: overlap is a
+ * typed rejection before the serializer, while the permanent sidecar becomes
+ * reusable as soon as the live handle closes. */
+static void test_live_destination_lease_blocks_before_serializer(void) {
+    char primary[TP_IDENTITY_PATH_MAX];
+    char page[TP_IDENTITY_PATH_MAX];
+    char lock_path[TP_FS_STAGE_PATH_MAX];
+    AT_BASE(primary, ".json");
+    AT_BASE(page, "-0.png");
+    TEST_ASSERT_TRUE(snprintf(lock_path, sizeof lock_path,
+                              "%s.ntpacker-export.lock", primary) > 0);
+    seed(primary, "OLD-META");
+    seed(page, "OLD-PAGE");
+
+    tp_file_lease *lease = NULL;
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_file_lease_acquire(lock_path, TP_STATUS_EXPORT_BUSY,
+                              "fixture destination", primary, &lease, &error),
+        error.msg);
+
+    plan_add(".json");
+    const char *outputs[2] = {primary, page};
+    bool writer_ran = true;
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_EXPORT_BUSY,
+        publish(outputs, 2, NULL, &writer_ran, &error), error.msg);
+    TEST_ASSERT_FALSE(writer_ran);
+    TEST_ASSERT_TRUE(file_holds(primary, "OLD-META"));
+    TEST_ASSERT_TRUE(file_holds(page, "OLD-PAGE"));
+    TEST_ASSERT_FALSE(any_entry_containing(".tp-stage-"));
+    TEST_ASSERT_FALSE(any_entry_containing(".tp-old-"));
+
+    tp_file_lease_release(lease);
+    writer_ran = false;
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK, publish(outputs, 2, NULL, &writer_ran, &error),
+        error.msg);
+    TEST_ASSERT_TRUE(writer_ran);
+    TEST_ASSERT_TRUE(file_holds(primary, "NEW"));
+
+    (void)tp_fs_remove_file(primary);
+    (void)tp_fs_remove_file(page);
+}
+
+/* An unrelated destination in the same directory must not serialize all
+ * exports through a directory-wide lock. */
+static void test_disjoint_destination_lease_does_not_block(void) {
+    char primary[TP_IDENTITY_PATH_MAX];
+    char page[TP_IDENTITY_PATH_MAX];
+    char foreign[TP_IDENTITY_PATH_MAX];
+    char lock_path[TP_FS_STAGE_PATH_MAX];
+    AT_BASE(primary, ".json");
+    AT_BASE(page, "-0.png");
+    IN_DIR(foreign, "unrelated.json");
+    TEST_ASSERT_TRUE(snprintf(lock_path, sizeof lock_path,
+                              "%s.ntpacker-export.lock", foreign) > 0);
+
+    tp_file_lease *lease = NULL;
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_file_lease_acquire(lock_path, TP_STATUS_EXPORT_BUSY,
+                              "fixture destination", foreign, &lease, &error),
+        error.msg);
+
+    plan_add(".json");
+    const char *outputs[2] = {primary, page};
+    bool writer_ran = false;
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK, publish(outputs, 2, NULL, &writer_ran, &error),
+        error.msg);
+    TEST_ASSERT_TRUE(writer_ran);
+
+    tp_file_lease_release(lease);
+    (void)tp_fs_remove_file(primary);
+    (void)tp_fs_remove_file(page);
+}
+
+static void test_page_count_shrink_preserves_files_outside_the_new_plan(void) {
+    char base[TP_IDENTITY_PATH_MAX];
+    char page0[TP_IDENTITY_PATH_MAX];
+    char page1[TP_IDENTITY_PATH_MAX];
+    IN_DIR(base, "page_shrink");
+    AT_BASE(page0, "-0.png");
+    (void)snprintf(page0, sizeof page0, "%s-0.png", base);
+    (void)snprintf(page1, sizeof page1, "%s-1.png", base);
+    (void)tp_fs_remove_file(page0);
+    (void)tp_fs_remove_file(page1);
+    uint8_t pixels[2][4] = {{10, 20, 30, 255}, {40, 50, 60, 255}};
+    tp_page pages[2] = {
+        {.image_name = "p0", .w = 1, .h = 1, .rgba = pixels[0]},
+        {.image_name = "p1", .w = 1, .h = 1, .rgba = pixels[1]},
+    };
+    tp_export_page ir_pages[2] = {
+        {.artifact_id = 0, .w = 1, .h = 1},
+        {.artifact_id = 1, .w = 1, .h = 1},
+    };
+    tp_error error = {{0}};
+    tp_arena *first = tp_arena_create(0);
+    tp_export_artifact_plan first_plan;
+    TEST_ASSERT_NOT_NULL(first);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        publish_page_set(base, pages, ir_pages, 2, first, &first_plan, &error),
+        error.msg);
+    TEST_ASSERT_TRUE(tp_fs_exists(page0));
+    TEST_ASSERT_TRUE(tp_fs_exists(page1));
+    tp_arena_destroy(first);
+
+    tp_arena *second = tp_arena_create(0);
+    tp_export_artifact_plan second_plan;
+    TEST_ASSERT_NOT_NULL(second);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        publish_page_set(base, pages, ir_pages, 1, second, &second_plan, &error),
+        error.msg);
+    TEST_ASSERT_TRUE(tp_fs_exists(page0));
+    TEST_ASSERT_TRUE_MESSAGE(
+        tp_fs_exists(page1),
+        "export must not delete a file absent from the current artifact plan");
+    tp_arena_destroy(second);
+}
+
+static void test_publisher_rejects_a_mutated_typed_plan_before_serializer(void) {
+    char base[TP_IDENTITY_PATH_MAX];
+    IN_DIR(base, "mutated_plan");
+    uint8_t pixel[4] = {10, 20, 30, 255};
+    tp_page page = {.image_name = "p0", .w = 1, .h = 1, .rgba = pixel};
+    tp_export_page ir_page = {.artifact_id = 0, .w = 1, .h = 1};
+    tp_export_ir ir = {
+        .version = TP_EXPORT_IR_VERSION,
+        .atlas_name = "page-set",
+        .pixels_per_unit = 1.0F,
+        .pages = &ir_page,
+        .page_count = 1,
+    };
+    tp_result packed = {
+        .atlas_name = "page-set", .pixels_per_unit = 1.0F,
+        .pages = &page, .page_count = 1,
+    };
+    tp_arena *arena = tp_arena_create(0);
+    tp_export_artifact_plan plan;
+    tp_error error = {{0}};
+    TEST_ASSERT_NOT_NULL(arena);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_export_artifact_plan_build(g_page_set_exporter.format, &ir, base, arena,
+                                      &plan, &error),
+        error.msg);
+    const char *format_id = plan.format_id;
+    plan.format_id = "other-format";
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_INVALID_ARGUMENT,
+        tp_export_publish(&g_page_set_exporter, &ir, &packed, &plan, NULL,
+                          NULL, NULL, &error));
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        0, g_write_calls,
+        "publisher must reject a plan bound to another format before serialization");
+    plan.format_id = format_id;
+    plan.artifacts[1].kind = TP_EXPORT_ARTIFACT_DOCUMENT;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_INVALID_ARGUMENT,
+        tp_export_publish(&g_page_set_exporter, &ir, &packed, &plan, NULL,
+                          NULL, NULL, &error));
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        0, g_write_calls,
+        "publisher must reject a mutated typed plan before serialization");
+    tp_arena_destroy(arena);
+}
+
+static void test_publisher_rejects_a_null_plan_path_before_dereference(void) {
+    char base[TP_IDENTITY_PATH_MAX];
+    IN_DIR(base, "null_plan_path");
+    uint8_t pixel[4] = {10, 20, 30, 255};
+    tp_page page = {.image_name = "p0", .w = 1, .h = 1, .rgba = pixel};
+    tp_export_page ir_page = {.artifact_id = 0, .w = 1, .h = 1};
+    tp_export_ir ir = {
+        .version = TP_EXPORT_IR_VERSION,
+        .atlas_name = "page-set", .pixels_per_unit = 1.0F,
+        .pages = &ir_page, .page_count = 1,
+    };
+    tp_result packed = {
+        .atlas_name = "page-set", .pixels_per_unit = 1.0F,
+        .pages = &page, .page_count = 1,
+    };
+    tp_arena *arena = tp_arena_create(0);
+    tp_export_artifact_plan plan;
+    tp_error error = {{0}};
+    TEST_ASSERT_NOT_NULL(arena);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_export_artifact_plan_build(g_page_set_exporter.format, &ir, base, arena,
+                                      &plan, &error),
+        error.msg);
+    plan.artifacts[1].path = NULL;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_INVALID_ARGUMENT,
+        tp_export_publish(&g_page_set_exporter, &ir, &packed, &plan, NULL,
+                          NULL, NULL, &error));
+    TEST_ASSERT_EQUAL_INT(0, g_write_calls);
+    tp_arena_destroy(arena);
+}
+
+static void test_publisher_revalidates_ir_before_serializer(void) {
+    char base[TP_IDENTITY_PATH_MAX];
+    IN_DIR(base, "mutated_ir");
+    uint8_t pixel[4] = {10, 20, 30, 255};
+    tp_page page = {.image_name = "p0", .w = 1, .h = 1, .rgba = pixel};
+    tp_export_page ir_page = {.artifact_id = 0, .w = 1, .h = 1};
+    tp_export_ir ir = {
+        .version = TP_EXPORT_IR_VERSION,
+        .atlas_name = "page-set", .pixels_per_unit = 1.0F,
+        .pages = &ir_page, .page_count = 1,
+    };
+    tp_result packed = {
+        .atlas_name = "page-set", .pixels_per_unit = 1.0F,
+        .pages = &page, .page_count = 1,
+    };
+    tp_arena *arena = tp_arena_create(0);
+    tp_export_artifact_plan plan;
+    tp_error error = {{0}};
+    TEST_ASSERT_NOT_NULL(arena);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_export_artifact_plan_build(g_page_set_exporter.format, &ir, base, arena,
+                                      &plan, &error),
+        error.msg);
+    ir.sprite_count = 1;
+    ir.sprites = NULL;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OUT_OF_BOUNDS,
+        tp_export_publish(&g_page_set_exporter, &ir, &packed, &plan, NULL,
+                          NULL, NULL, &error));
+    TEST_ASSERT_EQUAL_INT(0, g_write_calls);
+    tp_arena_destroy(arena);
+}
+
+static void test_publisher_validates_ir_counts_before_plan_arithmetic(void) {
+    char base[TP_IDENTITY_PATH_MAX];
+    IN_DIR(base, "invalid_ir_count");
+    uint8_t pixel[4] = {10, 20, 30, 255};
+    tp_page page = {.image_name = "p0", .w = 1, .h = 1, .rgba = pixel};
+    tp_export_page ir_page = {.artifact_id = 0, .w = 1, .h = 1};
+    tp_export_ir ir = {
+        .version = TP_EXPORT_IR_VERSION,
+        .atlas_name = "page-set", .pixels_per_unit = 1.0F,
+        .pages = &ir_page, .page_count = 1,
+    };
+    tp_result packed = {
+        .atlas_name = "page-set", .pixels_per_unit = 1.0F,
+        .pages = &page, .page_count = 1,
+    };
+    tp_arena *arena = tp_arena_create(0);
+    tp_export_artifact_plan plan;
+    tp_error error = {{0}};
+    TEST_ASSERT_NOT_NULL(arena);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_export_artifact_plan_build(g_page_set_exporter.format, &ir, base, arena,
+                                      &plan, &error),
+        error.msg);
+    ir.page_count = INT_MAX;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OUT_OF_BOUNDS,
+        tp_export_publish(&g_page_set_exporter, &ir, &packed, &plan, NULL,
+                          NULL, NULL, &error));
+    TEST_ASSERT_EQUAL_INT(0, g_write_calls);
+    tp_arena_destroy(arena);
+}
+
+static void test_publisher_does_not_premultiply_an_already_premultiplied_page(void) {
+    char base[TP_IDENTITY_PATH_MAX];
+    char path[TP_IDENTITY_PATH_MAX];
+    IN_DIR(base, "premultiplied_page");
+    (void)snprintf(path, sizeof path, "%s-0.png", base);
+    uint8_t pixel[4] = {100, 50, 25, 128};
+    tp_page page = {.image_name = "p0", .w = 1, .h = 1, .rgba = pixel,
+                    .premultiplied = true};
+    tp_export_page ir_page = {.artifact_id = 0, .w = 1, .h = 1,
+                              .premultiplied = true};
+    tp_arena *arena = tp_arena_create(0);
+    tp_export_artifact_plan plan;
+    tp_error error = {{0}};
+    TEST_ASSERT_NOT_NULL(arena);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        publish_page_set(base, &page, &ir_page, 1, arena, &plan, &error),
+        error.msg);
+    int w = 0;
+    int h = 0;
+    int channels = 0;
+    unsigned char *decoded = stbi_load(path, &w, &h, &channels, 4);
+    TEST_ASSERT_NOT_NULL(decoded);
+    TEST_ASSERT_EQUAL_UINT8(pixel[0], decoded[0]);
+    TEST_ASSERT_EQUAL_UINT8(pixel[1], decoded[1]);
+    TEST_ASSERT_EQUAL_UINT8(pixel[2], decoded[2]);
+    TEST_ASSERT_EQUAL_UINT8(pixel[3], decoded[3]);
+    stbi_image_free(decoded);
+    tp_arena_destroy(arena);
 }
 
 /* ------------------------------------------------------------------ */
@@ -284,9 +712,8 @@ static void test_case_insensitive_duplicate_output_is_rejected(void) {
 /* the produced set is verified before the first irreversible rename  */
 /* ------------------------------------------------------------------ */
 
-/* An unlisted staged file is a PREFLIGHT verdict, not a cleanup discovery: the
- * report says nothing was published, so nothing may have been. */
-static void test_unlisted_output_blocks_the_whole_publication(void) {
+/* Serializer overproduction is rejected before any destination mutation. */
+static void test_serializer_overproduction_blocks_the_whole_publication(void) {
     char primary[TP_IDENTITY_PATH_MAX];
     char extra[TP_IDENTITY_PATH_MAX];
     AT_BASE(primary, ".json");
@@ -356,7 +783,6 @@ static void test_a_failed_promote_restores_the_previous_set(void) {
     seed(second, "OLD-TWO");
 
     plan_add(".json");
-    plan_add("-0.png");
     const char *outputs[2] = {first, second};
 
     /* Ordinals 0,1 displace the two existing destinations; 2,3 move the staged
@@ -391,7 +817,6 @@ static void test_a_failed_displace_restores_the_previous_set(void) {
     seed(second, "OLD-TWO");
 
     plan_add(".json");
-    plan_add("-0.png");
     const char *outputs[2] = {first, second};
 
     tp_export_publish__test_fail_rename_at(1); /* the second displace */
@@ -441,10 +866,10 @@ static void test_a_rolled_back_new_output_is_removed(void) {
 }
 
 /* ------------------------------------------------------------------ */
-/* orphan reaping and crash-mid-swap recovery                         */
+/* files outside the current plan are never inferred as owned         */
 /* ------------------------------------------------------------------ */
 
-static void test_a_dead_owners_staging_dir_is_reaped(void) {
+static void test_a_private_looking_staging_dir_is_preserved(void) {
     char orphan[TP_IDENTITY_PATH_MAX];
     char inside[TP_IDENTITY_PATH_MAX];
     char primary[TP_IDENTITY_PATH_MAX];
@@ -461,43 +886,15 @@ static void test_a_dead_owners_staging_dir_is_reaped(void) {
     TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_OK,
                                   publish(outputs, 1, NULL, NULL, &error),
                                   error.msg);
-    TEST_ASSERT_FALSE_MESSAGE(
-        tp_fs_exists(orphan),
-        "a staging dir whose owning process is gone must be reclaimed");
-
-    (void)tp_fs_remove_file(primary);
-}
-
-/* Our OWN leftovers are not garbage: the pid is alive, so a concurrent export
- * in this very process is never swept out from under itself. */
-static void test_a_live_owners_staging_dir_is_kept(void) {
-    char mine[TP_IDENTITY_PATH_MAX];
-    char name[64];
-    char primary[TP_IDENTITY_PATH_MAX];
-    TEST_ASSERT_TRUE(snprintf(name, sizeof name, ".tp-stage-%08lx-0000ffff",
-                              (unsigned long)test_getpid() & 0xffffffffUL) > 0);
-    IN_DIR(mine, name);
-    AT_BASE(primary, ".json");
-    tp_fs_remove_tree(mine);
-    TEST_ASSERT_TRUE(tp_fs_create_dir(mine));
-
-    plan_add(".json");
-    const char *outputs[1] = {primary};
-    tp_error error = {{0}};
-    TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_OK,
-                                  publish(outputs, 1, NULL, NULL, &error),
-                                  error.msg);
     TEST_ASSERT_TRUE_MESSAGE(
-        tp_fs_is_dir(mine),
-        "a live owner's staging dir must survive another export's sweep");
+        tp_fs_is_dir(orphan),
+        "export must not infer ownership of a directory outside its plan");
 
-    tp_fs_remove_tree(mine);
+    tp_fs_remove_tree(orphan);
     (void)tp_fs_remove_file(primary);
 }
 
-/* Killed between the displace and the promote: the destination is MISSING, so
- * the recorded old copy is the only surviving version and must come back. */
-static void test_an_interrupted_swap_is_restored(void) {
+static void test_a_private_looking_backup_is_not_restored(void) {
     char destination[TP_IDENTITY_PATH_MAX];
     char record[TP_IDENTITY_PATH_MAX];
     char primary[TP_IDENTITY_PATH_MAX];
@@ -513,18 +910,19 @@ static void test_an_interrupted_swap_is_restored(void) {
     TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_OK,
                                   publish(outputs, 1, NULL, NULL, &error),
                                   error.msg);
+    TEST_ASSERT_FALSE_MESSAGE(
+        tp_fs_exists(destination),
+        "export must not infer a destination from a file outside its plan");
     TEST_ASSERT_TRUE_MESSAGE(
-        file_holds(destination, "SURVIVOR"),
-        "an interrupted swap must put the previous output back");
-    TEST_ASSERT_FALSE(tp_fs_exists(record));
+        file_holds(record, "SURVIVOR"),
+        "export must preserve a private-looking file outside its plan");
 
     (void)tp_fs_remove_file(destination);
+    (void)tp_fs_remove_file(record);
     (void)tp_fs_remove_file(primary);
 }
 
-/* Killed after the promote: the destination is PRESENT, so the swap completed
- * and the old copy is spent -- restoring it would undo a published export. */
-static void test_a_completed_swap_record_is_discarded(void) {
+static void test_a_private_looking_backup_is_not_discarded(void) {
     char destination[TP_IDENTITY_PATH_MAX];
     char record[TP_IDENTITY_PATH_MAX];
     char primary[TP_IDENTITY_PATH_MAX];
@@ -543,9 +941,12 @@ static void test_a_completed_swap_record_is_discarded(void) {
     TEST_ASSERT_TRUE_MESSAGE(
         file_holds(destination, "PUBLISHED"),
         "a completed swap must not be rolled back by the reaper");
-    TEST_ASSERT_FALSE(tp_fs_exists(record));
+    TEST_ASSERT_TRUE_MESSAGE(
+        file_holds(record, "SUPERSEDED"),
+        "export must preserve a private-looking file outside its plan");
 
     (void)tp_fs_remove_file(destination);
+    (void)tp_fs_remove_file(record);
     (void)tp_fs_remove_file(primary);
 }
 
@@ -622,19 +1023,26 @@ int main(int argc, char **argv) {
     }
     UNITY_BEGIN();
     RUN_TEST(test_listed_set_publishes);
+    RUN_TEST(test_live_destination_lease_blocks_before_serializer);
+    RUN_TEST(test_disjoint_destination_lease_does_not_block);
+    RUN_TEST(test_page_count_shrink_preserves_files_outside_the_new_plan);
+    RUN_TEST(test_publisher_rejects_a_mutated_typed_plan_before_serializer);
+    RUN_TEST(test_publisher_rejects_a_null_plan_path_before_dereference);
+    RUN_TEST(test_publisher_revalidates_ir_before_serializer);
+    RUN_TEST(test_publisher_validates_ir_counts_before_plan_arithmetic);
+    RUN_TEST(test_publisher_does_not_premultiply_an_already_premultiplied_page);
     RUN_TEST(test_output_outside_the_export_directory_is_rejected);
     RUN_TEST(test_output_in_a_foreign_directory_is_rejected);
     RUN_TEST(test_duplicate_output_is_rejected);
     RUN_TEST(test_case_insensitive_duplicate_output_is_rejected);
-    RUN_TEST(test_unlisted_output_blocks_the_whole_publication);
+    RUN_TEST(test_serializer_overproduction_blocks_the_whole_publication);
     RUN_TEST(test_missing_declared_output_blocks_the_publication);
     RUN_TEST(test_a_failed_promote_restores_the_previous_set);
     RUN_TEST(test_a_failed_displace_restores_the_previous_set);
     RUN_TEST(test_a_rolled_back_new_output_is_removed);
-    RUN_TEST(test_a_dead_owners_staging_dir_is_reaped);
-    RUN_TEST(test_a_live_owners_staging_dir_is_kept);
-    RUN_TEST(test_an_interrupted_swap_is_restored);
-    RUN_TEST(test_a_completed_swap_record_is_discarded);
+    RUN_TEST(test_a_private_looking_staging_dir_is_preserved);
+    RUN_TEST(test_a_private_looking_backup_is_not_restored);
+    RUN_TEST(test_a_private_looking_backup_is_not_discarded);
     RUN_TEST(test_exclusive_create_never_adopts_an_existing_name);
     RUN_TEST(test_stage_dirs_are_distinct_and_created);
     RUN_TEST(test_displaced_names_are_siblings_and_distinct);

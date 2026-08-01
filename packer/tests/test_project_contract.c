@@ -253,7 +253,9 @@ void test_loader_maps_checked_in_bytes_to_expected_model(void) {
     TEST_ASSERT_EQUAL_INT(defaults.alpha_threshold, ui->alpha_threshold);
     TEST_ASSERT_EQUAL_INT(defaults.max_vertices, ui->max_vertices);
     TEST_ASSERT_EQUAL_INT(defaults.shape, ui->shape);
-    TEST_ASSERT_EQUAL_INT(defaults.allow_transform, ui->allow_transform);
+    TEST_ASSERT_EQUAL_INT(
+        defaults.allowed_transforms != TP_PACK_TRANSFORMS_IDENTITY,
+        ui->allow_transform);
     TEST_ASSERT_EQUAL_INT(defaults.power_of_two, ui->power_of_two);
     TEST_ASSERT_TRUE(fabsf(defaults.pixels_per_unit - ui->pixels_per_unit) <
                           0.0001F);

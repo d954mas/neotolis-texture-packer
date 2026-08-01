@@ -94,6 +94,26 @@ static bool test_submit_atlas_name(
     return committed;
 }
 
+static bool test_submit_atlas_margin(tp_id128 atlas_id, int margin) {
+    const tp_session_snapshot *snapshot = gui_project_snapshot();
+    char transaction_id[33];
+    const gui_project_operation_submit_identity identity =
+        test_submit_identity(transaction_id);
+    gui_project_operation_submit_terminal terminal = {0};
+    tp_error error = {{0}};
+    tp_op_atlas_settings settings = {0};
+    settings.mask = TP_AF_MARGIN;
+    settings.margin = margin;
+    const bool committed =
+        gui_project_submit_atlas_settings(
+            atlas_id, tp_session_snapshot_revision(snapshot), &settings,
+            identity, transaction_id, &terminal, &error) == TP_STATUS_OK;
+    if (committed) {
+        publish_project_frame();
+    }
+    return committed;
+}
+
 static bool test_submit_animation_name(
     const gui_animation_ref *animation,
     const char *name) {
@@ -1686,8 +1706,10 @@ void test_failed_resident_switch_never_serves_the_evicted_resident(void) {
      * nothing between the pack of C and that switch pumps the store, so nothing
      * can turn A cold underneath the assertions.
      *
-     * Atlases: A(0) and C(2) carry two sprites, B(1) one, so raw(B) < raw(C) ==
-     * raw(A). The budget is raw(A) + raw(C) - 1: exactly one raw atlas short of
+     * Atlases: A(0) and C(2) carry two sprites and use a larger explicit margin;
+     * B(1) carries one sprite and a smaller margin. This keeps raw(B) < raw(C) ==
+     * raw(A) independent of improvements to the engine's packing density. The
+     * budget is raw(A) + raw(C) - 1: exactly one raw atlas short of
      * holding both, so every step up to the failing switch fits and the switch
      * itself -- raw(C) beside raw(A) -- does not, leaving the LRU exactly one
      * legal victim: A (B is the active pin, C the highest sequence).
@@ -1697,13 +1719,16 @@ void test_failed_resident_switch_never_serves_the_evicted_resident(void) {
      * predictable from the raw pages -- on this toy fixture (8x8 pages) it is in
      * fact the larger half. The one premise that buys is asserted below rather
      * than assumed: cold(B) beside one raw atlas must still fit. */
-    (void)add_sprite_source_to_atlas(0, "coin.png");
+    const tp_id128 atlas_a = add_sprite_source_to_atlas(0, "coin.png");
     (void)add_sprite_source_to_atlas(0, "hero.png");
     TEST_ASSERT_EQUAL_INT(1, add_atlas_observed().visible_index);
-    (void)add_sprite_source_to_atlas(1, "coin.png");
+    const tp_id128 atlas_b = add_sprite_source_to_atlas(1, "coin.png");
     TEST_ASSERT_EQUAL_INT(2, add_atlas_observed().visible_index);
-    (void)add_sprite_source_to_atlas(2, "coin.png");
+    const tp_id128 atlas_c = add_sprite_source_to_atlas(2, "coin.png");
     (void)add_sprite_source_to_atlas(2, "hero.png");
+    TEST_ASSERT_TRUE(test_submit_atlas_margin(atlas_a, 32));
+    TEST_ASSERT_TRUE(test_submit_atlas_margin(atlas_b, 8));
+    TEST_ASSERT_TRUE(test_submit_atlas_margin(atlas_c, 32));
     TEST_ASSERT_TRUE(gui_pack_init(TP_GUI_IDENTITY_TEST_DIR));
 
     /* Measure under the default (never-evicting) budget; the budget below is

@@ -82,7 +82,7 @@ void test_atlas_constraint_facts_cover_raw_boundaries(void) {
     TEST_ASSERT_TRUE(facts.alpha_threshold_out_of_range);
 
     input = valid_atlas();
-    input.max_vertices = 0;
+    input.max_vertices = TP_PACK_MIN_VERTICES - 1;
     facts = tp_pack_atlas_constraint_facts_of(&input);
     TEST_ASSERT_TRUE(facts.max_vertices_out_of_range);
     input.max_vertices = TP_PACK_MAX_VERTICES + 1;
@@ -192,8 +192,10 @@ void test_sprite_wire_predicates_cover_exact_storage_edges(void) {
     TEST_ASSERT_TRUE(tp_pack_sprite_rotate_wire_representable(0));
     TEST_ASSERT_FALSE(tp_pack_sprite_rotate_wire_representable(1));
 
-    TEST_ASSERT_FALSE(tp_pack_sprite_max_vertices_wire_representable(0));
-    TEST_ASSERT_TRUE(tp_pack_sprite_max_vertices_wire_representable(1));
+    TEST_ASSERT_FALSE(tp_pack_sprite_max_vertices_wire_representable(
+        TP_PACK_MIN_VERTICES - 1));
+    TEST_ASSERT_TRUE(tp_pack_sprite_max_vertices_wire_representable(
+        TP_PACK_MIN_VERTICES));
     TEST_ASSERT_TRUE(tp_pack_sprite_max_vertices_wire_representable(
         TP_PACK_MAX_VERTICES));
     TEST_ASSERT_FALSE(tp_pack_sprite_max_vertices_wire_representable(

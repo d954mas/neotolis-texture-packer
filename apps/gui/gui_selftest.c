@@ -30,7 +30,7 @@
 #include "window/nt_window.h"   /* g_nt_window (phase-driven framebuffer dims) */
 
 #include "tp_core/tp_error.h"   /* tp_status_str / tp_error */
-#include "tp_core/tp_export.h"  /* tp_exporter_count/at (preview-target selector index) */
+#include "tp_core/tp_export.h"  /* tp_format_count/at (preview-target selector index) */
 #include "tp_core/tp_id.h"      /* stable structural-ID assertions */
 #include "tp_core/tp_pack_result.h"   /* tp_result */
 #include "tp_core/tp_names.h"   /* tp_sprite_export_key (region -> override key) */
@@ -3590,9 +3590,8 @@ void selftest_pre_frame(void) {
             s_st_pf = 0;
         }
     } else if (s_st_phase == 11) {
-        /* Export-target PREVIEW (packet EXP-PREVIEW): a defold preview must (a) exist with identity-only
-         * placements (defold caps.flips=false -> the clamp turns allow_transform off -> tp_pack bakes no
-         * rotated/flipped regions), (b) leave the native session result untouched (pointer + content),
+        /* Export-target PREVIEW (packet EXP-PREVIEW): a Defold preview must (a) contain only transforms
+         * admitted by the exact Defold mask (identity + clockwise 90), (b) leave the native session result untouched (pointer + content),
          * (c) re-bind the native result WITHOUT a repack when switched back to Native, and (d) yield a
          * non-empty degradation summary. Blocking path (the dev seam), mirroring do_pack_blocking. */
         g_ui_scale = 1.0F;
@@ -3633,8 +3632,8 @@ void selftest_pre_frame(void) {
             const int native_pc = native->page_count;
 
             int defold_idx = -1;
-            for (int i = 0; i < tp_exporter_count(); i++) {
-                const tp_exporter *e = tp_exporter_at(i);
+            for (int i = 0; i < tp_format_count(); i++) {
+                const tp_format_descriptor *e = tp_format_at(i);
                 if (e && strcmp(e->id, "defold") == 0) {
                     defold_idx = i;
                     break;
@@ -3649,15 +3648,17 @@ void selftest_pre_frame(void) {
                         okp ? "" : pverr);
             NT_ASSERT(okp && pv && pv->sprite_count > 0 && "SELFTEST preview: defold preview result present");
 
-            /* (a) identity-only placements */
-            int nonidentity = 0;
+            /* (a) every placement is admitted by the exact target mask */
+            const tp_format_descriptor *defold_exporter = tp_format_at(defold_idx);
+            int unsupported = 0;
             for (int i = 0; i < pv->sprite_count; i++) {
-                if (pv->sprites[i].transform != 0) {
-                    nonidentity++;
+                const uint8_t transform_bit = TP_EXPORT_TRANSFORM_BIT(pv->sprites[i].transform);
+                if ((defold_exporter->caps.transform_mask & transform_bit) == 0U) {
+                    unsupported++;
                 }
             }
-            nt_log_info("SELFTEST: preview defold non-identity placements=%d (expect 0)", nonidentity);
-            NT_ASSERT(nonidentity == 0 && "SELFTEST preview: defold packs identity-only (no flip/rotate)");
+            nt_log_info("SELFTEST: preview defold unsupported placements=%d (expect 0)", unsupported);
+            NT_ASSERT(unsupported == 0 && "SELFTEST preview: Defold exact transform mask enforced");
 
             /* (b) native session result untouched */
             const tp_result *native2 = gui_pack_result(0);

@@ -48,7 +48,7 @@ types, and payload magic/version. It does not currently enforce the container
 `nt_hash64_str("pixels_per_unit")`. Records have a 20-byte header and payloads
 are padded to four-byte alignment. Missing metadata defaults to 1.
 
-## Atlas asset version 6
+## Atlas asset version 7
 
 ```text
 NtAtlasHeader                         28 bytes
@@ -61,23 +61,33 @@ uint16_t indices[]
 Required atlas magic is `ATLS` / `0x534C5441`. Header vertex and index offsets
 are relative to the atlas payload.
 
-An atlas region contains:
+Version 7 keeps the version-6 binary layout but tightens alias semantics and the
+shared-geometry precondition. An atlas region contains:
 
 - name hash;
 - source dimensions;
 - y-up trim offsets and normalized pivot;
 - vertex/index starts and counts;
-- page index and raw D4 transform mask;
+- page index and composed D4 transform value;
 - 9-slice borders `[left,right,top,bottom]`.
 
 Vertices store trim-local y-up `int16` positions and quantized page UVs.
 Indices are local to the region and form a triangle list.
 
 The reader converts the engine's y-up geometry back to canonical y-down PNG
-space. It preserves the raw transform mask, normalizes recovered hull vertices
+space. It preserves the stored transform value, normalizes recovered hull vertices
 to a `(0,0)` bounding-box origin, and makes `spriteSourceSize` equal the
 recovered vertex bbox. Polygon hull inflation means this bbox may differ
 slightly from the decoder's original alpha trim.
+
+For a deduplicated alias, the stored transform is
+`placement_transform ∘ relative_transform`; aliases sharing one placement may
+therefore carry different transform values. The reader recovers that link from
+a shared page placement (same page, origin, and transformed extent), not from
+equal transform values or duplicate vertex spans. Shared vertex spans are
+emitted only when the regions also share trim offsets, matching the runtime's
+cached-geometry precondition. The engine format and builder cap an atlas at 8
+pages.
 
 ## Texture asset version 3
 

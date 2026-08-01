@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include "tp_core/tp_project.h"
+#include "tp_core/tp_pack.h"
 #include "unity.h"
 #include "tp_project_identity_internal.h"
 #include "tp_project_mutation_internal.h"
@@ -255,6 +256,31 @@ void test_loader_rejects_unrepresentable_sprite_override_domains(void) {
     for (size_t i = 0U; i < sizeof invalid / sizeof invalid[0]; i++) {
         assert_sprite_override_json_rejected(invalid[i]);
     }
+}
+
+void test_loader_preserves_v5_max_vertices_below_engine_minimum(void) {
+    static const char json[] =
+        "{\"version\":5,\"atlases\":[{"
+        "\"id\":\"atlas_00000000000000000000000000000001\","
+        "\"name\":\"a\",\"max_vertices\":1,\"sources\":[{"
+        "\"id\":\"source_00000000000000000000000000000002\","
+        "\"path\":\"sprites\"}],\"sprites\":[{"
+        "\"source\":\"source_00000000000000000000000000000002\","
+        "\"key\":\"hero.png\",\"max_vertices\":1}]}]}";
+    tp_project *project = NULL;
+    tp_error error = {0};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK, load_text(json, &project, &error), error.msg);
+    TEST_ASSERT_NOT_NULL(project);
+    TEST_ASSERT_EQUAL_INT(1, project->atlases[0].max_vertices);
+    TEST_ASSERT_EQUAL_INT(1, project->atlases[0].sprites[0].ov_max_vertices);
+
+    tp_pack_settings settings;
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_project_atlas_to_settings(project, 0, &settings, &error), error.msg);
+    TEST_ASSERT_EQUAL_INT(TP_PACK_MIN_VERTICES, settings.max_vertices);
+    tp_project_destroy(project);
 }
 
 void test_loader_accepts_exact_sprite_override_domain_edges(void) {
@@ -518,6 +544,7 @@ int main(void) {
     RUN_TEST(test_loader_requires_root_atlases);
     RUN_TEST(test_loader_rejects_unknown_keys_at_every_schema_object);
     RUN_TEST(test_loader_rejects_unrepresentable_sprite_override_domains);
+    RUN_TEST(test_loader_preserves_v5_max_vertices_below_engine_minimum);
     RUN_TEST(test_loader_accepts_exact_sprite_override_domain_edges);
     RUN_TEST(test_save_rejects_noncanonical_ids);
     RUN_TEST(test_writer_always_emits_schema_v5);

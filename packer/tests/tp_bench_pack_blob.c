@@ -786,7 +786,7 @@ static bool run_scale(const scale_spec *spec, const char *scratch,
     settings.margin = 0;
     settings.extrude = 0;
     settings.shape = TP_PACK_SHAPE_RECT;
-    settings.allow_transform = false;
+    settings.allowed_transforms = TP_PACK_TRANSFORMS_IDENTITY;
     settings.power_of_two = true;
 
     char path[1024];

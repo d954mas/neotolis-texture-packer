@@ -58,7 +58,7 @@ packing fields are sparse and use the defaults returned by
 | `margin` | 0 | integer 0 through effective `max_size` |
 | `extrude` | 0 | integer 0 through effective `max_size`; nonzero only with rectangle shape |
 | `alpha_threshold` | 1 | integer 0 through 255 |
-| `max_vertices` | 8 | integer 1 through 16 |
+| `max_vertices` | 8 | integer 1 through 16; values below 4 adapt to 4 for the current engine |
 | `shape` | 2 | 0 rectangle, 1 convex hull, 2 concave contour |
 | `allow_transform` | true | boolean |
 | `power_of_two` | true | boolean |
@@ -122,7 +122,9 @@ Optional fields are `allow_rotate`, `extrude`, `margin`, `max_vertices`,
 
 Defaults are centered origin `[0.5, 0.5]`, no rename, zero slice borders, and
 inherited packing settings. Origin components are finite, slice borders are
-integers 0 through 65535, and explicit `max_vertices` is 1 through 16.
+integers 0 through 65535, and explicit `max_vertices` is 1 through 16. Values
+below 4 adapt to 4 at the current engine boundary while remaining unchanged in
+the saved project.
 Explicit `margin` and `extrude` are 1 through 255 and cannot exceed the atlas
 `max_size`; nonzero effective extrude requires rectangle shape. `shape` is 0
 through 2. The only explicit `allow_rotate` value admitted by v5 is 0; absence

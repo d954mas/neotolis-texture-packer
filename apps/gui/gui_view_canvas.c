@@ -143,8 +143,10 @@ static void preview_target_short(int combo_index, char *out, size_t cap) {
         (void)snprintf(out, cap, "Native");
         return;
     }
-    const tp_exporter *e = tp_exporter_at(combo_index - 1);
-    const char *dn = (e && e->display_name) ? e->display_name : (e ? e->id : "?");
+    const tp_format_descriptor *e = tp_format_at(combo_index - 1);
+    const char *dn = (e && e->display_name)
+                         ? e->display_name
+                         : (e ? e->id : "?");
     const char *paren = strstr(dn, " (");
     size_t len = paren ? (size_t)(paren - dn) : strlen(dn);
     if (len >= cap) {
@@ -158,7 +160,7 @@ static void preview_target_short(int combo_index, char *out, size_t cap) {
  * exporter's full display_name. A pick queues a preview-target intent (applied next frame). Disabled to a
  * static label while a pack/export/preview is in flight (only one worker op at a time). */
 static void strip_preview_selector(nt_ui_context_t *ctx, float h) {
-    const int ne = tp_exporter_count();
+    const int ne = tp_format_count();
     char trig[48];
     preview_target_short(s_preview_target, trig, sizeof trig);
     const bool busy = gui_pack_async_busy();
@@ -177,8 +179,10 @@ static void strip_preview_selector(nt_ui_context_t *ctx, float h) {
                     gui_request_preview_target(0);
                 }
                 for (int i = 0; i < ne; i++) {
-                    const tp_exporter *e = tp_exporter_at(i);
-                    const char *lbl = (e && e->display_name) ? e->display_name : (e ? e->id : "?");
+                    const tp_format_descriptor *e = tp_format_at(i);
+                    const char *lbl = (e && e->display_name)
+                                          ? e->display_name
+                                          : (e ? e->id : "?");
                     if (nt_ui_combo_selectable(ctx, (uint32_t)(i + 1), lbl, s_preview_target == i + 1)) {
                         gui_request_preview_target(i + 1);
                     }
@@ -197,7 +201,8 @@ static void strip_preview_selector(nt_ui_context_t *ctx, float h) {
  * chip can never push the strip past the canvas budget -- below that stop the selector alone signals the
  * active target and the degradation detail waits for room. */
 static bool strip_preview_chip(nt_ui_context_t *ctx, float h) {
-    const tp_exporter *e = (s_preview_target > 0) ? tp_exporter_at(s_preview_target - 1) : NULL;
+    const tp_format_descriptor *e =
+        (s_preview_target > 0) ? tp_format_at(s_preview_target - 1) : NULL;
     if (!e) {
         return false;
     }

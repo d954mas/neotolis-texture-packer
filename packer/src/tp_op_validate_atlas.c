@@ -182,11 +182,11 @@ static tp_status validate_atlas_settings(const tp_project_atlas *atlas,
                              TP_PACK_ALPHA_MAX);
     }
     if ((s->mask & TP_AF_MAX_VERTICES) &&
-        raw.max_vertices_out_of_range) {
+        !tp_project_max_vertices_valid(s->max_vertices)) {
         return tp_op__reject(rej, TP_STATUS_OUT_OF_RANGE, "max_vertices",
                              "max_vertices = %d must be in [%d..%d]",
-                             s->max_vertices, TP_PACK_MIN_VERTICES,
-                             TP_PACK_MAX_VERTICES);
+                             s->max_vertices, TP_PROJECT_MIN_VERTICES,
+                             TP_PROJECT_MAX_VERTICES);
     }
     if ((s->mask & TP_AF_SHAPE) && raw.shape_out_of_range) {
         return tp_op__reject(rej, TP_STATUS_OUT_OF_RANGE, "shape",

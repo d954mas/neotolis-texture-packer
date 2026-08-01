@@ -104,7 +104,7 @@ static void assert_request_equal(const tp_build_proto_request *a, const tp_build
     TEST_ASSERT_EQUAL_INT32(a->alpha_threshold, b->alpha_threshold);
     TEST_ASSERT_EQUAL_INT32(a->max_vertices, b->max_vertices);
     TEST_ASSERT_EQUAL_INT32(a->shape, b->shape);
-    TEST_ASSERT_EQUAL_UINT8(a->allow_transform, b->allow_transform);
+    TEST_ASSERT_EQUAL_UINT8(a->allowed_transforms, b->allowed_transforms);
     TEST_ASSERT_EQUAL_UINT8(a->power_of_two, b->power_of_two);
     assert_float_bits_equal(a->pixels_per_unit, b->pixels_per_unit);
     TEST_ASSERT_EQUAL_STRING(a->atlas_name, b->atlas_name);
@@ -160,7 +160,7 @@ void test_request_roundtrip_multi_sprite(void) {
         .alpha_threshold = 128,
         .max_vertices = 8,
         .shape = 2,
-        .allow_transform = 1,
+        .allowed_transforms = TP_PACK_TRANSFORMS_ALL,
         .power_of_two = 1,
         .pixels_per_unit = 16.0F,
         .atlas_name = "sheet",
@@ -183,7 +183,7 @@ void test_request_roundtrip_zero_sprites(void) {
         .alpha_threshold = 1,
         .max_vertices = 16,
         .shape = 0,
-        .allow_transform = 0,
+        .allowed_transforms = TP_PACK_TRANSFORMS_IDENTITY,
         .power_of_two = 0,
         .pixels_per_unit = 1.0F,
         .atlas_name = "empty",

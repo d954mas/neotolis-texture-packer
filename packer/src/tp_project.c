@@ -63,7 +63,7 @@ static void tp_project_atlas_set_defaults(tp_project_atlas *a) {
     a->alpha_threshold = s.alpha_threshold;
     a->max_vertices = s.max_vertices;
     a->shape = s.shape;
-    a->allow_transform = s.allow_transform;
+    a->allow_transform = s.allowed_transforms != TP_PACK_TRANSFORMS_IDENTITY;
     a->power_of_two = s.power_of_two;
     a->pixels_per_unit = s.pixels_per_unit;
 }

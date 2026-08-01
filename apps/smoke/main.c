@@ -43,7 +43,7 @@ int main(int argc, char **argv) {
     atlas_opts.max_size = 256;
     atlas_opts.debug_png = true;
 
-    nt_builder_begin_atlas(ctx, "smoke_atlas", &atlas_opts);
+    NtAtlasBuild *atlas = nt_atlas_begin(ctx, "smoke_atlas", &atlas_opts);
 
     static uint8_t pixels[SPRITE_MAX_DIM * SPRITE_MAX_DIM * 4];
     static const uint8_t colors[3][4] = {
@@ -60,16 +60,18 @@ int main(int argc, char **argv) {
         fill_disc(pixels, w, h, colors[i]);
         nt_atlas_sprite_opts_t sprite_opts = nt_atlas_sprite_opts_defaults();
         sprite_opts.name = names[i];
-        nt_builder_atlas_add_raw(ctx, pixels, w, h, &sprite_opts);
+        nt_atlas_add_raw(atlas, pixels, w, h, &sprite_opts);
     }
 
-    nt_builder_end_atlas(ctx);
+    const nt_build_result_t atlas_result = nt_atlas_commit(atlas);
 
     const nt_build_result_t result = nt_builder_finish_pack(ctx);
     nt_builder_free_pack(ctx);
 
-    if (result != NT_BUILD_OK) {
-        (void)fprintf(stderr, "smoke: finish_pack failed with %d\n", (int)result);
+    if (atlas_result != NT_BUILD_OK || result != NT_BUILD_OK) {
+        (void)fprintf(stderr,
+                      "smoke: atlas/finish failed with %d/%d\n",
+                      (int)atlas_result, (int)result);
         return 1;
     }
     (void)printf("smoke: OK, wrote %s\n", pack_path);

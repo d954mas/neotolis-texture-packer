@@ -296,7 +296,9 @@ static void tp_emit_atlas(tp_sb *sb, const tp_write_ctx *ctx, int depth,
                           const tp_project_atlas *a, const tp_pack_settings *d) {
     tp_sb_char(sb, '{');
     bool first = true;
-    if (a->allow_transform != d->allow_transform) {
+    const bool default_allow_transform =
+        d->allowed_transforms != TP_PACK_TRANSFORMS_IDENTITY;
+    if (a->allow_transform != default_allow_transform) {
         tp_obj_key(sb, depth + 1, &first, "allow_transform");
         tp_sb_str(sb, a->allow_transform ? "true" : "false");
     }

@@ -29,7 +29,7 @@ as a current preview.
 
 Saved-file CLI Export and the live session worker both construct the same
 immutable export snapshot job. That executor owns pack-input assembly,
-effective settings, normalization, target publication, and structured
+effective settings, Export IR materialization, target publication, and structured
 diagnostics. The clients differ only in admission and delivery: CLI drains the
 job synchronously, while a live session transfers one terminal result through
 its task slot.
@@ -132,13 +132,17 @@ candidate. Cache storage is not persisted to disk.
 
 Pack transfers one terminal result through `tp_session_update`. The GUI may
 then adopt a successful completion into its preview/cache. Export uses the same
-captured model, effective settings, pack core, normalization, and target
+captured model, effective settings, pack core, Export IR materialization, and target
 writers, then publishes external files. The final writer callback publishes an
 explicit terminal boundary to the host; cancellation after that boundary cannot
 rewrite a successfully published Export into Cancelled.
 
 Each target's declared output set is all-or-none. A command spanning multiple
-targets can nevertheless finish with `partial_publication`, and a direct-writer
-failure can report `publication_uncertain` when the writer cannot prove that it
-left no artifacts. Ordinary project Save does not export, and Export does not
-silently mutate project configuration.
+targets can nevertheless finish with `partial_publication`, and a target
+failure reports `publication_uncertain` only when publication rollback cannot
+prove that the previous artifact set was restored. Serializer, staging,
+preflight, and ordinary writer failures leave it false. Ordinary project Save
+does not export, and Export does not silently mutate project configuration.
+Concurrent exports acquire destination-file leases after preflight and before
+serialization. Any overlap returns `export_busy` with no attempted writer or
+artifact publication; non-overlapping targets may proceed independently.

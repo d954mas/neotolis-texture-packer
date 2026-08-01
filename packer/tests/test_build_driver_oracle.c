@@ -71,6 +71,8 @@ static void direct_nt_build(const tp_pack_settings *s, const char *out_path) {
     o.premultiplied = false;
     o.compress = NULL;
     o.gen_mipmaps = false;
+    o.filter_min = NT_TEXTURE_DEFAULT_FILTER_LINEAR;
+    o.filter_mag = NT_TEXTURE_DEFAULT_FILTER_LINEAR;
     o.format = NT_TEXTURE_FORMAT_RGBA8;
     o.debug_png = false;
     o.max_size = (uint32_t)s->max_size;
@@ -80,10 +82,10 @@ static void direct_nt_build(const tp_pack_settings *s, const char *out_path) {
     o.alpha_threshold = (uint8_t)s->alpha_threshold;
     o.max_vertices = (uint8_t)s->max_vertices;
     o.shape = (nt_atlas_shape_t)s->shape;
-    o.allow_transform = s->allow_transform;
+    o.allowed_transforms = s->allowed_transforms;
     o.power_of_two = s->power_of_two;
     o.pixels_per_unit = s->pixels_per_unit;
-    nt_builder_begin_atlas(ctx, s->atlas_name, &o);
+    NtAtlasBuild *atlas = nt_atlas_begin(ctx, s->atlas_name, &o);
     for (int i = 0; i < s->sprite_count; i++) {
         const tp_pack_sprite_desc *sp = &s->sprites[i];
         nt_atlas_sprite_opts_t so = nt_atlas_sprite_opts_defaults();
@@ -94,9 +96,10 @@ static void direct_nt_build(const tp_pack_settings *s, const char *out_path) {
         so.slice9_right = sp->slice9_lrtb[1];
         so.slice9_top = sp->slice9_lrtb[2];
         so.slice9_bottom = sp->slice9_lrtb[3];
-        nt_builder_atlas_add_raw(ctx, sp->rgba, (uint32_t)sp->w, (uint32_t)sp->h, &so);
+        nt_atlas_add_raw(atlas, sp->rgba, (uint32_t)sp->w,
+                         (uint32_t)sp->h, &so);
     }
-    nt_builder_end_atlas(ctx);
+    TEST_ASSERT_EQUAL_INT(NT_BUILD_OK, nt_atlas_commit(atlas));
     nt_build_result_t br = nt_builder_finish_pack(ctx);
     nt_builder_free_pack(ctx);
     TEST_ASSERT_EQUAL_INT(NT_BUILD_OK, br);

@@ -892,7 +892,7 @@ tp_status tp_session_pack_job_start(tp_session *session,
         if (status != TP_STATUS_OK) {
             return status;
         }
-        if (!tp_exporter_find(request->preview_exporter_id)) {
+        if (!tp_format_find(request->preview_exporter_id)) {
             return tp_error_set(err, TP_STATUS_NOT_FOUND,
                                 "unknown preview exporter '%s'",
                                 request->preview_exporter_id);

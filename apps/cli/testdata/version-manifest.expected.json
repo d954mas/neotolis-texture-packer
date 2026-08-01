@@ -52,6 +52,7 @@
       "name": "JSON (neotolis, full fidelity)",
       "ext": "json",
       "caps": {
+        "transform_mask": 255,
         "rotate90": true,
         "flips": true,
         "polygons": true,
@@ -66,6 +67,7 @@
       "name": "Defold (.tpinfo + .tpatlas)",
       "ext": "tpinfo",
       "caps": {
+        "transform_mask": 33,
         "rotate90": true,
         "flips": false,
         "polygons": true,

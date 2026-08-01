@@ -310,7 +310,7 @@ static tp_status encode_request(const tp_pack_settings *s,
     req.alpha_threshold = s->alpha_threshold;
     req.max_vertices = s->max_vertices;
     req.shape = s->shape;
-    req.allow_transform = s->allow_transform ? 1u : 0u;
+    req.allowed_transforms = s->allowed_transforms;
     req.power_of_two = s->power_of_two ? 1u : 0u;
     req.pixels_per_unit = s->pixels_per_unit;
     req.atlas_name = s->atlas_name;

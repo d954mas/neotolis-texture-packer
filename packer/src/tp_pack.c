@@ -75,6 +75,11 @@ static tp_status validate_settings(const tp_pack_settings *s, tp_error *err) {
                             "tp_pack: sprite_count %d exceeds %u regions",
                             s->sprite_count, (unsigned int)UINT16_MAX);
     }
+    if ((s->allowed_transforms & TP_PACK_TRANSFORMS_IDENTITY) == 0U) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "tp_pack: allowed_transforms 0x%02x must include identity",
+                            (unsigned)s->allowed_transforms);
+    }
     const tp_pack_atlas_constraint_input atlas_input = {
         .max_size = s->max_size,
         .padding = s->padding,
@@ -107,8 +112,10 @@ static tp_status validate_settings(const tp_pack_settings *s, tp_error *err) {
                             s->alpha_threshold);
     }
     if (atlas_facts.max_vertices_out_of_range) {
-        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "tp_pack: max_vertices %d out of range [1..16]",
-                            s->max_vertices);
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "tp_pack: max_vertices %d out of range [%d..%d]",
+                            s->max_vertices, TP_PACK_MIN_VERTICES,
+                            TP_PACK_MAX_VERTICES);
     }
     if (atlas_facts.shape_out_of_range) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "tp_pack: shape %d out of range [0..2]", s->shape);
@@ -171,8 +178,9 @@ static tp_status validate_settings(const tp_pack_settings *s, tp_error *err) {
         }
         if (sprite_facts.max_vertices_not_wire_representable) {
             return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
-                                "tp_pack: sprite '%s' max_vertices override %d out of range [1..16]", sp->name,
-                                (int)sp->ov_max_vertices);
+                                "tp_pack: sprite '%s' max_vertices override %d out of range [%d..%d]",
+                                sp->name, (int)sp->ov_max_vertices,
+                                TP_PACK_MIN_VERTICES, TP_PACK_MAX_VERTICES);
         }
         if (sprite_facts.margin_not_wire_representable) {
             return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,

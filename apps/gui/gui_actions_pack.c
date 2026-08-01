@@ -220,7 +220,7 @@ void gui_actions__preview_target_start(int combo_index) {
         preview_target_reset();
         return;
     }
-    const tp_exporter *e = tp_exporter_at(combo_index - 1);
+    const tp_format_descriptor *e = tp_format_at(combo_index - 1);
     if (!e) {
         preview_target_reset();
         return;
@@ -255,7 +255,8 @@ void gui_actions__preview_target_start(int combo_index) {
         admitted ? "" : err);
     if (admitted) {
         s_preview_target = combo_index;
-        set_statusf_ex(STATUS_INFO, "Preview: %s\xE2\x80\xA6", e->display_name ? e->display_name : e->id);
+        set_statusf_ex(STATUS_INFO, "Preview: %s\xE2\x80\xA6",
+                       e->display_name ? e->display_name : e->id);
     } else {
         preview_target_reset();
         set_statusf_ex(STATUS_ERROR, "Preview failed: %s", err);
@@ -389,7 +390,7 @@ static gui_pack_done poll_async(
             } else {
                 /* The degradation chip is width-gated (STRIP_CHIP_MIN_W) and drops on common window
                  * sizes, so the pill also carries the summary -- it is width-independent. */
-                const tp_exporter *pe = tp_exporter_at(s_preview_target - 1);
+                const tp_format_descriptor *pe = tp_format_at(s_preview_target - 1);
                 if (pe) {
                     char chip[96] = {0};
                     char tip[256] = {0};
@@ -398,7 +399,8 @@ static gui_pack_done poll_async(
                         pe->id, chip, sizeof chip,
                         tip, sizeof tip);
                     if (nd > 0) {
-                        set_statusf_ex(STATUS_WARNING, "Previewing %s export: %s", pe->display_name ? pe->display_name : pe->id, chip);
+                        set_statusf_ex(STATUS_WARNING, "Previewing %s export: %s",
+                                       pe->display_name ? pe->display_name : pe->id, chip);
                     } else {
                         set_statusf_ex(STATUS_SUCCESS, "Previewing %s export: same layout rules as native.",
                                        pe->display_name ? pe->display_name : pe->id);

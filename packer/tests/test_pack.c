@@ -283,6 +283,58 @@ void test_alias_relationship(void) {
     TEST_ASSERT_EQUAL_INT(red->transform, dup->transform);
 }
 
+void test_relative_d4_alias_relationship(void) {
+    uint8_t original[2 * 3 * 4] = {0};
+    uint8_t rotated[3 * 2 * 4] = {0};
+    for (int y = 0; y < 3; ++y) {
+        for (int x = 0; x < 2; ++x) {
+            uint8_t *pixel = &original[(y * 2 + x) * 4];
+            pixel[0] = (uint8_t)(20 + y * 50 + x * 17);
+            pixel[1] = (uint8_t)(40 + y * 13 + x * 61);
+            pixel[2] = (uint8_t)(60 + y * 29 + x * 23);
+            pixel[3] = 255;
+            const int dx = 2 - y;
+            const int dy = x;
+            memcpy(&rotated[(dy * 3 + dx) * 4], pixel, 4);
+        }
+    }
+
+    tp_pack_sprite_desc sprites[2] = {
+        {.name = "d4_alias_a", .rgba = original, .w = 2, .h = 3,
+         .origin_x = 0.5f, .origin_y = 0.5f},
+        {.name = "d4_alias_b", .rgba = rotated, .w = 3, .h = 2,
+         .origin_x = 0.5f, .origin_y = 0.5f},
+    };
+    tp_pack_settings settings;
+    tp_pack_settings_defaults(&settings);
+    settings.atlas_name = "relative_d4_alias";
+    settings.work_dir = g_dir;
+    settings.sprites = sprites;
+    settings.sprite_count = 2;
+    settings.shape = TP_PACK_SHAPE_RECT;
+    settings.power_of_two = false;
+    settings.allowed_transforms = TP_PACK_TRANSFORMS_ALL;
+
+    tp_arena *arena = tp_arena_create(0);
+    tp_result *result = NULL;
+    tp_error error = {0};
+    TEST_ASSERT_NOT_NULL(arena);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK, tp_pack(&settings, arena, &result, &error), error.msg);
+    TEST_ASSERT_NOT_NULL(result);
+    const tp_sprite *root = find_sprite(result, "d4_alias_a");
+    const tp_sprite *alias = find_sprite(result, "d4_alias_b");
+    TEST_ASSERT_NOT_NULL(root);
+    TEST_ASSERT_NOT_NULL(alias);
+    TEST_ASSERT_EQUAL_INT(-1, root->alias_of);
+    TEST_ASSERT_EQUAL_INT(sprite_index(result, "d4_alias_a"), alias->alias_of);
+    TEST_ASSERT_EQUAL_INT(root->page, alias->page);
+    TEST_ASSERT_EQUAL_INT(root->frame.x, alias->frame.x);
+    TEST_ASSERT_EQUAL_INT(root->frame.y, alias->frame.y);
+    TEST_ASSERT_NOT_EQUAL(root->transform, alias->transform);
+    tp_arena_destroy(arena);
+}
+
 void test_pixels_per_unit(void) {
     TEST_ASSERT_TRUE(fabsf(g_res->pixels_per_unit - TEST_PPU) < 1e-5f);
 }
@@ -992,7 +1044,10 @@ void test_provable_more_than_page_limit_returns_structured_error(void) {
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OUT_OF_BOUNDS,
                           tp_pack(&settings, arena, &result, &error));
     TEST_ASSERT_NULL(result);
-    TEST_ASSERT_NOT_NULL(strstr(error.msg, "64"));
+    char page_limit[32];
+    (void)snprintf(page_limit, sizeof page_limit, "%d pages",
+                   TP_PACK_MAX_PAGES);
+    TEST_ASSERT_NOT_NULL(strstr(error.msg, page_limit));
     TEST_ASSERT_NOT_NULL(strstr(error.msg, "opaque"));
     tp_arena_destroy(arena);
 }
@@ -1086,6 +1141,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_stable_ordering);
     RUN_TEST(test_sprites_present_and_inside_page);
     RUN_TEST(test_alias_relationship);
+    RUN_TEST(test_relative_d4_alias_relationship);
     RUN_TEST(test_pixels_per_unit);
     RUN_TEST(test_determinism);
     RUN_TEST(test_neg_invalid_atlas_name);

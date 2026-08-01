@@ -25,7 +25,7 @@ tp_status tp_pack_settings_defaults(tp_pack_settings *out) {
     out->alpha_threshold = (int)d.alpha_threshold;
     out->max_vertices = (int)d.max_vertices;
     out->shape = (int)d.shape;
-    out->allow_transform = d.allow_transform;
+    out->allowed_transforms = d.allowed_transforms;
     out->power_of_two = d.power_of_two;
     out->pixels_per_unit = d.pixels_per_unit;
     return TP_STATUS_OK;

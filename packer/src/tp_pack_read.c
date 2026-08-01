@@ -94,9 +94,6 @@ static size_t align4(uint32_t n) {
  * the by-name sort assigns final indices. */
 typedef struct {
     tp_sprite sprite;
-    uint32_t vertex_start;
-    uint16_t first_u;
-    uint16_t first_v;
     uint8_t page_index;
 } region_parse_t;
 
@@ -230,8 +227,6 @@ static tp_status parse_region(const NtAtlasRegion *reg, const uint8_t *blob, con
     int32_t max_px = 0;
     int32_t min_py = 0;
     int32_t max_py = 0;
-    uint16_t first_u = 0;
-    uint16_t first_v = 0;
 
     const uint8_t *vbase = blob + ah->vertex_offset;
     for (uint32_t v = 0; v < vc; v++) {
@@ -246,8 +241,6 @@ static tp_status parse_region(const NtAtlasRegion *reg, const uint8_t *blob, con
             min_ly = max_ly = ly;
             min_px = max_px = px;
             min_py = max_py = py;
-            first_u = vtx.atlas_u;
-            first_v = vtx.atlas_v;
         } else {
             if (lx < min_lx) { min_lx = lx; }
             if (lx > max_lx) { max_lx = lx; }
@@ -333,10 +326,7 @@ static tp_status parse_region(const NtAtlasRegion *reg, const uint8_t *blob, con
     s->index_count = (int)ic;
     s->alias_of = -1;
 
-    out->vertex_start = vs;
     out->page_index = reg->page_index;
-    out->first_u = first_u;
-    out->first_v = first_v;
 
     /* A violation means a corrupt pack or reader bug.
      * NOTE: trim_w/h are the hull's local SPAN (max - min), which for CONVEX /
@@ -525,8 +515,22 @@ static tp_status parse_atlas(const uint8_t *data, size_t total, const NtAssetEnt
         for (uint16_t i = 0; i < region_count; i++) {
             rp[i].sprite.alias_of = -1;
             for (uint16_t j = 0; j < i; j++) {
-                if (rp[j].vertex_start == rp[i].vertex_start && rp[j].page_index == rp[i].page_index &&
-                    rp[j].first_u == rp[i].first_u && rp[j].first_v == rp[i].first_v) {
+                int i_width = 0;
+                int i_height = 0;
+                int j_width = 0;
+                int j_height = 0;
+                tp_transform_out_dims(rp[i].sprite.transform,
+                                      rp[i].sprite.frame.w,
+                                      rp[i].sprite.frame.h,
+                                      &i_width, &i_height);
+                tp_transform_out_dims(rp[j].sprite.transform,
+                                      rp[j].sprite.frame.w,
+                                      rp[j].sprite.frame.h,
+                                      &j_width, &j_height);
+                if (rp[j].page_index == rp[i].page_index &&
+                    rp[j].sprite.frame.x == rp[i].sprite.frame.x &&
+                    rp[j].sprite.frame.y == rp[i].sprite.frame.y &&
+                    j_width == i_width && j_height == i_height) {
                     rp[i].sprite.alias_of = (rp[j].sprite.alias_of >= 0) ? rp[j].sprite.alias_of : (int)j;
                     break;
                 }

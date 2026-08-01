@@ -86,7 +86,7 @@ int main(int argc, char *argv[]) {
     // #region atlas: white pixel only (UI panel/rect fill)
     nt_atlas_opts_t atlas_opts = nt_atlas_opts_defaults();
     atlas_opts.shape = NT_ATLAS_SHAPE_RECT;
-    atlas_opts.allow_transform = false;
+    atlas_opts.allowed_transforms = NT_ATLAS_TRANSFORMS_IDENTITY;
     atlas_opts.pixels_per_unit = 1.0F;
     atlas_opts.padding = 2;
     atlas_opts.margin = 2;
@@ -99,12 +99,13 @@ int main(int argc, char *argv[]) {
     atlas_opts.wrap_v = NT_TEXTURE_DEFAULT_WRAP_CLAMP_TO_EDGE;
     atlas_opts.gen_mipmaps = false;
 
-    nt_builder_begin_atlas(ctx, "ntpacker_ui_atlas", &atlas_opts);
+    NtAtlasBuild *atlas =
+        nt_atlas_begin(ctx, "ntpacker_ui_atlas", &atlas_opts);
 
     static const uint8_t white_pixel[4] = {255, 255, 255, 255};
     nt_atlas_sprite_opts_t white_opts = nt_atlas_sprite_opts_defaults();
     white_opts.name = "_white";
-    nt_builder_atlas_add_raw(ctx, white_pixel, 1, 1, &white_opts);
+    nt_atlas_add_raw(atlas, white_pixel, 1, 1, &white_opts);
     (void)printf("  Atlas 'ntpacker_ui_atlas' region '_white': 1x1\n");
 
     /* Lucide icon masks (48px white-on-alpha; the hero is 96px). Explicit list, not a glob: it
@@ -127,12 +128,12 @@ int main(int argc, char *argv[]) {
         (void)snprintf(icon_path, sizeof icon_path, "%s/%s.png", icons_dir, icon_names[i]);
         nt_atlas_sprite_opts_t iopts = nt_atlas_sprite_opts_defaults();
         iopts.name = icon_names[i];
-        nt_builder_atlas_add(ctx, icon_path, &iopts);
+        nt_atlas_add(atlas, icon_path, &iopts);
     }
     (void)printf("  Atlas 'ntpacker_ui_atlas' icons added: %zu (from %s)\n",
                  sizeof icon_names / sizeof icon_names[0], icons_dir);
 
-    nt_builder_end_atlas(ctx);
+    const nt_build_result_t atlas_result = nt_atlas_commit(atlas);
     // #endregion
 
     // #region font: ASCII + Latin-1 + Cyrillic + UI symbols (DejaVu Sans)
@@ -147,8 +148,9 @@ int main(int argc, char *argv[]) {
     // #region finish + codegen
     nt_build_result_t r = nt_builder_finish_pack(ctx);
     nt_builder_free_pack(ctx);
-    if (r != NT_BUILD_OK) {
-        (void)fprintf(stderr, "ntpacker_ui.ntpack failed: %d\n", r);
+    if (atlas_result != NT_BUILD_OK || r != NT_BUILD_OK) {
+        (void)fprintf(stderr, "ntpacker_ui.ntpack failed: atlas=%d finish=%d\n",
+                      (int)atlas_result, (int)r);
         return 1;
     }
 

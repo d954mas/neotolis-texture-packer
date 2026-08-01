@@ -98,10 +98,14 @@ static int check_manifest(const cJSON *root) {
     }
     const cJSON *e = NULL;
     cJSON_ArrayForEach(e, exporters) {
+        const cJSON *caps = cJSON_GetObjectItemCaseSensitive(e, "caps");
+        const cJSON *transform_mask =
+            cJSON_GetObjectItemCaseSensitive(caps, "transform_mask");
         if (!cJSON_IsString(cJSON_GetObjectItemCaseSensitive(e, "id")) ||
             !cJSON_IsString(cJSON_GetObjectItemCaseSensitive(e, "name")) ||
             !cJSON_IsString(cJSON_GetObjectItemCaseSensitive(e, "ext")) ||
-            !cJSON_IsObject(cJSON_GetObjectItemCaseSensitive(e, "caps"))) {
+            !cJSON_IsObject(caps) || !cJSON_IsNumber(transform_mask) ||
+            transform_mask->valueint < 1 || transform_mask->valueint > 255) {
             return fail("an exporter entry is missing id/name/ext/caps");
         }
     }
@@ -348,6 +352,19 @@ static int check_pack(const cJSON *root, int argc, char **argv) {
             !cJSON_IsNumber(cJSON_GetObjectItemCaseSensitive(pg, "h")) || !cJSON_IsNumber(occ) ||
             occ->valuedouble <= 0.0 || occ->valuedouble > 100.0) {
             return fail("pack: a page is missing w/h or occupancy_pct out of (0,100]");
+        }
+    }
+    const cJSON *report_atlas = NULL;
+    cJSON_ArrayForEach(report_atlas, atlases) {
+        const cJSON *report_targets =
+            cJSON_GetObjectItemCaseSensitive(report_atlas, "targets");
+        const cJSON *report_target = NULL;
+        cJSON_ArrayForEach(report_target, report_targets) {
+            if (!cJSON_IsBool(cJSON_GetObjectItemCaseSensitive(
+                    report_target, "publication_uncertain"))) {
+                return fail(
+                    "pack: target missing/!bool: publication_uncertain");
+            }
         }
     }
     const cJSON *totals = cJSON_GetObjectItemCaseSensitive(root, "totals");
