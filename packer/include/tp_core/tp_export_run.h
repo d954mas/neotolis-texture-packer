@@ -111,15 +111,15 @@ typedef enum tp_export_writer_outcome {
     TP_EXPORT_WRITER_FAILED
 } tp_export_writer_outcome;
 
-/* One ENABLED target's outcome. `written_files` are the absolute paths its writer
- * produced (NULL/empty when it failed, and ALWAYS empty on a dry run -- see
- * `would_write`). `would_write` is populated only on a DRY run: the paths the
- * target WOULD produce, assembled from the same list_outputs source the writer
- * uses, without touching the disk (empty on a wet run). `notice_begin`/`notice_end`
+/* One ENABLED target's outcome. `written_files` are the absolute paths published
+ * from its artifact plan (NULL/empty when it failed, and ALWAYS empty on a dry
+ * run -- see `would_write`). `would_write` is populated only on a DRY run from
+ * the same artifact plan used by a wet run, without touching disk.
+ * `notice_begin`/`notice_end`
  * bound this target's slice of the caller's notices list ([begin,end)); on a dry
  * run those notices come from tp_export_predict_loss (the writers never run), on a
- * wet run from the writers themselves. `pack_run` indexes report.runs (-1 if the
- * target failed before packing). `error` holds the failure reason when !ok
+ * wet run from core pack adaptations and the serializers. `pack_run` indexes
+ * report.runs (-1 if the target failed before packing). `error` holds the failure reason when !ok
  * (normally an arena string, with a static fallback if copying that detail
  * fails), NULL when ok. */
 typedef struct tp_export_report_target {
@@ -137,6 +137,9 @@ typedef struct tp_export_report_target {
      * output-listing, dry-run, and cancellation-before-write paths remain
      * NOT_ATTEMPTED. */
     tp_export_writer_outcome writer_outcome;
+    /* True only when rollback could not prove that the previous artifact set
+     * was restored. Serializer/staging failures before swap leave this false. */
+    bool publication_uncertain;
     bool ok;
 } tp_export_report_target;
 
@@ -174,7 +177,8 @@ struct tp_export_report {
  *
  * `work_dir` holds the session .ntpack(s); `arena` owns all packed/normalized
  * data (destroy it to free everything). Metadata-loss notices are appended to
- * `notices` (init'd by the caller; never fatal). `out_pack_runs` (nullable)
+ * `notices` (init'd by the caller). A capability loss is not fatal, but failure
+ * to record its required structured notice is. `out_pack_runs` (nullable)
  * receives the number of distinct pack runs performed (targets with identical
  * effective settings collapse to one). Target output paths are resolved against
  * the project dir; their parent directories must already exist. */

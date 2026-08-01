@@ -1,14 +1,11 @@
 /* Raw-RGBA ownership regression.
  *
- * The engine's nt_builder_atlas_add_raw() DEEP-COPIES the caller's RGBA buffer
- * (external/neotolis-engine/tools/builder/nt_builder_atlas.c:771-775: malloc +
- * memcpy, then sprite->rgba = the copy). The PUBLIC header (nt_builder.h:424)
- * does NOT promise this lifetime -- so this test pins the observed behaviour as
- * an executable regression; docs/architecture/sources-and-raster.md records the
- * remaining public engine-contract gap.
+ * The engine's public nt_atlas_add_raw() contract borrows the RGBA buffer only
+ * for the call and deep-copies valid input. This test pins that lifetime across
+ * engine updates.
  *
- * Because the copy is CONFIRMED in the source we read, exercising it is safe (no
- * UB): we fill an RGBA buffer, add_raw it, then MUTATE AND FREE that caller
+ * Exercising the public lifetime is safe (no UB): we fill an RGBA buffer,
+ * add_raw it, then MUTATE AND FREE that caller
  * buffer immediately -- before end_atlas/finish_pack, where the real blitting
  * happens -- and assert the packed page still holds the ORIGINAL pixels. If the
  * builder had adopted the pointer instead of copying, the page would show the
@@ -66,6 +63,8 @@ static bool pack_one_raw(const char *path, const char *atlas, const char *sprite
     o.premultiplied = false; /* straight alpha: stored pixels == originals */
     o.compress = NULL;       /* RAW RGBA8 -- the reader requires it */
     o.gen_mipmaps = false;
+    o.filter_min = NT_TEXTURE_DEFAULT_FILTER_LINEAR;
+    o.filter_mag = NT_TEXTURE_DEFAULT_FILTER_LINEAR;
     o.format = NT_TEXTURE_FORMAT_RGBA8;
     o.debug_png = false;
     o.max_size = 256;
@@ -75,16 +74,16 @@ static bool pack_one_raw(const char *path, const char *atlas, const char *sprite
     o.alpha_threshold = 0;
     o.max_vertices = 8;
     o.shape = NT_ATLAS_SHAPE_RECT;
-    o.allow_transform = false;
+    o.allowed_transforms = NT_ATLAS_TRANSFORMS_IDENTITY;
     o.power_of_two = false;
     o.pixels_per_unit = 100.0f;
 
-    nt_builder_begin_atlas(ctx, atlas, &o);
+    NtAtlasBuild *build = nt_atlas_begin(ctx, atlas, &o);
     nt_atlas_sprite_opts_t so = nt_atlas_sprite_opts_defaults();
     so.name = sprite;
     so.origin_x = 0.5f;
     so.origin_y = 0.5f;
-    nt_builder_atlas_add_raw(ctx, buf, SPR_W, SPR_H, &so);
+    nt_atlas_add_raw(build, buf, SPR_W, SPR_H, &so);
 
     if (sabotage) {
         /* The load-bearing step: destroy the caller buffer BEFORE the pack blits. */
@@ -93,11 +92,11 @@ static bool pack_one_raw(const char *path, const char *atlas, const char *sprite
         buf = NULL;
     }
 
-    nt_builder_end_atlas(ctx);
+    nt_build_result_t atlas_result = nt_atlas_commit(build);
     nt_build_result_t br = nt_builder_finish_pack(ctx);
     nt_builder_free_pack(ctx);
     free(buf); /* no-op if already freed/NULL */
-    return br == NT_BUILD_OK;
+    return atlas_result == NT_BUILD_OK && br == NT_BUILD_OK;
 }
 
 /* Read the pack back and return the single result's first page + sprite. */

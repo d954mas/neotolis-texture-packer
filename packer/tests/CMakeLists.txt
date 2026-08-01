@@ -422,8 +422,8 @@ tp_add_test(NAME export_png LIBS tp_build unity stb_image
 
 # Export output-SET publication: declared-list preflight (outside-directory and
 # case-insensitive duplicate rejections before the writer runs), unlisted/missing
-# output verdicts before the first rename, two-phase-swap rollback, and the
-# dead-owner reaper including crash-mid-swap recovery. Drives
+# output verdicts before the first rename, two-phase-swap rollback, and strict
+# preservation of entries outside the current artifact plan. Drives
 # tp_export_write_and_publish_set directly over a fixture exporter (no pack).
 # The rename fault seam is compiled out of the shipped library, so tp_export_png.c
 # is rebuilt here with TP_ENABLE_TEST_SEAMS (same pattern as tp_test_export_run
@@ -431,8 +431,9 @@ tp_add_test(NAME export_png LIBS tp_build unity stb_image
 # stb_image_write include path and link.
 tp_add_test(NAME export_set_publish
     SOURCES test_export_set_publish.c ../src/tp_export_png.c
-    LIBS tp_core unity stb_image_write PRIVATE_SRC SEAMS
+    LIBS tp_core unity stb_image stb_image_write PRIVATE_SRC SEAMS
     INCLUDE_DIRS
+        $<TARGET_PROPERTY:stb_image,INTERFACE_INCLUDE_DIRECTORIES>
         $<TARGET_PROPERTY:stb_image_write,INTERFACE_INCLUDE_DIRECTORIES>
     MAKE_DIRS "${CMAKE_BINARY_DIR}/tp_export_set_publish_test"
     ARGS "${CMAKE_BINARY_DIR}/tp_export_set_publish_test")
@@ -440,7 +441,7 @@ tp_add_test(NAME export_set_publish
 # Phase 2 per-target packing: test-only capability-restricted descriptors prove
 # effective-settings repack, shared runs, and metadata-loss notices.
 tp_add_test(NAME export_run
-    SOURCES test_export_run.c ../src/tp_export_run.c
+    SOURCES test_export_run.c ../src/tp_export_run.c ../src/tp_export.c
     LIBS tp_build unity cjson PRIVATE_SRC SEAMS
     MAKE_DIRS "${CMAKE_BINARY_DIR}/tp_export_run_test"
     ARGS "${CMAKE_BINARY_DIR}/tp_export_run_test")
@@ -449,7 +450,8 @@ tp_add_test(NAME export_run
 # NULL prep, pack-dependent axes (alias/multipage) with a prep, and every
 # writer-emitted project-knowable notice field_id covered by predict. Links tp_build
 # to pack + export the fixture through the real path (tp_export_run).
-tp_add_test(NAME predict LIBS tp_build unity PRIVATE_SRC
+tp_add_test(NAME predict SOURCES test_predict.c ../src/tp_export.c
+    LIBS tp_build unity PRIVATE_SRC SEAMS
     MAKE_DIRS "${CMAKE_BINARY_DIR}/tp_predict_test"
     ARGS "${CMAKE_BINARY_DIR}/tp_predict_test")
 

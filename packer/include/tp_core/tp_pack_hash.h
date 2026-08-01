@@ -43,7 +43,7 @@ struct tp_pack_settings;
 
 /* Version byte -- emitted FIRST in the canonical stream. Bumping it is a visible
  * change: every previously cached hash is invalidated. */
-#define TP_PACK_INPUT_HASH_VERSION ((uint8_t)1)
+#define TP_PACK_INPUT_HASH_VERSION ((uint8_t)2)
 
 /* Packer algorithm/version profile term (spec §10.2). A change in the packer
  * that would change layout for identical inputs must bump this so stale cached

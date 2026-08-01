@@ -100,11 +100,11 @@ static tp_status validate_sprite_set(const tp_project_atlas *atlas,
     }
     if ((s->mask & TP_SPF_MAX_VERTICES) &&
         s->ov_max_vertices != TP_PROJECT_OV_INHERIT &&
-        facts.max_vertices_not_wire_representable) {
+        !tp_project_max_vertices_valid(s->ov_max_vertices)) {
         return tp_op__reject(rej, TP_STATUS_OUT_OF_RANGE, "ov_max_vertices",
                              "ov_max_vertices = %d must be in [%d..%d]",
-                             s->ov_max_vertices, TP_PACK_MIN_VERTICES,
-                             TP_PACK_MAX_VERTICES);
+                             s->ov_max_vertices, TP_PROJECT_MIN_VERTICES,
+                             TP_PROJECT_MAX_VERTICES);
     }
     if ((s->mask & TP_SPF_MARGIN) && s->ov_margin != TP_PROJECT_OV_INHERIT &&
         facts.margin_not_wire_representable) {

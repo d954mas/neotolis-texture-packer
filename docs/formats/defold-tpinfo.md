@@ -31,13 +31,13 @@ the basename and a notice because Defold may not resolve it.
 | Aliases | One complete sprite entry per alias. |
 | 9-slice | Unsupported and dropped with a notice. |
 | Full D4 transforms | Unsupported. |
-| 90-degree rotation | The writer supports D4 mask 5 as `rotated: true`. |
+| 90-degree rotation | D4 value 5 is packed and emitted as `rotated: true`. |
 
-The engine builder currently exposes either all D4 transforms or identity,
-not a rotation-only packing policy. Because Defold cannot represent flips, the
-effective target settings select identity-only packing. The rotation writer
-path remains directly tested but is not produced by the normal Defold pack
-profile.
+The native descriptor declares the exact transform-value mask
+`identity + rotate90`. The shared export layer intersects that mask with the
+requested atlas mask before pack grouping and passes it unchanged to the engine.
+Flips and the opposite rotations therefore cannot enter a Defold result, while
+the representable 90-degree rotation remains available to the packer.
 
 ## `.tpinfo` sprite fields
 

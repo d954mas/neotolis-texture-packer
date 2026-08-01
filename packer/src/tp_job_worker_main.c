@@ -385,7 +385,7 @@ static tp_status run_pack(const tp_job_worker_proto_request *request,
         }
         tp_pack_settings effective = {0};
         status = tp_export_effective_settings(
-            &settings, &exporter->caps, &effective);
+            &settings, &exporter->format->caps, &effective);
         if (status != TP_STATUS_OK) {
             tp_pack_input_free(&input);
             return status;
@@ -740,7 +740,8 @@ static tp_status run_export(const tp_job_worker_proto_request *request,
                     report.targets[target].written_file_count;
             } else if (report.targets[target].writer_outcome ==
                        TP_EXPORT_WRITER_FAILED) {
-                response->export_result.publication_uncertain = true;
+                response->export_result.publication_uncertain |=
+                    report.targets[target].publication_uncertain;
                 writer_failed = true;
                 if (!writer_error) {
                     writer_error = report.targets[target].error;

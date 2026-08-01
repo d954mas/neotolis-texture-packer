@@ -234,7 +234,7 @@ void gui_shot_tick(void) {
             int idx = -1;
             for (int i = 0; i < tp_exporter_count(); i++) {
                 const tp_exporter *e = tp_exporter_at(i);
-                if (e && strcmp(e->id, s_shot_preview) == 0) {
+                if (e && strcmp(e->format->id, s_shot_preview) == 0) {
                     idx = i;
                     break;
                 }

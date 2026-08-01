@@ -333,6 +333,8 @@ bool tp_fixture_build(const tp_fixture_case *c, const char *out_dir, char *out_p
     o.premultiplied = false; /* straight alpha -> exact opaque probes (R3 warn expected) */
     o.compress = NULL;       /* RAW RGBA8 */
     o.gen_mipmaps = false;
+    o.filter_min = NT_TEXTURE_DEFAULT_FILTER_LINEAR;
+    o.filter_mag = NT_TEXTURE_DEFAULT_FILTER_LINEAR;
     o.format = NT_TEXTURE_FORMAT_RGBA8;
     o.debug_png = false;
     o.extrude = 0;
@@ -342,11 +344,13 @@ bool tp_fixture_build(const tp_fixture_case *c, const char *out_dir, char *out_p
     o.margin = c->margin;
     o.max_vertices = c->max_vertices;
     o.shape = (nt_atlas_shape_t)c->shape;
-    o.allow_transform = c->allow_transform;
+    o.allowed_transforms = c->allow_transform
+                               ? NT_ATLAS_TRANSFORMS_ALL
+                               : NT_ATLAS_TRANSFORMS_IDENTITY;
     o.power_of_two = c->power_of_two;
     o.pixels_per_unit = c->pixels_per_unit;
 
-    nt_builder_begin_atlas(ctx, c->name, &o);
+    NtAtlasBuild *atlas = nt_atlas_begin(ctx, c->name, &o);
 
     for (int i = 0; i < c->sprite_count; i++) {
         const tp_fixture_sprite *s = &c->sprites[i];
@@ -363,13 +367,14 @@ bool tp_fixture_build(const tp_fixture_case *c, const char *out_dir, char *out_p
         so.slice9_right = s->slice9_lrtb[1];
         so.slice9_top = s->slice9_lrtb[2];
         so.slice9_bottom = s->slice9_lrtb[3];
-        nt_builder_atlas_add_raw(ctx, g_pixbuf, (uint32_t)s->src_w, (uint32_t)s->src_h, &so);
+        nt_atlas_add_raw(atlas, g_pixbuf, (uint32_t)s->src_w,
+                         (uint32_t)s->src_h, &so);
     }
 
-    nt_builder_end_atlas(ctx);
+    nt_build_result_t atlas_result = nt_atlas_commit(atlas);
     nt_build_result_t r = nt_builder_finish_pack(ctx);
     nt_builder_free_pack(ctx);
-    return r == NT_BUILD_OK;
+    return atlas_result == NT_BUILD_OK && r == NT_BUILD_OK;
 }
 
 bool tp_fixtures_register_names(struct tp_name_map *map) {

@@ -18,14 +18,16 @@ through a shared core rather than separate GUI and automation models.
 - full-fidelity `json-neotolis` export;
 - Defold export with explicit capability adaptation and loss notices;
 - target-capability adaptation with structured loss notices;
+- versioned immutable Export IR, native format descriptors, deterministic
+  artifact plans, and rollback-backed common publication for handled failures;
 - semantic revision, dirty state, Undo/Redo, durable Save, and best-effort
   recovery;
 - worker-process containment for fallible builder work;
 - GUI-owned semantic Pack-result preview caching.
 
 The current product does not provide filesystem watchers, linked foreign-atlas
-sources, Import/Export IR, unified format packages, Lua handlers, MCP, or a Dev
-API transport.
+sources, Import IR, installable format packages, template or Lua handlers, MCP,
+or a Dev API transport.
 
 ## Shared behavior
 
@@ -67,8 +69,9 @@ none silently performs another's persistent side effects.
 
 ## Capability adaptation
 
-Each export target states what it can represent. Effective settings may disable
-an unsupported packing transform so the resulting artifact remains valid.
+Each export target states what it can represent, including an exact D4 transform
+mask. Effective settings intersect the requested and supported masks before
+packing so the resulting artifact remains valid.
 Metadata that cannot be represented is reported before export and in the final
 machine report.
 

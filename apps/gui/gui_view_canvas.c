@@ -144,7 +144,9 @@ static void preview_target_short(int combo_index, char *out, size_t cap) {
         return;
     }
     const tp_exporter *e = tp_exporter_at(combo_index - 1);
-    const char *dn = (e && e->display_name) ? e->display_name : (e ? e->id : "?");
+    const char *dn = (e && e->format->display_name)
+                         ? e->format->display_name
+                         : (e ? e->format->id : "?");
     const char *paren = strstr(dn, " (");
     size_t len = paren ? (size_t)(paren - dn) : strlen(dn);
     if (len >= cap) {
@@ -178,7 +180,9 @@ static void strip_preview_selector(nt_ui_context_t *ctx, float h) {
                 }
                 for (int i = 0; i < ne; i++) {
                     const tp_exporter *e = tp_exporter_at(i);
-                    const char *lbl = (e && e->display_name) ? e->display_name : (e ? e->id : "?");
+                    const char *lbl = (e && e->format->display_name)
+                                          ? e->format->display_name
+                                          : (e ? e->format->id : "?");
                     if (nt_ui_combo_selectable(ctx, (uint32_t)(i + 1), lbl, s_preview_target == i + 1)) {
                         gui_request_preview_target(i + 1);
                     }
@@ -205,7 +209,7 @@ static bool strip_preview_chip(nt_ui_context_t *ctx, float h) {
     char tip[224];
     const int nd = gui_pack_preview_diff(
         gui_view_atlas_id(),
-        e->id, chip, sizeof chip, tip, sizeof tip);
+        e->format->id, chip, sizeof chip, tip, sizeof tip);
     if (nd <= 0) {
         return false; /* format holds everything -> no degradation chip (canvas simply shows the preview) */
     }

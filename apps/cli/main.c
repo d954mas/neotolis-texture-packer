@@ -48,11 +48,18 @@ static void emit_caps(tp_sb *sb, int depth, const tp_export_caps *c) {
         const char *key;
         bool val;
     } fields[] = {
-        {"rotate90", c->rotate90}, {"flips", c->flips},         {"polygons", c->polygons}, {"pivot", c->pivot},
+        {"rotate90", tp_export_caps_supports_rotate90(c)},
+        {"flips", tp_export_caps_supports_flips(c)},
+        {"polygons", c->polygons}, {"pivot", c->pivot},
         {"slice9", c->slice9},     {"multipage", c->multipage}, {"aliases", c->aliases},
     };
     int n = (int)(sizeof fields / sizeof fields[0]);
     tp_sb_str(sb, "{\n");
+    indent(sb, depth + 1);
+    tp_sb_json_string(sb, "transform_mask");
+    tp_sb_str(sb, ": ");
+    tp_sb_int(sb, c->transform_mask);
+    tp_sb_str(sb, ",\n");
     for (int i = 0; i < n; i++) {
         indent(sb, depth + 1);
         tp_sb_json_string(sb, fields[i].key);
@@ -164,7 +171,7 @@ static void build_manifest(tp_sb *sb) {
     indent(sb, 1);
     tp_sb_str(sb, "},\n");
 
-    /* exporters: the live registry (built-ins + any runtime-registered). */
+    /* Exporters: the fixed built-in native registry. */
     indent(sb, 1);
     tp_sb_json_string(sb, "exporters");
     tp_sb_str(sb, ": [\n");
@@ -176,22 +183,22 @@ static void build_manifest(tp_sb *sb) {
         indent(sb, 3);
         tp_sb_json_string(sb, "id");
         tp_sb_str(sb, ": ");
-        tp_sb_json_string(sb, e->id);
+        tp_sb_json_string(sb, e->format->id);
         tp_sb_str(sb, ",\n");
         indent(sb, 3);
         tp_sb_json_string(sb, "name");
         tp_sb_str(sb, ": ");
-        tp_sb_json_string(sb, e->display_name);
+        tp_sb_json_string(sb, e->format->display_name);
         tp_sb_str(sb, ",\n");
         indent(sb, 3);
         tp_sb_json_string(sb, "ext");
         tp_sb_str(sb, ": ");
-        tp_sb_json_string(sb, e->extension);
+        tp_sb_json_string(sb, e->format->artifacts[0].suffix + 1);
         tp_sb_str(sb, ",\n");
         indent(sb, 3);
         tp_sb_json_string(sb, "caps");
         tp_sb_str(sb, ": ");
-        emit_caps(sb, 3, &e->caps);
+        emit_caps(sb, 3, &e->format->caps);
         tp_sb_str(sb, "\n");
         indent(sb, 2);
         tp_sb_char(sb, '}');

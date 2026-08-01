@@ -146,7 +146,6 @@ static bool run_path_is_absolute(const char *path) {
 typedef struct {
     tp_pack_settings eff;
     tp_result *result;
-    tp_export_prepared prep;
 } run_group;
 
 /* Builds the normalize options for an atlas (target-independent). Explicit
@@ -162,11 +161,11 @@ typedef struct {
  * emitted entries borrow: raw_name points into `sprites` (the caller's desc
  * array) and final_name into ps->rename; both outlive every tp_normalize call in
  * this run, and final_name is duped by tp_normalize. */
-static tp_status build_norm_opts(const tp_project_atlas *a, const tp_pack_sprite_desc *sprites, int sprite_count,
+static tp_status build_ir_opts(const tp_project_atlas *a, const tp_pack_sprite_desc *sprites, int sprite_count,
                                  tp_export_anim_in *anims, tp_export_name_override *ovs,
                                  tp_export_sprite_ref_in *refs, tp_arena *arena,
-                                 tp_normalize_opts *out, tp_error *err) {
-    tp_normalize_opts_defaults(out);
+                                 tp_export_ir_opts *out, tp_error *err) {
+    tp_export_ir_opts_defaults(out);
     for (int i = 0; i < a->animation_count; i++) {
         const tp_project_anim *pa = &a->animations[i];
         anims[i].id = pa->name; /* export "id" is the animation's logical name (id/name split) */
@@ -223,7 +222,8 @@ static tp_status unknown_exporter(const char *id, tp_error *err) {
     known[0] = '\0';
     for (int i = 0; i < tp_exporter_count(); i++) {
         const tp_exporter *e = tp_exporter_at(i);
-        int n = snprintf(known + used, sizeof known - used, "%s%s", (i == 0) ? "" : ", ", e->id);
+        int n = snprintf(known + used, sizeof known - used, "%s%s",
+                         (i == 0) ? "" : ", ", e->format->id);
         if (n < 0 || (size_t)n >= sizeof known - used) {
             break;
         }
@@ -236,104 +236,63 @@ static tp_status unknown_exporter(const char *id, tp_error *err) {
 /* report assembly (only when the caller wants a report)              */
 /* ------------------------------------------------------------------ */
 
-/* Collects arena-duped output paths into a pre-sized array. `files == NULL` is a
- * counting pass (only `count` moves); the fill pass sets `files`/`cap`. */
-typedef struct {
-    tp_arena *arena;
-    const char **files;
-    int count;
-    int cap;
-    bool oom;
-} file_collect;
-
-static void file_count_sink(void *ud, const char *path) {
-    (void)path;
-    ((file_collect *)ud)->count++;
+static tp_status collect_plan_files(const tp_export_artifact_plan *plan,
+                                    tp_arena *arena,
+                                    const char *const **out_files,
+                                    int *out_count, tp_error *err) {
+    const char **files = (const char **)tp_arena_alloc(
+        arena, (size_t)plan->artifact_count * sizeof *files);
+    if (!files) {
+        return tp_error_set(err, TP_STATUS_OOM,
+                            "tp_export_run: OOM collecting artifact paths");
+    }
+    for (int i = 0; i < plan->artifact_count; ++i) {
+        files[i] = plan->artifacts[i].path;
+    }
+    *out_files = files;
+    *out_count = plan->artifact_count;
+    return TP_STATUS_OK;
 }
 
-static void file_fill_sink(void *ud, const char *path) {
-    file_collect *fc = (file_collect *)ud;
-    if (fc->count >= fc->cap) {
-        fc->count++; /* keep counting so a mismatch is visible; never write past end */
-        return;
-    }
-    char *dup = tp_arena_strdup(fc->arena, path);
-    if (!dup) {
-        fc->oom = true;
-        return;
-    }
-    fc->files[fc->count++] = dup;
-}
-
-static void ignore_output_path(void *ud, const char *path) {
-    (void)ud;
-    (void)path;
-}
-
-/* Enumerates a target's produced files (exporter list_outputs, or the common
- * "<base>.<ext>" + page PNGs default) into `sink`. */
-static tp_status list_target_outputs(const tp_exporter *exp, const tp_export_prepared *prep, const char *out_base,
-                                     tp_export_path_sink sink, void *ud, tp_error *err) {
-    if (exp->list_outputs) {
-        return exp->list_outputs(prep, out_base, sink, ud, err);
-    }
-    char suffix[TP_IDENTITY_PATH_MAX];
-    int sn = snprintf(suffix, sizeof suffix, ".%s", exp->extension ? exp->extension : "");
-    if (sn < 0 || (size_t)sn >= sizeof suffix) {
-        return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
-                            "export extension exceeds the canonical path limit");
-    }
-    char path[TP_RUN_PATH_MAX];
-    tp_status st = tp_export_output_path(out_base, suffix, path, err);
-    if (st != TP_STATUS_OK) {
-        return st;
-    }
-    st = tp_export_list_page_files(prep->result, out_base, ignore_output_path, NULL, err);
-    if (st != TP_STATUS_OK) {
-        return st;
-    }
-    sink(ud, path);
-    return tp_export_list_page_files(prep->result, out_base, sink, ud, err);
-}
-
-/* Enumerates the target's output paths (two passes: count then fill) into an
- * arena-owned array, writing out_files + out_count. Used for both the wet-path
- * written_files and the dry-path would_write (identical list; dry just never
- * writes). Returns a typed listing error or TP_STATUS_OOM on allocation failure. */
-static tp_status collect_output_files(const tp_exporter *exp, const tp_export_prepared *prep, const char *out_base,
-                                      tp_arena *arena, const char *const **out_files, int *out_count,
-                                      tp_error *err) {
-    file_collect c = {.arena = arena};
-    tp_status st = list_target_outputs(exp, prep, out_base, file_count_sink, &c, err);
-    if (st != TP_STATUS_OK) {
-        return st;
-    }
-    int n = c.count;
-    if (n <= 0) {
-        *out_files = NULL;
-        *out_count = 0;
+static tp_status append_pack_adaptation_notices(
+    const tp_project *project, int atlas_index, const tp_exporter *exporter,
+    tp_export_notices *notices, tp_error *err) {
+    if (!notices) {
         return TP_STATUS_OK;
     }
-    const char **arr = (const char **)tp_arena_alloc(arena, (size_t)n * sizeof(char *));
-    if (!arr) {
-        return tp_error_set(err, TP_STATUS_OOM,
-                            "tp_export_run: OOM collecting output paths");
-    }
-    file_collect f = {.arena = arena, .files = arr, .cap = n};
-    st = list_target_outputs(exp, prep, out_base, file_fill_sink, &f, err);
+    tp_pack_settings native;
+    tp_status st = tp_project_atlas_to_settings(project, atlas_index, &native,
+                                                err);
     if (st != TP_STATUS_OK) {
         return st;
     }
-    if (f.oom) {
-        return tp_error_set(err, TP_STATUS_OOM,
-                            "tp_export_run: OOM copying output paths");
-    }
-    if (f.count != n) {
+    tp_pack_settings effective;
+    st = tp_export_effective_settings(&native, &exporter->format->caps,
+                                      &effective);
+    if (st != TP_STATUS_OK) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
-                            "export output enumeration changed between passes");
+                            "export adaptation settings are invalid");
     }
-    *out_files = arr;
-    *out_count = f.count;
+    if (native.allowed_transforms != effective.allowed_transforms &&
+        tp_export_notice_add_ex(
+            notices, TP_NOTICE_FIELD_TRANSFORM,
+            TP_NOTICE_REASON_CAPS_UNSUPPORTED, NULL, exporter->format->id,
+            "unsupported orientations disabled -- this format accepts "
+            "transform mask 0x%02x of requested 0x%02x",
+            (unsigned)effective.allowed_transforms,
+            (unsigned)native.allowed_transforms) != TP_STATUS_OK) {
+        return tp_error_set(err, TP_STATUS_OOM,
+                            "export adaptation notice allocation failed");
+    }
+    if (native.shape != effective.shape &&
+        tp_export_notice_add_ex(
+            notices, TP_NOTICE_FIELD_POLYGON,
+            TP_NOTICE_REASON_CAPS_UNSUPPORTED, NULL, exporter->format->id,
+            "polygon hulls flattened to rectangles -- this format stores "
+            "quads only") != TP_STATUS_OK) {
+        return tp_error_set(err, TP_STATUS_OOM,
+                            "export adaptation notice allocation failed");
+    }
     return TP_STATUS_OK;
 }
 
@@ -447,8 +406,8 @@ tp_status tp_export_run_ex(const tp_project *project, int atlas_index, const tp_
         }
         return tp_error_set(err, TP_STATUS_OOM, "tp_export_run: OOM (sprite refs)");
     }
-    tp_normalize_opts nopts;
-    st = build_norm_opts(a, sprites, sprite_count, anims, ovs, refs, arena,
+    tp_export_ir_opts nopts;
+    st = build_ir_opts(a, sprites, sprite_count, anims, ovs, refs, arena,
                          &nopts, err);
     if (st != TP_STATUS_OK) {
         if (report) {
@@ -559,7 +518,7 @@ tp_status tp_export_run_ex(const tp_project *project, int atlas_index, const tp_
         }
 
         tp_pack_settings eff;
-        st = tp_export_effective_settings(&base, &exp->caps, &eff);
+        st = tp_export_effective_settings(&base, &exp->format->caps, &eff);
         if (st != TP_STATUS_OK) {
             if (report) {
                 report->pack_failed = true;
@@ -596,17 +555,6 @@ tp_status tp_export_run_ex(const tp_project *project, int atlas_index, const tp_
             if (st != TP_STATUS_OK) {
                 return st;
             }
-            st = tp_normalize(groups[g].result, &nopts, arena, &groups[g].prep, err);
-            if (st != TP_STATUS_OK) {
-                if (report) {
-                    report->pack_failed = true;
-                }
-                return st;
-            }
-            st = export_cancel_poll(cancel, err);
-            if (st != TP_STATUS_OK) {
-                return st;
-            }
         }
         target_group[t] = g;
         if (rt) {
@@ -634,7 +582,36 @@ tp_status tp_export_run_ex(const tp_project *project, int atlas_index, const tp_
         const tp_exporter *exp = tp_exporter_find(tg->exporter_id);
         tp_export_report_target *rt = (report && rtidx[t] >= 0) ? &report->targets[rtidx[t]] : NULL;
 
-        const tp_export_prepared *prep = &groups[target_group[t]].prep;
+        tp_export_ir ir;
+        st = tp_export_ir_build(groups[target_group[t]].result, &nopts,
+                                exp->format->id, arena, &ir, err);
+        if (st != TP_STATUS_OK) {
+            if (!report) {
+                return st;
+            }
+            if (rt) {
+                rt->error = report_error_copy(arena, err ? err->msg : "Export IR failed");
+            }
+            if (first_fail == TP_STATUS_OK) {
+                first_fail = st;
+            }
+            continue;
+        }
+        tp_export_artifact_plan plan;
+        st = tp_export_artifact_plan_build(exp, &ir, out_bases[t], arena,
+                                           &plan, err);
+        if (st != TP_STATUS_OK) {
+            if (!report) {
+                return st;
+            }
+            if (rt) {
+                rt->error = report_error_copy(arena, err ? err->msg : "artifact plan failed");
+            }
+            if (first_fail == TP_STATUS_OK) {
+                first_fail = st;
+            }
+            continue;
+        }
         int nbefore = notices ? notices->count : 0;
         if (rt) {
             rt->notice_begin = nbefore;
@@ -646,8 +623,8 @@ tp_status tp_export_run_ex(const tp_project *project, int atlas_index, const tp_
          * list becomes would_write (dry) or written_files (wet). */
         const char *const *output_files = NULL;
         int output_file_count = 0;
-        tp_status cst = collect_output_files(exp, prep, out_bases[t], arena,
-                                             &output_files, &output_file_count, err);
+        tp_status cst = collect_plan_files(&plan, arena, &output_files,
+                                           &output_file_count, err);
         if (cst != TP_STATUS_OK) {
             if (rt) {
                 rt->notice_end = nbefore;
@@ -672,7 +649,9 @@ tp_status tp_export_run_ex(const tp_project *project, int atlas_index, const tp_
              * run here -- so predict every degradation instead (full axes: the packed
              * prep supplies the alias/multipage axes on top of the project-knowable
              * ones). Dry-run reports the predicted losses. */
-            st = tp_export_predict_loss(project, atlas_index, &exp->caps, exp->id, prep, notices, err);
+            st = tp_export_predict_loss(project, atlas_index,
+                                        &exp->format->caps, exp->format->id,
+                                        &ir, notices, err);
             if (rt) {
                 rt->notice_end = notices ? notices->count : nbefore;
             }
@@ -701,16 +680,37 @@ tp_status tp_export_run_ex(const tp_project *project, int atlas_index, const tp_
 
         /* Deterministic test seam at the last reversible boundary. Production is
          * a no-op; after release, poll before staging the irreversible target. */
+        st = append_pack_adaptation_notices(project, atlas_index, exp, notices,
+                                            err);
+        if (st != TP_STATUS_OK) {
+            if (!report) {
+                return st;
+            }
+            if (rt) {
+                rt->notice_end = notices ? notices->count : nbefore;
+                rt->ok = false;
+                rt->error = report_error_copy(
+                    arena, err && err->msg[0]
+                               ? err->msg
+                               : "export adaptation notice failed");
+            }
+            if (first_fail == TP_STATUS_OK) {
+                first_fail = st;
+            }
+            continue;
+        }
         export_before_write_gate_wait();
         st = export_cancel_poll(cancel, err);
         if (st != TP_STATUS_OK) {
             return st;
         }
         bool writer_ran = false;
-        st = tp_export_write_and_publish_set(exp, prep, out_bases[t],
-                                             output_files, output_file_count,
-                                             notices, &writer_ran, err);
+        bool publication_uncertain = false;
+        st = tp_export_publish(exp, &ir, groups[target_group[t]].result,
+                               &plan, notices, &writer_ran,
+                               &publication_uncertain, err);
         if (rt) {
+            rt->publication_uncertain = publication_uncertain;
             /* A rejected output list is decided BEFORE the writer runs, so it is
              * not a writer failure -- the report must not blame a writer that
              * never executed. */

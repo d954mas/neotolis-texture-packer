@@ -58,6 +58,11 @@ number. Mutation families advertise separate variants:
 `help --json` and `--help --json` return the same schema-1 command catalog,
 global options, and exit-code mapping.
 
+Each exporter `caps` object includes the exact numeric `transform_mask`
+(`1..255`, bit `i` permits stored D4 transform value `i`). The derived
+`rotate90` and `flips` booleans remain presentation conveniences and do not
+replace the exact mask.
+
 ## Pack report: schema 1
 
 ```json

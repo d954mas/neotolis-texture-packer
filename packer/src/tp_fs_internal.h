@@ -46,7 +46,7 @@ bool tp_fs_write_file(const char *path_utf8, const void *data, size_t size);
 /* Staged output-SET publish (export set-atomicity).                    */
 /* ------------------------------------------------------------------ */
 /*
- * The publisher (tp_export_write_and_publish_set) owns the policy; this module
+ * The publisher (tp_export_publish) owns the policy; this module
  * owns the three names it needs and the cross-run reaper. Every private name is
  * "<something>.tp-<role>-<hexpid>-<hexserial>", so a leftover always says which
  * process owned it and the reaper can decide by liveness alone.
@@ -76,19 +76,6 @@ bool tp_fs_stage_child_path(const char *final_dir_utf8,
 bool tp_fs_stage_old_path(const char *destination_utf8, char *out,
                           size_t out_cap);
 
-/* Best-effort cross-run cleanup of the two private names above under
- * `parent_utf8` ("" or trailing-separator form). Only entries whose embedded pid
- * is definitively gone are touched, so a concurrent exporter's work is never
- * disturbed. A ".tp-stage-*" directory is removed. A ".tp-old-*" file is the
- * crash-mid-swap record: its destination present means the swap completed and
- * the old copy is deleted; its destination missing means the swap was
- * interrupted and the old copy is renamed back. Silent; never fails a run. */
-void tp_fs_stage_reap_orphans(const char *parent_utf8);
-
-/* True unless a process with `pid` is definitively gone. Conservative on
- * purpose: an access-denied or otherwise unanswerable probe reports LIVE, so the
- * reaper above never removes a directory that might still be in use. */
-bool tp_fs_process_is_live(unsigned long pid);
 /* Best-effort recursive removal; never follows directory reparse points. */
 void tp_fs_remove_tree(const char *path_utf8);
 

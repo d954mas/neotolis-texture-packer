@@ -46,7 +46,8 @@ tp_status tp_project_validate_sprite_pack_overrides(
             "sprite ov_allow_rotate %d must be 0 or inherit",
             sprite->ov_allow_rotate);
     }
-    if (facts.max_vertices_not_wire_representable) {
+    if (sprite->ov_max_vertices != TP_PROJECT_OV_INHERIT &&
+        !tp_project_max_vertices_valid(sprite->ov_max_vertices)) {
         return tp_error_set(error, TP_STATUS_BAD_PROJECT,
                             "sprite ov_max_vertices %d is not representable",
                             sprite->ov_max_vertices);

@@ -10,9 +10,9 @@
       "pages": [
         {
           "index": 0,
-          "w": 16,
-          "h": 8,
-          "occupancy_pct": 14.0625
+          "w": 8,
+          "h": 4,
+          "occupancy_pct": 6.25
         }
       ],
       "targets": [

@@ -25,23 +25,38 @@ The builder is fallible and is treated as such even where engine internals use
 assertions. Production job boundaries convert malformed input, worker crash,
 timeout, protocol error, and invalid binary output into `tp_status` diagnostics.
 
-## Shared exporter boundary
+## Native export boundary
 
-Current exporter descriptors declare:
+The native registry is fixed to built-in formats. Production does not accept
+runtime C exporters; custom formats belong to the later template/Lua layer.
+Each built-in binds two separate pieces:
 
-- stable exporter ID and display name;
-- primary extension;
-- capability flags;
-- write callback;
-- optional output-list callback.
+- a descriptor with stable ID, display name, exact D4 transform mask, other
+  capabilities, and declared document artifacts;
+- a memory-only serializer for those declared documents.
 
-Settings clamping, loss notices, normalization, and safe publication are shared
-export-layer behavior around the descriptor. The current descriptor does not
-carry format-version metadata.
+The shared layer materializes and validates immutable Export IR v1 with final
+names, page facts, geometry, transforms, aliases, and explicit animations. Raw
+page pixels are not serializer-visible. It then creates the artifact plan, which
+is the sole authority for concrete filenames. Serializers consume the IR and
+plan and return memory documents; they do not write files or enumerate outputs.
+The bundled Defold serializer retains one explicit exception: a bounded,
+read-only upward probe for `game.project` used to form its resource reference.
+That trusted built-in environment lookup is not a general handler capability and
+does not grant future template/Lua drivers filesystem access.
 
-Built-in `json-neotolis` and `defold` descriptors and runtime-registered C
-exporters use the same export orchestration. This is not yet the target unified
-package descriptor or Import/Export IR.
+The core writes every planned document and page PNG into sibling staging,
+verifies the complete planned set, and publishes it with rollback for handled
+failures. Abrupt process termination may leave private staging/backup entries;
+later exports do not infer ownership of or clean them. Files outside the current
+plan remain untouched. Capability
+adaptation also lives here: the project boolean expands to an internal D4 mask,
+the format mask is intersected before pack grouping, and the exact effective
+mask reaches neotolis-engine.
+
+`json-neotolis` and `defold` both use this path. The production registry has no
+generic native registration API; test binaries may compile a narrow injection
+seam for capability and failure coverage.
 
 ## Client shapes
 

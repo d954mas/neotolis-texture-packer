@@ -32,8 +32,8 @@ These describe intended future behavior and are not claims about current
 availability:
 
 - [`spec/automation.md`](spec/automation.md) — Dev API and MCP.
-- [`spec/format-ecosystem.md`](spec/format-ecosystem.md) — unified packages,
-  Import/Export IR, linked atlases, extraction, templates, and sandboxing.
+- [`spec/format-ecosystem.md`](spec/format-ecosystem.md) —
+  later template and sandboxed Lua export handlers over the native export core.
 - [`spec/ux.md`](spec/ux.md) — two-level canvas and future workspace model.
 
 Repository-wide working rules remain in [`../AGENTS.md`](../AGENTS.md).

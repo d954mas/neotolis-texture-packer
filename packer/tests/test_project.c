@@ -1239,7 +1239,8 @@ void test_to_settings_mapping(void) {
     TEST_ASSERT_EQUAL_INT(200, s.alpha_threshold);
     TEST_ASSERT_EQUAL_INT(8, s.max_vertices);
     TEST_ASSERT_EQUAL_INT(0, s.shape);
-    TEST_ASSERT_FALSE(s.allow_transform);
+    TEST_ASSERT_EQUAL_UINT8(TP_PACK_TRANSFORMS_IDENTITY,
+                            s.allowed_transforms);
     TEST_ASSERT_FALSE(s.power_of_two);
     feq(s.pixels_per_unit, 2.0F);
     /* the bridge fills knobs only -- work_dir/sprites are the call site's job */
@@ -1254,7 +1255,7 @@ void test_to_settings_mapping(void) {
     TEST_ASSERT_EQUAL_INT(def.max_size, s.max_size);
     TEST_ASSERT_EQUAL_INT(def.padding, s.padding);
     TEST_ASSERT_EQUAL_INT(def.shape, s.shape);
-    TEST_ASSERT_EQUAL_INT(def.allow_transform ? 1 : 0, s.allow_transform ? 1 : 0);
+    TEST_ASSERT_EQUAL_UINT8(def.allowed_transforms, s.allowed_transforms);
     feq(s.pixels_per_unit, def.pixels_per_unit);
 
     /* out-of-range index -> error, not a crash */

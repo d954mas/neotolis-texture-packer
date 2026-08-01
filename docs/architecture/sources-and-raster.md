@@ -102,8 +102,8 @@ stream used by Pack and semantic image hashing.
 
 ## Engine raw-pixel lifetime
 
-The pinned engine revision currently deep-copies raw RGBA passed to the builder,
-and `tp_raw_ownership` protects that observed behavior. The public engine API
-does not yet promise this lifetime contract. Packer code must continue to keep
-ownership explicit and treat the regression as a version-coupling guard, not as
-permission to infer undocumented behavior from other engine entry points.
+The pinned engine revision's public `nt_atlas_add_raw` contract borrows the RGBA
+buffer for the duration of the call and deep-copies valid input. Packer releases
+decoded source pixels after the atlas commit, and `tp_raw_ownership` protects
+that public lifetime contract across engine updates. This guarantee is specific
+to `nt_atlas_add_raw`; ownership for other engine entry points remains explicit.

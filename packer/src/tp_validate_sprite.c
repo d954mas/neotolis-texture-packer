@@ -198,7 +198,7 @@ void validate_sprite_animation_domain(validation_builder *fs,
         }
         /* keys[]/finals[] BORROW the index's export keys (and any project rename string) --
          * no per-desc allocation. finals default to the key; a project rename replaces the
-         * FIRST desc whose key matches, exactly as build_norm_opts / export does. */
+         * FIRST desc whose key matches, exactly as Export IR construction does. */
         const char **keys = NULL;
         const char **finals = NULL;
         str_index key_index = {0};

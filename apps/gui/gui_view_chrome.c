@@ -588,8 +588,10 @@ void declare_export_modal(nt_ui_context_t *ctx) {
                     const char *exp_name = t->exporter_id;
                     for (int i = 0; i < ne; i++) {
                         const tp_exporter *e = tp_exporter_at(i);
-                        if (e && strcmp(e->id, t->exporter_id) == 0) {
-                            exp_name = (e->display_name && e->display_name[0]) ? e->display_name : e->id;
+                        if (e && strcmp(e->format->id, t->exporter_id) == 0) {
+                            exp_name = (e->format->display_name && e->format->display_name[0])
+                                           ? e->format->display_name
+                                           : e->format->id;
                             break;
                         }
                     }

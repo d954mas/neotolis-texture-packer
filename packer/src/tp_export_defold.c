@@ -24,10 +24,8 @@
  * polygons, pivots, multipage and aliases; it has NO 9-slice and NO region-level
  * flips (flips exist only per-animation). caps gates emission and raises a
  * metadata-loss notice for a genuine drop; never a hard error. The per-target
- * clamp (tp_export_effective_settings) additionally packs Defold IDENTITY-ONLY in
- * v1 (rotate90 && !flips), so a non-identity transform never reaches this writer
- * through the supported pipeline -- the rotation path below is exercised directly
- * by tests and is ready for the future rotation-only engine policy. */
+ * clamp passes the exact identity + clockwise-90 mask to the engine, so every
+ * transform reaching this serializer is representable by `.tpinfo`. */
 
 #define TP_DEFOLD_PATH_MAX TP_IDENTITY_PATH_MAX
 /* TP_DEFOLD_TPINFO_VERSION now lives in tp_core/tp_export.h (shared with the CLI
@@ -223,58 +221,32 @@ static void emit_size(tp_sb *sb, int depth, const char *key, long w, long h) {
     tp_sb_str(sb, "}\n");
 }
 
-/* is_solid = no transparent texel in the sprite's placed footprint. Informational
- * (the bob loader ignores it), but we compute it honestly from the page pixels so
- * it matches what TexturePacker reports. Bounds-clamped; false for an absent page
- * or an empty/degenerate region. */
-static bool region_is_solid(const tp_page *pg, long x, long y, long w, long h) {
-    if (!pg || !pg->rgba || pg->w <= 0 || pg->h <= 0) {
-        return false;
-    }
-    long x0 = x < 0 ? 0 : x;
-    long y0 = y < 0 ? 0 : y;
-    long x1 = x + w;
-    long y1 = y + h;
-    if (x1 > pg->w) {
-        x1 = pg->w;
-    }
-    if (y1 > pg->h) {
-        y1 = pg->h;
-    }
-    if (x0 >= x1 || y0 >= y1) {
-        return false;
-    }
-    for (long yy = y0; yy < y1; yy++) {
-        for (long xx = x0; xx < x1; xx++) {
-            if (pg->rgba[((size_t)yy * (size_t)pg->w + (size_t)xx) * 4U + 3U] != 255U) {
-                return false;
-            }
-        }
-    }
-    return true;
-}
-
 /* ------------------------------------------------------------------ */
 /* .tpinfo                                                            */
 /* ------------------------------------------------------------------ */
 
-static void emit_sprite(tp_sb *sb, int depth, const tp_export_prepared *prep, const tp_export_sprite *es,
-                        const tp_export_caps *caps, tp_export_notices *notices) {
-    const tp_sprite *s = es->src;
-    const tp_result *r = prep->result;
+static tp_status emit_sprite(tp_sb *sb, int depth, const tp_export_ir *prep,
+                             const tp_export_sprite *es,
+                             const tp_export_caps *caps,
+                             tp_export_notices *notices) {
+    const tp_sprite *s = &es->data;
 
     /* Rotation: only the one representable 90-degree CW mask maps to rotated:true.
      * v1 never reaches here with a transform (identity clamp); the else-branch is a
      * guard for a caps-bypassing caller. */
     bool rotated = false;
     if (s->transform != 0) {
-        if (caps->rotate90 && s->transform == TP_DEFOLD_ROTATED_MASK) {
+        if ((caps->transform_mask & TP_EXPORT_TRANSFORM_BIT(s->transform)) != 0U &&
+            s->transform == TP_DEFOLD_ROTATED_MASK) {
             rotated = true;
         } else if (notices) {
-            (void)tp_export_notice_add_ex(
+            tp_status status = tp_export_notice_add_ex(
                 notices, TP_NOTICE_FIELD_TRANSFORM, TP_NOTICE_REASON_CAPS_UNSUPPORTED, es->final_name, NULL,
                 "transform %d dropped for '%s' (.tpinfo encodes only a 90-degree rotation)", (int)s->transform,
                 es->final_name);
+            if (status != TP_STATUS_OK) {
+                return status;
+            }
         }
     }
 
@@ -297,18 +269,19 @@ static void emit_sprite(tp_sb *sb, int depth, const tp_export_prepared *prep, co
     long foot_w = rotated ? sh : sw; /* as-drawn footprint on the page */
     long foot_h = rotated ? sw : sh;
 
-    bool solid = false;
-    if (s->page >= 0 && s->page < r->page_count) {
-        solid = region_is_solid(&r->pages[s->page], s->frame.x, s->frame.y, foot_w, foot_h);
-    }
+    bool solid = es->is_solid;
 
     bool poly = (s->vert_count > 0 && !tp_export_is_rect_quad(s));
     if (poly && !caps->polygons) {
         if (notices) {
-            (void)tp_export_notice_add_ex(notices, TP_NOTICE_FIELD_POLYGON, TP_NOTICE_REASON_CAPS_UNSUPPORTED,
-                                          es->final_name, NULL,
-                                          "polygon flattened to rect for '%s' (target stores quads only)",
-                                          es->final_name);
+            tp_status status = tp_export_notice_add_ex(
+                notices, TP_NOTICE_FIELD_POLYGON,
+                TP_NOTICE_REASON_CAPS_UNSUPPORTED, es->final_name, NULL,
+                "polygon flattened to rect for '%s' (target stores quads only)",
+                es->final_name);
+            if (status != TP_STATUS_OK) {
+                return status;
+            }
         }
         poly = false;
     }
@@ -328,8 +301,14 @@ static void emit_sprite(tp_sb *sb, int depth, const tp_export_prepared *prep, co
         emit_point_f(sb, depth + 1, "pivot", (double)s->pivot.x * (double)s->sourceSize.w,
                      (double)s->pivot.y * (double)s->sourceSize.h);
     } else if ((s->pivot.x != 0.5F || s->pivot.y != 0.5F) && notices) {
-        (void)tp_export_notice_add_ex(notices, TP_NOTICE_FIELD_PIVOT, TP_NOTICE_REASON_CAPS_UNSUPPORTED, es->final_name,
-                                      NULL, "pivot dropped for '%s' (target has no pivot support)", es->final_name);
+        tp_status status = tp_export_notice_add_ex(
+            notices, TP_NOTICE_FIELD_PIVOT,
+            TP_NOTICE_REASON_CAPS_UNSUPPORTED, es->final_name, NULL,
+            "pivot dropped for '%s' (target has no pivot support)",
+            es->final_name);
+        if (status != TP_STATUS_OK) {
+            return status;
+        }
     }
 
     emit_rect(sb, depth + 1, "frame_rect", s->frame.x, s->frame.y, foot_w, foot_h);
@@ -340,9 +319,14 @@ static void emit_sprite(tp_sb *sb, int depth, const tp_export_prepared *prep, co
      * future-proof if a slice9-carrying variant is ever added). */
     if (!caps->slice9 && (s->slice9_lrtb[0] || s->slice9_lrtb[1] || s->slice9_lrtb[2] || s->slice9_lrtb[3]) &&
         notices) {
-        (void)tp_export_notice_add_ex(notices, TP_NOTICE_FIELD_SLICE9, TP_NOTICE_REASON_CAPS_UNSUPPORTED,
-                                      es->final_name, NULL, "slice9 dropped for '%s' (target has no 9-slice support)",
-                                      es->final_name);
+        tp_status status = tp_export_notice_add_ex(
+            notices, TP_NOTICE_FIELD_SLICE9,
+            TP_NOTICE_REASON_CAPS_UNSUPPORTED, es->final_name, NULL,
+            "slice9 dropped for '%s' (target has no 9-slice support)",
+            es->final_name);
+        if (status != TP_STATUS_OK) {
+            return status;
+        }
     }
 
     if (poly) {
@@ -373,40 +357,46 @@ static void emit_sprite(tp_sb *sb, int depth, const tp_export_prepared *prep, co
 
     tp_sb_indent(sb, depth);
     tp_sb_str(sb, "}\n");
+    return TP_STATUS_OK;
 }
 
-static tp_status emit_tpinfo(tp_sb *sb, const tp_export_prepared *prep, const tp_export_caps *caps,
-                             const char *page_base, tp_export_notices *notices, tp_error *err) {
-    const tp_result *r = prep->result;
-
+static tp_status emit_tpinfo(tp_sb *sb, const tp_export_ir *prep, const tp_export_caps *caps,
+                             const tp_export_artifact_plan *plan,
+                             tp_export_notices *notices, tp_error *err) {
     tp_sb_str(sb, "# Exported by neotolis-texture-packer\n");
     tp_sb_str(sb, "# Format: Defold extension-texturepacker .tpinfo (protobuf text)\n\n");
     kv_str(sb, 0, "version", TP_DEFOLD_TPINFO_VERSION);
     kv_str(sb, 0, "description", TP_DEFOLD_DESCRIPTION);
 
-    for (int p = 0; p < r->page_count; p++) {
+    for (int p = 0; p < prep->page_count; p++) {
         tp_sb_str(sb, "pages {\n");
-        char name[TP_DEFOLD_PATH_MAX];
-        tp_status st = tp_export_page_path(page_base, p, name, err);
-        if (st != TP_STATUS_OK) {
-            return st;
-        }
-        kv_str(sb, 1, "name", name);
-        emit_size(sb, 1, "size", r->pages[p].w, r->pages[p].h);
+        const tp_export_artifact *page =
+            &plan->artifacts[plan->document_count + p];
+        kv_str(sb, 1, "name", tp_path_basename(page->path));
+        emit_size(sb, 1, "size", prep->pages[p].w, prep->pages[p].h);
         /* prep->sprites is final-name sorted; filtering by page keeps that order. */
         for (int i = 0; i < prep->sprite_count; i++) {
-            if (prep->sprites[i].src->page != p) {
+            if (prep->sprites[i].data.page != p) {
                 continue;
             }
-            emit_sprite(sb, 1, prep, &prep->sprites[i], caps, notices);
+            tp_status status = emit_sprite(
+                sb, 1, prep, &prep->sprites[i], caps, notices);
+            if (status != TP_STATUS_OK) {
+                return status;
+            }
         }
         tp_sb_str(sb, "}\n");
     }
 
-    if (r->page_count > 1 && !caps->multipage && notices) {
-        (void)tp_export_notice_add_ex(notices, TP_NOTICE_FIELD_MULTIPAGE, TP_NOTICE_REASON_CAPS_UNSUPPORTED, NULL, NULL,
-                                      "atlas '%s' has %d pages but the target is single-page",
-                                      r->atlas_name ? r->atlas_name : "", r->page_count);
+    if (prep->page_count > 1 && !caps->multipage && notices) {
+        tp_status status = tp_export_notice_add_ex(
+            notices, TP_NOTICE_FIELD_MULTIPAGE,
+            TP_NOTICE_REASON_CAPS_UNSUPPORTED, NULL, NULL,
+            "atlas '%s' has %d pages but the target is single-page",
+            prep->atlas_name ? prep->atlas_name : "", prep->page_count);
+        if (status != TP_STATUS_OK) {
+            return status;
+        }
     }
     return TP_STATUS_OK;
 }
@@ -415,8 +405,9 @@ static tp_status emit_tpinfo(tp_sb *sb, const tp_export_prepared *prep, const tp
 /* .tpatlas                                                           */
 /* ------------------------------------------------------------------ */
 
-static void emit_tpatlas(tp_sb *sb, const tp_export_prepared *prep, const char *tpinfo_ref,
-                         tp_export_notices *notices) {
+static tp_status emit_tpatlas(tp_sb *sb, const tp_export_ir *prep,
+                              const char *tpinfo_ref,
+                              tp_export_notices *notices) {
     /* file: project-absolute Defold resource path ("/dir/base.tpinfo") when a
      * game.project was located, else the bare co-located basename (resolved by
      * resolve_tpatlas_file_ref in the writer). */
@@ -434,9 +425,12 @@ static void emit_tpatlas(tp_sb *sb, const tp_export_prepared *prep, const char *
         if (!pb) {
             pb = "PLAYBACK_ONCE_FORWARD";
             if (notices) {
-                (void)tp_export_notice_addf(
+                tp_status status = tp_export_notice_addf(
                     notices, "animation '%s' has unknown playback id %d; exported as PLAYBACK_ONCE_FORWARD", a->id,
                     a->playback);
+                if (status != TP_STATUS_OK) {
+                    return status;
+                }
             }
         }
         tp_sb_indent(sb, 1);
@@ -454,108 +448,73 @@ static void emit_tpatlas(tp_sb *sb, const tp_export_prepared *prep, const char *
      * (2D-array) texture regardless of this flag, so false is safe (matches the
      * upstream 2-page basic.tpatlas). */
     kv_bool(sb, 0, "is_paged_atlas", false);
+    return TP_STATUS_OK;
 }
 
 /* ------------------------------------------------------------------ */
 /* files                                                              */
 /* ------------------------------------------------------------------ */
 
-static void ignore_output_path(void *ud, const char *path);
-
-static tp_status write_text(const char *base, const char *ext, const tp_sb *sb, tp_error *err) {
-    if (sb->oom) {
-        return tp_error_set(err, TP_STATUS_OOM, "defold: OOM building %s", ext);
+tp_status tp_export_defold_serialize(const tp_export_serialize_ctx *ctx,
+                                     tp_export_document *documents,
+                                     int document_count,
+                                     tp_error *err) {
+    if (!ctx || !ctx->ir || !ctx->format || !ctx->plan || !documents ||
+        document_count != 2 || ctx->plan->document_count != 2) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "defold: incomplete serialize context");
     }
-    char path[TP_DEFOLD_PATH_MAX];
-    tp_status st = tp_export_output_path(base, ext, path, err);
-    if (st != TP_STATUS_OK) {
-        return st;
-    }
-    if (!tp_fs_write_file(path, sb->buf, sb->len)) { /* binary: keep LF */
-        return tp_error_set(err, TP_STATUS_BAD_PROJECT, "defold: cannot write '%s'", path);
-    }
-    return TP_STATUS_OK;
-}
-
-tp_status tp_export_defold_write(const tp_export_write_ctx *ctx, tp_error *err) {
-    if (!ctx || !ctx->prep || !ctx->caps || !ctx->write_path_base || !ctx->out_path_base) {
-        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "defold: incomplete write context");
-    }
-    const tp_export_prepared *prep = ctx->prep;
-    const char *write_base = ctx->write_path_base;
+    const tp_export_ir *prep = ctx->ir;
     tp_export_notices *notices = ctx->notices;
-
-    tp_status st = tp_export_defold_list_outputs(prep, write_base, ignore_output_path, NULL, err);
-    if (st != TP_STATUS_OK) {
-        return st;
-    }
-
-    /* Page PNGs: straight-alpha (Defold texture profiles premultiply at build). */
-    st = tp_export_write_pages(prep->result, write_base, false, err);
-    if (st != TP_STATUS_OK) {
-        return st;
-    }
 
     /* Page/tpinfo files sit next to the .tpatlas; bob resolves page `name` and the
      * .tpatlas `file` relative to their own directory (AtlasBuilder.java 2.7.0).
      * Both references describe where the atlas will BE, so they are derived from
      * the published base -- staging shares its basename, and the game.project
      * walk must climb the real output tree, not the staging dir. */
-    const char *base = tp_path_basename(ctx->out_path_base);
+    const char *base = tp_path_basename(ctx->plan->out_path_base);
 
     tp_sb info = {0};
-    st = emit_tpinfo(&info, prep, ctx->caps, base, notices, err);
+    tp_status st = emit_tpinfo(&info, prep, &ctx->format->caps, ctx->plan,
+                               notices, err);
     if (st != TP_STATUS_OK) {
         free(info.buf);
-        return st;
+        return tp_error_set(err, st,
+                            "defold: could not record export notice");
     }
-    st = write_text(write_base, ".tpinfo", &info, err);
-    free(info.buf);
-    if (st != TP_STATUS_OK) {
-        return st;
+    if (info.oom) {
+        free(info.buf);
+        return tp_error_set(err, TP_STATUS_OOM, "defold: OOM building .tpinfo");
     }
 
     char tpinfo_ref[TP_DEFOLD_PATH_MAX];
-    if (!resolve_tpatlas_file_ref(ctx->out_path_base, base, tpinfo_ref, sizeof tpinfo_ref) && notices) {
-        (void)tp_export_notice_addf(
+    if (!resolve_tpatlas_file_ref(ctx->plan->out_path_base, base, tpinfo_ref,
+                                 sizeof tpinfo_ref) && notices) {
+        st = tp_export_notice_addf(
             notices,
             "could not locate game.project above '%s' -- .tpatlas 'file' reference '%s' may not resolve in Defold "
             "(expected a project-absolute \"/path/%s\")",
-            ctx->out_path_base, tpinfo_ref, tpinfo_ref);
+            ctx->plan->out_path_base, tpinfo_ref, tpinfo_ref);
+        if (st != TP_STATUS_OK) {
+            free(info.buf);
+            return tp_error_set(err, st,
+                                "defold: could not record export notice");
+        }
     }
     tp_sb atlas = {0};
-    emit_tpatlas(&atlas, prep, tpinfo_ref, notices);
-    st = write_text(write_base, ".tpatlas", &atlas, err);
-    free(atlas.buf);
-    return st;
-}
-
-static void ignore_output_path(void *ud, const char *path) {
-    (void)ud;
-    (void)path;
-}
-
-tp_status tp_export_defold_list_outputs(const tp_export_prepared *prep, const char *out_path_base,
-                                        tp_export_path_sink sink, void *ud, tp_error *err) {
-    if (!prep || !out_path_base || !sink) {
-        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
-                            "defold output listing requires prep, base, and sink");
-    }
-    char tpinfo[TP_DEFOLD_PATH_MAX];
-    tp_status st = tp_export_output_path(out_path_base, ".tpinfo", tpinfo, err);
+    st = emit_tpatlas(&atlas, prep, tpinfo_ref, notices);
     if (st != TP_STATUS_OK) {
-        return st;
+        free(info.buf);
+        free(atlas.buf);
+        return tp_error_set(err, st,
+                            "defold: could not record export notice");
     }
-    char tpatlas[TP_DEFOLD_PATH_MAX];
-    st = tp_export_output_path(out_path_base, ".tpatlas", tpatlas, err);
-    if (st != TP_STATUS_OK) {
-        return st;
+    if (atlas.oom) {
+        free(info.buf);
+        free(atlas.buf);
+        return tp_error_set(err, TP_STATUS_OOM, "defold: OOM building .tpatlas");
     }
-    st = tp_export_list_page_files(prep->result, out_path_base, ignore_output_path, NULL, err);
-    if (st != TP_STATUS_OK) {
-        return st;
-    }
-    sink(ud, tpinfo);
-    sink(ud, tpatlas);
-    return tp_export_list_page_files(prep->result, out_path_base, sink, ud, err);
+    documents[0] = (tp_export_document){.data = info.buf, .size = info.len};
+    documents[1] = (tp_export_document){.data = atlas.buf, .size = atlas.len};
+    return TP_STATUS_OK;
 }

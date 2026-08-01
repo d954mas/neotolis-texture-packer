@@ -50,6 +50,20 @@ static tp_exporter g_norot;
 static tp_exporter g_list_error;
 static tp_exporter g_write_error;
 static tp_exporter g_stray;
+static tp_format_descriptor g_nopivot_format;
+static tp_format_descriptor g_norot_format;
+static tp_format_descriptor g_list_error_format;
+static tp_format_descriptor g_write_error_format;
+static tp_format_descriptor g_stray_format;
+static const tp_format_artifact_decl g_json_artifact[] = {
+    {.id = "metadata", .suffix = ".json"},
+};
+static const tp_format_artifact_decl g_bad_artifact[] = {
+    {.id = "metadata", .suffix = "/bad"},
+};
+static const tp_format_artifact_decl g_stray_artifact[] = {
+    {.id = "metadata", .suffix = ".json/sub/stray.json"},
+};
 static int g_list_error_write_calls;
 
 void setUp(void) { tp_export_run__test_reset_all(); }
@@ -64,25 +78,23 @@ static void fill(uint8_t *p, int n, uint8_t r, uint8_t g, uint8_t b) {
     }
 }
 
-static tp_status list_error_write(const tp_export_write_ctx *ctx, tp_error *err) {
+static tp_status list_error_serialize(const tp_export_serialize_ctx *ctx,
+                                      tp_export_document *documents,
+                                      int document_count, tp_error *err) {
     (void)ctx;
+    (void)documents;
+    (void)document_count;
     (void)err;
     g_list_error_write_calls++;
     return TP_STATUS_OK;
 }
 
-static tp_status list_error_outputs(const tp_export_prepared *prep, const char *out_path_base,
-                                    tp_export_path_sink sink, void *ud, tp_error *err) {
-    (void)prep;
-    (void)out_path_base;
-    (void)sink;
-    (void)ud;
-    return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS, "test exporter output path overflow");
-}
-
-static tp_status write_error_write(const tp_export_write_ctx *ctx,
-                                   tp_error *err) {
+static tp_status write_error_serialize(const tp_export_serialize_ctx *ctx,
+                                       tp_export_document *documents,
+                                       int document_count, tp_error *err) {
     (void)ctx;
+    (void)documents;
+    (void)document_count;
     return tp_error_set(err, TP_STATUS_PATH_RESOLVE_FAILED,
                         "test writer failed after its publication attempt");
 }
@@ -91,25 +103,12 @@ static tp_status write_error_write(const tp_export_write_ctx *ctx,
  * directory -- a set the whole-set publication cannot cover. */
 static int g_stray_write_calls;
 
-static tp_status stray_outputs(const tp_export_prepared *prep, const char *out_path_base,
-                               tp_export_path_sink sink, void *ud, tp_error *err) {
-    (void)prep;
-    char primary[TP_IDENTITY_PATH_MAX];
-    char stray[TP_IDENTITY_PATH_MAX];
-    const int pn = snprintf(primary, sizeof primary, "%s.json", out_path_base);
-    const int sn = snprintf(stray, sizeof stray, "%s/sub/stray.json", out_path_base);
-    if (pn <= 0 || (size_t)pn >= sizeof primary || sn <= 0 ||
-        (size_t)sn >= sizeof stray) {
-        return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
-                            "test exporter output path overflow");
-    }
-    sink(ud, primary);
-    sink(ud, stray);
-    return TP_STATUS_OK;
-}
-
-static tp_status stray_write(const tp_export_write_ctx *ctx, tp_error *err) {
+static tp_status stray_serialize(const tp_export_serialize_ctx *ctx,
+                                 tp_export_document *documents,
+                                 int document_count, tp_error *err) {
     (void)ctx;
+    (void)documents;
+    (void)document_count;
     (void)err;
     g_stray_write_calls++;
     return TP_STATUS_OK;
@@ -240,6 +239,58 @@ void test_nopivot_drops_pivot_with_notice(void) {
         }
     }
     TEST_ASSERT_TRUE_MESSAGE(found, "dropping a non-default pivot must raise a notice");
+}
+
+void test_serializer_notice_allocation_failure_is_fatal(void) {
+    tp_export_page page = {.artifact_id = 0, .w = 8, .h = 8};
+    tp_export_sprite sprite = {
+        .final_name = "hero",
+        .data = {
+            .name = "hero", .page = 0, .alias_of = -1,
+            .frame = {.w = 8, .h = 8},
+            .sourceSize = {.w = 8, .h = 8},
+            .spriteSourceSize = {.w = 8, .h = 8},
+            .pivot = {.x = 0.25F, .y = 0.75F},
+        },
+    };
+    tp_export_ir ir = {
+        .version = TP_EXPORT_IR_VERSION,
+        .target_id = "test-nopivot",
+        .atlas_name = "notice-oom",
+        .pixels_per_unit = 1.0F,
+        .pages = &page,
+        .page_count = 1,
+        .sprites = &sprite,
+        .sprite_count = 1,
+        .scale = 1.0F,
+    };
+    tp_export_artifact artifacts[2] = {
+        {.kind = TP_EXPORT_ARTIFACT_DOCUMENT, .logical_id = 0,
+         .id = "metadata", .path = "notice-oom.json"},
+        {.kind = TP_EXPORT_ARTIFACT_PAGE, .logical_id = 0,
+         .id = "page-0", .path = "notice-oom-0.png"},
+    };
+    tp_export_artifact_plan plan = {
+        .out_path_base = "notice-oom",
+        .artifacts = artifacts,
+        .artifact_count = 2,
+        .document_count = 1,
+    };
+    tp_export_notices notices;
+    tp_export_notices_init(&notices);
+    tp_export_document document = {0};
+    const tp_export_serialize_ctx ctx = {
+        .ir = &ir, .format = &g_nopivot_format, .plan = &plan,
+        .notices = &notices,
+    };
+    tp_error error = {{0}};
+    tp_export_notices__test_fail_next_reserve();
+    const tp_status status =
+        g_nopivot.serialize(&ctx, &document, 1, &error);
+    free(document.data);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OOM, status);
+    TEST_ASSERT_EQUAL_INT(0, notices.count);
+    tp_export_notices_free(&notices);
 }
 
 void test_rename_and_anim_through_run(void) {
@@ -462,63 +513,34 @@ static bool setup_all(const char *dir) {
     tp_export_notices_init(&g_notices);
 
     /* register test-only descriptors over the json writer. */
-    g_nopivot = (tp_exporter){.id = "test-nopivot",
-                              .display_name = "test nopivot",
-                              .extension = "json",
-                              .caps = {.rotate90 = true,
-                                       .flips = true,
-                                       .polygons = true,
-                                       .pivot = false,
-                                       .slice9 = true,
-                                       .multipage = true,
-                                       .aliases = true},
-                              .write = tp_export_json_neotolis_write};
-    g_norot = (tp_exporter){.id = "test-norot",
-                            .display_name = "test norot",
-                            .extension = "json",
-                            .caps = {.rotate90 = false,
-                                     .flips = false,
-                                     .polygons = true,
-                                     .pivot = true,
-                                     .slice9 = true,
-                                     .multipage = true,
-                                     .aliases = true},
-                            .write = tp_export_json_neotolis_write};
-    g_list_error = (tp_exporter){.id = "test-list-error",
-                                 .display_name = "test list error",
-                                 .extension = "bad",
-                                 .caps = {.rotate90 = true,
-                                          .flips = true,
-                                          .polygons = true,
-                                          .pivot = true,
-                                          .slice9 = true,
-                                          .multipage = true,
-                                          .aliases = true},
-                                 .write = list_error_write,
-                                 .list_outputs = list_error_outputs};
-    g_write_error = (tp_exporter){.id = "test-write-error",
-                                  .display_name = "test write error",
-                                  .extension = "bad",
-                                  .caps = {.rotate90 = true,
-                                           .flips = true,
-                                           .polygons = true,
-                                           .pivot = true,
-                                           .slice9 = true,
-                                           .multipage = true,
-                                           .aliases = true},
-                                  .write = write_error_write};
-    g_stray = (tp_exporter){.id = "test-stray-output",
-                            .display_name = "test stray output",
-                            .extension = "json",
-                            .caps = {.rotate90 = true,
-                                     .flips = true,
-                                     .polygons = true,
-                                     .pivot = true,
-                                     .slice9 = true,
-                                     .multipage = true,
-                                     .aliases = true},
-                            .write = stray_write,
-                            .list_outputs = stray_outputs};
+    tp_export_caps full = tp_export_caps_full();
+    g_nopivot_format = (tp_format_descriptor){
+        .id = "test-nopivot", .display_name = "test nopivot", .caps = full,
+        .artifacts = g_json_artifact, .artifact_count = 1};
+    g_nopivot_format.caps.pivot = false;
+    g_nopivot = (tp_exporter){.format = &g_nopivot_format,
+                              .serialize = tp_export_json_neotolis_serialize};
+    g_norot_format = (tp_format_descriptor){
+        .id = "test-norot", .display_name = "test norot", .caps = full,
+        .artifacts = g_json_artifact, .artifact_count = 1};
+    g_norot_format.caps.transform_mask = TP_EXPORT_TRANSFORMS_IDENTITY;
+    g_norot = (tp_exporter){.format = &g_norot_format,
+                            .serialize = tp_export_json_neotolis_serialize};
+    g_list_error_format = (tp_format_descriptor){
+        .id = "test-list-error", .display_name = "test list error", .caps = full,
+        .artifacts = g_bad_artifact, .artifact_count = 1};
+    g_list_error = (tp_exporter){.format = &g_list_error_format,
+                                 .serialize = list_error_serialize};
+    g_write_error_format = (tp_format_descriptor){
+        .id = "test-write-error", .display_name = "test write error", .caps = full,
+        .artifacts = g_json_artifact, .artifact_count = 1};
+    g_write_error = (tp_exporter){.format = &g_write_error_format,
+                                  .serialize = write_error_serialize};
+    g_stray_format = (tp_format_descriptor){
+        .id = "test-stray-output", .display_name = "test stray output", .caps = full,
+        .artifacts = g_stray_artifact, .artifact_count = 1};
+    g_stray = (tp_exporter){.format = &g_stray_format,
+                            .serialize = stray_serialize};
     if (tp_exporter_register(&g_nopivot) != TP_STATUS_OK ||
         tp_exporter_register(&g_norot) != TP_STATUS_OK ||
         tp_exporter_register(&g_list_error) != TP_STATUS_OK ||
@@ -730,6 +752,20 @@ static void test_dry_run(void) {
     tp_project_destroy(proj);
 }
 
+static void test_wet_run_reports_pack_transform_adaptation(void) {
+    bool found = false;
+    for (int i = 0; i < g_notices.count; ++i) {
+        if (g_notices.items[i].field_id == TP_NOTICE_FIELD_TRANSFORM &&
+            g_notices.items[i].target &&
+            strcmp(g_notices.items[i].target, "test-norot") == 0) {
+            found = true;
+            break;
+        }
+    }
+    TEST_ASSERT_TRUE_MESSAGE(
+        found, "wet export must report the transform mask disabled before repack");
+}
+
 /* Every output artifact must fit the canonical path contract, including the
  * suffix added by the exporter. Dry-run validates that exact same output set,
  * so it must reject an overflowing page path just like the wet writer does. */
@@ -827,11 +863,13 @@ static void test_custom_output_listing_failure_prevents_wet_write_and_matches_dr
         tp_error err = {{0}};
 
         TEST_ASSERT_EQUAL_INT(
-            TP_STATUS_OUT_OF_BOUNDS,
+            TP_STATUS_INVALID_ARGUMENT,
             tp_export_run_ex(proj, 0, &sprite, 1, g_dir, arena, &notices, NULL, &opts, &err));
         TEST_ASSERT_EQUAL_INT(1, report.target_count);
         TEST_ASSERT_FALSE(report.targets[0].ok);
-        TEST_ASSERT_EQUAL_STRING("test exporter output path overflow", report.targets[0].error);
+        TEST_ASSERT_EQUAL_STRING(
+            "format 'test-list-error' has invalid artifact declaration 0",
+            report.targets[0].error);
         TEST_ASSERT_EQUAL_INT(TP_EXPORT_WRITER_NOT_ATTEMPTED,
                               report.targets[0].writer_outcome);
         tp_export_notices_free(&notices);
@@ -924,6 +962,9 @@ static void test_failed_writer_error_falls_back_when_error_copy_fails(void) {
                              report.targets[0].error);
     TEST_ASSERT_EQUAL_INT(TP_EXPORT_WRITER_FAILED,
                           report.targets[0].writer_outcome);
+    TEST_ASSERT_FALSE_MESSAGE(
+        report.targets[0].publication_uncertain,
+        "a serializer failure before staging cannot make publication uncertain");
 
     tp_export_notices_free(&notices);
     tp_arena_destroy(arena);
@@ -977,7 +1018,8 @@ static void test_uncoverable_output_list_is_refused_before_the_writer_runs(void)
                                   report.targets[0].writer_outcome,
                                   "a rejected output list is not a writer failure");
     TEST_ASSERT_EQUAL_INT(0, g_stray_write_calls);
-    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(report.targets[0].error, "stray.json"),
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(report.targets[0].error,
+                                        "invalid artifact declaration"),
                                  report.targets[0].error);
     TEST_ASSERT_FALSE_MESSAGE(tp_fs_exists(primary),
                               "a refused output list must write nothing");
@@ -1652,11 +1694,13 @@ int main(int argc, char **argv) {
     RUN_TEST(test_full_target_has_diagonal);
     RUN_TEST(test_norot_target_is_identity);
     RUN_TEST(test_nopivot_drops_pivot_with_notice);
+    RUN_TEST(test_serializer_notice_allocation_failure_is_fatal);
     RUN_TEST(test_rename_and_anim_through_run);
     RUN_TEST(test_dangling_frame_through_run);
     RUN_TEST(test_duplicate_source_keys_export_the_canonical_animation_frame);
     RUN_TEST(test_report_ex);
     RUN_TEST(test_dry_run);
+    RUN_TEST(test_wet_run_reports_pack_transform_adaptation);
     RUN_TEST(test_dry_run_rejects_the_same_output_path_overflow_as_wet_export);
     RUN_TEST(test_custom_output_listing_failure_prevents_wet_write_and_matches_dry_run);
     RUN_TEST(test_unknown_exporter_error_falls_back_when_error_copy_fails);

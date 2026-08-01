@@ -617,8 +617,9 @@ static int outcome_notice(const char *path) {
     tp_export_notices notices;
     tp_export_notices_init(&notices);
     status = exporter
-                 ? tp_export_predict_loss_snapshot(
-                       snapshot, atlas_id, &exporter->caps, exporter->id, NULL,
+                       ? tp_export_predict_loss_snapshot(
+                       snapshot, atlas_id, &exporter->format->caps,
+                       exporter->format->id, NULL,
                        &notices, &err)
                  : TP_STATUS_NOT_FOUND;
     bool found = false;

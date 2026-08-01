@@ -206,12 +206,13 @@ void validate_target_settings_domain(
                     "alpha_threshold = %d is out of range [0..%d]",
                     a->alpha_threshold, TP_PACK_ALPHA_MAX);
     }
-    if (atlas_facts.max_vertices_out_of_range) {
+    if (!tp_project_max_vertices_valid(a->max_vertices)) {
         add_finding(fs, TP_VALIDATION_ERROR,
                     TP_VALIDATION_CODE_SETTING_OUT_OF_RANGE,
                     context_atlas(a),
-                    "max_vertices = %d is out of range [1..%d]",
-                    a->max_vertices, TP_PACK_MAX_VERTICES);
+                    "max_vertices = %d is out of range [%d..%d]",
+                    a->max_vertices, TP_PROJECT_MIN_VERTICES,
+                    TP_PROJECT_MAX_VERTICES);
     }
     if (atlas_facts.shape_out_of_range) {
         add_finding(fs, TP_VALIDATION_ERROR,

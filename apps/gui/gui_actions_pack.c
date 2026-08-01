@@ -249,13 +249,14 @@ void gui_actions__preview_target_start(int combo_index) {
     char err[256] = {0};
     const bool admitted =
         gui_pack_preview_async_start(
-            a->id, e->id, err, sizeof err);
+            a->id, e->format->id, err, sizeof err);
     gui_actions__record_job_request(
         GUI_JOB_REQUEST_PREVIEW, admitted,
         admitted ? "" : err);
     if (admitted) {
         s_preview_target = combo_index;
-        set_statusf_ex(STATUS_INFO, "Preview: %s\xE2\x80\xA6", e->display_name ? e->display_name : e->id);
+        set_statusf_ex(STATUS_INFO, "Preview: %s\xE2\x80\xA6",
+                       e->format->display_name ? e->format->display_name : e->format->id);
     } else {
         preview_target_reset();
         set_statusf_ex(STATUS_ERROR, "Preview failed: %s", err);
@@ -395,13 +396,14 @@ static gui_pack_done poll_async(
                     char tip[256] = {0};
                     const int nd = gui_pack_preview_diff(
                         gui_view_atlas_id(),
-                        pe->id, chip, sizeof chip,
+                        pe->format->id, chip, sizeof chip,
                         tip, sizeof tip);
                     if (nd > 0) {
-                        set_statusf_ex(STATUS_WARNING, "Previewing %s export: %s", pe->display_name ? pe->display_name : pe->id, chip);
+                        set_statusf_ex(STATUS_WARNING, "Previewing %s export: %s",
+                                       pe->format->display_name ? pe->format->display_name : pe->format->id, chip);
                     } else {
                         set_statusf_ex(STATUS_SUCCESS, "Previewing %s export: same layout rules as native.",
-                                       pe->display_name ? pe->display_name : pe->id);
+                                       pe->format->display_name ? pe->format->display_name : pe->format->id);
                     }
                 }
             }

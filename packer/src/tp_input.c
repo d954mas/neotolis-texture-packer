@@ -160,7 +160,10 @@ static tp_status desc_add(desc_vec *dv, const tp_project_atlas *a,
         }
         if (ov->ov_max_vertices != TP_PROJECT_OV_INHERIT) {
             d->ov_mask |= TP_PACK_OV_MAXVERT;
-            d->ov_max_vertices = (uint8_t)ov->ov_max_vertices;
+            d->ov_max_vertices = (uint8_t)(
+                ov->ov_max_vertices < TP_PACK_MIN_VERTICES
+                    ? TP_PACK_MIN_VERTICES
+                    : ov->ov_max_vertices);
         }
         if (ov->ov_margin != TP_PROJECT_OV_INHERIT) {
             d->ov_mask |= TP_PACK_OV_MARGIN;

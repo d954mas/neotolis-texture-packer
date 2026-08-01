@@ -33,9 +33,63 @@ static const char *g_dir;
 static tp_arena *g_arena;
 static tp_result *g_res;
 static const tp_sprite *g_sp;
+typedef void (*tp_export_path_sink)(void *ud, const char *path);
 
 void setUp(void) {}
 void tearDown(void) {}
+
+static tp_status tp_export_write_pages(const tp_result *result,
+                                       const char *base, bool premultiply,
+                                       tp_error *err) {
+    if (!result || !base) {
+        return TP_STATUS_INVALID_ARGUMENT;
+    }
+    for (int p = 0; p < result->page_count; ++p) {
+        char path[TP_IDENTITY_PATH_MAX];
+        tp_status st = tp_export_page_path(base, p, path, err);
+        if (st != TP_STATUS_OK) {
+            return st;
+        }
+    }
+    for (int p = 0; p < result->page_count; ++p) {
+        char path[TP_IDENTITY_PATH_MAX];
+        tp_status st = tp_export_page_path(base, p, path, err);
+        if (st != TP_STATUS_OK) {
+            return st;
+        }
+        st = tp_export_write_page_artifact(&result->pages[p], p, path,
+                                           premultiply, err);
+        if (st != TP_STATUS_OK) {
+            return st;
+        }
+    }
+    return TP_STATUS_OK;
+}
+
+static tp_status tp_export_list_page_files(const tp_result *result,
+                                           const char *base,
+                                           tp_export_path_sink sink, void *ud,
+                                           tp_error *err) {
+    if (!result || !base || !sink) {
+        return TP_STATUS_INVALID_ARGUMENT;
+    }
+    for (int p = 0; p < result->page_count; ++p) {
+        char path[TP_IDENTITY_PATH_MAX];
+        tp_status st = tp_export_page_path(base, p, path, err);
+        if (st != TP_STATUS_OK) {
+            return st;
+        }
+    }
+    for (int p = 0; p < result->page_count; ++p) {
+        char path[TP_IDENTITY_PATH_MAX];
+        tp_status st = tp_export_page_path(base, p, path, err);
+        if (st != TP_STATUS_OK) {
+            return st;
+        }
+        sink(ud, path);
+    }
+    return TP_STATUS_OK;
+}
 
 static uint8_t *read_whole_file(const char *path, size_t *out_size) {
     FILE *f = fopen(path, "rb");
@@ -289,7 +343,7 @@ static bool setup_all(const char *dir) {
     s.sprites = &sp;
     s.sprite_count = 1;
     s.shape = 0; /* RECT */
-    s.allow_transform = false;
+    s.allowed_transforms = TP_PACK_TRANSFORMS_IDENTITY;
     s.power_of_two = false;
     s.padding = 0;
     s.margin = 0;

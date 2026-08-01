@@ -2,8 +2,8 @@
 
 **Status:** Current contract, schema 1.
 
-`json-neotolis` is the full-fidelity built-in atlas descriptor. It represents
-the D4 transform mask, polygons, pivots, 9-slice borders, multiple pages,
+`json-neotolis` is the full-fidelity built-in interchange format. It represents
+all D4 transform values, polygons, pivots, 9-slice borders, multiple pages,
 aliases, and explicit animations.
 
 - Exporter ID: `json-neotolis`
@@ -60,10 +60,10 @@ Coordinates are y-down PNG space.
 | `slice9` | `[l,r,t,b]` | Pixel borders; omitted when all are zero. |
 | `sourceSize` | `{w,h}` | Original untrimmed dimensions. |
 | `spriteSourceSize` | `{x,y,w,h}` | Recovered content/hull bbox in the original image. |
-| `transform` | integer | D4 mask; omitted for identity. |
+| `transform` | integer | D4 transform value 0 through 7; omitted for identity. |
 | `transformStr` | string | `flipH`, `flipV`, and `diag` tokens joined by `|`; emitted with `transform`. |
 
-The D4 mask uses bit 0 for horizontal flip, bit 1 for vertical flip, and bit 2
+The D4 value uses bit 0 for horizontal flip, bit 1 for vertical flip, and bit 2
 for diagonal transpose. Apply diagonal, then horizontal flip, then vertical
 flip. A diagonal transform swaps the on-page footprint dimensions.
 

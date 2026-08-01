@@ -344,7 +344,7 @@ static tp_status hash_input_stream(const tp_pack_settings *settings,
     hash_u32(&h, (uint32_t)settings->alpha_threshold);
     hash_u32(&h, (uint32_t)settings->max_vertices);
     hash_u32(&h, (uint32_t)settings->shape);
-    hash_u8(&h, settings->allow_transform ? 1U : 0U);
+    hash_u8(&h, settings->allowed_transforms);
     hash_u8(&h, settings->power_of_two ? 1U : 0U);
     hash_f32(&h, settings->pixels_per_unit);
 

@@ -29,9 +29,13 @@ tp_status tp_project_atlas_to_settings(const tp_project *p, int atlas_index, str
     out->margin = a->margin;
     out->extrude = a->extrude;
     out->alpha_threshold = a->alpha_threshold;
-    out->max_vertices = a->max_vertices;
+    out->max_vertices = a->max_vertices < TP_PACK_MIN_VERTICES
+                            ? TP_PACK_MIN_VERTICES
+                            : a->max_vertices;
     out->shape = a->shape;
-    out->allow_transform = a->allow_transform;
+    out->allowed_transforms = a->allow_transform
+                                  ? TP_PACK_TRANSFORMS_ALL
+                                  : TP_PACK_TRANSFORMS_IDENTITY;
     out->power_of_two = a->power_of_two;
     out->pixels_per_unit = a->pixels_per_unit;
     /* Non-RECT shapes cannot extrude (engine + tp_pack invariant). Clamp here so

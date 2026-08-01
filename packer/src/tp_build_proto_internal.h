@@ -26,7 +26,7 @@ extern "C" {
  * "PTBW", response bytes "PTBR" (packer build worker / reply). */
 #define TP_BUILD_PROTO_REQUEST_MAGIC 0x57425450u
 #define TP_BUILD_PROTO_RESPONSE_MAGIC 0x52425450u
-#define TP_BUILD_PROTO_VERSION 1u
+#define TP_BUILD_PROTO_VERSION 2u
 
 /* Fail-closed bounds applied before any allocation. A frame that declares more
  * than the buffer holds, or a field past these caps, is rejected.
@@ -69,7 +69,7 @@ typedef struct tp_build_proto_request {
     int32_t alpha_threshold;
     int32_t max_vertices;
     int32_t shape;
-    uint8_t allow_transform;
+    uint8_t allowed_transforms;
     uint8_t power_of_two;
     float pixels_per_unit;
     const char *atlas_name; /* NUL-terminated */

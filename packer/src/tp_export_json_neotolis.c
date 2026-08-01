@@ -5,7 +5,6 @@
 #include <string.h>
 
 #include "tp_export_geom.h"
-#include "tp_fs_internal.h"
 #include "tp_strutil.h" /* shared tp_path_basename (one core definition) */
 
 #include "tp_core/tp_sb.h"
@@ -19,11 +18,6 @@
 /* ------------------------------------------------------------------ */
 /* helpers                                                            */
 /* ------------------------------------------------------------------ */
-
-static void ignore_output_path(void *ud, const char *path) {
-    (void)ud;
-    (void)path;
-}
 
 /* Decodes a D4 mask into a readable token string (raw-mask semantics: diag =
  * main-diagonal transpose; a 90-degree rotation is diag composed with a flip). */
@@ -113,25 +107,30 @@ static void emit_polygon(tp_sb *sb, int depth, const tp_sprite *s, float scale) 
 
 /* Emits one sprite object. `caps` gates optional fields; a genuine drop of
  * non-default metadata raises a notice. */
-static tp_status emit_sprite(tp_sb *sb, int depth, const tp_export_prepared *prep, const tp_export_sprite *es,
+static tp_status emit_sprite(tp_sb *sb, int depth, const tp_export_ir *prep, const tp_export_sprite *es,
                              const tp_export_caps *caps, tp_export_notices *notices) {
-    const tp_sprite *s = es->src;
+    const tp_sprite *s = &es->data;
     float scale = prep->scale;
     tp_sb_char(sb, '{');
     bool first = true;
 
     if (caps->aliases) {
         tp_obj_key(sb, depth + 1, &first, "alias_of");
-        if (es->alias_of >= 0) {
-            tp_sb_json_string(sb, prep->sprites[es->alias_of].final_name);
+        if (s->alias_of >= 0) {
+            tp_sb_json_string(sb, prep->sprites[s->alias_of].final_name);
         } else {
             tp_sb_str(sb, "null");
         }
-    } else if (es->alias_of >= 0 && notices) {
+    } else if (s->alias_of >= 0 && notices) {
         /* target unknown to the writer (id lives on the descriptor); the run/predict layer fills it. */
-        (void)tp_export_notice_add_ex(notices, TP_NOTICE_FIELD_ALIAS, TP_NOTICE_REASON_CAPS_UNSUPPORTED,
-                                      es->final_name, NULL, "alias link dropped for '%s' (target has no alias support)",
-                                      es->final_name);
+        tp_status status = tp_export_notice_add_ex(
+            notices, TP_NOTICE_FIELD_ALIAS, TP_NOTICE_REASON_CAPS_UNSUPPORTED,
+            es->final_name, NULL,
+            "alias link dropped for '%s' (target has no alias support)",
+            es->final_name);
+        if (status != TP_STATUS_OK) {
+            return status;
+        }
     }
 
     tp_obj_key(sb, depth + 1, &first, "frame");
@@ -153,9 +152,14 @@ static tp_status emit_sprite(tp_sb *sb, int depth, const tp_export_prepared *pre
             tp_sb_num(sb, (double)s->pivot.y);
             tp_sb_char(sb, ']');
         } else if (notices) {
-            (void)tp_export_notice_add_ex(notices, TP_NOTICE_FIELD_PIVOT, TP_NOTICE_REASON_CAPS_UNSUPPORTED,
-                                          es->final_name, NULL, "pivot dropped for '%s' (target has no pivot support)",
-                                          es->final_name);
+            tp_status status = tp_export_notice_add_ex(
+                notices, TP_NOTICE_FIELD_PIVOT,
+                TP_NOTICE_REASON_CAPS_UNSUPPORTED, es->final_name, NULL,
+                "pivot dropped for '%s' (target has no pivot support)",
+                es->final_name);
+            if (status != TP_STATUS_OK) {
+                return status;
+            }
         }
     }
 
@@ -165,10 +169,14 @@ static tp_status emit_sprite(tp_sb *sb, int depth, const tp_export_prepared *pre
             tp_obj_key(sb, depth + 1, &first, "polygon");
             emit_polygon(sb, depth + 1, s, scale);
         } else if (notices) {
-            (void)tp_export_notice_add_ex(notices, TP_NOTICE_FIELD_POLYGON, TP_NOTICE_REASON_CAPS_UNSUPPORTED,
-                                          es->final_name, NULL,
-                                          "polygon flattened to rect for '%s' (target stores quads only)",
-                                          es->final_name);
+            tp_status status = tp_export_notice_add_ex(
+                notices, TP_NOTICE_FIELD_POLYGON,
+                TP_NOTICE_REASON_CAPS_UNSUPPORTED, es->final_name, NULL,
+                "polygon flattened to rect for '%s' (target stores quads only)",
+                es->final_name);
+            if (status != TP_STATUS_OK) {
+                return status;
+            }
         }
     }
 
@@ -183,9 +191,14 @@ static tp_status emit_sprite(tp_sb *sb, int depth, const tp_export_prepared *pre
             }
             tp_sb_char(sb, ']');
         } else if (notices) {
-            (void)tp_export_notice_add_ex(notices, TP_NOTICE_FIELD_SLICE9, TP_NOTICE_REASON_CAPS_UNSUPPORTED,
-                                          es->final_name, NULL, "slice9 dropped for '%s' (target has no 9-slice support)",
-                                          es->final_name);
+            tp_status status = tp_export_notice_add_ex(
+                notices, TP_NOTICE_FIELD_SLICE9,
+                TP_NOTICE_REASON_CAPS_UNSUPPORTED, es->final_name, NULL,
+                "slice9 dropped for '%s' (target has no 9-slice support)",
+                es->final_name);
+            if (status != TP_STATUS_OK) {
+                return status;
+            }
         }
     }
 
@@ -207,7 +220,7 @@ static tp_status emit_sprite(tp_sb *sb, int depth, const tp_export_prepared *pre
                s->spriteSourceSize.h, scale);
 
     if (s->transform != 0) {
-        if (caps->rotate90 || caps->flips) {
+        if ((caps->transform_mask & TP_EXPORT_TRANSFORM_BIT(s->transform)) != 0U) {
             char tbuf[32];
             transform_str(s->transform, tbuf, sizeof tbuf);
             tp_obj_key(sb, depth + 1, &first, "transform");
@@ -215,9 +228,14 @@ static tp_status emit_sprite(tp_sb *sb, int depth, const tp_export_prepared *pre
             tp_obj_key(sb, depth + 1, &first, "transformStr");
             tp_sb_json_string(sb, tbuf);
         } else if (notices) {
-            (void)tp_export_notice_add_ex(notices, TP_NOTICE_FIELD_TRANSFORM, TP_NOTICE_REASON_CAPS_UNSUPPORTED,
-                                          es->final_name, NULL, "transform dropped for '%s' (target cannot rotate/flip)",
-                                          es->final_name);
+            tp_status status = tp_export_notice_add_ex(
+                notices, TP_NOTICE_FIELD_TRANSFORM,
+                TP_NOTICE_REASON_CAPS_UNSUPPORTED, es->final_name, NULL,
+                "transform dropped for '%s' (target cannot rotate/flip)",
+                es->final_name);
+            if (status != TP_STATUS_OK) {
+                return status;
+            }
         }
     }
 
@@ -257,9 +275,9 @@ static void emit_anim(tp_sb *sb, int depth, const tp_export_anim *a) {
     tp_sb_char(sb, '}');
 }
 
-static tp_status emit_root(tp_sb *sb, const tp_export_prepared *prep, const tp_export_caps *caps,
-                           const char *page_base, tp_export_notices *notices, tp_error *err) {
-    const tp_result *r = prep->result;
+static tp_status emit_root(tp_sb *sb, const tp_export_ir *prep, const tp_export_caps *caps,
+                           const tp_export_artifact_plan *plan,
+                           tp_export_notices *notices, tp_error *err) {
     tp_sb_char(sb, '{');
     bool first = true;
 
@@ -280,31 +298,28 @@ static tp_status emit_root(tp_sb *sb, const tp_export_prepared *prep, const tp_e
     }
 
     tp_obj_key(sb, 1, &first, "atlas");
-    tp_sb_json_string(sb, r->atlas_name ? r->atlas_name : "");
+    tp_sb_json_string(sb, prep->atlas_name ? prep->atlas_name : "");
 
     tp_obj_key(sb, 1, &first, "pages");
-    if (r->page_count == 0) {
+    if (prep->page_count == 0) {
         tp_sb_str(sb, "[]");
     } else {
         tp_sb_char(sb, '[');
-        for (int p = 0; p < r->page_count; p++) {
+        for (int p = 0; p < prep->page_count; p++) {
             tp_sb_str(sb, p == 0 ? "\n" : ",\n");
             tp_sb_indent(sb, 2);
             tp_sb_char(sb, '{');
             bool f2 = true;
-            char file[TP_IDENTITY_PATH_MAX];
-            tp_status st = tp_export_page_path(page_base, p, file, err);
-            if (st != TP_STATUS_OK) {
-                return st;
-            }
+            const tp_export_artifact *page =
+                &plan->artifacts[plan->document_count + p];
             tp_obj_key(sb, 3, &f2, "file");
-            tp_sb_json_string(sb, file);
+            tp_sb_json_string(sb, tp_path_basename(page->path));
             tp_obj_key(sb, 3, &f2, "h");
-            tp_sb_int(sb, (long)r->pages[p].h);
+            tp_sb_int(sb, (long)prep->pages[p].h);
             tp_obj_key(sb, 3, &f2, "premultiplied");
-            tp_sb_str(sb, r->pages[p].premultiplied ? "true" : "false");
+            tp_sb_str(sb, prep->pages[p].premultiplied ? "true" : "false");
             tp_obj_key(sb, 3, &f2, "w");
-            tp_sb_int(sb, (long)r->pages[p].w);
+            tp_sb_int(sb, (long)prep->pages[p].w);
             tp_sb_str(sb, "\n");
             tp_sb_indent(sb, 2);
             tp_sb_char(sb, '}');
@@ -313,14 +328,19 @@ static tp_status emit_root(tp_sb *sb, const tp_export_prepared *prep, const tp_e
         tp_sb_indent(sb, 1);
         tp_sb_char(sb, ']');
     }
-    if (r->page_count > 1 && !caps->multipage && notices) {
-        (void)tp_export_notice_add_ex(notices, TP_NOTICE_FIELD_MULTIPAGE, TP_NOTICE_REASON_CAPS_UNSUPPORTED, NULL, NULL,
-                                      "atlas '%s' has %d pages but the target is single-page",
-                                      r->atlas_name ? r->atlas_name : "", r->page_count);
+    if (prep->page_count > 1 && !caps->multipage && notices) {
+        tp_status status = tp_export_notice_add_ex(
+            notices, TP_NOTICE_FIELD_MULTIPAGE,
+            TP_NOTICE_REASON_CAPS_UNSUPPORTED, NULL, NULL,
+            "atlas '%s' has %d pages but the target is single-page",
+            prep->atlas_name ? prep->atlas_name : "", prep->page_count);
+        if (status != TP_STATUS_OK) {
+            return status;
+        }
     }
 
     tp_obj_key(sb, 1, &first, "pixels_per_unit");
-    tp_sb_num(sb, (double)r->pixels_per_unit);
+    tp_sb_num(sb, (double)prep->pixels_per_unit);
 
     tp_obj_key(sb, 1, &first, "sprites");
     if (prep->sprite_count == 0) {
@@ -350,47 +370,30 @@ static tp_status emit_root(tp_sb *sb, const tp_export_prepared *prep, const tp_e
 /* entry                                                              */
 /* ------------------------------------------------------------------ */
 
-tp_status tp_export_json_neotolis_write(const tp_export_write_ctx *ctx, tp_error *err) {
-    if (!ctx || !ctx->prep || !ctx->caps || !ctx->write_path_base || !ctx->out_path_base) {
-        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "json-neotolis: incomplete write context");
+tp_status tp_export_json_neotolis_serialize(const tp_export_serialize_ctx *ctx,
+                                            tp_export_document *documents,
+                                            int document_count,
+                                            tp_error *err) {
+    if (!ctx || !ctx->ir || !ctx->format || !ctx->plan || !documents ||
+        document_count != 1 || ctx->plan->document_count != 1) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "json-neotolis: incomplete serialize context");
     }
-    const tp_export_prepared *prep = ctx->prep;
-    const char *write_base = ctx->write_path_base;
-
-    char path[TP_IDENTITY_PATH_MAX];
-    tp_status st = tp_export_output_path(write_base, ".json", path, err);
-    if (st != TP_STATUS_OK) {
-        return st;
-    }
-    st = tp_export_list_page_files(prep->result, write_base, ignore_output_path, NULL, err);
-    if (st != TP_STATUS_OK) {
-        return st;
-    }
-
-    /* Pages sit next to the JSON and use straight alpha by default. */
-    st = tp_export_write_pages(prep->result, write_base, false, err);
-    if (st != TP_STATUS_OK) {
-        return st;
-    }
-
-    /* Page files sit next to the json, so the emitted reference is a bare
-     * basename -- identical whether the set is staged or written in place. */
-    const char *page_base = tp_path_basename(ctx->out_path_base);
+    const tp_export_ir *prep = ctx->ir;
     tp_sb sb = {0};
-    st = emit_root(&sb, prep, ctx->caps, page_base, ctx->notices, err);
+    tp_status st = emit_root(&sb, prep, &ctx->format->caps, ctx->plan,
+                             ctx->notices, err);
     if (st != TP_STATUS_OK) {
         free(sb.buf);
-        return st;
+        return tp_error_set(err, st,
+                            "json-neotolis: could not record export notice");
     }
     if (sb.oom) {
         free(sb.buf);
         return tp_error_set(err, TP_STATUS_OOM, "json-neotolis: OOM building JSON");
     }
 
-    if (!tp_fs_write_file(path, sb.buf, sb.len)) { /* binary: keep LF */
-        free(sb.buf);
-        return tp_error_set(err, TP_STATUS_BAD_PROJECT, "json-neotolis: cannot write '%s'", path);
-    }
-    free(sb.buf);
+    documents[0].data = sb.buf;
+    documents[0].size = sb.len;
     return TP_STATUS_OK;
 }

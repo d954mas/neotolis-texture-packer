@@ -29,55 +29,47 @@ static void premultiply_rgba(const uint8_t *src, uint8_t *dst, int w, int h) {
     }
 }
 
-tp_status tp_export_write_pages(const tp_result *result, const char *write_path_base, bool premultiply, tp_error *err) {
-    if (!result || !write_path_base) {
-        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "tp_export_write_pages: NULL result/write_path_base");
+tp_status tp_export_write_page_artifact(const tp_page *pg, int page_id,
+                                        const char *path, bool premultiply,
+                                        tp_error *err) {
+    if (!pg || !path || page_id < 0) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "page artifact requires page, logical id, and path");
     }
-    /* Validate the complete output set before encoding or writing page zero. */
-    for (int p = 0; p < result->page_count; p++) {
-        char path[TP_IDENTITY_PATH_MAX];
-        tp_status st = tp_export_page_path(write_path_base, p, path, err);
-        if (st != TP_STATUS_OK) {
-            return st;
-        }
+    if (!pg->rgba || pg->w <= 0 || pg->h <= 0) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "page artifact %d has no pixels", page_id);
     }
-    for (int p = 0; p < result->page_count; p++) {
-        const tp_page *pg = &result->pages[p];
-        if (!pg->rgba || pg->w <= 0 || pg->h <= 0) {
-            return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "tp_export_write_pages: page %d has no pixels", p);
+    if (pg->w > INT_MAX / 4 || (size_t)pg->w > SIZE_MAX / (size_t)pg->h ||
+        (size_t)pg->w * (size_t)pg->h > SIZE_MAX / 4U) {
+        return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
+                            "page artifact %d dimensions overflow", page_id);
+    }
+    const uint8_t *pixels = pg->rgba;
+    uint8_t *tmp = NULL;
+    if (premultiply) {
+        tmp = (uint8_t *)malloc((size_t)pg->w * (size_t)pg->h * 4U);
+        if (!tmp) {
+            return tp_error_set(err, TP_STATUS_OOM,
+                                "page artifact: OOM premultiplying page %d", page_id);
         }
-        if (pg->w > INT_MAX / 4 || (size_t)pg->w > SIZE_MAX / (size_t)pg->h ||
-            (size_t)pg->w * (size_t)pg->h > SIZE_MAX / 4U) {
-            return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS, "tp_export_write_pages: page %d dimensions overflow", p);
-        }
-        char path[TP_IDENTITY_PATH_MAX];
-        tp_status st = tp_export_page_path(write_path_base, p, path, err);
-        if (st != TP_STATUS_OK) {
-            return st;
-        }
-
-        const uint8_t *pixels = pg->rgba;
-        uint8_t *tmp = NULL;
-        if (premultiply) {
-            tmp = (uint8_t *)malloc((size_t)pg->w * (size_t)pg->h * 4U);
-            if (!tmp) {
-                return tp_error_set(err, TP_STATUS_OOM, "tp_export_write_pages: OOM premultiplying page %d", p);
-            }
-            premultiply_rgba(pg->rgba, tmp, pg->w, pg->h);
-            pixels = tmp;
-        }
-        int png_size = 0;
-        unsigned char *png = stbi_write_png_to_mem(pixels, pg->w * 4, pg->w, pg->h, 4, &png_size);
-        free(tmp);
-        if (!png || png_size <= 0) {
-            free(png);
-            return tp_error_set(err, TP_STATUS_BAD_PROJECT, "tp_export_write_pages: failed encoding page %d", p);
-        }
-        bool wrote = tp_fs_write_file(path, png, (size_t)png_size);
+        premultiply_rgba(pg->rgba, tmp, pg->w, pg->h);
+        pixels = tmp;
+    }
+    int png_size = 0;
+    unsigned char *png = stbi_write_png_to_mem(pixels, pg->w * 4, pg->w,
+                                                pg->h, 4, &png_size);
+    free(tmp);
+    if (!png || png_size <= 0) {
         free(png);
-        if (!wrote) {
-            return tp_error_set(err, TP_STATUS_BAD_PROJECT, "tp_export_write_pages: failed writing '%s'", path);
-        }
+        return tp_error_set(err, TP_STATUS_BAD_PROJECT,
+                            "page artifact: failed encoding page %d", page_id);
+    }
+    const bool wrote = tp_fs_write_file(path, png, (size_t)png_size);
+    free(png);
+    if (!wrote) {
+        return tp_error_set(err, TP_STATUS_BAD_PROJECT,
+                            "page artifact: failed writing '%s'", path);
     }
     return TP_STATUS_OK;
 }
@@ -112,13 +104,18 @@ static bool publish_rename_allowed(void) {
 
 /* One listed output, resolved once so no later phase re-derives a path. */
 typedef struct publish_entry {
-    const char *destination; /* borrowed from the caller's list                  */
+    const char *destination; /* borrowed from the artifact plan                  */
     const char *leaf;        /* points into `destination`                        */
     char staged[TP_FS_STAGE_PATH_MAX];
     char displaced[TP_FS_STAGE_PATH_MAX];
     bool has_displaced; /* the destination existed and was renamed aside         */
     bool promoted;      /* the staged file was renamed onto the destination      */
 } publish_entry;
+
+static void publish_entries_free(publish_entry *entries, int count) {
+    (void)count;
+    free(entries);
+}
 
 static bool publish_is_sep(char c) {
     return c == '/' || c == '\\';
@@ -209,7 +206,7 @@ static tp_status publish_verify_staged_set(const tp_exporter *exp,
             return tp_error_set(err, TP_STATUS_BAD_PROJECT,
                                 "exporter '%s' listed an output it did not "
                                 "produce (existing outputs are untouched): '%s'",
-                                exp->id, entries[f].destination);
+                                exp->format->id, entries[f].destination);
         }
         if (tp_fs_is_dir(entries[f].destination)) {
             return tp_error_set(err, TP_STATUS_BAD_PROJECT,
@@ -230,7 +227,7 @@ static tp_status publish_verify_staged_set(const tp_exporter *exp,
                             "not be read, so its output set could not be "
                             "verified; nothing was published (existing outputs "
                             "are untouched)",
-                            exp->id);
+                            exp->format->id);
     }
     char leftover[TP_FS_NAME_MAX];
     leftover[0] = '\0';
@@ -256,21 +253,23 @@ static tp_status publish_verify_staged_set(const tp_exporter *exp,
                             "not be enumerated to its end, so its output set "
                             "could not be verified; nothing was published "
                             "(existing outputs are untouched)",
-                            exp->id);
+                            exp->format->id);
     }
     if (leftover[0] != '\0') {
         return tp_error_set(err, TP_STATUS_BAD_PROJECT,
                             "exporter '%s' produced '%s' outside its declared "
                             "output list; nothing was published (existing "
                             "outputs are untouched)",
-                            exp->id, leftover);
+                            exp->format->id, leftover);
     }
     return TP_STATUS_OK;
 }
 
 /* Phase one displaces every existing destination, phase two moves the staged set
  * in. Either phase failing rolls the whole thing back. */
-static tp_status publish_swap(publish_entry *entries, int count, tp_error *err) {
+static tp_status publish_swap(publish_entry *entries, int count,
+                              bool *out_publication_uncertain,
+                              tp_error *err) {
     char clause[160];
     for (int f = 0; f < count; f++) {
         publish_entry *e = &entries[f];
@@ -280,6 +279,7 @@ static tp_status publish_swap(publish_entry *entries, int count, tp_error *err) 
         if (!tp_fs_stage_old_path(e->destination, e->displaced,
                                   sizeof e->displaced)) {
             const int unrestored = publish_rollback(entries, count);
+            *out_publication_uncertain = unrestored > 0;
             return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
                                 "export publish cannot name a rollback copy of "
                                 "'%s' within the path limit; %s",
@@ -291,6 +291,7 @@ static tp_status publish_swap(publish_entry *entries, int count, tp_error *err) 
             tp_fs_move_no_replace(e->destination, e->displaced) !=
                 TP_FS_MOVE_OK) {
             const int unrestored = publish_rollback(entries, count);
+            *out_publication_uncertain = unrestored > 0;
             return tp_error_set(err, TP_STATUS_BAD_PROJECT,
                                 "export publish could not move the previous "
                                 "'%s' aside; nothing was published and %s",
@@ -305,6 +306,7 @@ static tp_status publish_swap(publish_entry *entries, int count, tp_error *err) 
         if (!publish_rename_allowed() ||
             !tp_fs_replace(e->staged, e->destination)) {
             const int unrestored = publish_rollback(entries, count);
+            *out_publication_uncertain = unrestored > 0;
             return tp_error_set(err, TP_STATUS_BAD_PROJECT,
                                 "export publish failed placing '%s'; the whole "
                                 "set was rolled back and %s",
@@ -323,23 +325,51 @@ static tp_status publish_swap(publish_entry *entries, int count, tp_error *err) 
     return TP_STATUS_OK;
 }
 
-tp_status tp_export_write_and_publish_set(const tp_exporter *exp,
-                                          const tp_export_prepared *prep,
-                                          const char *out_path_base,
-                                          const char *const *output_files,
-                                          int output_file_count,
-                                          tp_export_notices *notices,
-                                          bool *out_writer_ran,
-                                          tp_error *err) {
-    if (out_writer_ran) {
-        *out_writer_ran = false;
+tp_status tp_export_publish(const tp_exporter *exp,
+                            const tp_export_ir *ir,
+                            const tp_result *packed,
+                            const tp_export_artifact_plan *plan,
+                            tp_export_notices *notices,
+                            bool *out_serializer_ran,
+                            bool *out_publication_uncertain,
+                            tp_error *err) {
+    if (out_serializer_ran) {
+        *out_serializer_ran = false;
     }
-    if (!exp || !exp->write || !prep || !out_path_base ||
-        (!output_files && output_file_count > 0) || output_file_count < 0) {
+    bool ignored_publication_uncertain = false;
+    if (!out_publication_uncertain) {
+        out_publication_uncertain = &ignored_publication_uncertain;
+    }
+    *out_publication_uncertain = false;
+    if (!exp || !exp->format || !exp->format->id || !exp->serialize || !ir ||
+        !packed || !plan) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
-                            "set publication requires exporter, prep, base, "
-                            "and the enumerated output list");
+                            "export publish requires a matching exporter, IR, packed pages, and artifact plan");
     }
+    tp_status validation = tp_export_ir_validate(ir, err);
+    if (validation != TP_STATUS_OK) {
+        return validation;
+    }
+    if (strcmp(ir->target_id, exp->format->id) != 0 ||
+        !plan->out_path_base || !plan->artifacts ||
+        plan->document_count < 0 ||
+        plan->artifact_count < plan->document_count ||
+        !exp->format->artifacts || exp->format->artifact_count <= 0 ||
+        plan->document_count != exp->format->artifact_count ||
+        plan->artifact_count - plan->document_count != ir->page_count ||
+        packed->page_count != ir->page_count || !packed->pages) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "export publish requires a matching exporter, IR, packed pages, and artifact plan");
+    }
+    for (int f = 0; f < plan->artifact_count; ++f) {
+        if (!plan->artifacts[f].id || !plan->artifacts[f].path) {
+            return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                                "export artifact plan entry %d is incomplete",
+                                f);
+        }
+    }
+    const char *out_path_base = plan->out_path_base;
+    const int output_file_count = plan->artifact_count;
 
     /* The whole set lands in out_path_base's own directory: every output is
      * "<base><suffix>". "" (no separator) means cwd-relative outputs. */
@@ -370,16 +400,18 @@ tp_status tp_export_write_and_publish_set(const tp_exporter *exp,
     /* PREFLIGHT, before the writer runs and before anything is created: the
      * declared list must describe a set this publication can actually deliver. */
     for (int f = 0; f < output_file_count; f++) {
-        entries[f].destination = output_files[f];
-        entries[f].leaf = publish_direct_child_leaf(out_dir, cut, output_files[f]);
+        entries[f].destination = plan->artifacts[f].path;
+        entries[f].leaf = publish_direct_child_leaf(out_dir, cut,
+                                                     plan->artifacts[f].path);
         if (!entries[f].leaf) {
             const tp_status st = tp_error_set(
                 err, TP_STATUS_INVALID_ARGUMENT,
                 "exporter '%s' declared the output '%s', which is not a direct "
                 "child of the export directory '%s'; the whole-set publication "
                 "cannot cover it, so nothing was written",
-                exp->id, output_files[f], cut > 0 ? out_dir : ".");
-            free(entries);
+                exp->format->id, plan->artifacts[f].path,
+                cut > 0 ? out_dir : ".");
+            publish_entries_free(entries, output_file_count);
             return st;
         }
     }
@@ -393,16 +425,56 @@ tp_status tp_export_write_and_publish_set(const tp_exporter *exp,
                 "exporter '%s' declared outputs %d and %d as the same file "
                 "('%s' and '%s' differ only by ASCII case, which Windows and "
                 "macOS resolve to one file); nothing was written",
-                exp->id, f, g, entries[f].leaf, entries[g].leaf);
-            free(entries);
+                exp->format->id, f, g, entries[f].leaf, entries[g].leaf);
+            publish_entries_free(entries, output_file_count);
             return st;
         }
     }
 
-    /* A process killed mid-export leaves its private names behind forever.
-     * Reclaim the ones whose owner is definitively gone before adding our own;
-     * that also completes or undoes a swap that crashed halfway. */
-    tp_fs_stage_reap_orphans(out_dir);
+    /* The plan is typed and ordered: documents match descriptor declarations;
+     * pages match IR logical ids; every concrete path is derived from the one
+     * output base. This is checked after generic path/collision diagnostics but
+     * before any filesystem mutation or serializer call. */
+    for (int d = 0; d < plan->document_count; ++d) {
+        const tp_export_artifact *artifact = &plan->artifacts[d];
+        const tp_format_artifact_decl *decl = &exp->format->artifacts[d];
+        char expected[TP_IDENTITY_PATH_MAX];
+        if (artifact->kind != TP_EXPORT_ARTIFACT_DOCUMENT ||
+            artifact->logical_id != d || !artifact->id || !decl->id ||
+            strcmp(artifact->id, decl->id) != 0 || !decl->suffix ||
+            tp_export_output_path(out_path_base, decl->suffix, expected, err) !=
+                TP_STATUS_OK ||
+            strcmp(artifact->path, expected) != 0) {
+            publish_entries_free(entries, output_file_count);
+            return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                                "export document plan entry %d does not match format '%s'",
+                                d, exp->format->id);
+        }
+    }
+    for (int p = 0; p < ir->page_count; ++p) {
+        const int index = plan->document_count + p;
+        const tp_export_artifact *artifact = &plan->artifacts[index];
+        char expected_path[TP_IDENTITY_PATH_MAX];
+        char expected_id[32];
+        const int id_len = snprintf(expected_id, sizeof expected_id, "page-%d",
+                                    ir->pages[p].artifact_id);
+        if (artifact->kind != TP_EXPORT_ARTIFACT_PAGE ||
+            artifact->logical_id != ir->pages[p].artifact_id ||
+            !artifact->id || id_len < 0 ||
+            (size_t)id_len >= sizeof expected_id ||
+            strcmp(artifact->id, expected_id) != 0 ||
+            tp_export_page_path(out_path_base, ir->pages[p].artifact_id,
+                                expected_path, err) != TP_STATUS_OK ||
+            strcmp(artifact->path, expected_path) != 0 ||
+            packed->pages[p].w != ir->pages[p].w ||
+            packed->pages[p].h != ir->pages[p].h ||
+            packed->pages[p].premultiplied != ir->pages[p].premultiplied) {
+            publish_entries_free(entries, output_file_count);
+            return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                                "export page plan entry %d does not match IR and packed page",
+                                p);
+        }
+    }
 
     char staging[TP_FS_STAGE_PATH_MAX];
     if (!tp_fs_stage_dir_create(out_dir, staging, sizeof staging)) {
@@ -411,20 +483,13 @@ tp_status tp_export_write_and_publish_set(const tp_exporter *exp,
             "cannot create the export staging directory under '%s' (existing "
             "outputs are untouched)",
             cut > 0 ? out_dir : ".");
-        free(entries);
+        publish_entries_free(entries, output_file_count);
         return st;
     }
 
-    /* Same basename inside staging, so "<base>.<ext>" naming is unchanged and
-     * every listed output maps to exactly one staged file. The staged forms are
-     * bounded by the CANONICAL path limit, not by this module's buffers: a
-     * writer composes its outputs with tp_export_output_path, which cannot
-     * express anything longer, so a base too close to the limit has to fail here
-     * -- with a message about the output set -- rather than deep inside a writer. */
-    char stage_base[TP_FS_STAGE_PATH_MAX];
-    const int sn = snprintf(stage_base, sizeof stage_base, "%s/%s", staging,
-                            out_path_base + cut);
-    bool mapped = sn > 0 && (size_t)sn < (size_t)TP_IDENTITY_PATH_MAX;
+    /* Every planned output maps to exactly one staged file. Staged forms obey
+     * the same canonical path bound as final artifacts. */
+    bool mapped = true;
     for (int f = 0; mapped && f < output_file_count; f++) {
         mapped = tp_fs_stage_child_path(out_dir, staging, entries[f].destination,
                                         entries[f].staged, TP_IDENTITY_PATH_MAX);
@@ -435,30 +500,62 @@ tp_status tp_export_write_and_publish_set(const tp_exporter *exp,
             err, TP_STATUS_OUT_OF_BOUNDS,
             "exporter '%s': the staged form of its output set exceeds the "
             "canonical path limit, so nothing was written",
-            exp->id);
-        free(entries);
+            exp->format->id);
+        publish_entries_free(entries, output_file_count);
         return st;
     }
 
-    const tp_export_write_ctx ctx = {
-        .prep = prep,
-        .caps = &exp->caps,
-        .write_path_base = stage_base,
-        .out_path_base = out_path_base,
+    tp_export_document *documents = (tp_export_document *)calloc(
+        (size_t)plan->document_count, sizeof *documents);
+    if (!documents) {
+        tp_fs_remove_tree(staging);
+        publish_entries_free(entries, output_file_count);
+        return tp_error_set(err, TP_STATUS_OOM,
+                            "export publish: OOM allocating serializer documents");
+    }
+    const tp_export_serialize_ctx ctx = {
+        .ir = ir,
+        .format = exp->format,
+        .plan = plan,
         .notices = notices,
     };
-    if (out_writer_ran) {
-        *out_writer_ran = true;
+    if (out_serializer_ran) {
+        *out_serializer_ran = true;
     }
-    tp_status st = exp->write(&ctx, err);
+    tp_status st = exp->serialize(&ctx, documents, plan->document_count, err);
+    for (int d = 0; st == TP_STATUS_OK && d < plan->document_count; ++d) {
+        if (!documents[d].data || documents[d].size == 0U) {
+            st = tp_error_set(err, TP_STATUS_BAD_PROJECT,
+                              "format '%s' did not serialize document '%s' for '%s'",
+                              exp->format->id, plan->artifacts[d].id,
+                              entries[d].destination);
+        } else if (!tp_fs_write_file(entries[d].staged, documents[d].data,
+                                     documents[d].size)) {
+            st = tp_error_set(err, TP_STATUS_BAD_PROJECT,
+                              "cannot stage export document '%s'",
+                              entries[d].destination);
+        }
+    }
+    for (int p = 0; st == TP_STATUS_OK && p < ir->page_count; ++p) {
+        const int index = plan->document_count + p;
+        st = tp_export_write_page_artifact(&packed->pages[p],
+                                           ir->pages[p].artifact_id,
+                                           entries[index].staged,
+                                           false, err);
+    }
+    for (int d = 0; d < plan->document_count; ++d) {
+        free(documents[d].data);
+    }
+    free(documents);
     if (st == TP_STATUS_OK) {
         st = publish_verify_staged_set(exp, entries, output_file_count, staging,
                                        err);
     }
     if (st == TP_STATUS_OK) {
-        st = publish_swap(entries, output_file_count, err);
+        st = publish_swap(entries, output_file_count,
+                          out_publication_uncertain, err);
     }
     tp_fs_remove_tree(staging);
-    free(entries);
+    publish_entries_free(entries, output_file_count);
     return st;
 }

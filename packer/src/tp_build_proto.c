@@ -28,7 +28,7 @@ typedef struct proto_request_head {
     int32_t alpha_threshold;
     int32_t max_vertices;
     int32_t shape;
-    uint8_t allow_transform;
+    uint8_t allowed_transforms;
     uint8_t power_of_two;
     uint16_t reserved;
     float pixels_per_unit;
@@ -294,7 +294,7 @@ tp_status tp_build_proto_encode_request(const tp_build_proto_request *req, uint8
     rh.alpha_threshold = req->alpha_threshold;
     rh.max_vertices = req->max_vertices;
     rh.shape = req->shape;
-    rh.allow_transform = req->allow_transform;
+    rh.allowed_transforms = req->allowed_transforms;
     rh.power_of_two = req->power_of_two;
     rh.pixels_per_unit = req->pixels_per_unit;
     rh.atlas_name_len = (uint32_t)atlas_len;
@@ -458,7 +458,7 @@ tp_status tp_build_proto_decode_request(const uint8_t *bytes, size_t len, tp_bui
     out->alpha_threshold = rh.alpha_threshold;
     out->max_vertices = rh.max_vertices;
     out->shape = rh.shape;
-    out->allow_transform = rh.allow_transform;
+    out->allowed_transforms = rh.allowed_transforms;
     out->power_of_two = rh.power_of_two;
     out->pixels_per_unit = rh.pixels_per_unit;
     out->sprite_count = rh.sprite_count;

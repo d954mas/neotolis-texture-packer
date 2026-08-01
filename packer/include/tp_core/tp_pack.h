@@ -4,8 +4,8 @@
 /* Runs one atlas through nt_builder from a minimal settings input and returns an
  * owned tp_result (docs/architecture/jobs-pack-and-cache.md).
  *
- * Flow: drive nt_builder (start_pack -> begin_atlas -> add sprites -> end_atlas
- * -> finish_pack) using the §5 export-friendly profile, writing a session
+ * Flow: drive nt_builder (start_pack -> nt_atlas_begin -> add sprites ->
+ * nt_atlas_commit -> finish_pack) using the §5 export-friendly profile, writing a session
  * .ntpack to "<work_dir>/<atlas_name>.ntpack", then parse that pack back with
  * tp_pack_read to recover the canonical model. Phase 1b packs ONE atlas per
  * call; multi-atlas orchestration is a later layer.
@@ -44,7 +44,7 @@ struct tp_result;
 #endif
 #define TP_PACK_ALPHA_MIN 0
 #define TP_PACK_ALPHA_MAX 255
-#define TP_PACK_MIN_VERTICES 1
+#define TP_PACK_MIN_VERTICES 4
 #define TP_PACK_MAX_VERTICES 16
 /* Atlas shape ids. These are also the sprite `ov_shape` override's value domain
  * (tp_project_sprite documents the same 0/1/2 semantics). */
@@ -61,13 +61,13 @@ struct tp_result;
  * engine reads 0 there as "inherit", so an explicit override is [1..255]. */
 #define TP_PACK_SPRITE_SPACING_MIN 1
 #define TP_PACK_SPRITE_SPACING_MAX UINT8_MAX
-/* The only representable allow_rotate override: force no-rotate (the engine has
- * no force-rotate, so there is no "1"). */
+/* The only product-level transform override currently representable: force the
+ * engine's D4 mask to identity. More granular engine masks are not yet exposed. */
 #define TP_PACK_OV_ALLOW_ROTATE_OFF 0
-/* Current nt_builder vector-packer hard limit.  Keep this public because it is
+/* Current engine atlas page limit. Keep this public because it is
  * a product capability boundary, not an implementation accident: admission
- * must reject a provably larger job before the assertion-based backend sees it. */
-#define TP_PACK_MAX_PAGES 64
+ * must reject a provably larger job before the backend sees it. */
+#define TP_PACK_MAX_PAGES 8
 
 static inline bool tp_pack_max_size_valid(int value) {
     return value >= TP_PACK_MIN_PAGE_DIM && value <= TP_PACK_MAX_PAGE_DIM;
@@ -152,7 +152,7 @@ typedef struct tp_pack_sprite_desc {
     uint8_t ov_mask;
     uint8_t ov_shape;        /* TP_PACK_SPRITE_SHAPE_* when TP_PACK_OV_SHAPE */
     uint8_t ov_allow_rotate; /* TP_PACK_SPRITE_ROTATE_NO when TP_PACK_OV_ROTATE */
-    uint8_t ov_max_vertices; /* [1..16] when TP_PACK_OV_MAXVERT */
+    uint8_t ov_max_vertices; /* [4..16] when TP_PACK_OV_MAXVERT */
     uint8_t ov_margin;       /* [1..255] when TP_PACK_OV_MARGIN */
     uint8_t ov_extrude;      /* [1..255] when TP_PACK_OV_EXTRUDE, effective RECT only */
 } tp_pack_sprite_desc;
@@ -178,15 +178,19 @@ typedef struct tp_pack_settings {
     int margin;          /* atlas edge margin (>= 0) */
     int extrude;         /* AABB edge duplication (>= 0; must be 0 unless shape == RECT) */
     int alpha_threshold; /* alpha >= this = opaque for trimming, [0..255] */
-    int max_vertices;    /* max polygon vertices per region, [1..16] */
+    int max_vertices;    /* max polygon vertices per region, [4..16] */
     int shape;           /* nt_atlas_shape_t: 0=RECT, 1=CONVEX_HULL, 2=CONCAVE_CONTOUR */
-    bool allow_transform;
+    uint8_t allowed_transforms; /* bit i permits stored D4 transform value i */
     bool power_of_two;
     float pixels_per_unit; /* > 0 and finite */
 } tp_pack_settings;
 
+#define TP_PACK_TRANSFORM_BIT(value) ((uint8_t)(1U << (uint8_t)(value)))
+#define TP_PACK_TRANSFORMS_IDENTITY TP_PACK_TRANSFORM_BIT(0)
+#define TP_PACK_TRANSFORMS_ALL ((uint8_t)0xffU)
+
 /* Fills `out` with the nt_atlas_opts_defaults() knobs (max_size=2048, padding=2,
- * shape=CONCAVE_CONTOUR, allow_transform, power_of_two, ppu=1.0, ...). Leaves
+ * shape=CONCAVE_CONTOUR, all D4 transforms, power_of_two, ppu=1.0, ...). Leaves
  * atlas_name/work_dir/sprites unset (caller must fill). Returns
  * TP_STATUS_INVALID_ARGUMENT if `out` is NULL. */
 tp_status tp_pack_settings_defaults(tp_pack_settings *out);

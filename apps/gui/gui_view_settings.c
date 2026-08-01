@@ -473,7 +473,8 @@ static void declare_atlas_settings(nt_ui_context_t *ctx,
         atlas_int_value(
             a, GUI_ATLAS_MAX_VERTICES,
             a->max_vertices);
-    if (row_int(ctx, "Max vertices", nt_ui_id("set/maxv"), s_nb_maxv, sizeof s_nb_maxv, max_vertices, 1, 16, true, &iv)) {
+    if (row_int(ctx, "Max vertices", nt_ui_id("set/maxv"), s_nb_maxv, sizeof s_nb_maxv, max_vertices,
+                TP_PROJECT_MIN_VERTICES, TP_PROJECT_MAX_VERTICES, true, &iv)) {
         offer_atlas_setting(snapshot, a, GUI_ATLAS_MAX_VERTICES, iv, 0.0F);
     }
     const int power_of_two =
@@ -770,7 +771,7 @@ static void declare_target_exporter_combo(nt_ui_context_t *ctx, uint32_t row_id,
                 if (nt_ui_combo_selectable(ctx, (uint32_t)i, exp_labels[i], i == cur_exp)) {
                     const tp_exporter *e = tp_exporter_at(i);
                     if (e) {
-                        gui_edit_target_exporter(target, e->id);
+                        gui_edit_target_exporter(target, e->format->id);
                     }
                 }
             }
@@ -810,7 +811,9 @@ static void declare_export_targets(nt_ui_context_t *ctx,
     int nlabels = 0;
     for (int i = 0; i < ne && nlabels < 24; i++) {
         const tp_exporter *e = tp_exporter_at(i);
-        exp_labels[nlabels++] = (e && e->display_name) ? e->display_name : (e ? e->id : "?");
+        exp_labels[nlabels++] = (e && e->format->display_name)
+                                   ? e->format->display_name
+                                   : (e ? e->format->id : "?");
     }
     if (a->target_count == 0) {
         panel_note(ctx, "No export targets. Add one so this atlas exports files.");
@@ -837,7 +840,7 @@ static void declare_export_targets(nt_ui_context_t *ctx,
         int cur_exp = -1;
         for (int i = 0; i < nlabels; i++) {
             const tp_exporter *e = tp_exporter_at(i);
-            if (e && strcmp(e->id, t->exporter_id) == 0) {
+            if (e && strcmp(e->format->id, t->exporter_id) == 0) {
                 cur_exp = i;
                 break;
             }

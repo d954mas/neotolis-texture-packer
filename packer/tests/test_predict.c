@@ -22,6 +22,8 @@
 #include "tp_project_mutation_internal.h"
 #include "unity.h"
 
+#define tp_export_prepared tp_export_ir
+
 void setUp(void) {}
 void tearDown(void) {}
 
@@ -31,8 +33,13 @@ static uint8_t g_sl_px[30 * 20 * 4];
 
 /* A test-only all-restricted exporter over the json writer: drops every axis. */
 static tp_exporter g_restrict;
+static tp_format_descriptor g_restrict_format;
 static char g_boundary_exporter_id[TP_EXPORTER_ID_MAX];
 static tp_exporter g_boundary_exporter;
+static tp_format_descriptor g_boundary_format;
+static const tp_format_artifact_decl g_json_artifact[] = {
+    {.id = "metadata", .suffix = ".json"},
+};
 
 static void fill(uint8_t *p, int n) {
     for (int i = 0; i < n; i++) {
@@ -117,15 +124,19 @@ void test_exporter_registry_enforces_exact_canonical_id_bound(void) {
         TP_STATUS_OUT_OF_BOUNDS,
         tp_exporter_id_validate(oversized, &error));
 
-    tp_exporter oversized_exporter = g_boundary_exporter;
-    oversized_exporter.id = oversized;
+    tp_format_descriptor oversized_format = g_boundary_format;
+    oversized_format.id = oversized;
+    tp_exporter oversized_exporter = {
+        .format = &oversized_format,
+        .serialize = tp_export_json_neotolis_serialize,
+    };
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OUT_OF_BOUNDS,
                           tp_exporter_register(&oversized_exporter));
 
     memset(g_boundary_exporter_id, 'b',
            sizeof g_boundary_exporter_id - 1U);
     g_boundary_exporter_id[sizeof g_boundary_exporter_id - 1U] = '\0';
-    g_boundary_exporter.id = g_boundary_exporter_id;
+    g_boundary_format.id = g_boundary_exporter_id;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
                           tp_exporter_id_validate(g_boundary_exporter_id,
                                                   &error));
@@ -141,8 +152,8 @@ void test_predict_alias_with_prep(void) {
      * (a NULL-prep predict cannot know aliases exist). */
     tp_project *p = tp_project_create();
     tp_export_sprite sprs[2] = {
-        {.final_name = "a", .src = NULL, .alias_of = -1},
-        {.final_name = "b", .src = NULL, .alias_of = 0},
+        {.final_name = "a", .data = {.alias_of = -1}},
+        {.final_name = "b", .data = {.alias_of = 0}},
     };
     tp_result r;
     memset(&r, 0, sizeof r);
@@ -151,7 +162,7 @@ void test_predict_alias_with_prep(void) {
     r.page_count = 1;
     tp_export_prepared prep;
     memset(&prep, 0, sizeof prep);
-    prep.result = &r;
+    prep.page_count = r.page_count;
     prep.sprites = sprs;
     prep.sprite_count = 2;
     prep.scale = 1.0F;
@@ -184,7 +195,7 @@ void test_predict_multipage_with_prep(void) {
     r.page_count = 2; /* multi-page */
     tp_export_prepared prep;
     memset(&prep, 0, sizeof prep);
-    prep.result = &r;
+    prep.page_count = r.page_count;
     prep.scale = 1.0F;
 
     tp_export_caps caps = tp_export_caps_full();
@@ -226,7 +237,9 @@ void test_consistency_restrict(void) {
     TEST_ASSERT_NOT_NULL(rex);
     tp_export_notices pn;
     tp_export_notices_init(&pn);
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_export_predict_loss(p, 0, &rex->caps, "test-restrict", NULL, &pn, &e));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_export_predict_loss(p, 0, &rex->format->caps,
+                                                 "test-restrict", NULL, &pn, &e));
 
     TEST_ASSERT_TRUE_MESSAGE(has_field(&pn, TP_NOTICE_FIELD_TRANSFORM), "predict must flag transform");
     TEST_ASSERT_TRUE_MESSAGE(has_field(&pn, TP_NOTICE_FIELD_POLYGON), "predict must flag polygon");
@@ -264,7 +277,9 @@ void test_consistency_defold(void) {
     TEST_ASSERT_NOT_NULL(dex);
     tp_export_notices pn;
     tp_export_notices_init(&pn);
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_export_predict_loss(p, 0, &dex->caps, "defold", NULL, &pn, &e));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_export_predict_loss(p, 0, &dex->format->caps,
+                                                 "defold", NULL, &pn, &e));
 
     TEST_ASSERT_TRUE_MESSAGE(has_field(&pn, TP_NOTICE_FIELD_TRANSFORM), "predict must flag transform for defold");
     TEST_ASSERT_TRUE_MESSAGE(has_field(&pn, TP_NOTICE_FIELD_SLICE9), "predict must flag slice9 for defold");
@@ -285,28 +300,20 @@ int main(int argc, char **argv) {
     fill(g_piv_px, 30 * 20);
     fill(g_sl_px, 30 * 20);
 
-    g_restrict = (tp_exporter){.id = "test-restrict",
-                               .display_name = "test restrict",
-                               .extension = "json",
-                               .caps = {.rotate90 = false,
-                                        .flips = false,
-                                        .polygons = false,
-                                        .pivot = false,
-                                        .slice9 = false,
-                                        .multipage = false,
-                                        .aliases = false},
-                               .write = tp_export_json_neotolis_write};
+    g_restrict_format = (tp_format_descriptor){
+        .id = "test-restrict", .display_name = "test restrict",
+        .caps = {.transform_mask = TP_EXPORT_TRANSFORMS_IDENTITY},
+        .artifacts = g_json_artifact, .artifact_count = 1};
+    g_restrict = (tp_exporter){
+        .format = &g_restrict_format,
+        .serialize = tp_export_json_neotolis_serialize};
+    g_boundary_format = (tp_format_descriptor){
+        .id = "boundary-placeholder", .display_name = "canonical id boundary",
+        .caps = tp_export_caps_full(), .artifacts = g_json_artifact,
+        .artifact_count = 1};
     g_boundary_exporter = (tp_exporter){
-        .display_name = "canonical id boundary",
-        .extension = "json",
-        .caps = {.rotate90 = true,
-                 .flips = true,
-                 .polygons = true,
-                 .pivot = true,
-                 .slice9 = true,
-                 .multipage = true,
-                 .aliases = true},
-        .write = tp_export_json_neotolis_write};
+        .format = &g_boundary_format,
+        .serialize = tp_export_json_neotolis_serialize};
     if (tp_exporter_register(&g_restrict) != TP_STATUS_OK) {
         (void)fprintf(stderr, "failed to register test-restrict exporter\n");
         return 1;

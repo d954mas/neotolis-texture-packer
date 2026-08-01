@@ -273,7 +273,7 @@ static tp_status pack_request(const tp_build_proto_request *req, tp_error *err) 
     s.alpha_threshold = req->alpha_threshold;
     s.max_vertices = req->max_vertices;
     s.shape = req->shape;
-    s.allow_transform = req->allow_transform != 0u;
+    s.allowed_transforms = req->allowed_transforms;
     s.power_of_two = req->power_of_two != 0u;
     s.pixels_per_unit = req->pixels_per_unit;
 

@@ -42,6 +42,17 @@ struct tp_pack_settings;
  * or newer versions are rejected; conversion is intentionally outside tp_core. */
 #define TP_PROJECT_SCHEMA_VERSION 5
 
+/* Schema-v5 persisted range. The current engine requires at least four
+ * vertices; values 1..3 remain valid project data and are adapted to four at
+ * the project -> pack boundary. */
+#define TP_PROJECT_MIN_VERTICES 1
+#define TP_PROJECT_MAX_VERTICES 16
+
+static inline bool tp_project_max_vertices_valid(int value) {
+    return value >= TP_PROJECT_MIN_VERTICES &&
+           value <= TP_PROJECT_MAX_VERTICES;
+}
+
 /* Per-sprite override. Sparse: an entry exists only when at least one field is
  * non-default. Defaults: origin (0.5,0.5), slice9 all-zero, rename NULL (see the
  * *_DEFAULT constants below).

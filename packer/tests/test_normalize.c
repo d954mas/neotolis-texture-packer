@@ -14,6 +14,12 @@
 #include "tp_core/tp_pack_result.h"
 #include "unity.h"
 
+#define tp_export_prepared tp_export_ir
+#define tp_normalize_opts tp_export_ir_opts
+#define tp_normalize_opts_defaults tp_export_ir_opts_defaults
+#define tp_normalize(result, opts, arena, out, err) \
+    tp_export_ir_build((result), (opts), "normalize-test", (arena), (out), (err))
+
 void setUp(void) {}
 void tearDown(void) {}
 
@@ -35,10 +41,17 @@ static tp_sprite mk(const char *name, int alias_of) {
 }
 
 static tp_result mk_result(tp_sprite *arr, int n) {
+    static uint8_t pixels[8U * 8U * 4U];
+    static tp_page page;
+    memset(pixels, 0xFF, sizeof pixels);
+    page = (tp_page){.image_name = "t-0", .w = 8, .h = 8,
+                     .rgba = pixels, .premultiplied = false};
     tp_result r;
     memset(&r, 0, sizeof r);
     r.atlas_name = "t";
     r.pixels_per_unit = 1.0F;
+    r.pages = &page;
+    r.page_count = 1;
     r.sprites = arr;
     r.sprite_count = n;
     return r;
@@ -154,10 +167,10 @@ void test_alias_entries(void) {
     const tp_export_sprite *b = find_final(&prep, "b");
     TEST_ASSERT_NOT_NULL(a);
     TEST_ASSERT_NOT_NULL(b);
-    TEST_ASSERT_EQUAL_INT(-1, a->alias_of);
+    TEST_ASSERT_EQUAL_INT(-1, a->data.alias_of);
     /* b's alias_of points at the prepared index of "a". */
     int ia = (int)(a - prep.sprites);
-    TEST_ASSERT_EQUAL_INT(ia, b->alias_of);
+    TEST_ASSERT_EQUAL_INT(ia, b->data.alias_of);
     tp_arena_destroy(ar);
 }
 
@@ -341,6 +354,173 @@ void test_no_auto_grouping(void) {
     TEST_ASSERT_NULL(find_anim(&prep, "walk"));
     tp_arena_destroy(ar);
 }
+
+void test_invalid_source_alias_is_rejected_before_remap(void) {
+    tp_arena *ar = tp_arena_create(0);
+    tp_sprite s[2] = {mk("a", -1), mk("b", 2)};
+    tp_result r = mk_result(s, 2);
+    tp_export_prepared prep;
+    tp_error e = {{0}};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_ARGUMENT,
+                          tp_normalize(&r, NULL, ar, &prep, &e));
+    TEST_ASSERT_NOT_NULL(strstr(e.msg, "alias"));
+    tp_arena_destroy(ar);
+}
+
+void test_source_alias_cycle_is_rejected(void) {
+    tp_arena *ar = tp_arena_create(0);
+    tp_sprite s[2] = {mk("a", 1), mk("b", 0)};
+    tp_result r = mk_result(s, 2);
+    tp_export_prepared prep;
+    tp_error e = {{0}};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_ARGUMENT,
+                          tp_normalize(&r, NULL, ar, &prep, &e));
+    TEST_ASSERT_NOT_NULL(strstr(e.msg, "alias"));
+    tp_arena_destroy(ar);
+}
+
+void test_ir_validator_rejects_alias_cycles(void) {
+    tp_arena *ar = tp_arena_create(0);
+    tp_sprite s[2] = {mk("a", -1), mk("b", 0)};
+    tp_result r = mk_result(s, 2);
+    tp_export_prepared prep;
+    tp_error e = {{0}};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_OK,
+                                  tp_normalize(&r, NULL, ar, &prep, &e),
+                                  e.msg);
+    prep.sprites[0].data.alias_of = 1;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_ARGUMENT,
+                          tp_export_ir_validate(&prep, &e));
+    tp_arena_destroy(ar);
+}
+
+void test_ir_validator_rejects_frame_outside_page(void) {
+    tp_arena *arena = tp_arena_create(0);
+    tp_sprite sprite = mk("hero", -1);
+    tp_result result = mk_result(&sprite, 1);
+    tp_export_prepared ir;
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK, tp_normalize(&result, NULL, arena, &ir, &error),
+        error.msg);
+    ir.sprites[0].data.frame.x = 7;
+    ir.sprites[0].data.frame.w = 2;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_ARGUMENT,
+                          tp_export_ir_validate(&ir, &error));
+    tp_arena_destroy(arena);
+}
+
+void test_ir_validator_uses_d4_swapped_page_footprint(void) {
+    tp_arena *arena = tp_arena_create(0);
+    tp_sprite sprite = mk("hero", -1);
+    tp_result result = mk_result(&sprite, 1);
+    tp_export_prepared ir;
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK, tp_normalize(&result, NULL, arena, &ir, &error),
+        error.msg);
+    ir.sprites[0].data.frame.x = 1;
+    ir.sprites[0].data.frame.w = 4;
+    ir.sprites[0].data.frame.h = 8;
+    ir.sprites[0].data.transform = TP_TRANSFORM_DIAGONAL;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_ARGUMENT,
+                          tp_export_ir_validate(&ir, &error));
+    tp_arena_destroy(arena);
+}
+
+void test_ir_validator_rejects_unbounded_animation_tables(void) {
+    tp_arena *arena = tp_arena_create(0);
+    tp_sprite sprite = mk("hero", -1);
+    tp_result result = mk_result(&sprite, 1);
+    tp_export_prepared ir;
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK, tp_normalize(&result, NULL, arena, &ir, &error),
+        error.msg);
+    ir.animation_count = (int)UINT16_MAX + 1;
+    ir.animations = NULL;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OUT_OF_BOUNDS,
+                          tp_export_ir_validate(&ir, &error));
+
+    tp_export_anim animation = {
+        .id = "walk", .frames = NULL,
+        .frame_count = (int)UINT16_MAX + 1, .fps = 12.0F,
+    };
+    ir.animation_count = 1;
+    ir.animations = &animation;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OUT_OF_BOUNDS,
+                          tp_export_ir_validate(&ir, &error));
+    tp_arena_destroy(arena);
+}
+
+void test_invalid_source_result_is_rejected_before_copy(void) {
+    tp_arena *arena = tp_arena_create(0);
+    tp_error error = {{0}};
+    tp_export_prepared prepared;
+    tp_result result = {0};
+    result.atlas_name = "invalid";
+    result.pixels_per_unit = 1.0F;
+    result.page_count = 1;
+    result.pages = NULL;
+    TEST_ASSERT_NOT_NULL(arena);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_INVALID_ARGUMENT,
+        tp_normalize(&result, NULL, arena, &prepared, &error));
+
+    tp_page page = {.image_name = "page", .w = 1, .h = 1,
+                    .rgba = (uint8_t[4]){0, 0, 0, 0}};
+    result.pages = &page;
+    result.sprite_count = -1;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_INVALID_ARGUMENT,
+        tp_normalize(&result, NULL, arena, &prepared, &error));
+
+    tp_sprite sprite = mk("bad-mesh", -1);
+    sprite.vert_count = 1;
+    sprite.verts = NULL;
+    result.sprite_count = 1;
+    result.sprites = &sprite;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_INVALID_ARGUMENT,
+        tp_normalize(&result, NULL, arena, &prepared, &error));
+    tp_arena_destroy(arena);
+}
+
+void test_invalid_ir_options_are_rejected_before_copy(void) {
+    tp_arena *arena = tp_arena_create(0);
+    tp_sprite sprite = mk("hero", -1);
+    tp_result result = mk_result(&sprite, 1);
+    tp_export_prepared prepared;
+    tp_error error = {{0}};
+    tp_normalize_opts opts;
+    tp_normalize_opts_defaults(&opts);
+    opts.override_count = 1;
+    opts.overrides = NULL;
+    TEST_ASSERT_NOT_NULL(arena);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_INVALID_ARGUMENT,
+        tp_normalize(&result, &opts, arena, &prepared, &error));
+    opts.override_count = 0;
+    opts.animation_count = 1;
+    opts.animations = NULL;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_INVALID_ARGUMENT,
+        tp_normalize(&result, &opts, arena, &prepared, &error));
+    opts.animation_count = (int)UINT16_MAX + 1;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OUT_OF_BOUNDS,
+        tp_normalize(&result, &opts, arena, &prepared, &error));
+    tp_export_anim_in animation = {
+        .id = "walk", .frames = NULL,
+        .frame_count = (int)UINT16_MAX + 1, .fps = 12.0F,
+    };
+    opts.animation_count = 1;
+    opts.animations = &animation;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OUT_OF_BOUNDS,
+        tp_normalize(&result, &opts, arena, &prepared, &error));
+    tp_arena_destroy(arena);
+}
 // #endregion
 
 int main(void) {
@@ -351,6 +531,12 @@ int main(void) {
     RUN_TEST(test_munge_collision);
     RUN_TEST(test_override_collision);
     RUN_TEST(test_alias_entries);
+    RUN_TEST(test_invalid_source_alias_is_rejected_before_remap);
+    RUN_TEST(test_source_alias_cycle_is_rejected);
+    RUN_TEST(test_ir_validator_rejects_alias_cycles);
+    RUN_TEST(test_ir_validator_rejects_frame_outside_page);
+    RUN_TEST(test_ir_validator_uses_d4_swapped_page_footprint);
+    RUN_TEST(test_ir_validator_rejects_unbounded_animation_tables);
     RUN_TEST(test_final_name_sort);
     RUN_TEST(test_scale_stored);
     RUN_TEST(test_explicit_animation);
@@ -358,5 +544,7 @@ int main(void) {
     RUN_TEST(test_frame_key_ext_resolves);
     RUN_TEST(test_dangling_frame);
     RUN_TEST(test_no_auto_grouping);
+    RUN_TEST(test_invalid_source_result_is_rejected_before_copy);
+    RUN_TEST(test_invalid_ir_options_are_rejected_before_copy);
     return UNITY_END();
 }

@@ -138,7 +138,8 @@ explicit terminal boundary to the host; cancellation after that boundary cannot
 rewrite a successfully published Export into Cancelled.
 
 Each target's declared output set is all-or-none. A command spanning multiple
-targets can nevertheless finish with `partial_publication`, and a direct-writer
-failure can report `publication_uncertain` when the writer cannot prove that it
-left no artifacts. Ordinary project Save does not export, and Export does not
-silently mutate project configuration.
+targets can nevertheless finish with `partial_publication`, and a target
+failure reports `publication_uncertain` only when publication rollback cannot
+prove that the previous artifact set was restored. Serializer, staging,
+preflight, and ordinary writer failures leave it false. Ordinary project Save
+does not export, and Export does not silently mutate project configuration.
