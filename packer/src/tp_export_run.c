@@ -874,11 +874,12 @@ tp_status tp_export_project_job_create_internal(
                         return status;
                     }
                     if (!run_path_is_strict_child(out_dir, rerooted)) {
-                        tp_export_snapshot_job_destroy(job);
-                        return tp_error_set(
+                        status = tp_error_set(
                             err, TP_STATUS_INVALID_ARGUMENT,
                             "relative export output '%s' escapes reroot '%s'",
                             out_path, out_dir);
+                        tp_export_snapshot_job_destroy(job);
+                        return status;
                     }
                     out_path = rerooted;
                 }

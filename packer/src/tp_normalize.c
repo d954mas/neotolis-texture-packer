@@ -377,7 +377,9 @@ tp_status tp_export_ir_build(const tp_result *result,
     }
 
     /* Determinism: sort by final export name. */
-    qsort(build, (size_t)n, sizeof *build, cmp_sprite_final);
+    if (n > 1) {
+        qsort(build, (size_t)n, sizeof *build, cmp_sprite_final);
+    }
 
     tp_export_sprite *sprites = NULL;
     if (n > 0) {
