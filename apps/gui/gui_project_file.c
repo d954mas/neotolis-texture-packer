@@ -242,8 +242,34 @@ static tp_status begin_candidate(
 static tp_status create_fresh_candidate(
     tp_session **out, tp_error *err) {
     tp_rng rng = tp_rng_os();
-    return tp_session_create_default_project(
-        &rng, out, err);
+    return tp_session_create_default_project_with_catalog(
+        s_project.format_catalog, &rng, out, err);
+}
+
+static tp_format_catalog *create_startup_format_catalog(void) {
+    char root[TP_IDENTITY_PATH_MAX];
+    tp_error error = {{0}};
+    if (tp_format_root_from_executable(root, sizeof root, &error) !=
+        TP_STATUS_OK) {
+        return tp_format_catalog_retain(tp_format_catalog_native());
+    }
+    tp_format_catalog_scan *scan = NULL;
+    tp_format_diagnostic_report *failure_diagnostics = NULL;
+    tp_status status = tp_format_catalog_scan_root(
+        root, &scan, &failure_diagnostics, &error);
+    tp_format_diagnostic_report_destroy(failure_diagnostics);
+    if (status != TP_STATUS_OK || !scan ||
+        tp_format_catalog_scan_compile_count(scan) != 0U) {
+        tp_format_catalog_scan_destroy(scan);
+        return tp_format_catalog_retain(tp_format_catalog_native());
+    }
+    tp_format_catalog *catalog = NULL;
+    status = tp_format_catalog_scan_finish_without_compile(
+        &scan, &catalog, &error);
+    tp_format_catalog_scan_destroy(scan);
+    return status == TP_STATUS_OK && catalog
+               ? catalog
+               : tp_format_catalog_retain(tp_format_catalog_native());
 }
 
 static bool current_identity_is(
@@ -271,6 +297,9 @@ static bool controller_attached(void) {
 void gui_project_init(void) {
     if (s_project.session) {
         return;
+    }
+    if (!s_project.format_catalog) {
+        s_project.format_catalog = create_startup_format_catalog();
     }
     tp_error err = {{0}};
     tp_session *initial = NULL;
@@ -316,6 +345,8 @@ void gui_project_shutdown(void) {
     s_project.save_notice_pending = false;
     s_project.save_notice[0] = '\0';
     s_project.refresh_pending = false;
+    tp_format_catalog_release(s_project.format_catalog);
+    s_project.format_catalog = NULL;
 }
 
 tp_status gui_project_lifecycle_begin_new(
@@ -370,8 +401,8 @@ tp_status gui_project_lifecycle_begin_open(
     ++s_test_open_call_count;
 #endif
     const tp_status open_status =
-        tp_session_open(
-            canonical_path, &rng,
+        tp_session_open_with_catalog(
+            canonical_path, s_project.format_catalog, &rng,
             &candidate, err);
     if (open_status != TP_STATUS_OK) {
         return open_status;

@@ -4,7 +4,7 @@
 #include "tp_core/tp_export.h"
 
 /* Native serializers are an implementation detail of the fixed built-in
- * registry. Public clients discover descriptor metadata through tp_format_*.
+ * table. Public clients discover descriptor metadata through tp_format_catalog_*.
  */
 typedef struct tp_export_document {
     void *data;
@@ -28,9 +28,12 @@ typedef struct tp_exporter {
     tp_export_serialize_fn serialize;
 } tp_exporter;
 
-const tp_exporter *tp_exporter_find(const char *id);
-int tp_exporter_count(void);
-const tp_exporter *tp_exporter_at(int index);
+/* Fixed compiled-in handler table. Active lookup always goes through an
+ * explicit tp_format_catalog; these helpers expose only the immutable native
+ * prefix used to materialize/query a catalog. */
+const tp_exporter *tp_native_exporter_find(const char *id);
+int tp_native_exporter_count(void);
+const tp_exporter *tp_native_exporter_at(int index);
 
 tp_status tp_export_publish(const tp_exporter *exp,
                             const tp_export_ir *ir,
@@ -55,7 +58,6 @@ tp_status tp_export_defold_serialize(const tp_export_serialize_ctx *ctx,
                                      tp_error *err);
 
 #ifdef TP_ENABLE_TEST_SEAMS
-tp_status tp_exporter_register(const tp_exporter *e);
 void tp_export_notices__test_fail_next_reserve(void);
 void tp_export_publish__test_fail_rename_at(int nth);
 #endif

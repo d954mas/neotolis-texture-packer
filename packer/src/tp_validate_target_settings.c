@@ -5,7 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "tp_core/tp_export.h"
+#include "tp_core/tp_format.h"
 #include "tp_pack_constraints_internal.h"
 #include "tp_session_internal.h"
 
@@ -15,9 +15,10 @@ enum {
     TARGET_ISSUE_DUPLICATE_OUT_PATH = 1U << 2,
 };
 
-static unsigned target_issue_mask(const char *exporter_id, bool enabled,
+static unsigned target_issue_mask(const tp_format_catalog *catalog,
+                                  const char *exporter_id, bool enabled,
                                   const char *out_path, bool path_shared) {
-    unsigned mask = tp_format_find(exporter_id)
+    unsigned mask = tp_format_catalog_find_available(catalog, exporter_id)
                         ? 0U
                         : TARGET_ISSUE_UNKNOWN_EXPORTER;
     if (enabled) {
@@ -107,10 +108,11 @@ bool target_path_index_build(const tp_project *project,
     return ok;
 }
 void validate_target_settings_domain(
-    validation_builder *fs, const tp_project *p, int ai,
+    validation_builder *fs, const tp_format_catalog *catalog,
+    const tp_project *p, int ai,
     const tp_project_atlas *a, const target_path_index *target_paths) {
     /* (f) target integrity.
-     *   unknown_exporter   [error]   exporter id tp_format_find cannot resolve -- a broken id is bad
+     *   unknown_exporter   [error]   exporter id is unavailable in this catalog -- a broken id is bad
      *                                 data regardless of enable state, so reported for EVERY target.
      *   target_no_out_path [error]   an ENABLED target with an empty/NULL out_path can produce no file.
      *   duplicate_out_path [warning] an ENABLED target whose out_path is ALSO another ENABLED target's
@@ -128,7 +130,7 @@ void validate_target_settings_domain(
                                                           path_key)
                                          : NULL;
         const unsigned issues = target_issue_mask(
-            tg->exporter_id, tg->enabled, tg->out_path,
+            catalog, tg->exporter_id, tg->enabled, tg->out_path,
             path_group && path_group->count > 1U);
         if ((issues & TARGET_ISSUE_UNKNOWN_EXPORTER) != 0U) {
             add_finding(fs, TP_VALIDATION_ERROR,
@@ -315,6 +317,12 @@ tp_status tp_validate_session_snapshot_target(
                             "target validation needs snapshot and output");
     }
     memset(out, 0, sizeof *out);
+    const tp_format_catalog *catalog =
+        tp_session_snapshot_format_catalog(snapshot);
+    if (!catalog) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "target validation snapshot has no format catalog");
+    }
     const tp_snapshot_target *target = tp_session_snapshot_target_by_id(
         snapshot, atlas_id, target_id);
     if (!target) {
@@ -326,7 +334,8 @@ tp_status tp_validate_session_snapshot_target(
                         tp_session_snapshot_target_out_path_shared(
                             snapshot, atlas_id, target_id, target->out_path);
     const unsigned issues = target_issue_mask(
-        target->exporter_id, target->enabled, target->out_path, shared);
+        catalog, target->exporter_id, target->enabled, target->out_path,
+        shared);
     if ((issues & TARGET_ISSUE_UNKNOWN_EXPORTER) != 0U) {
         target_issue_add(out, TP_VALIDATION_ERROR,
                          TP_VALIDATION_CODE_UNKNOWN_EXPORTER);

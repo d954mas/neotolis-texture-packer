@@ -27,6 +27,7 @@ tp_export_caps tp_export_caps_full(void) {
         .slice9 = true,
         .multipage = true,
         .aliases = true,
+        .animations = true,
     };
 }
 
@@ -220,7 +221,7 @@ bool tp_export_settings_equal(const tp_pack_settings *a, const tp_pack_settings 
 }
 
 /* ======================================================================== */
-/* exporter registry                                                        */
+/* immutable native exporter table                                           */
 /* ======================================================================== */
 
 static const tp_format_artifact_decl g_json_artifacts[] = {
@@ -235,7 +236,8 @@ static const tp_format_descriptor g_json_neotolis_format = {
              .pivot = true,
              .slice9 = true,
              .multipage = true,
-             .aliases = true},
+             .aliases = true,
+             .animations = true},
     .artifacts = g_json_artifacts,
     .artifact_count = 1,
 };
@@ -265,7 +267,8 @@ static const tp_format_descriptor g_defold_format = {
              .pivot = true,
              .slice9 = false,
              .multipage = true,
-             .aliases = true},
+             .aliases = true,
+             .animations = true},
     .artifacts = g_defold_artifacts,
     .artifact_count = 2,
 };
@@ -278,14 +281,6 @@ static const tp_exporter g_defold = {
 /* Built-in table: the current user-facing exporters. */
 static const tp_exporter *const g_builtins[] = {&g_json_neotolis, &g_defold};
 #define TP_BUILTIN_COUNT ((int)(sizeof g_builtins / sizeof g_builtins[0]))
-
-#ifdef TP_ENABLE_TEST_SEAMS
-/* Test-only injection. Production formats are the fixed built-in table; future
- * templates/Lua bind through their own package runtime, not this native table. */
-#define TP_REGISTERED_MAX 32
-static const tp_exporter *g_registered[TP_REGISTERED_MAX];
-static int g_registered_count;
-#endif
 
 tp_status tp_exporter_id_validate(const char *id, tp_error *err) {
     if (!id || id[0] == '\0') {
@@ -309,7 +304,7 @@ tp_status tp_exporter_id_validate(const char *id, tp_error *err) {
     return TP_STATUS_OK;
 }
 
-const tp_exporter *tp_exporter_find(const char *id) {
+const tp_exporter *tp_native_exporter_find(const char *id) {
     if (tp_exporter_id_validate(id, NULL) != TP_STATUS_OK) {
         return NULL;
     }
@@ -318,14 +313,27 @@ const tp_exporter *tp_exporter_find(const char *id) {
             return g_builtins[i];
         }
     }
-#ifdef TP_ENABLE_TEST_SEAMS
-    for (int i = 0; i < g_registered_count; i++) {
-        if (strcmp(g_registered[i]->format->id, id) == 0) {
-            return g_registered[i];
-        }
-    }
-#endif
     return NULL;
+}
+
+tp_status tp_export_ir_project_for_caps(const tp_export_ir *source,
+                                        const tp_export_caps *caps,
+                                        tp_export_ir *out,
+                                        tp_error *err) {
+    if (!source || !caps || !out) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "Export IR projection requires source, capabilities, and output");
+    }
+    tp_status status = tp_export_ir_validate(source, err);
+    if (status != TP_STATUS_OK) {
+        return status;
+    }
+    *out = *source;
+    if (!caps->animations) {
+        out->animations = NULL;
+        out->animation_count = 0;
+    }
+    return TP_STATUS_OK;
 }
 
 tp_status tp_export_format_admit(const tp_format_descriptor *format,
@@ -459,59 +467,14 @@ tp_status tp_export_artifact_plan_build(const tp_format_descriptor *format,
     return TP_STATUS_OK;
 }
 
-int tp_exporter_count(void) {
-#ifdef TP_ENABLE_TEST_SEAMS
-    return TP_BUILTIN_COUNT + g_registered_count;
-#else
-    return TP_BUILTIN_COUNT;
-#endif
-}
+int tp_native_exporter_count(void) { return TP_BUILTIN_COUNT; }
 
-const tp_exporter *tp_exporter_at(int index) {
-    if (index < 0 || index >= tp_exporter_count()) {
+const tp_exporter *tp_native_exporter_at(int index) {
+    if (index < 0 || index >= TP_BUILTIN_COUNT) {
         return NULL;
     }
-    if (index < TP_BUILTIN_COUNT) {
-        return g_builtins[index];
-    }
-#ifdef TP_ENABLE_TEST_SEAMS
-    return g_registered[index - TP_BUILTIN_COUNT];
-#else
-    return NULL;
-#endif
+    return g_builtins[index];
 }
-
-const tp_format_descriptor *tp_format_find(const char *id) {
-    const tp_exporter *exporter = tp_exporter_find(id);
-    return exporter ? exporter->format : NULL;
-}
-
-int tp_format_count(void) { return tp_exporter_count(); }
-
-const tp_format_descriptor *tp_format_at(int index) {
-    const tp_exporter *exporter = tp_exporter_at(index);
-    return exporter ? exporter->format : NULL;
-}
-
-#ifdef TP_ENABLE_TEST_SEAMS
-tp_status tp_exporter_register(const tp_exporter *e) {
-    if (!e || !e->format || !e->format->id || !e->serialize) {
-        return TP_STATUS_INVALID_ARGUMENT;
-    }
-    const tp_status id_status = tp_exporter_id_validate(e->format->id, NULL);
-    if (id_status != TP_STATUS_OK) {
-        return id_status;
-    }
-    if (tp_exporter_find(e->format->id)) {
-        return TP_STATUS_INVALID_ARGUMENT; /* duplicate id */
-    }
-    if (g_registered_count >= TP_REGISTERED_MAX) {
-        return TP_STATUS_OUT_OF_BOUNDS;
-    }
-    g_registered[g_registered_count++] = e;
-    return TP_STATUS_OK;
-}
-#endif
 
 /* ======================================================================== */
 /* degradation prediction                                                    */
@@ -580,6 +543,12 @@ tp_status tp_export_predict_loss(const struct tp_project *project, int atlas_ind
     if (native.shape != eff.shape) {
         PREDICT_ADD(TP_NOTICE_FIELD_POLYGON, NULL,
                     "polygon hulls flattened to rectangles -- this format stores quads only");
+    }
+    const int animation_count =
+        opt_ir ? opt_ir->animation_count : a->animation_count;
+    if (!caps->animations && animation_count > 0) {
+        PREDICT_ADD(TP_NOTICE_FIELD_ANIMATION, NULL,
+                    "animations dropped -- this format does not store explicit animations");
     }
     if (!opt_ir) {
         if (!caps->slice9 && atlas_uses_slice9(a)) {

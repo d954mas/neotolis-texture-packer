@@ -452,7 +452,8 @@ tp_status tp_model_recover(tp_journal_io io, tp_id128 key, tp_model **out, tp_jo
                 for (int i = 0; i < req->op_count; i++) {
                     tp_op_reject rej;
                     memset(&rej, 0, sizeof rej);
-                    tp_status as = tp_operation_apply(p, &req->ops[i], &rej); /* identical to the commit apply */
+                    tp_status as = tp_operation_apply_replay(
+                        p, &req->ops[i], &rej);
                     if (as != TP_STATUS_OK) {
                         ls = tp_error_set(err, as, "recovery replay of transaction %zu op %d rejected: %s", k, i,
                                           rej.message);

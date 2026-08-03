@@ -16,6 +16,7 @@
  * the opaque handle + read accessors. */
 struct tp_model {
     tp_project *project;      /* authoritative immutable view; see generation */
+    struct tp_format_catalog *format_catalog; /* retained immutable generation */
     tp_project_generation *generation; /* NULL => model directly owns project */
     int64_t revision;         /* canonical monotonic counter; runtime, not persisted */
     tp_id128 saved_identity;  /* semantic identity of the saved baseline (dirty anchor) */

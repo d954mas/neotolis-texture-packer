@@ -26,6 +26,7 @@
 #include "tp_core/tp_session.h"
 #include "tp_core/tp_build_worker.h"
 #include "tp_export_internal.h"
+#include "tp_format_catalog_internal.h"
 #include "tp_fs_internal.h"
 #include "tp_export_job_internal.h"
 #include "tp_project_mutation_internal.h"
@@ -42,11 +43,12 @@ static tp_project *g_proj;
 static tp_arena *g_arena;
 static tp_export_notices g_notices;
 static int g_pack_runs;
+static tp_format_catalog *g_catalog;
 static char g_A[1024]; /* json-neotolis base */
 static char g_B[1024]; /* test-nopivot base  */
 static char g_C[1024]; /* test-norot base    */
 
-/* test-only descriptors (borrowed by the registry; must outlive the run). */
+/* test-only descriptors (borrowed by the catalog; must outlive the run). */
 static tp_exporter g_nopivot;
 static tp_exporter g_norot;
 static tp_exporter g_list_error;
@@ -72,6 +74,18 @@ static const tp_format_artifact_decl g_stray_artifact[] = {
     {.id = "metadata", .suffix = ".json/sub/stray.json"},
 };
 static int g_list_error_write_calls;
+
+static tp_status run_with_catalog(
+    const tp_project *project, int atlas_index,
+    const tp_pack_sprite_desc *sprites, int sprite_count,
+    const char *work_dir, tp_arena *arena,
+    tp_export_notices *notices, int *out_pack_runs,
+    tp_error *error) {
+    const tp_export_run_opts opts = {.catalog = g_catalog};
+    return tp_export_run_ex(project, atlas_index, sprites, sprite_count,
+                            work_dir, arena, notices, out_pack_runs,
+                            &opts, error);
+}
 
 static tp_status nopivot_serialize(const tp_export_serialize_ctx *ctx,
                                    tp_export_document *documents,
@@ -299,7 +313,7 @@ void test_targets_in_one_pack_group_share_one_export_ir(void) {
     g_capture_ir = NULL;
     TEST_ASSERT_EQUAL_INT_MESSAGE(
         TP_STATUS_OK,
-        tp_export_run(project, 0, &sprite, 1, g_dir, arena, &notices,
+        run_with_catalog(project, 0, &sprite, 1, g_dir, arena, &notices,
                       &runs, &error),
         error.msg);
     TEST_ASSERT_EQUAL_INT(1, runs);
@@ -400,7 +414,7 @@ void test_rename_and_anim_through_run(void) {
     tp_export_notices nts;
     tp_export_notices_init(&nts);
     tp_error e = {{0}};
-    tp_status st = tp_export_run(proj, 0, sprites, 2, g_dir, ar, &nts, NULL, &e);
+    tp_status st = run_with_catalog(proj, 0, sprites, 2, g_dir, ar, &nts, NULL, &e);
     TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_OK, st, e.msg);
     tp_export_notices_free(&nts);
 
@@ -473,7 +487,7 @@ void test_dangling_frame_through_run(void) {
     tp_export_notices nts;
     tp_export_notices_init(&nts);
     tp_error e = {{0}};
-    tp_status st = tp_export_run(proj, 0, sprites, 1, g_dir, ar, &nts, NULL, &e);
+    tp_status st = run_with_catalog(proj, 0, sprites, 1, g_dir, ar, &nts, NULL, &e);
     TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_INVALID_ARGUMENT, st, "dangling frame must fail the export");
     TEST_ASSERT_NOT_NULL_MESSAGE(strstr(e.msg, "run"), e.msg);   /* names the animation */
     TEST_ASSERT_NOT_NULL_MESSAGE(strstr(e.msg, "ghost"), e.msg); /* names the frame */
@@ -538,7 +552,7 @@ void test_duplicate_source_keys_export_the_canonical_animation_frame(void) {
     tp_error error = {{0}};
     TEST_ASSERT_EQUAL_INT_MESSAGE(
         TP_STATUS_OK,
-        tp_export_run(project, 0, sprites, 2, g_dir, arena, &notices, NULL,
+        run_with_catalog(project, 0, sprites, 2, g_dir, arena, &notices, NULL,
                       &error),
         error.msg);
     cJSON *json = load_json(out);
@@ -596,12 +610,13 @@ static bool setup_all(const char *dir) {
         .artifacts = g_stray_artifact, .artifact_count = 1};
     g_stray = (tp_exporter){.format = &g_stray_format,
                             .serialize = stray_serialize};
-    if (tp_exporter_register(&g_nopivot) != TP_STATUS_OK ||
-        tp_exporter_register(&g_norot) != TP_STATUS_OK ||
-        tp_exporter_register(&g_list_error) != TP_STATUS_OK ||
-        tp_exporter_register(&g_write_error) != TP_STATUS_OK ||
-        tp_exporter_register(&g_stray) != TP_STATUS_OK ||
-        tp_exporter_register(&g_capture) != TP_STATUS_OK) {
+    const tp_exporter *const exporters[] = {
+        &g_nopivot, &g_norot, &g_list_error,
+        &g_write_error, &g_stray, &g_capture,
+    };
+    if (tp_format_catalog__test_create(
+            exporters, sizeof exporters / sizeof exporters[0],
+            &g_catalog, NULL) != TP_STATUS_OK) {
         return false;
     }
 
@@ -639,7 +654,7 @@ static bool setup_all(const char *dir) {
         return false;
     }
     tp_error e = {{0}};
-    tp_status st = tp_export_run(g_proj, 0, sprites, 3, dir, g_arena, &g_notices, &g_pack_runs, &e);
+    tp_status st = run_with_catalog(g_proj, 0, sprites, 3, dir, g_arena, &g_notices, &g_pack_runs, &e);
     if (st != TP_STATUS_OK) {
         (void)fprintf(stderr, "tp_export_run failed: %s (%s)\n", tp_status_str(st), e.msg);
         return false;
@@ -665,7 +680,8 @@ static void test_report_ex(void) {
         tp_export_notices_init(&nts);
         tp_error e = {{0}};
         memset(&rep[pass], 0, sizeof rep[pass]);
-        tp_export_run_opts opts = {.report = &rep[pass]};
+        tp_export_run_opts opts = {
+            .report = &rep[pass], .catalog = g_catalog};
         tp_status st = tp_export_run_ex(g_proj, 0, sprites, 3, g_dir, ar, &nts, NULL, &opts, &e);
         TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, st);
         TEST_ASSERT_FALSE(rep[pass].pack_failed);
@@ -746,7 +762,7 @@ static void test_dry_run(void) {
     tp_export_notices_init(&nw);
     tp_export_report rw;
     memset(&rw, 0, sizeof rw);
-    tp_export_run_opts wopts = {.report = &rw};
+    tp_export_run_opts wopts = {.report = &rw, .catalog = g_catalog};
     tp_error e = {{0}};
     tp_status st = tp_export_run_ex(proj, 0, sprites, 3, g_dir, arw, &nw, NULL, &wopts, &e);
     TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_OK, st, e.msg);
@@ -780,7 +796,8 @@ static void test_dry_run(void) {
     tp_export_notices_init(&nd);
     tp_export_report rd;
     memset(&rd, 0, sizeof rd);
-    tp_export_run_opts dopts = {.report = &rd, .dry_run = true};
+    tp_export_run_opts dopts = {
+        .report = &rd, .catalog = g_catalog, .dry_run = true};
     st = tp_export_run_ex(proj, 0, sprites, 3, g_dir, ard, &nd, NULL, &dopts, &e);
     TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_OK, st, e.msg);
     TEST_ASSERT_TRUE_MESSAGE(rd.dry_run, "report must record dry_run");
@@ -879,7 +896,8 @@ static void test_dry_run_rejects_the_same_output_path_overflow_as_wet_export(voi
         tp_export_notices_init(&notices);
         tp_export_report report;
         memset(&report, 0, sizeof report);
-        tp_export_run_opts opts = {.report = &report, .dry_run = dry != 0};
+        tp_export_run_opts opts = {
+            .report = &report, .catalog = g_catalog, .dry_run = dry != 0};
         tp_error err = {{0}};
 
         statuses[dry] = tp_export_run_ex(proj, 0, &sprite, 1, g_dir, arena, &notices, NULL, &opts, &err);
@@ -924,7 +942,8 @@ static void test_custom_output_listing_failure_prevents_wet_write_and_matches_dr
         TEST_ASSERT_NOT_NULL(arena);
         tp_export_report report;
         memset(&report, 0, sizeof report);
-        tp_export_run_opts opts = {.report = &report, .dry_run = dry != 0};
+        tp_export_run_opts opts = {
+            .report = &report, .catalog = g_catalog, .dry_run = dry != 0};
         tp_export_notices notices;
         tp_export_notices_init(&notices);
         tp_error err = {{0}};
@@ -966,7 +985,8 @@ static void test_unknown_exporter_error_falls_back_when_error_copy_fails(void) {
     TEST_ASSERT_NOT_NULL(arena);
     tp_export_report report;
     memset(&report, 0, sizeof report);
-    const tp_export_run_opts opts = {.report = &report};
+    const tp_export_run_opts opts = {
+        .report = &report, .catalog = g_catalog};
     tp_export_notices notices;
     tp_export_notices_init(&notices);
     tp_error error = {{0}};
@@ -1013,7 +1033,8 @@ static void test_failed_writer_error_falls_back_when_error_copy_fails(void) {
     TEST_ASSERT_NOT_NULL(arena);
     tp_export_report report;
     memset(&report, 0, sizeof report);
-    const tp_export_run_opts opts = {.report = &report};
+    const tp_export_run_opts opts = {
+        .report = &report, .catalog = g_catalog};
     tp_export_notices notices;
     tp_export_notices_init(&notices);
     tp_error error = {{0}};
@@ -1069,7 +1090,8 @@ static void test_uncoverable_output_list_is_refused_before_the_writer_runs(void)
     TEST_ASSERT_NOT_NULL(arena);
     tp_export_report report;
     memset(&report, 0, sizeof report);
-    const tp_export_run_opts opts = {.report = &report};
+    const tp_export_run_opts opts = {
+        .report = &report, .catalog = g_catalog};
     tp_export_notices notices;
     tp_export_notices_init(&notices);
     tp_error error = {{0}};
@@ -1180,7 +1202,8 @@ static void test_report_marks_pre_target_setup_failure_as_pack_failed(void) {
     };
     tp_export_report report;
     memset(&report, 0, sizeof report);
-    const tp_export_run_opts opts = {.report = &report};
+    const tp_export_run_opts opts = {
+        .report = &report, .catalog = g_catalog};
     tp_export_notices notices;
     tp_export_notices_init(&notices);
     tp_error error = {{0}};
@@ -1215,7 +1238,8 @@ static void test_report_page_oom_leaves_no_partial_runs(void) {
     tp_export_notices_init(&notices);
     tp_export_report report;
     memset(&report, 0, sizeof report);
-    const tp_export_run_opts opts = {.report = &report, .dry_run = true};
+    const tp_export_run_opts opts = {
+        .report = &report, .catalog = g_catalog, .dry_run = true};
     tp_error error = {{0}};
 
     tp_export_run__test_set_report_alloc_fail(1);
@@ -1314,7 +1338,8 @@ static void test_atomic_export_overwrite_publishes_the_new_content(void) {
     tp_export_notices_init(&notices);
     tp_export_report report;
     memset(&report, 0, sizeof report);
-    const tp_export_run_opts opts = {.report = &report};
+    const tp_export_run_opts opts = {
+        .report = &report, .catalog = g_catalog};
     tp_error error = {{0}};
 
     TEST_ASSERT_EQUAL_INT_MESSAGE(
@@ -1374,7 +1399,8 @@ static void test_atomic_export_replace_failure_keeps_the_old_file(void) {
     tp_export_notices_init(&notices);
     tp_export_report report;
     memset(&report, 0, sizeof report);
-    const tp_export_run_opts opts = {.report = &report};
+    const tp_export_run_opts opts = {
+        .report = &report, .catalog = g_catalog};
     tp_error error = {{0}};
 
     TEST_ASSERT_EQUAL_INT(
@@ -1454,7 +1480,7 @@ static void test_export_set_failure_leaves_previous_outputs_byte_identical(void)
         tp_error error = {{0}};
         TEST_ASSERT_EQUAL_INT_MESSAGE(
             TP_STATUS_OK,
-            tp_export_run(project, 0, sprites, 2, g_dir, arena, &notices, NULL,
+        run_with_catalog(project, 0, sprites, 2, g_dir, arena, &notices, NULL,
                           &error),
             error.msg);
         tp_export_notices_free(&notices);
@@ -1482,7 +1508,8 @@ static void test_export_set_failure_leaves_previous_outputs_byte_identical(void)
         tp_export_notices_init(&notices);
         tp_export_report report;
         memset(&report, 0, sizeof report);
-        const tp_export_run_opts opts = {.report = &report};
+        const tp_export_run_opts opts = {
+            .report = &report, .catalog = g_catalog};
         tp_error error = {{0}};
         TEST_ASSERT_EQUAL_INT(
             TP_STATUS_BAD_PROJECT,
@@ -1523,7 +1550,8 @@ static void test_export_set_failure_leaves_previous_outputs_byte_identical(void)
         tp_export_notices_init(&notices);
         tp_export_report report;
         memset(&report, 0, sizeof report);
-        const tp_export_run_opts opts = {.report = &report};
+        const tp_export_run_opts opts = {
+            .report = &report, .catalog = g_catalog};
         tp_error error = {{0}};
         TEST_ASSERT_EQUAL_INT_MESSAGE(
             TP_STATUS_OK,
@@ -1602,6 +1630,7 @@ static void test_export_run_cancels_the_pack_worker_before_artifact_publication(
     const tp_cancel_token cancel = {cancel_after_n_polls, &cancel_state};
     const tp_export_run_opts opts = {
         .report = &report,
+        .catalog = g_catalog,
         .cancel = &cancel,
     };
     tp_error error = {{0}};
@@ -1738,6 +1767,7 @@ static void test_export_run_honors_cancel_before_safe_pack_phase(void) {
     const tp_cancel_token cancel = {cancel_export_run, NULL};
     const tp_export_run_opts opts = {
         .report = &report,
+        .catalog = g_catalog,
         .cancel = &cancel,
     };
     tp_error error = {{0}};
@@ -1764,7 +1794,8 @@ static void test_snapshot_job_rejects_relative_reroot(void) {
     tp_error error = {{0}};
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_PATH_NOT_ABSOLUTE,
-        tp_export_project_job_create_internal(g_proj, g_dir, &opts, &job,
+        tp_export_project_job_create_internal(g_proj, g_catalog, g_dir,
+                                              &opts, &job,
                                               &error));
     TEST_ASSERT_NULL(job);
 }
@@ -1783,7 +1814,8 @@ static void assert_snapshot_job_rejects_reroot_target(const char *out_path,
     tp_error error = {{0}};
     TEST_ASSERT_EQUAL_INT(
         expected,
-        tp_export_project_job_create_internal(project, g_dir, &opts, &job,
+        tp_export_project_job_create_internal(project, g_catalog, g_dir,
+                                              &opts, &job,
                                               &error));
     TEST_ASSERT_NULL(job);
     tp_project_destroy(project);
@@ -1843,5 +1875,6 @@ int main(int argc, char **argv) {
     tp_export_notices_free(&g_notices);
     tp_project_destroy(g_proj);
     tp_arena_destroy(g_arena);
+    tp_format_catalog_release(g_catalog);
     return rc;
 }

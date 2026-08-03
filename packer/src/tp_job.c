@@ -887,15 +887,23 @@ tp_status tp_session_pack_job_start(tp_session *session,
                             "Pack job requires session, atlas id, and work dir");
     }
     if (request->preview_exporter_id) {
-        tp_status status =
-            tp_exporter_id_validate(request->preview_exporter_id, err);
+        tp_format_resolution resolution = {0};
+        tp_status status = tp_format_catalog_resolve(
+            tp_session_format_catalog(session),
+            request->preview_exporter_id, &resolution, err);
         if (status != TP_STATUS_OK) {
             return status;
         }
-        if (!tp_format_find(request->preview_exporter_id)) {
+        if (resolution.state != TP_FORMAT_RESOLUTION_AVAILABLE) {
             return tp_error_set(err, TP_STATUS_NOT_FOUND,
                                 "unknown preview exporter '%s'",
                                 request->preview_exporter_id);
+        }
+        if (resolution.implementation == TP_FORMAT_IMPLEMENTATION_LUA) {
+            return tp_error_set(
+                err, TP_STATUS_UNIMPLEMENTED,
+                "runtime preview bindings are not implemented for '%s'",
+                request->preview_exporter_id);
         }
     }
 
@@ -1002,6 +1010,25 @@ tp_status tp_session_export_start(tp_session *session,
                 tp_session_snapshot_target_at(
                     snapshot, atlas->id, t);
             if (target && target->enabled) {
+                tp_format_resolution resolution = {0};
+                status = tp_format_catalog_resolve(
+                    tp_session_snapshot_format_catalog(snapshot),
+                    target->exporter_id, &resolution, err);
+                if (status != TP_STATUS_OK) {
+                    tp_session_snapshot_destroy(snapshot);
+                    tp_session_job_release_internal(&job->owner);
+                    return status;
+                }
+                if (resolution.state == TP_FORMAT_RESOLUTION_AVAILABLE &&
+                    resolution.implementation ==
+                        TP_FORMAT_IMPLEMENTATION_LUA) {
+                    tp_session_snapshot_destroy(snapshot);
+                    tp_session_job_release_internal(&job->owner);
+                    return tp_error_set(
+                        err, TP_STATUS_UNIMPLEMENTED,
+                        "runtime Export bindings are not implemented for '%s'",
+                        target->exporter_id);
+                }
                 target_count++;
                 eligible = true;
             }

@@ -1,5 +1,7 @@
 #include "tp_proc_internal.h"
 
+#include "tp_core/tp_format.h"
+
 #ifdef TP_ENABLE_TEST_SEAMS
 static unsigned int s_test_destroy_kill_calls;
 static unsigned int s_test_destroy_blocking_wait_calls;
@@ -59,38 +61,7 @@ static wchar_t *utf8_to_wide(const char *utf8) {
 }
 
 bool tp_proc_self_path(char *out, size_t out_cap) {
-    if (!out || out_cap == 0U) {
-        return false;
-    }
-    out[0] = '\0';
-    DWORD capacity = 512U;
-    for (;;) {
-        wchar_t *wide = (wchar_t *)malloc((size_t)capacity * sizeof *wide);
-        if (!wide) {
-            return false;
-        }
-        SetLastError(ERROR_SUCCESS);
-        DWORD copied = GetModuleFileNameW(NULL, wide, capacity);
-        if (copied == 0U) {
-            free(wide);
-            return false;
-        }
-        if (copied < capacity - 1U) {
-            int bytes = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, wide, -1, NULL, 0, NULL, NULL);
-            bool ok = bytes > 0 && (size_t)bytes <= out_cap &&
-                      WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, wide, -1, out, bytes, NULL, NULL) == bytes;
-            free(wide);
-            if (!ok) {
-                out[0] = '\0';
-            }
-            return ok;
-        }
-        free(wide);
-        if (capacity >= 32768U) {
-            return false;
-        }
-        capacity *= 2U;
-    }
+    return tp_executable_path(out, out_cap, NULL) == TP_STATUS_OK;
 }
 
 /* Build a quoted mutable command line: "<exe>" <arg1>. CreateProcessW may write

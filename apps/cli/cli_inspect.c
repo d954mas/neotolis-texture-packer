@@ -416,9 +416,10 @@ static tp_status print_inspect_human(const tp_session_snapshot *snapshot,
     return TP_STATUS_OK;
 }
 
-int cmd_inspect(const char *path, bool json, bool quiet) {
+int cmd_inspect(tp_format_catalog *catalog, const char *path,
+                bool json, bool quiet) {
     tp_session_snapshot *snapshot = NULL;
-    int rc = cli_load_snapshot(path, json, quiet, &snapshot);
+    int rc = cli_load_snapshot(catalog, path, json, quiet, &snapshot);
     if (rc != CLI_EXIT_OK) {
         return rc;
     }

@@ -18,6 +18,7 @@
 #include "tp_core/tp_project.h"
 #include "tp_core/tp_build_worker.h"
 #include "tp_export_internal.h"
+#include "tp_format_catalog_internal.h"
 #include "tp_export_job_internal.h"
 #include "tp_project_mutation_internal.h"
 #include "unity.h"
@@ -36,6 +37,7 @@ static tp_format_descriptor g_restrict_format;
 static char g_boundary_exporter_id[TP_EXPORTER_ID_MAX];
 static tp_exporter g_boundary_exporter;
 static tp_format_descriptor g_boundary_format;
+static tp_format_catalog *g_catalog;
 static const tp_format_artifact_decl g_json_artifact[] = {
     {.id = "metadata", .suffix = ".json"},
 };
@@ -56,6 +58,16 @@ static bool has_field(const tp_export_notices *n, int field_id) {
         }
     }
     return false;
+}
+
+static int count_field(const tp_export_notices *n, int field_id) {
+    int count = 0;
+    for (int i = 0; i < n->count; ++i) {
+        if (n->items[i].field_id == field_id) {
+            ++count;
+        }
+    }
+    return count;
 }
 
 /* Every writer-emitted PROJECT-KNOWABLE axis must be covered by predict. */
@@ -129,8 +141,13 @@ void test_exporter_registry_enforces_exact_canonical_id_bound(void) {
         .format = &oversized_format,
         .serialize = tp_export_json_neotolis_serialize,
     };
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OUT_OF_BOUNDS,
-                          tp_exporter_register(&oversized_exporter));
+    const tp_exporter *oversized_exporters[] = {&oversized_exporter};
+    tp_format_catalog *boundary_catalog = NULL;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OUT_OF_BOUNDS,
+        tp_format_catalog__test_create(
+            oversized_exporters, 1U, &boundary_catalog, &error));
+    TEST_ASSERT_NULL(boundary_catalog);
 
     memset(g_boundary_exporter_id, 'b',
            sizeof g_boundary_exporter_id - 1U);
@@ -139,10 +156,16 @@ void test_exporter_registry_enforces_exact_canonical_id_bound(void) {
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
                           tp_exporter_id_validate(g_boundary_exporter_id,
                                                   &error));
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
-                          tp_exporter_register(&g_boundary_exporter));
-    TEST_ASSERT_EQUAL_PTR(&g_boundary_exporter,
-                          tp_exporter_find(g_boundary_exporter_id));
+    const tp_exporter *boundary_exporters[] = {&g_boundary_exporter};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_format_catalog__test_create(
+            boundary_exporters, 1U, &boundary_catalog, &error));
+    TEST_ASSERT_EQUAL_PTR(
+        &g_boundary_exporter,
+        tp_format_catalog_exporter_find(
+            boundary_catalog, g_boundary_exporter_id));
+    tp_format_catalog_release(boundary_catalog);
 }
 
 void test_predict_alias_with_ir(void) {
@@ -174,6 +197,60 @@ void test_predict_alias_with_ir(void) {
     tp_export_notices_free(&with_ir);
     tp_export_notices_free(&no_ir);
     tp_project_destroy(p);
+}
+
+void test_animation_capability_projects_ir_and_emits_one_notice(void) {
+    TEST_ASSERT_EQUAL_INT(7, TP_NOTICE_FIELD_ANIMATION);
+
+    tp_export_page page = {.artifact_id = 0, .w = 1, .h = 1};
+    tp_export_anim animation = {
+        .id = "idle",
+        .frames = NULL,
+        .frame_count = 0,
+        .fps = 12.0F,
+    };
+    tp_export_ir source = {
+        .version = TP_EXPORT_IR_VERSION,
+        .atlas_name = "animations",
+        .pixels_per_unit = 1.0F,
+        .pages = &page,
+        .page_count = 1,
+        .animations = &animation,
+        .animation_count = 1,
+    };
+    tp_export_caps caps = tp_export_caps_full();
+    caps.animations = false;
+    tp_export_ir projected = {0};
+    tp_error error = {0};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_export_ir_project_for_caps(&source, &caps, &projected, &error));
+    TEST_ASSERT_EQUAL_INT(0, projected.animation_count);
+    TEST_ASSERT_NULL(projected.animations);
+    TEST_ASSERT_EQUAL_PTR(source.pages, projected.pages);
+
+    tp_project *project = tp_project_create();
+    TEST_ASSERT_NOT_NULL(project);
+    tp_project_atlas *atlas = tp_project_get_atlas(project, 0);
+    TEST_ASSERT_NOT_NULL(atlas);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_atlas_add_animation(atlas, "idle", NULL));
+    tp_export_notices notices;
+    tp_export_notices_init(&notices);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_export_predict_loss(project, 0, &caps, "test-restrict", NULL,
+                               &notices, &error));
+    TEST_ASSERT_EQUAL_INT(
+        1, count_field(&notices, TP_NOTICE_FIELD_ANIMATION));
+    TEST_ASSERT_EQUAL_INT(
+        TP_NOTICE_REASON_CAPS_UNSUPPORTED,
+        notices.items[0].reason_id);
+    TEST_ASSERT_NULL(notices.items[0].sprite);
+
+    tp_export_notices_free(&notices);
+    tp_project_destroy(project);
 }
 
 void test_single_page_format_rejects_multipage_ir_before_planning(void) {
@@ -232,9 +309,15 @@ void test_consistency_restrict(void) {
     tp_export_notices wn;
     tp_export_notices_init(&wn);
     tp_error e = {{0}};
-    TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_OK, tp_export_run(p, 0, descs, 2, g_dir, ar, &wn, NULL, &e), e.msg);
+    const tp_export_run_opts run_opts = {.catalog = g_catalog};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_export_run_ex(p, 0, descs, 2, g_dir, ar, &wn, NULL,
+                         &run_opts, &e),
+        e.msg);
 
-    const tp_exporter *rex = tp_exporter_find("test-restrict");
+    const tp_exporter *rex =
+        tp_format_catalog_exporter_find(g_catalog, "test-restrict");
     TEST_ASSERT_NOT_NULL(rex);
     tp_export_notices pn;
     tp_export_notices_init(&pn);
@@ -272,9 +355,15 @@ void test_consistency_defold(void) {
     tp_export_notices wn;
     tp_export_notices_init(&wn);
     tp_error e = {{0}};
-    TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_OK, tp_export_run(p, 0, descs, 2, g_dir, ar, &wn, NULL, &e), e.msg);
+    const tp_export_run_opts run_opts = {.catalog = g_catalog};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_export_run_ex(p, 0, descs, 2, g_dir, ar, &wn, NULL,
+                         &run_opts, &e),
+        e.msg);
 
-    const tp_exporter *dex = tp_exporter_find("defold");
+    const tp_exporter *dex =
+        tp_format_catalog_exporter_find(g_catalog, "defold");
     TEST_ASSERT_NOT_NULL(dex);
     tp_export_notices pn;
     tp_export_notices_init(&pn);
@@ -315,7 +404,9 @@ int main(int argc, char **argv) {
     g_boundary_exporter = (tp_exporter){
         .format = &g_boundary_format,
         .serialize = tp_export_json_neotolis_serialize};
-    if (tp_exporter_register(&g_restrict) != TP_STATUS_OK) {
+    const tp_exporter *const exporters[] = {&g_restrict};
+    if (tp_format_catalog__test_create(
+            exporters, 1U, &g_catalog, NULL) != TP_STATUS_OK) {
         (void)fprintf(stderr, "failed to register test-restrict exporter\n");
         return 1;
     }
@@ -323,8 +414,11 @@ int main(int argc, char **argv) {
     UNITY_BEGIN();
     RUN_TEST(test_exporter_registry_enforces_exact_canonical_id_bound);
     RUN_TEST(test_predict_alias_with_ir);
+    RUN_TEST(test_animation_capability_projects_ir_and_emits_one_notice);
     RUN_TEST(test_single_page_format_rejects_multipage_ir_before_planning);
     RUN_TEST(test_consistency_restrict);
     RUN_TEST(test_consistency_defold);
-    return UNITY_END();
+    const int result = UNITY_END();
+    tp_format_catalog_release(g_catalog);
+    return result;
 }

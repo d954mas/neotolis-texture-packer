@@ -1,6 +1,6 @@
 # ntpacker: saved-file CLI frontend over the shared operation/session contracts.
 # Console exe. Links tp_build now (pack/export land in B3); tp_build PUBLIC-links
-# tp_core + nt_builder, so the model/export API + exporter registry come
+# tp_core + nt_builder, so the model/export API + owned format catalog come
 # transitively. CRT: -U_DLL to match tp_build/nt_builder's static CRT (same pin
 # as apps/smoke and the builder-linking tests).
 set(CLI_OUTPUT_DIR "${CMAKE_SOURCE_DIR}/build/apps/cli/${NT_PRESET_NAME}")
@@ -30,6 +30,7 @@ endfunction()
 add_executable(ntpacker ${_ntpacker_sources})
 ntpacker_configure_target(ntpacker)
 set_target_properties(ntpacker PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CLI_OUTPUT_DIR}")
+tp_stage_format_packages(ntpacker)
 
 # Test-only binary with one deterministic fault seam. Production ntpacker has
 # no environment-controlled behavior; this variant proves inspect propagates a

@@ -19,6 +19,8 @@
 #include "tp_core/tp_operation.h"
 #include "tp_core/tp_project.h"
 
+struct tp_format_catalog;
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -69,6 +71,8 @@ typedef struct tp_model tp_model;
  * current identity (so a freshly-wrapped model is clean). NULL on a noncanonical
  * graph or OOM; on failure the project is NOT freed and remains caller-owned. */
 tp_model *tp_model_wrap(tp_project *project);
+tp_model *tp_model_wrap_with_catalog(
+    tp_project *project, struct tp_format_catalog *catalog);
 
 /* Frees the model, its project, and its owned idstore. NULL-safe. */
 void tp_model_destroy(tp_model *m);

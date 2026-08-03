@@ -1,0 +1,17 @@
+{
+  "api_version": 1,
+  "id": "fixture-duplicate-id",
+  "display_name": "Fixture Duplicate ID A",
+  "capabilities": {
+    "transforms": ["identity"],
+    "polygons": false,
+    "pivot": false,
+    "slice9": false,
+    "multipage": false,
+    "aliases": false,
+    "animations": false
+  },
+  "outputs": [
+    {"id": "metadata", "suffix": ".a.txt"}
+  ]
+}

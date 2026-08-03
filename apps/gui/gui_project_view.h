@@ -10,6 +10,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "tp_core/tp_format.h"
 #include "tp_core/tp_recovery_query.h"
 #include "tp_core/tp_session_snapshot_query.h"
 
@@ -79,6 +80,12 @@ typedef struct gui_recovery_notice {
 } gui_recovery_notice;
 
 const tp_session_snapshot *gui_project_snapshot(void);
+/* Borrowed active immutable format generation plus available-row helpers used
+ * by passive GUI selectors. */
+const tp_format_catalog *gui_project_format_catalog(void);
+int gui_project_format_count(void);
+const tp_format_descriptor *gui_project_format_at(int index);
+const tp_format_descriptor *gui_project_format_find(const char *id);
 uint64_t gui_project_snapshot_model_generation(void);
 const char *gui_project_path(void);
 const char *gui_project_display_name(void);

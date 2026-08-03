@@ -7,6 +7,7 @@
  */
 
 #include "tp_core/tp_operation.h"
+#include "tp_core/tp_format.h"
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -177,7 +178,9 @@ tp_status tp_op__canonical_view(const tp_project *project,
     return status;
 }
 
-tp_status tp_operation_validate(const tp_project *p, const tp_operation *op, tp_op_reject *rej) {
+static tp_status operation_validate_internal(
+    const tp_format_catalog *catalog, bool require_availability,
+    const tp_project *p, const tp_operation *op, tp_op_reject *rej) {
     tp_op__reject_ok(rej);
     if (!p || !op) {
         return tp_op__reject(rej, TP_STATUS_INVALID_ARGUMENT, "", "null project or operation");
@@ -236,11 +239,38 @@ tp_status tp_operation_validate(const tp_project *p, const tp_operation *op, tp_
         case TP_OP_TARGET_CREATE:
         case TP_OP_TARGET_REMOVE:
         case TP_OP_TARGET_SET:
-            return tp_op_validate_target_family(p, a, op, rej);
+            return tp_op_validate_target_family(catalog, require_availability,
+                                                p, a, op, rej);
 
         case TP_OP_INVALID:
         case TP_OP_ATLAS_CREATE: /* handled above */
         case TP_OP_KIND_COUNT: break;
     }
     return tp_op__reject(rej, TP_STATUS_UNKNOWN_OP, "op", "operation kind %d is not applicable", (int)op->kind);
+}
+
+tp_status tp_operation_validate_with_catalog(
+    const tp_format_catalog *catalog, const tp_project *project,
+    const tp_operation *operation, tp_op_reject *reject) {
+    if (!catalog) {
+        tp_op__reject_ok(reject);
+        return tp_op__reject(reject, TP_STATUS_INVALID_ARGUMENT, "",
+                             "operation validation requires a format catalog");
+    }
+    return operation_validate_internal(catalog, true, project, operation,
+                                       reject);
+}
+
+tp_status tp_operation_validate(const tp_project *project,
+                                const tp_operation *operation,
+                                tp_op_reject *reject) {
+    return tp_operation_validate_with_catalog(tp_format_catalog_native(),
+                                              project, operation, reject);
+}
+
+tp_status tp_operation_validate_replay_internal(
+    const tp_project *project, const tp_operation *operation,
+    tp_op_reject *reject) {
+    return operation_validate_internal(NULL, false, project, operation,
+                                       reject);
 }

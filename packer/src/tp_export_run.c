@@ -18,6 +18,7 @@
 #include "tp_core/tp_scan.h"
 #include "tp_project_mutation_internal.h"
 #include "tp_export_internal.h"
+#include "tp_format_catalog_internal.h"
 #include "tp_export_job_internal.h"
 #include "tp_session_internal.h"
 #ifdef TP_ENABLE_TEST_SEAMS
@@ -28,6 +29,7 @@
 
 struct tp_export_snapshot_job {
     tp_project *project;
+    tp_format_catalog *catalog;
     char *work_dir;
     bool dry_run;
     tp_export_terminal_boundary_fn terminal_boundary;
@@ -254,14 +256,20 @@ static tp_status build_ir_opts(const tp_project_atlas *a, const tp_pack_sprite_d
     return TP_STATUS_OK;
 }
 
-static tp_status unknown_exporter(const char *id, tp_error *err) {
+static tp_status unknown_exporter(const tp_format_catalog *catalog,
+                                  const char *id, tp_error *err) {
     char known[256];
     size_t used = 0;
     known[0] = '\0';
-    for (int i = 0; i < tp_exporter_count(); i++) {
-        const tp_exporter *e = tp_exporter_at(i);
+    const size_t count = tp_format_catalog_row_count(catalog);
+    for (size_t i = 0U; i < count; ++i) {
+        tp_format_catalog_row row = {0};
+        if (!tp_format_catalog_row_at(catalog, i, &row) ||
+            !row.available || !row.descriptor) {
+            continue;
+        }
         int n = snprintf(known + used, sizeof known - used, "%s%s",
-                         (i == 0) ? "" : ", ", e->format->id);
+                         used == 0U ? "" : ", ", row.descriptor->id);
         if (n < 0 || (size_t)n >= sizeof known - used) {
             break;
         }
@@ -356,6 +364,8 @@ tp_status tp_export_run_ex(const tp_project *project, int atlas_index, const tp_
                            int sprite_count, const char *work_dir, tp_arena *arena, tp_export_notices *notices,
                            int *out_pack_runs, const tp_export_run_opts *opts, tp_error *err) {
     tp_export_report *report = opts ? opts->report : NULL;
+    const tp_format_catalog *catalog =
+        opts && opts->catalog ? opts->catalog : tp_format_catalog_native();
     const bool dry_run = opts && opts->dry_run;
     const tp_cancel_token *cancel = opts ? opts->cancel : NULL;
     if (report) {
@@ -485,9 +495,10 @@ tp_status tp_export_run_ex(const tp_project *project, int atlas_index, const tp_
             rt->pack_run = -1;
         }
 
-        const tp_exporter *exp = tp_exporter_find(tg->exporter_id);
+        const tp_exporter *exp =
+            tp_format_catalog_exporter_find(catalog, tg->exporter_id);
         if (!exp) {
-            tp_status ust = unknown_exporter(tg->exporter_id, err);
+            tp_status ust = unknown_exporter(catalog, tg->exporter_id, err);
             if (!report) {
                 return ust;
             }
@@ -603,10 +614,29 @@ tp_status tp_export_run_ex(const tp_project *project, int atlas_index, const tp_
             return st;
         }
         const tp_project_target *tg = &a->targets[t];
-        const tp_exporter *exp = tp_exporter_find(tg->exporter_id);
+        const tp_exporter *exp =
+            tp_format_catalog_exporter_find(catalog, tg->exporter_id);
         tp_export_report_target *rt = (report && rtidx[t] >= 0) ? &report->targets[rtidx[t]] : NULL;
 
         const tp_export_ir *ir = &groups[target_group[t]].ir;
+        tp_export_ir projected_ir = {0};
+        st = tp_export_ir_project_for_caps(
+            ir, &exp->format->caps, &projected_ir, err);
+        if (st != TP_STATUS_OK) {
+            if (!report) {
+                return st;
+            }
+            if (rt) {
+                rt->error = report_error_copy(
+                    arena, err && err->msg[0]
+                               ? err->msg
+                               : "Export IR projection failed");
+            }
+            if (first_fail == TP_STATUS_OK) {
+                first_fail = st;
+            }
+            continue;
+        }
         tp_export_artifact_plan plan;
         st = tp_export_artifact_plan_build(exp->format, ir, out_bases[t], arena,
                                            &plan, err);
@@ -700,7 +730,8 @@ tp_status tp_export_run_ex(const tp_project *project, int atlas_index, const tp_
         }
         bool writer_ran = false;
         bool publication_uncertain = false;
-        st = tp_export_publish(exp, ir, groups[target_group[t]].result,
+        st = tp_export_publish(exp, &projected_ir,
+                               groups[target_group[t]].result,
                                &plan, notices, &writer_ran,
                                &publication_uncertain, err);
         if (rt) {
@@ -795,15 +826,17 @@ tp_status tp_export_snapshot_job_create_ex(const tp_session_snapshot *snapshot,
                             "export snapshot job requires snapshot, work dir, and output");
     }
     return tp_export_project_job_create_internal(
-        tp_session_snapshot_project_internal(snapshot), work_dir,
+        tp_session_snapshot_project_internal(snapshot),
+        tp_session_snapshot_format_catalog(snapshot), work_dir,
         opts, out, err);
 }
 
 tp_status tp_export_project_job_create_internal(
-    const tp_project *project, const char *work_dir,
+    const tp_project *project, tp_format_catalog *catalog,
+    const char *work_dir,
     const tp_export_snapshot_job_opts *opts,
     tp_export_snapshot_job **out, tp_error *err) {
-    if (!project || !work_dir || !out) {
+    if (!project || !catalog || !work_dir || !out) {
         return tp_error_set(
             err, TP_STATUS_INVALID_ARGUMENT,
             "export project job requires project, work dir, and output");
@@ -824,12 +857,13 @@ tp_status tp_export_project_job_create_internal(
         return tp_error_set(err, TP_STATUS_OOM, "export snapshot job allocation failed");
     }
     job->project = tp_project_clone(project);
+    job->catalog = tp_format_catalog_retain(catalog);
     const size_t work_dir_len = strlen(work_dir) + 1U;
     job->work_dir = malloc(work_dir_len);
     if (job->work_dir) {
         memcpy(job->work_dir, work_dir, work_dir_len);
     }
-    if (!job->project || !job->work_dir) {
+    if (!job->project || !job->catalog || !job->work_dir) {
         tp_export_snapshot_job_destroy(job);
         return tp_error_set(err, TP_STATUS_OOM, "export snapshot job clone failed");
     }
@@ -902,6 +936,7 @@ void tp_export_snapshot_job_destroy(tp_export_snapshot_job *job) {
         return;
     }
     tp_project_destroy(job->project);
+    tp_format_catalog_release(job->catalog);
     free(job->work_dir);
     free(job);
 }
@@ -1022,6 +1057,7 @@ tp_status tp_export_snapshot_job_run_atlas_ex_cancellable(
     }
     tp_export_run_opts run_opts = {
         .report = report,
+        .catalog = job->catalog,
         .dry_run = job->dry_run,
         .cancel = cancel,
         .terminal_boundary = job->terminal_boundary,

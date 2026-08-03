@@ -227,6 +227,51 @@ const tp_session_snapshot *gui_project_snapshot(void) {
                : NULL;
 }
 
+const tp_format_catalog *gui_project_format_catalog(void) {
+    return s_project.format_catalog
+               ? s_project.format_catalog
+               : tp_format_catalog_native();
+}
+
+int gui_project_format_count(void) {
+    const tp_format_catalog *catalog = gui_project_format_catalog();
+    const size_t row_count = tp_format_catalog_row_count(catalog);
+    int available = 0;
+    for (size_t i = 0U; i < row_count; ++i) {
+        tp_format_catalog_row row = {0};
+        if (tp_format_catalog_row_at(catalog, i, &row) &&
+            row.available && row.descriptor) {
+            ++available;
+        }
+    }
+    return available;
+}
+
+const tp_format_descriptor *gui_project_format_at(int index) {
+    if (index < 0) {
+        return NULL;
+    }
+    const tp_format_catalog *catalog = gui_project_format_catalog();
+    const size_t row_count = tp_format_catalog_row_count(catalog);
+    int available = 0;
+    for (size_t i = 0U; i < row_count; ++i) {
+        tp_format_catalog_row row = {0};
+        if (!tp_format_catalog_row_at(catalog, i, &row) ||
+            !row.available || !row.descriptor) {
+            continue;
+        }
+        if (available == index) {
+            return row.descriptor;
+        }
+        ++available;
+    }
+    return NULL;
+}
+
+const tp_format_descriptor *gui_project_format_find(const char *id) {
+    return tp_format_catalog_find_available(gui_project_format_catalog(), id);
+}
+
 const tp_source_runtime_projection *gui_project_sources(void) {
     return s_project.observation_valid &&
                    s_project.view

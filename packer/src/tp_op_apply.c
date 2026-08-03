@@ -18,6 +18,7 @@
  */
 
 #include "tp_core/tp_operation.h"
+#include "tp_core/tp_format.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -456,9 +457,22 @@ tp_status tp_op__apply_prevalidated(tp_project *p, const tp_operation *op,
 
 tp_status tp_operation_apply(tp_project *p, const tp_operation *op,
                              tp_op_reject *rej) {
-    tp_status st = tp_operation_validate(p, op, rej);
+    return tp_operation_apply_with_catalog(tp_format_catalog_native(), p, op,
+                                           rej);
+}
+
+tp_status tp_operation_apply_with_catalog(
+    const tp_format_catalog *catalog, tp_project *p, const tp_operation *op,
+    tp_op_reject *rej) {
+    tp_status st = tp_operation_validate_with_catalog(catalog, p, op, rej);
     if (st != TP_STATUS_OK) {
         return st; /* rejected: model untouched */
     }
     return tp_op__apply_prevalidated(p, op, rej);
+}
+
+tp_status tp_operation_apply_replay(tp_project *p, const tp_operation *op,
+                                    tp_op_reject *rej) {
+    tp_status st = tp_operation_validate_replay_internal(p, op, rej);
+    return st == TP_STATUS_OK ? tp_op__apply_prevalidated(p, op, rej) : st;
 }

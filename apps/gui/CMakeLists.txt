@@ -142,6 +142,7 @@ endif()
 nt_set_warning_flags(ntpacker-gui)
 nt_set_sanitizer_flags(ntpacker-gui)
 set_target_properties(ntpacker-gui PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${GUI_OUTPUT_DIR}")
+tp_stage_format_packages(ntpacker-gui)
 # Shipped Windows GUI is a windows-subsystem app (no console window behind the
 # GUI; javaw pattern). Debug keeps the console -- logs, NT_ASSERT text and the
 # self-test output stay visible in a terminal. Entry stays plain main().

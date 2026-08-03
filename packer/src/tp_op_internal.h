@@ -80,6 +80,16 @@ tp_status tp_op__apply_prevalidated(tp_project *project,
                                     const tp_operation *operation,
                                     tp_op_reject *reject);
 
+/* Durable recovery validates project-local shape/references but deliberately
+ * skips current format availability: a missing package must not erase authored
+ * target IDs from an otherwise valid journal prefix. */
+tp_status tp_operation_apply_replay(tp_project *project,
+                                    const tp_operation *operation,
+                                    tp_op_reject *reject);
+tp_status tp_operation_validate_replay_internal(
+    const tp_project *project, const tp_operation *operation,
+    tp_op_reject *reject);
+
 /* One canonical token<->bit vocabulary (the registry's `clear_token` column)
  * shared by JSON validation/lowering and encoding. This prevents a field from
  * being accepted but silently dropped by the durable transaction encoder. */

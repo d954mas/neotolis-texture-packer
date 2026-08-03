@@ -21,6 +21,7 @@ transaction owner around that aggregate and runtime state:
 
 - monotonic revision;
 - semantic saved baseline and dirty state;
+- one retained immutable format-catalog generation;
 - bounded transaction-ID retention;
 - optional semantic Undo/Redo history;
 - optional best-effort recovery journal.
@@ -104,6 +105,16 @@ stack.
 `tp_session` owns the live model, canonical project identity/lease, history,
 recovery binding, snapshots, event sequence, source-runtime generation, and at
 most one concrete derived job.
+
+The model/session catalog is an explicit dependency, not mutable process-global
+state. Session creation/open APIs accept a catalog generation, and every owned
+snapshot retains that same generation independently. Target create/set
+operations require the referenced exporter to be available in that catalog;
+project-file parsing still admits syntactically valid absent IDs, and project
+validation reports them as `unknown_exporter`. Recovery replay validates the
+durable graph without an availability check, so an absent target ID is
+preserved and can revive when a later catalog contains it. Compatibility entry
+points use the immutable native-only baseline explicitly.
 
 Session mutation and view publication run on one owning host thread. Worker
 processes never mutate the session. Replacement is a prepare/drain/commit

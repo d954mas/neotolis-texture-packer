@@ -1,4 +1,5 @@
 #include "tp_core/tp_transaction.h"
+#include "tp_core/tp_format.h"
 
 #include <inttypes.h>
 #include <stdint.h>
@@ -11,8 +12,9 @@
 #include "tp_txn_internal.h"
 /* ---- model lifecycle ----------------------------------------------------- */
 
-tp_model *tp_model_wrap(tp_project *project) {
-    if (!project) {
+tp_model *tp_model_wrap_with_catalog(tp_project *project,
+                                     tp_format_catalog *catalog) {
+    if (!project || !catalog) {
         return NULL;
     }
     tp_error canonical_error = {{0}};
@@ -30,6 +32,15 @@ tp_model *tp_model_wrap(tp_project *project) {
         return NULL;
     }
     m->project = project;
+    m->format_catalog = tp_format_catalog_retain(catalog);
+    if (!m->format_catalog) {
+        if (m->idstore->destroy) {
+            m->idstore->destroy(m->idstore->ctx);
+        }
+        free(m->idstore);
+        free(m);
+        return NULL;
+    }
     m->owns_idstore = true;
     m->revision = 0;
     m->recovery_status = TP_STATUS_OK;
@@ -37,10 +48,14 @@ tp_model *tp_model_wrap(tp_project *project) {
     return m;
 }
 
+tp_model *tp_model_wrap(tp_project *project) {
+    return tp_model_wrap_with_catalog(project, tp_format_catalog_native());
+}
+
 tp_status tp_model__apply_snapshot_preview(
-    const tp_project *project, int64_t revision,
+    const tp_project *project, tp_format_catalog *catalog, int64_t revision,
     const tp_txn_request *request, tp_txn_result *result, tp_error *error) {
-    if (!project || !request || revision < 0) {
+    if (!project || !catalog || !request || revision < 0) {
         return tp_error_set(error, TP_STATUS_INVALID_ARGUMENT,
                             "snapshot preview requires project, request, and revision");
     }
@@ -49,7 +64,7 @@ tp_status tp_model__apply_snapshot_preview(
         return tp_error_set(error, TP_STATUS_OOM,
                             "snapshot preview project clone failed");
     }
-    tp_model *preview = tp_model_wrap(candidate);
+    tp_model *preview = tp_model_wrap_with_catalog(candidate, catalog);
     if (!preview) {
         tp_project_destroy(candidate);
         return tp_error_set(error, TP_STATUS_OOM,
@@ -73,6 +88,7 @@ void tp_model_destroy(tp_model *m) {
     } else {
         tp_project_destroy(m->project);
     }
+    tp_format_catalog_release(m->format_catalog);
     if (m->idstore) {
         if (m->owns_idstore && m->idstore->destroy) {
             m->idstore->destroy(m->idstore->ctx);
@@ -84,6 +100,9 @@ void tp_model_destroy(tp_model *m) {
 
 const tp_project *tp_model_project(const tp_model *m) {
     return m ? m->project : NULL;
+}
+tp_format_catalog *tp_model_format_catalog(const tp_model *m) {
+    return m ? m->format_catalog : NULL;
 }
 tp_journal *tp_model_journal(tp_model *m) { return m ? m->journal : NULL; }
 int64_t tp_model_revision(const tp_model *m) { return m ? m->revision : 0; }

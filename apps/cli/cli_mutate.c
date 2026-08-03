@@ -339,15 +339,18 @@ void edit_close(cli_edit *edit) {
     memset(edit, 0, sizeof *edit);
 }
 
-int edit_open(cli_edit *edit, const char *path, bool dry_run, bool json, bool quiet) {
+int edit_open(cli_edit *edit, tp_format_catalog *catalog, const char *path,
+              bool dry_run, bool json, bool quiet) {
     memset(edit, 0, sizeof *edit);
     tp_error err = {0};
     tp_status status;
     if (dry_run) {
-        status = tp_session_snapshot_load(path, &edit->snapshot, &err);
+        status = tp_session_snapshot_load_with_catalog(
+            path, catalog, &edit->snapshot, &err);
     } else {
         tp_rng rng = tp_rng_os();
-        status = tp_session_open(path, &rng, &edit->session, &err);
+        status = tp_session_open_with_catalog(
+            path, catalog, &rng, &edit->session, &err);
         if (status == TP_STATUS_OK) {
             status = tp_session_snapshot_create(edit->session, &edit->snapshot, &err);
         }
@@ -408,11 +411,12 @@ int edit_resolve_sprite(cli_edit *edit, tp_id128 atlas_id,
                                          : CLI_EXIT_PROJECT;
 }
 
-int edit_open_atlas(cli_edit *edit, const char *path,
+int edit_open_atlas(cli_edit *edit, tp_format_catalog *catalog,
+                    const char *path,
                            const char *selector,
                            const tp_snapshot_atlas **atlas, bool dry_run, bool json,
                            bool quiet) {
-    int rc = edit_open(edit, path, dry_run, json, quiet);
+    int rc = edit_open(edit, catalog, path, dry_run, json, quiet);
     if (rc != CLI_EXIT_OK) {
         return rc;
     }
@@ -565,13 +569,15 @@ int commit_session_ops(cli_edit *edit, tp_operation *ops, int nops,
 /* new (session create + Save As)                                     */
 /* ------------------------------------------------------------------ */
 
-static int do_new(const char *path, bool dry_run, bool json, bool quiet) {
+static int do_new(tp_format_catalog *catalog, const char *path,
+                  bool dry_run, bool json, bool quiet) {
     tp_rng rng = tp_rng_os();
     tp_error err = {0};
     tp_session *session = NULL;
     tp_session_save_result result;
     memset(&result, 0, sizeof result);
-    tp_status st = tp_session_create_default_project(&rng, &session, &err);
+    tp_status st = tp_session_create_default_project_with_catalog(
+        catalog, &rng, &session, &err);
     if (st == TP_STATUS_OK && dry_run && tp_scan_exists(path)) {
         st = tp_error_set(&err, TP_STATUS_FILE_EXISTS,
                           "tp_project_save: destination already exists: %s", path);
@@ -616,18 +622,21 @@ static int do_new(const char *path, bool dry_run, bool json, bool quiet) {
 /* dispatch                                                           */
 /* ------------------------------------------------------------------ */
 
-static int dispatch_mutation(int npos, const char *const *positionals,
+static int dispatch_mutation(tp_format_catalog *catalog, int npos,
+                             const char *const *positionals,
                              const char *opt_at, const char *opt_kind,
                              bool dry_run, bool json, bool quiet) {
     const char *verb = positionals[0];
     if (strcmp(verb, "add") == 0) {
-        return do_add(positionals, npos, opt_kind, dry_run, json, quiet);
+        return do_add(catalog, positionals, npos, opt_kind,
+                      dry_run, json, quiet);
     }
     if (strcmp(verb, "remove") == 0) {
-        return do_remove_source(positionals, npos, dry_run, json, quiet);
+        return do_remove_source(catalog, positionals, npos,
+                                dry_run, json, quiet);
     }
     if (strcmp(verb, "set") == 0) {
-        return do_set(positionals, npos, dry_run, json, quiet);
+        return do_set(catalog, positionals, npos, dry_run, json, quiet);
     }
     if (strcmp(verb, "sprite") == 0) {
         if (npos < 2) {
@@ -636,10 +645,12 @@ static int dispatch_mutation(int npos, const char *const *positionals,
             return CLI_EXIT_USAGE;
         }
         if (strcmp(positionals[1], "set") == 0) {
-            return do_sprite_set(positionals, npos, dry_run, json, quiet);
+            return do_sprite_set(catalog, positionals, npos,
+                                 dry_run, json, quiet);
         }
         if (strcmp(positionals[1], "unset") == 0) {
-            return do_sprite_unset(positionals, npos, dry_run, json, quiet);
+            return do_sprite_unset(catalog, positionals, npos,
+                                   dry_run, json, quiet);
         }
         cli_emit_error(json, quiet, "usage",
                        "unknown sprite sub-command '%s' (want set/unset)",
@@ -647,20 +658,22 @@ static int dispatch_mutation(int npos, const char *const *positionals,
         return CLI_EXIT_USAGE;
     }
     if (strcmp(verb, "anim") == 0) {
-        return do_anim(positionals, npos, opt_at, dry_run, json, quiet);
+        return do_anim(catalog, positionals, npos, opt_at,
+                       dry_run, json, quiet);
     }
     if (strcmp(verb, "target") == 0) {
-        return do_target(positionals, npos, dry_run, json, quiet);
+        return do_target(catalog, positionals, npos, dry_run, json, quiet);
     }
     if (strcmp(verb, "atlas") == 0) {
-        return do_atlas(positionals, npos, dry_run, json, quiet);
+        return do_atlas(catalog, positionals, npos, dry_run, json, quiet);
     }
     cli_emit_error(json, quiet, "usage",
                    "unknown command '%s'; try 'ntpacker help'", verb);
     return CLI_EXIT_USAGE;
 }
 
-int cmd_mutate(int npos, const char *const *positionals, const char *opt_at,
+int cmd_mutate(tp_format_catalog *catalog, int npos,
+               const char *const *positionals, const char *opt_at,
                const char *opt_kind, bool dry_run, bool json, bool quiet) {
     const char *verb = positionals[0];
     if (opt_at && strcmp(verb, "anim") != 0) {
@@ -674,7 +687,8 @@ int cmd_mutate(int npos, const char *const *positionals, const char *opt_at,
                            "new needs exactly one <path>; try 'ntpacker help'");
             return CLI_EXIT_USAGE;
         }
-        return do_new(positionals[1], dry_run, json, quiet);
+        return do_new(catalog, positionals[1], dry_run, json, quiet);
     }
-    return dispatch_mutation(npos, positionals, opt_at, opt_kind, dry_run, json, quiet);
+    return dispatch_mutation(catalog, npos, positionals, opt_at, opt_kind,
+                             dry_run, json, quiet);
 }

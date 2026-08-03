@@ -13,6 +13,8 @@
 #include "tp_project_identity_internal.h"
 #include "tp_core/tp_scan.h"
 #include "tp_core/tp_session.h"
+#include "tp_export_internal.h"
+#include "tp_format_catalog_internal.h"
 #include "tp_validate_internal.h"
 #include "../src/tp_fs_internal.h"
 
@@ -246,6 +248,26 @@ static bool report_has_code(const tp_validation_report *report, const char *code
     }
     return false;
 }
+
+static tp_status validation_test_serialize(
+    const tp_export_serialize_ctx *context, tp_export_document *documents,
+    int document_count, tp_error *error) {
+    (void)context;
+    (void)documents;
+    (void)document_count;
+    (void)error;
+    return TP_STATUS_OK;
+}
+
+static const tp_format_descriptor validation_test_format = {
+    .id = "missing-exporter",
+    .display_name = "Validation Test Format",
+};
+
+static const tp_exporter validation_test_exporter = {
+    .format = &validation_test_format,
+    .serialize = validation_test_serialize,
+};
 
 static size_t collect_setting_findings(
     const tp_validation_report *report,
@@ -749,6 +771,53 @@ void test_target_row_diagnostics_reuse_full_validation_predicates(void) {
                              report.issues[1].code);
     tp_session_snapshot_destroy(snapshot);
     tp_session_destroy(session);
+
+    const tp_exporter *test_exporters[] = {&validation_test_exporter};
+    tp_format_catalog *catalog = NULL;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_format_catalog__test_create(test_exporters, 1U, &catalog, &err));
+    TEST_ASSERT_NOT_NULL(catalog);
+
+    tp_validation_report catalog_report = {0};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_validate_project_file_with_catalog(
+            path, catalog, &catalog_report, &err));
+    TEST_ASSERT_FALSE(report_has_code(
+        &catalog_report, TP_VALIDATION_CODE_UNKNOWN_EXPORTER));
+    tp_validation_report_free(&catalog_report);
+
+    session = NULL;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_session_open_with_catalog(path, catalog, &rng, &session, &err));
+    snapshot = NULL;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_session_snapshot_create(session, &snapshot, &err));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_validate_session_snapshot(snapshot, &catalog_report, &err));
+    TEST_ASSERT_FALSE(report_has_code(
+        &catalog_report, TP_VALIDATION_CODE_UNKNOWN_EXPORTER));
+    tp_validation_report_free(&catalog_report);
+
+    atlas = tp_session_snapshot_atlas_at(snapshot, 0);
+    TEST_ASSERT_NOT_NULL(atlas);
+    target = tp_session_snapshot_target_at(snapshot, atlas->id, 1);
+    TEST_ASSERT_NOT_NULL(target);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_validate_session_snapshot_target(
+            snapshot, atlas->id, target->id, &report, &err));
+    TEST_ASSERT_EQUAL_size_t(1U, report.issue_count);
+    TEST_ASSERT_EQUAL_STRING(TP_VALIDATION_CODE_DUPLICATE_OUT_PATH,
+                             report.issues[0].code);
+
+    tp_session_snapshot_destroy(snapshot);
+    tp_session_destroy(session);
+    tp_format_catalog_release(catalog);
     TEST_ASSERT_EQUAL_INT(0, remove(path));
 }
 

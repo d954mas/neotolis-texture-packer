@@ -22,6 +22,7 @@ extern "C" {
 #endif
 
 struct tp_sprite_index;
+struct tp_format_catalog;
 
 /* ---- append-only operation catalog --------------------------------------- *
  * New kinds are added before TP_OP_KIND_COUNT, NEVER reordered or removed (a
@@ -207,7 +208,7 @@ typedef enum tp_field_domain {
     TP_FIELD_DOMAIN_ANY = 0,     /* every value of the row's type is admissible */
     TP_FIELD_DOMAIN_RANGE,       /* numeric [range_min..range_max] */
     TP_FIELD_DOMAIN_ENUM,        /* one of values[0..value_count) */
-    TP_FIELD_DOMAIN_EXPORTER_ID  /* a live id from the exporter registry (tp_export.h) */
+    TP_FIELD_DOMAIN_EXPORTER_ID  /* an available id from the caller's format catalog */
 } tp_field_domain;
 
 typedef struct tp_field_row {
@@ -435,11 +436,15 @@ typedef struct tp_op_reject {
 
 /* ---- validation ---------------------------------------------------------- *
  * Validate the op's payload (closed vocabulary, numeric RANGES, non-empty names,
- * exporter-id against the live registry) and its ID REFERENCES against `p` (parent
+ * exporter-id against the supplied catalog) and its ID REFERENCES against `p` (parent
  * atlas exists; addressed entity exists). Pure: never mutates `p`. Returns
  * TP_STATUS_OK, else fills *rej (may be NULL) with status + field + message. This
  * is the range/name/exporter/reference logic moved OUT of the CLI/GUI into core. */
-tp_status tp_operation_validate(const tp_project *p, const tp_operation *op, tp_op_reject *rej);
+tp_status tp_operation_validate(const tp_project *p, const tp_operation *op,
+                                tp_op_reject *rej);
+tp_status tp_operation_validate_with_catalog(
+    const struct tp_format_catalog *catalog, const tp_project *p,
+    const tp_operation *op, tp_op_reject *rej);
 
 /* ---- id-only apply ------------------------------------------------------- *
  * Validate then apply ONE operation to `p`, addressing entities by ID. STAGE-THEN-
@@ -447,6 +452,9 @@ tp_status tp_operation_validate(const tp_project *p, const tp_operation *op, tp_
  * BYTE-UNCHANGED (a failed apply never half-mutates). On rejection fills *rej (may
  * be NULL) and returns the structured status; the model is untouched. */
 tp_status tp_operation_apply(tp_project *p, const tp_operation *op, tp_op_reject *rej);
+tp_status tp_operation_apply_with_catalog(
+    const struct tp_format_catalog *catalog, tp_project *p,
+    const tp_operation *op, tp_op_reject *rej);
 
 /* ---- canonical byte-stable encoders (determinism) ------------------------ *
  * 2-space indent, LF, %.9g floats, keys ASCENDING (the "op" discriminator first),

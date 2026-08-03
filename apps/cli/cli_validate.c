@@ -118,9 +118,10 @@ static void print_validate_human(const tp_validation_report *report, const char 
     }
 }
 
-int cmd_validate(const char *path, bool json, bool quiet, bool strict) {
+int cmd_validate(tp_format_catalog *catalog, const char *path,
+                 bool json, bool quiet, bool strict) {
     tp_session_snapshot *snapshot = NULL;
-    int rc = cli_load_snapshot(path, json, quiet, &snapshot);
+    int rc = cli_load_snapshot(catalog, path, json, quiet, &snapshot);
     if (rc != CLI_EXIT_OK) {
         return rc;
     }

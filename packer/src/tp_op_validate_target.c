@@ -1,6 +1,7 @@
 #include "tp_op_validate_family_internal.h"
 
 #include "tp_core/tp_export.h"
+#include "tp_core/tp_format.h"
 #include "tp_op_internal.h"
 #include "tp_project_identity_internal.h"
 static const tp_project_target *find_target(const tp_project_atlas *a, tp_id128 id) {
@@ -22,6 +23,7 @@ static tp_status validate_exporter_id(const char *value,
  * storage is deliberately ignored: field-presence means it is not data. */
 
 tp_status tp_op_validate_target_family(
+    const tp_format_catalog *catalog, bool require_availability,
     const tp_project *p, const tp_project_atlas *a,
     const tp_operation *op, tp_op_reject *rej) {
     switch (op->kind) {
@@ -39,7 +41,8 @@ tp_status tp_op_validate_target_family(
             if (exporter_status != TP_STATUS_OK) {
                 return exporter_status;
             }
-            if (!tp_format_find(t->exporter_id)) {
+            if (require_availability &&
+                !tp_format_catalog_find_available(catalog, t->exporter_id)) {
                 return tp_op__reject(rej, TP_STATUS_NOT_FOUND, "exporter_id", "unknown exporter id '%s'",
                                      t->exporter_id ? t->exporter_id : "");
             }
@@ -72,7 +75,9 @@ tp_status tp_op_validate_target_family(
                 if (exporter_status != TP_STATUS_OK) {
                     return exporter_status;
                 }
-                if (!tp_format_find(t->exporter_id)) {
+                if (require_availability &&
+                    !tp_format_catalog_find_available(catalog,
+                                                      t->exporter_id)) {
                     return tp_op__reject(
                         rej, TP_STATUS_NOT_FOUND, "exporter_id",
                         "unknown exporter id '%s'", t->exporter_id);

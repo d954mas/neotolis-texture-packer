@@ -5,6 +5,7 @@
 
 /* Small active/candidate host plus presentation-only state. */
 typedef struct gui_project_state {
+    tp_format_catalog *format_catalog;
     tp_session *session;
     tp_session *candidate;
     const struct tp_session_view *view;

@@ -133,7 +133,8 @@ static int parse_sprite_field(sprite_edit *e, const char *tok, bool json, bool q
     return 0;
 }
 
-int do_sprite_set(const char *const *pos, int npos, bool dry_run, bool json, bool quiet) {
+int do_sprite_set(tp_format_catalog *catalog, const char *const *pos,
+                  int npos, bool dry_run, bool json, bool quiet) {
     /* sprite set <project> <atlas> <key> <field>=<value>... */
     if (npos < 6) {
         cli_emit_error(json, quiet, "usage",
@@ -145,7 +146,8 @@ int do_sprite_set(const char *const *pos, int npos, bool dry_run, bool json, boo
     const char *key = pos[4];
     cli_edit edit;
     const tp_snapshot_atlas *atlas_dto = NULL;
-    int rc = edit_open_atlas(&edit, path, atlas, &atlas_dto, dry_run, json, quiet);
+    int rc = edit_open_atlas(&edit, catalog, path, atlas, &atlas_dto,
+                             dry_run, json, quiet);
     if (rc != CLI_EXIT_OK) {
         return rc;
     }
@@ -254,7 +256,8 @@ int do_sprite_set(const char *const *pos, int npos, bool dry_run, bool json, boo
     return commit_session_ops(&edit, ops, n, "sprite", 1, human, json, quiet);
 }
 
-int do_sprite_unset(const char *const *pos, int npos, bool dry_run, bool json, bool quiet) {
+int do_sprite_unset(tp_format_catalog *catalog, const char *const *pos,
+                    int npos, bool dry_run, bool json, bool quiet) {
     /* sprite unset <project> <atlas> <key> */
     if (npos != 5) {
         cli_emit_error(json, quiet, "usage", "sprite unset needs <project> <atlas> <key>; try 'ntpacker help'");
@@ -265,7 +268,8 @@ int do_sprite_unset(const char *const *pos, int npos, bool dry_run, bool json, b
     const char *key = pos[4];
     cli_edit edit;
     const tp_snapshot_atlas *atlas_dto = NULL;
-    int rc = edit_open_atlas(&edit, path, atlas, &atlas_dto, dry_run, json, quiet);
+    int rc = edit_open_atlas(&edit, catalog, path, atlas, &atlas_dto,
+                             dry_run, json, quiet);
     if (rc != CLI_EXIT_OK) {
         return rc;
     }

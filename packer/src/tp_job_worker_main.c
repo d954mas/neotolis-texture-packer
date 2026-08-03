@@ -375,7 +375,9 @@ static tp_status run_pack(const tp_job_worker_proto_request *request,
     if (request->preview_exporter_id &&
         request->preview_exporter_id[0]) {
         const tp_format_descriptor *format =
-            tp_format_find(request->preview_exporter_id);
+            tp_format_catalog_find_available(
+                tp_format_catalog_native(),
+                request->preview_exporter_id);
         if (!format) {
             tp_pack_input_free(&input);
             return tp_error_set(
@@ -639,7 +641,7 @@ static tp_status run_export(const tp_job_worker_proto_request *request,
     };
     tp_export_snapshot_job *job = NULL;
     tp_status status = tp_export_project_job_create_internal(
-        project, request_dir, &opts, &job, err);
+        project, tp_format_catalog_native(), request_dir, &opts, &job, err);
     if (status != TP_STATUS_OK) {
         tp_worker_remove_dir_tree(request_dir);
         return status;

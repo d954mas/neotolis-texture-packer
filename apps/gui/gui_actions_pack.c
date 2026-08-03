@@ -220,7 +220,7 @@ void gui_actions__preview_target_start(int combo_index) {
         preview_target_reset();
         return;
     }
-    const tp_format_descriptor *e = tp_format_at(combo_index - 1);
+    const tp_format_descriptor *e = gui_project_format_at(combo_index - 1);
     if (!e) {
         preview_target_reset();
         return;
@@ -390,7 +390,8 @@ static gui_pack_done poll_async(
             } else {
                 /* The degradation chip is width-gated (STRIP_CHIP_MIN_W) and drops on common window
                  * sizes, so the pill also carries the summary -- it is width-independent. */
-                const tp_format_descriptor *pe = tp_format_at(s_preview_target - 1);
+                const tp_format_descriptor *pe =
+                    gui_project_format_at(s_preview_target - 1);
                 if (pe) {
                     char chip[96] = {0};
                     char tip[256] = {0};

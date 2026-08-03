@@ -61,7 +61,7 @@ global options, and exit-code mapping.
 Each exporter `caps` object includes the exact numeric `transform_mask`
 (`1..255`, bit `i` permits stored D4 transform value `i`). The derived
 `rotate90` and `flips` booleans remain presentation conveniences and do not
-replace the exact mask.
+replace the exact mask. It also includes the exact boolean `animations`.
 
 ## Pack report: schema 1
 
@@ -131,6 +131,10 @@ clean up its private scratch request directory and temporary `.ntpack`:
 - `files_written` is zero;
 - successful targets include `would_write`;
 - notices are predicted capability losses.
+
+Structured loss fields are append-only. `animation` is field value 7 and uses
+reason `caps_unsupported`; unsupported non-empty explicit animation data emits
+one atlas-wide notice.
 
 `--atlas` selects one atlas. `--target` filters by exporter ID; filtering all
 targets away is a successful empty result. `--out-dir` re-roots relative target

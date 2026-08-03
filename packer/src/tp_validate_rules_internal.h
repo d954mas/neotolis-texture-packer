@@ -5,6 +5,8 @@
 #include "tp_validate_index_internal.h"
 #include "tp_validate_report_internal.h"
 
+struct tp_format_catalog;
+
 finding_context context_atlas(const tp_project_atlas *atlas);
 finding_context context_source(const tp_project_atlas *atlas,
                                const tp_project_source *source);
@@ -38,7 +40,8 @@ bool target_path_index_build(const tp_project *project,
 void target_path_index_free(target_path_index *index,
                             const tp_project *project);
 void validate_target_settings_domain(
-    validation_builder *builder, const tp_project *project, int atlas_index,
+    validation_builder *builder, const struct tp_format_catalog *catalog,
+    const tp_project *project, int atlas_index,
     const tp_project_atlas *atlas, const target_path_index *target_paths);
 
 #endif /* TP_VALIDATE_RULES_INTERNAL_H */

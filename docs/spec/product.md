@@ -21,14 +21,16 @@ through a shared core rather than separate GUI and automation models.
 - target-neutral versioned immutable Export IR reused per effective pack result,
   native format descriptors, deterministic artifact plans, and rollback-backed
   common publication with destination ownership for handled failures;
+- an explicit immutable format catalog with executable-relative strict package
+  discovery, deterministic unavailable rows, fingerprints, and bounded owned
+  diagnostics; runtime package compilation/execution is not implemented yet;
 - semantic revision, dirty state, Undo/Redo, durable Save, and best-effort
   recovery;
 - worker-process containment for fallible builder work;
 - GUI-owned semantic Pack-result preview caching.
 
 The current product does not provide filesystem watchers, linked foreign-atlas
-sources, Import IR, installable format packages, template or Lua handlers, MCP,
-or a Dev API transport.
+sources, Import IR, runtime Lua format packages, MCP, or a Dev API transport.
 
 ## Shared behavior
 

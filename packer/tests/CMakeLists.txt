@@ -115,7 +115,9 @@ tp_add_test(NAME job_input_token
 
 # M5 thin-boundary validation: all project validation rules are core-owned and
 # exposed as an owned typed report over a file-oriented entry point.
-tp_add_test(NAME validate LIBS tp_core unity PRIVATE_SRC
+tp_add_test(NAME validate
+    SOURCES test_validate.c tp_format_catalog_test_seam.c
+    LIBS tp_core unity PRIVATE_SRC SEAMS
     DEFINES
         TP_CLI_TESTDATA_DIR="${CMAKE_SOURCE_DIR}/apps/cli/testdata"
         TP_VALIDATE_TEST_DIR="${CMAKE_BINARY_DIR}/tp_validate_test"
@@ -442,7 +444,8 @@ tp_add_test(NAME export_set_publish
 # Phase 2 per-target packing: test-only capability-restricted descriptors prove
 # effective-settings repack, shared runs, and metadata-loss notices.
 tp_add_test(NAME export_run
-    SOURCES test_export_run.c ../src/tp_export_run.c ../src/tp_export.c
+    SOURCES test_export_run.c tp_format_catalog_test_seam.c
+        ../src/tp_export_run.c ../src/tp_export.c
     LIBS tp_build unity cjson PRIVATE_SRC SEAMS
     MAKE_DIRS "${CMAKE_BINARY_DIR}/tp_export_run_test"
     ARGS "${CMAKE_BINARY_DIR}/tp_export_run_test")
@@ -450,7 +453,8 @@ tp_add_test(NAME export_run
 # A5 op-layer: tp_export_predict_loss consistency -- project-knowable axes from a
 # NULL IR and actual packed metadata (including aliases) from an IR. Links
 # tp_build to pack + export the fixture through the real path (tp_export_run).
-tp_add_test(NAME predict SOURCES test_predict.c ../src/tp_export.c
+tp_add_test(NAME predict
+    SOURCES test_predict.c tp_format_catalog_test_seam.c ../src/tp_export.c
     LIBS tp_build unity PRIVATE_SRC SEAMS
     MAKE_DIRS "${CMAKE_BINARY_DIR}/tp_predict_test"
     ARGS "${CMAKE_BINARY_DIR}/tp_predict_test")
@@ -573,6 +577,26 @@ tp_add_test(NAME job_worker_process
         ${_tp_proc_backend}
     LIBS tp_core tinycthread unity PRIVATE_SRC SEAMS
     DEFINES _CRT_SECURE_NO_WARNINGS)
+
+# Epic 3 Packet 1: immutable catalog/parser semantics, executable-relative
+# discovery, filesystem faults/fail-closed limits, and explicit session context.
+tp_add_test(NAME format_catalog_contract LIBS tp_core unity PRIVATE_SRC
+    DEFINES
+        TP_FORMAT_FIXTURE_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/format-packages"
+        TP_FORMAT_CATALOG_TEST_DIR="${CMAKE_BINARY_DIR}/tp_format_catalog_contract_test"
+    MAKE_DIRS "${CMAKE_BINARY_DIR}/tp_format_catalog_contract_test")
+
+tp_add_test(NAME format_catalog_paths LIBS tp_core unity PRIVATE_SRC
+    MAKE_DIRS "${CMAKE_BINARY_DIR}/tp_format_catalog_paths_test"
+    ARGS "${CMAKE_BINARY_DIR}/tp_format_catalog_paths_test")
+
+tp_add_test(NAME format_catalog_faults LIBS tp_core unity PRIVATE_SRC
+    MAKE_DIRS "${CMAKE_BINARY_DIR}/tp_format_catalog_faults_test"
+    ARGS "${CMAKE_BINARY_DIR}/tp_format_catalog_faults_test")
+
+tp_add_test(NAME format_catalog_context
+    SOURCES test_format_catalog_context.c tp_format_catalog_test_seam.c
+    LIBS tp_build unity PRIVATE_SRC SEAMS)
 
 # Tests are executable boundaries, so sanitizer instrumentation must be linked
 # on each one rather than only on tp_core/tp_build. Keep this directory-wide

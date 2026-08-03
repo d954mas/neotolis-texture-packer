@@ -13,7 +13,7 @@
 
 #include "gui_shell_quote.h" /* POSIX quoting for file-manager commands. */
 
-#include "tp_core/tp_export.h" /* exporter registry -> target dropdown (export modal) */
+#include "tp_core/tp_export.h" /* export capability vocabulary */
 #include "tp_core/tp_journal.h" /* recovery status labels */
 
 #include "gui_defs.h"
@@ -559,7 +559,7 @@ void declare_export_modal(nt_ui_context_t *ctx) {
             nt_ui_modal_end(ctx);
             return;
         }
-        const int ne = tp_format_count();
+        const int ne = gui_project_format_count();
         float list_h = (float)line_count * S(30.0F) + S(6.0F);
         const float list_cap = S(330.0F);
         if (list_h > list_cap) {
@@ -587,7 +587,8 @@ void declare_export_modal(nt_ui_context_t *ctx) {
                             "export/target", t->id);
                     const char *exp_name = t->exporter_id;
                     for (int i = 0; i < ne; i++) {
-                        const tp_format_descriptor *e = tp_format_at(i);
+                        const tp_format_descriptor *e =
+                            gui_project_format_at(i);
                         if (e && strcmp(e->id, t->exporter_id) == 0) {
                             exp_name = (e->display_name && e->display_name[0])
                                            ? e->display_name

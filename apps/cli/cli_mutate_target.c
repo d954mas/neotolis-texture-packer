@@ -11,7 +11,8 @@
 /* target                                                             */
 /* ------------------------------------------------------------------ */
 
-int do_target(const char *const *pos, int npos, bool dry_run, bool json, bool quiet) {
+int do_target(tp_format_catalog *catalog, const char *const *pos, int npos,
+              bool dry_run, bool json, bool quiet) {
     /* target <sub> <project> <atlas> ... */
     if (npos < 5) {
         cli_emit_error(json, quiet, "usage", "target needs <sub> <project> <atlas> ...; try 'ntpacker help'");
@@ -22,7 +23,8 @@ int do_target(const char *const *pos, int npos, bool dry_run, bool json, bool qu
     const char *atlas = pos[3];
     cli_edit edit;
     const tp_snapshot_atlas *atlas_dto = NULL;
-    int rc = edit_open_atlas(&edit, path, atlas, &atlas_dto, dry_run, json, quiet);
+    int rc = edit_open_atlas(&edit, catalog, path, atlas, &atlas_dto,
+                             dry_run, json, quiet);
     if (rc != CLI_EXIT_OK) {
         return rc;
     }

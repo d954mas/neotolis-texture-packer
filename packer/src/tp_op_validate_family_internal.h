@@ -4,6 +4,8 @@
 #include "tp_core/tp_operation.h"
 #include "tp_core/tp_project.h"
 
+struct tp_format_catalog;
+
 const tp_project_source *tp_op_validate_find_source(
     const tp_project_atlas *atlas, tp_id128 source_id);
 
@@ -17,6 +19,7 @@ tp_status tp_op_validate_animation_family(
     const tp_project *project, const tp_project_atlas *atlas,
     const tp_operation *operation, tp_op_reject *reject);
 tp_status tp_op_validate_target_family(
+    const struct tp_format_catalog *catalog, bool require_availability,
     const tp_project *project, const tp_project_atlas *atlas,
     const tp_operation *operation, tp_op_reject *reject);
 

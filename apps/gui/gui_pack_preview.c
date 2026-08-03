@@ -159,7 +159,8 @@ int gui_pack_preview_diff(tp_id128 atlas_id, const char *exporter_id, char *chip
     if (tip && tip_cap) {
         tip[0] = '\0';
     }
-    const tp_format_descriptor *exporter = tp_format_find(exporter_id);
+    const tp_format_descriptor *exporter =
+        gui_project_format_find(exporter_id);
     if (!exporter) {
         return 0;
     }

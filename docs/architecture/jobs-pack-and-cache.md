@@ -19,6 +19,13 @@ the worker after admission rather than copied into the envelope; the completed
 result's `pack_input_hash` identifies the decoded pixels actually consumed.
 Completion sequence is result ordering state, not part of the input token.
 
+Preview admission resolves its exporter ID through the session's retained
+format catalog. The in-process immutable Export snapshot job also retains and
+uses the snapshot's exact catalog generation for target admission and
+capability policy. The outer worker protocol still carries only the two native
+handlers; runtime package bindings and their diagnostics are the next protocol
+layer and no Lua row can become available before that layer exists.
+
 Later model/source-generation changes do not automatically reject a terminal
 receipt. Instance, request, and target identity still gate adoption. The core
 then compares input tokens for freshness: a changed token keeps the receipt
@@ -146,3 +153,8 @@ does not export, and Export does not silently mutate project configuration.
 Concurrent exports acquire destination-file leases after preflight and before
 serialization. Any overlap returns `export_busy` with no attempted writer or
 artifact publication; non-overlapping targets may proceed independently.
+
+Capability policy includes explicit animations. A target that declares no
+animation support receives a borrowed IR projection with zero animations and
+one atlas-wide structured `animation` loss notice when the source IR is
+non-empty.

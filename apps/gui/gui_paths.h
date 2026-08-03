@@ -39,10 +39,9 @@ bool gui_paths_relativize_to_project(const char *input,
                                      const char *project_file, char *out,
                                      size_t out_size);
 
-/* Resolve the directory the running exe lives in (absolute) into out[out_size]. Windows: the module
- * path's directory; POSIX: the CWD -- an ABSOLUTE base, never a bare "." (a relative base made the
- * headless selftest write scratch to the wrong dir on CI); "." only as a last resort. The single home
- * for this: main.c's s_exe_dir resolves through here. */
+/* Resolve the real running executable image's directory into out[out_size]
+ * through the shared core boundary. Failure leaves an empty output; there is
+ * deliberately no CWD, argv, PATH, or "." fallback. */
 void gui_paths_exe_dir(char *out, size_t out_size);
 
 #ifdef __cplusplus

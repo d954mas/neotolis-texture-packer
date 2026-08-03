@@ -12,7 +12,7 @@
 #include "ui/nt_ui_scroll.h"
 #include "ui/nt_ui_slider.h"
 
-#include "tp_core/tp_export.h" /* exporter registry -> target dropdown */
+#include "tp_core/tp_export.h" /* export capability vocabulary */
 #include "tp_core/tp_identity.h"
 #include "tp_core/tp_validate.h"
 
@@ -769,7 +769,7 @@ static void declare_target_exporter_combo(nt_ui_context_t *ctx, uint32_t row_id,
                               &s_dd_style, &open)) {
             for (int i = 0; i < nlabels; i++) {
                 if (nt_ui_combo_selectable(ctx, (uint32_t)i, exp_labels[i], i == cur_exp)) {
-                    const tp_format_descriptor *e = tp_format_at(i);
+                    const tp_format_descriptor *e = gui_project_format_at(i);
                     if (e) {
                         gui_edit_target_exporter(target, e->id);
                     }
@@ -806,11 +806,11 @@ static void declare_export_targets(nt_ui_context_t *ctx,
             s_open_target_combo_id = tp_id128_nil();
         }
     }
-    const int ne = tp_format_count();
+    const int ne = gui_project_format_count();
     const char *exp_labels[24];
     int nlabels = 0;
     for (int i = 0; i < ne && nlabels < 24; i++) {
-        const tp_format_descriptor *e = tp_format_at(i);
+        const tp_format_descriptor *e = gui_project_format_at(i);
         exp_labels[nlabels++] = (e && e->display_name)
                                    ? e->display_name
                                    : (e ? e->id : "?");
@@ -839,7 +839,7 @@ static void declare_export_targets(nt_ui_context_t *ctx,
         /* find current exporter index for the combo selection */
         int cur_exp = -1;
         for (int i = 0; i < nlabels; i++) {
-            const tp_format_descriptor *e = tp_format_at(i);
+            const tp_format_descriptor *e = gui_project_format_at(i);
             if (e && strcmp(e->id, t->exporter_id) == 0) {
                 cur_exp = i;
                 break;

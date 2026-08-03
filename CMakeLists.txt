@@ -26,6 +26,11 @@ add_compile_definitions(NT_BUILD_MAX_TEXTURE_SIZE=16384)
 # Engine submodule: libraries only (examples/tests/tools are top-level-guarded out).
 add_subdirectory(external/neotolis-engine)
 
+# cJSON's JSON grammar uses '.' regardless of the process numeric locale.
+# Enable its locale bridge so strict descriptor preflight and tree materializing
+# agree even when the host locale uses a different decimal separator.
+target_compile_definitions(cjson PRIVATE ENABLE_LOCALES)
+
 # nt_builder (packing pipeline) is a top-level-only engine target; the tool is
 # native-only, so pull it in explicitly.
 if(EMSCRIPTEN)
@@ -49,6 +54,7 @@ enable_testing()
 # Shared tp_add_test()/tp_add_gui_test() so every first-party test target gets the
 # same executable/link/warning/CRT/ctest shape (see the file header).
 include("${CMAKE_CURRENT_LIST_DIR}/cmake/tp_add_test.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/cmake/tp_stage_format_packages.cmake")
 add_custom_target(report_loc_inventory
     COMMAND ${CMAKE_COMMAND}
         -DROOT=${CMAKE_SOURCE_DIR}

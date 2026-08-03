@@ -30,7 +30,7 @@
 #include "window/nt_window.h"   /* g_nt_window (phase-driven framebuffer dims) */
 
 #include "tp_core/tp_error.h"   /* tp_status_str / tp_error */
-#include "tp_core/tp_export.h"  /* tp_format_count/at (preview-target selector index) */
+#include "tp_core/tp_export.h"  /* export capability vocabulary */
 #include "tp_core/tp_id.h"      /* stable structural-ID assertions */
 #include "tp_core/tp_pack_result.h"   /* tp_result */
 #include "tp_core/tp_names.h"   /* tp_sprite_export_key (region -> override key) */
@@ -3632,8 +3632,8 @@ void selftest_pre_frame(void) {
             const int native_pc = native->page_count;
 
             int defold_idx = -1;
-            for (int i = 0; i < tp_format_count(); i++) {
-                const tp_format_descriptor *e = tp_format_at(i);
+            for (int i = 0; i < gui_project_format_count(); i++) {
+                const tp_format_descriptor *e = gui_project_format_at(i);
                 if (e && strcmp(e->id, "defold") == 0) {
                     defold_idx = i;
                     break;
@@ -3649,7 +3649,8 @@ void selftest_pre_frame(void) {
             NT_ASSERT(okp && pv && pv->sprite_count > 0 && "SELFTEST preview: defold preview result present");
 
             /* (a) every placement is admitted by the exact target mask */
-            const tp_format_descriptor *defold_exporter = tp_format_at(defold_idx);
+            const tp_format_descriptor *defold_exporter =
+                gui_project_format_at(defold_idx);
             int unsupported = 0;
             for (int i = 0; i < pv->sprite_count; i++) {
                 const uint8_t transform_bit = TP_EXPORT_TRANSFORM_BIT(pv->sprites[i].transform);

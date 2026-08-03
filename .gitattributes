@@ -1,7 +1,11 @@
 *.ntpacker_project text eol=lf
 *.golden text eol=lf
 *.expected.json text eol=lf
+format.json text eol=lf
+*.lua text eol=lf
+*.patch text eol=lf
 *.sh text eol=lf
+*.png binary
 
 # U-01 owner-scale bench assets (real Kenney CC0 sprites). Stored in Git LFS so
 # the base clone stays lean; the deterministic manifest below is plain text.
