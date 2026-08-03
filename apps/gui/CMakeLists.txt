@@ -33,6 +33,7 @@ if(WIN32)
 endif()
 
 add_executable(ntpacker-gui main.c gui_state.c gui_widgets.c gui_actions.c gui_actions_dialogs.c gui_actions_edits.c gui_actions_intents.c gui_actions_pack.c gui_actions_preview.c gui_actions_recovery.c gui_rows.c gui_selftest.c gui_startup.c gui_paths.c gui_log_file.c gui_crash.c gui_bootstrap.c gui_project.c gui_project_file.c gui_project_mutations.c gui_project_recovery.c gui_project_operations.c gui_edit_state.c gui_canvas.c gui_canvas_resources.c gui_pack.c gui_pack_jobs.c gui_pack_preview.c gui_view_settings.c gui_view_lists.c gui_view_canvas.c gui_view_chrome.c
+    "${CMAKE_SOURCE_DIR}/apps/common/app_format_catalog.c"
     "${CMAKE_SOURCE_DIR}/apps/common/nt_utf8_fs.c"
     "${CMAKE_SOURCE_DIR}/apps/common/app_scratch.c")
 if(WIN32)
@@ -179,6 +180,7 @@ tp_add_gui_test(NAME gui_paths
 tp_add_gui_test(NAME gui_shell_quote LIBS unity)
 
 set(_tp_gui_headless_sources
+    "${CMAKE_SOURCE_DIR}/apps/common/app_format_catalog.c"
     gui_state.c
     gui_actions.c
     gui_actions_dialogs.c
@@ -253,6 +255,7 @@ tp_add_gui_test(NAME gui_canonical_identity
 tp_add_gui_test(NAME gui_view
     SOURCES
         test_gui_view.c
+        "${CMAKE_SOURCE_DIR}/packer/tests/tp_format_catalog_test_seam.c"
         "${CMAKE_SOURCE_DIR}/packer/src/tp_scan.c"
         ${_tp_gui_headless_sources}
     LIBS ${_tp_gui_headless_libs}

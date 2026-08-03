@@ -508,7 +508,8 @@ static void intent_execute(const gui_intent *intent) {
             gui_actions__export();
             break;
         case GUI_INTENT_PREVIEW_TARGET:
-            gui_actions__preview_target_start(intent->payload.exporter_slot);
+            gui_actions__preview_target_start(
+                &intent->payload.preview_target);
             break;
     }
 }
@@ -641,11 +642,28 @@ void gui_request_remove_source(tp_id128 atlas_id, tp_id128 source_id,
     (void)gui_actions__intent_push(&intent);
 }
 
-void gui_request_preview_target(int exporter_slot) {
-    if (exporter_slot < 0) {
+void gui_request_preview_target_native(void) {
+    const gui_intent intent = {
+        .kind = GUI_INTENT_PREVIEW_TARGET,
+        .payload.preview_target = {
+            .kind = GUI_PREVIEW_TARGET_NATIVE,
+        },
+    };
+    (void)gui_actions__intent_push(&intent);
+}
+
+void gui_request_preview_target_format(const char *format_id) {
+    const tp_format_descriptor *format =
+        gui_project_format_find(format_id);
+    gui_preview_target target = {0};
+    if (!format ||
+        !gui_preview_target_make_format(
+            format->id, &target)) {
         return;
     }
-    const gui_intent intent = {.kind = GUI_INTENT_PREVIEW_TARGET,
-                               .payload.exporter_slot = exporter_slot};
+    const gui_intent intent = {
+        .kind = GUI_INTENT_PREVIEW_TARGET,
+        .payload.preview_target = target,
+    };
     (void)gui_actions__intent_push(&intent);
 }

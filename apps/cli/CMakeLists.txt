@@ -10,6 +10,7 @@ set(_ntpacker_sources main.c cli_exit.c cli_out.c cli_project.c cli_inspect.c cl
     cli_mutate_anim.c cli_mutate_target.c
     # Shared app scratch root (<user cache dir>/ntpacker/work) + the CRT-local
     # UTF-8 FS adapters its request-directory release uses.
+    "${CMAKE_SOURCE_DIR}/apps/common/app_format_catalog.c"
     "${CMAKE_SOURCE_DIR}/apps/common/app_scratch.c"
     "${CMAKE_SOURCE_DIR}/apps/common/nt_utf8_fs.c")
 if(WIN32)

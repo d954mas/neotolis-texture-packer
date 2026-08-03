@@ -1,11 +1,19 @@
 #ifndef NTPACKER_GUI_PROJECT_INTERNAL_H
 #define NTPACKER_GUI_PROJECT_INTERNAL_H
 
+#include "app_format_catalog.h"
 #include "gui_project_driver.h"
 
 /* Small active/candidate host plus presentation-only state. */
 typedef struct gui_project_state {
-    tp_format_catalog *format_catalog;
+    /* One process-host owner for the active generation and all startup failure
+     * context. Keeping the shared result whole makes its close operation the
+     * only lifecycle authority when that result grows. */
+    app_format_catalog formats;
+    /* Derived available-row projection for this exact retained generation. */
+    tp_format_catalog *format_projection_catalog;
+    const tp_format_descriptor **available_formats;
+    int available_format_count;
     tp_session *session;
     tp_session *candidate;
     const struct tp_session_view *view;
@@ -59,5 +67,6 @@ tp_status gui_project__advance_lifecycle(
 void gui_project__publish_view(
     const struct tp_session_view *view);
 void gui_project__reduce_view(void);
+void gui_project__clear_format_projection(void);
 
 #endif /* NTPACKER_GUI_PROJECT_INTERNAL_H */

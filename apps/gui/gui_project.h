@@ -371,6 +371,10 @@ tp_session *gui_project__test_session(void);
 #ifdef TP_ENABLE_TEST_SEAMS
 uint64_t gui_project__test_open_call_count(void);
 void gui_project__test_set_drain_grace_ms(int grace_ms);
+/* Replaces only the GUI host's retained immutable generation. Tests use this
+ * to exercise passive projection/reorder behavior without filesystem scan. */
+bool gui_project__test_set_format_catalog(
+    tp_format_catalog *catalog);
 #endif
 
 #ifdef __cplusplus

@@ -622,7 +622,8 @@ static void frame(void) {
         } else if (s_preview_active) {
             preview_stop();
             set_status("Closed animation preview.");
-        } else if (s_preview_target != 0) {
+        } else if (!gui_preview_target_is_native(
+                       &s_preview_target)) {
             preview_target_reset(); /* export-target preview escape hatch (also works when the selector folded away) */
             set_status("Preview: back to Native.");
         } else {

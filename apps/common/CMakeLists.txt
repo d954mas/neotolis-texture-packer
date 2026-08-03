@@ -1,5 +1,6 @@
 # apps/common: the small modules BOTH shipped clients need (UTF-8 process/FS
-# ingress, the shared product version header, the app scratch-root policy).
+# ingress, the shared product version header, app scratch-root policy, and the
+# process-owned format-catalog startup workflow).
 #
 # They are listed in each client's own source list rather than linked as a
 # library: nt_utf8_argv.c is Windows-only and several client binaries pin a
@@ -19,5 +20,29 @@ tp_add_test(NAME app_scratch
     LIBS ${_app_scratch_libs}
     INCLUDE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}"
     DEFINES _CRT_SECURE_NO_WARNINGS
+    SANITIZE
+    TIMEOUT 30)
+
+set(_app_format_catalog_test_root
+    "${CMAKE_CURRENT_BINARY_DIR}/app_format_catalog_test")
+set(_app_format_catalog_empty_root
+    "${_app_format_catalog_test_root}/empty")
+set(_app_format_catalog_missing_root
+    "${_app_format_catalog_test_root}/missing")
+set(_app_format_catalog_file_root
+    "${_app_format_catalog_test_root}/not-a-directory")
+file(REMOVE_RECURSE "${_app_format_catalog_test_root}")
+file(MAKE_DIRECTORY "${_app_format_catalog_empty_root}")
+file(WRITE "${_app_format_catalog_file_root}" "not a directory")
+tp_add_test(NAME app_format_catalog
+    SOURCES test_app_format_catalog.c app_format_catalog.c
+    LIBS tp_core unity
+    INCLUDE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}"
+    DEFINES
+        APP_FORMAT_CATALOG_EMPTY_ROOT="${_app_format_catalog_empty_root}"
+        APP_FORMAT_CATALOG_MISSING_ROOT="${_app_format_catalog_missing_root}"
+        APP_FORMAT_CATALOG_FILE_ROOT="${_app_format_catalog_file_root}"
+        APP_FORMAT_CATALOG_FIXTURE_ROOT="${CMAKE_SOURCE_DIR}/packer/tests/fixtures/format-packages"
+        _CRT_SECURE_NO_WARNINGS
     SANITIZE
     TIMEOUT 30)

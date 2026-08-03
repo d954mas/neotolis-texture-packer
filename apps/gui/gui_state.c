@@ -94,8 +94,39 @@ uint32_t gui_stable_entity_ui_id(const char *scope,
     return nt_ui_id(key);
 }
 
-/* --- export-target preview (EXP-PREVIEW): 0 = Native (default) --- */
-int s_preview_target;
+/* --- export-target preview (EXP-PREVIEW): stable-id intent, Native by default --- */
+gui_preview_target s_preview_target = {
+    .kind = GUI_PREVIEW_TARGET_NATIVE,
+};
+
+gui_preview_target gui_preview_target_make_native(void) {
+    return (gui_preview_target){
+        .kind = GUI_PREVIEW_TARGET_NATIVE,
+    };
+}
+
+bool gui_preview_target_make_format(const char *format_id,
+                                    gui_preview_target *out) {
+    if (!format_id || !out || format_id[0] == '\0') {
+        return false;
+    }
+    const size_t length = strlen(format_id);
+    if (length >= TP_EXPORTER_ID_MAX) {
+        return false;
+    }
+    gui_preview_target target = {
+        .kind = GUI_PREVIEW_TARGET_FORMAT,
+    };
+    memcpy(target.format_id, format_id, length + 1U);
+    *out = target;
+    return true;
+}
+
+bool gui_preview_target_is_native(const gui_preview_target *target) {
+    return !target ||
+           target->kind != GUI_PREVIEW_TARGET_FORMAT ||
+           target->format_id[0] == '\0';
+}
 
 /* --- animation preview player --- */
 bool s_preview_active;

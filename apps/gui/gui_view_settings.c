@@ -760,19 +760,38 @@ static void declare_region_settings(nt_ui_context_t *ctx,
  * drop to a dedicated row when narrow). `preview` must already be width-fit (combo_preview_fit). */
 static void declare_target_exporter_combo(nt_ui_context_t *ctx, uint32_t row_id,
                                           const gui_target_ref *target,
-                                          const char *const *exp_labels, int nlabels, int cur_exp, const char *preview) {
+                                          int format_count,
+                                          const char *current_format_id,
+                                          const char *preview) {
     bool open = tp_id128_eq(
         s_open_target_combo_id,
         target->target_id);
+    const uint32_t combo_id =
+        nt_ui_child_id(row_id, "exp");
     CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}, .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
-        if (nt_ui_combo_begin(ctx, NT_UI_DATA_LAYER(LAYER_IMG), LAYER_TEXT, nt_ui_child_id(row_id, "exp"), preview,
+        if (nt_ui_combo_begin(ctx, NT_UI_DATA_LAYER(LAYER_IMG), LAYER_TEXT, combo_id, preview,
                               &s_dd_style, &open)) {
-            for (int i = 0; i < nlabels; i++) {
-                if (nt_ui_combo_selectable(ctx, (uint32_t)i, exp_labels[i], i == cur_exp)) {
-                    const tp_format_descriptor *e = gui_project_format_at(i);
-                    if (e) {
-                        gui_edit_target_exporter(target, e->id);
-                    }
+            for (int i = 0; i < format_count; i++) {
+                const tp_format_descriptor *e =
+                    gui_project_format_at(i);
+                if (!e) {
+                    continue;
+                }
+                const char *label =
+                    (e->display_name && e->display_name[0])
+                        ? e->display_name
+                        : e->id;
+                const bool selected =
+                    current_format_id &&
+                    strcmp(e->id,
+                           current_format_id) == 0;
+                if (nt_ui_combo_selectable(
+                        ctx, nt_ui_child_id(
+                                 combo_id, e->id),
+                        label,
+                        selected)) {
+                    gui_edit_target_exporter(
+                        target, e->id);
                 }
             }
             nt_ui_combo_end(ctx);
@@ -807,14 +826,6 @@ static void declare_export_targets(nt_ui_context_t *ctx,
         }
     }
     const int ne = gui_project_format_count();
-    const char *exp_labels[24];
-    int nlabels = 0;
-    for (int i = 0; i < ne && nlabels < 24; i++) {
-        const tp_format_descriptor *e = gui_project_format_at(i);
-        exp_labels[nlabels++] = (e && e->display_name)
-                                   ? e->display_name
-                                   : (e ? e->id : "?");
-    }
     if (a->target_count == 0) {
         panel_note(ctx, "No export targets. Add one so this atlas exports files.");
     }
@@ -836,15 +847,8 @@ static void declare_export_targets(nt_ui_context_t *ctx,
             s_ctx_target_id = target.target_id;
             s_ctx_target_revision = target.expected_revision;
         }
-        /* find current exporter index for the combo selection */
-        int cur_exp = -1;
-        for (int i = 0; i < nlabels; i++) {
-            const tp_format_descriptor *e = gui_project_format_at(i);
-            if (e && strcmp(e->id, t->exporter_id) == 0) {
-                cur_exp = i;
-                break;
-            }
-        }
+        const tp_format_descriptor *current_format =
+            gui_project_format_find(t->exporter_id);
         CLAY({.id = {.id = row_id},
               .layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0)},
                          .padding = {Su(4), Su(4), Su(4), Su(4)},
@@ -855,7 +859,12 @@ static void declare_export_targets(nt_ui_context_t *ctx,
             /* row 1: enabled checkbox + exporter dropdown + remove. The dropdown value is width-fit, and on a
              * narrow panel it drops to its own row below (checkbox + combo + x can't share a narrow line). */
             char pvbuf[96];
-            combo_preview_fit((cur_exp >= 0) ? exp_labels[cur_exp] : t->exporter_id, pvbuf, sizeof pvbuf);
+            const char *current_label =
+                current_format && current_format->display_name &&
+                        current_format->display_name[0]
+                    ? current_format->display_name
+                    : t->exporter_id;
+            combo_preview_fit(current_label, pvbuf, sizeof pvbuf);
             const bool tgt_narrow = s_right_panel_w < S(210.0F);
             CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(BASE_ROW_H))}, .childGap = Su(6), .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
                 if (tp_checkbox(ctx, nt_ui_child_id(row_id, "en"), t->enabled, true)) {
@@ -863,7 +872,7 @@ static void declare_export_targets(nt_ui_context_t *ctx,
                 }
                 if (!tgt_narrow) {
                     declare_target_exporter_combo(ctx, row_id, &target,
-                                                  exp_labels, nlabels, cur_exp,
+                                                  ne, t->exporter_id,
                                                   pvbuf);
                 } else {
                     CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}}}) {} /* push x to the right */
@@ -878,7 +887,7 @@ static void declare_export_targets(nt_ui_context_t *ctx,
             if (tgt_narrow) {
                 CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(BASE_ROW_H))}, .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
                     declare_target_exporter_combo(ctx, row_id, &target,
-                                                  exp_labels, nlabels, cur_exp,
+                                                  ne, t->exporter_id,
                                                   pvbuf);
                 }
             }

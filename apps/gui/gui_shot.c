@@ -231,17 +231,8 @@ void gui_shot_tick(void) {
             gui_pack_preview_blocking(
                 gui_view_atlas_id(), s_shot_preview,
                 perr, sizeof perr)) {
-            int idx = -1;
-            for (int i = 0; i < gui_project_format_count(); i++) {
-                const tp_format_descriptor *e = gui_project_format_at(i);
-                if (e && strcmp(e->id, s_shot_preview) == 0) {
-                    idx = i;
-                    break;
-                }
-            }
-            if (idx >= 0) {
-                s_preview_target = idx + 1; /* 0 = Native; k = format k-1 */
-            }
+            (void)gui_preview_target_make_format(
+                s_shot_preview, &s_preview_target);
         } else {
             nt_log_error("SHOT: preview '%s' failed: %s", s_shot_preview, perr);
         }

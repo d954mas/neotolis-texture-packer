@@ -11,6 +11,7 @@
 #include "cli_cmds.h"
 #include "cli_exit.h"
 #include "cli_out.h"
+#include "app_format_catalog.h"
 #include "ntpacker_version.h"
 #if defined(_WIN32)
 #include "nt_utf8_argv.h"
@@ -558,36 +559,26 @@ static int ntpacker_dispatch_utf8(int argc, char **argv,
     return CLI_EXIT_USAGE;
 }
 
-static tp_format_catalog *cli_startup_format_catalog(void) {
-    char root[TP_IDENTITY_PATH_MAX];
-    tp_error error = {{0}};
-    if (tp_format_root_from_executable(root, sizeof root, &error) !=
-        TP_STATUS_OK) {
-        return tp_format_catalog_retain(tp_format_catalog_native());
-    }
-    tp_format_catalog_scan *scan = NULL;
-    tp_format_diagnostic_report *failure_diagnostics = NULL;
-    tp_status status = tp_format_catalog_scan_root(
-        root, &scan, &failure_diagnostics, &error);
-    tp_format_diagnostic_report_destroy(failure_diagnostics);
-    if (status != TP_STATUS_OK || !scan ||
-        tp_format_catalog_scan_compile_count(scan) != 0U) {
-        tp_format_catalog_scan_destroy(scan);
-        return tp_format_catalog_retain(tp_format_catalog_native());
-    }
-    tp_format_catalog *catalog = NULL;
-    status = tp_format_catalog_scan_finish_without_compile(
-        &scan, &catalog, &error);
-    tp_format_catalog_scan_destroy(scan);
-    return status == TP_STATUS_OK && catalog
-               ? catalog
-               : tp_format_catalog_retain(tp_format_catalog_native());
-}
-
 static int ntpacker_main_utf8(int argc, char **argv) {
-    tp_format_catalog *catalog = cli_startup_format_catalog();
-    const int result = ntpacker_dispatch_utf8(argc, argv, catalog);
-    tp_format_catalog_release(catalog);
+    app_format_catalog formats = {0};
+    tp_error error = {{0}};
+    const tp_status format_status =
+        app_format_catalog_open_startup(&formats, &error);
+    if (format_status != TP_STATUS_OK || !formats.catalog) {
+        const tp_status fallback_status =
+            format_status != TP_STATUS_OK
+                ? format_status
+                : tp_error_set(
+                      &error, TP_STATUS_INVALID_ARGUMENT,
+                      "format catalog startup returned no catalog");
+        app_format_catalog_close(&formats);
+        formats.state = APP_FORMAT_CATALOG_NATIVE_FALLBACK;
+        formats.catalog = tp_format_catalog_retain(tp_format_catalog_native());
+        formats.reason_status = fallback_status;
+        formats.reason = error;
+    }
+    const int result = ntpacker_dispatch_utf8(argc, argv, formats.catalog);
+    app_format_catalog_close(&formats);
     return result;
 }
 

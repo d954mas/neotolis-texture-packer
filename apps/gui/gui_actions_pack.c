@@ -178,8 +178,19 @@ void gui_actions__export(void) {
 // #region export-target preview (packet EXP-PREVIEW)
 /* Back to Native: drop the preview state + free gui_pack's preview slot. Idempotent. */
 void preview_target_reset(void) {
-    s_preview_target = 0;
+    s_preview_target = gui_preview_target_make_native();
     gui_pack_preview_clear();
+}
+
+const tp_format_descriptor *preview_target_format(void) {
+    if (gui_preview_target_is_native(
+            &s_preview_target) ||
+        s_preview_target.kind !=
+            GUI_PREVIEW_TARGET_FORMAT) {
+        return NULL;
+    }
+    return gui_project_format_find(
+        s_preview_target.format_id);
 }
 
 /* The result the canvas should BIND this frame: the export preview when one is selected, has landed, and
@@ -189,7 +200,8 @@ void preview_target_reset(void) {
 const tp_result *preview_target_result(void) {
     const tp_id128 atlas_id = gui_view_atlas_id();
     const tp_result *native = gui_pack_result(atlas_id);
-    if (s_preview_target == 0 || s_preview_active) {
+    if (gui_preview_target_is_native(&s_preview_target) ||
+        s_preview_active) {
         return native;
     }
     if (s_canvas_w < S(STRIP_PREVIEW_MIN_W)) {
@@ -200,7 +212,8 @@ const tp_result *preview_target_result(void) {
 }
 
 bool preview_target_result_is_export(void) {
-    if (s_preview_target == 0 || s_preview_active ||
+    if (gui_preview_target_is_native(&s_preview_target) ||
+        s_preview_active ||
         s_canvas_w < S(STRIP_PREVIEW_MIN_W)) {
         return false;
     }
@@ -214,14 +227,28 @@ uint64_t preview_target_result_version(void) {
                : gui_pack_result_version(atlas_id);
 }
 
-/* Starts the preview pack for a strip-selector pick. combo 0 (or a bad index) -> Native. */
-void gui_actions__preview_target_start(int combo_index) {
-    if (combo_index <= 0) {
+/* Starts the preview pack for a selector pick after ingress has copied its
+ * stable id. Catalog reordering between declaration and drain cannot retarget
+ * the request. */
+void gui_actions__preview_target_start(
+    const gui_preview_target *target) {
+    if (gui_preview_target_is_native(target)) {
         preview_target_reset();
         return;
     }
-    const tp_format_descriptor *e = gui_project_format_at(combo_index - 1);
+    if (target->kind != GUI_PREVIEW_TARGET_FORMAT) {
+        preview_target_reset();
+        return;
+    }
+    const tp_format_descriptor *e =
+        gui_project_format_find(target->format_id);
     if (!e) {
+        preview_target_reset();
+        return;
+    }
+    gui_preview_target active_target = {0};
+    if (!gui_preview_target_make_format(
+            e->id, &active_target)) {
         preview_target_reset();
         return;
     }
@@ -254,7 +281,7 @@ void gui_actions__preview_target_start(int combo_index) {
         GUI_JOB_REQUEST_PREVIEW, admitted,
         admitted ? "" : err);
     if (admitted) {
-        s_preview_target = combo_index;
+        s_preview_target = active_target;
         set_statusf_ex(STATUS_INFO, "Preview: %s\xE2\x80\xA6",
                        e->display_name ? e->display_name : e->id);
     } else {
@@ -266,8 +293,10 @@ void gui_actions__preview_target_start(int combo_index) {
 /* Per-frame reconciliation: a model edit since the preview packed makes it stale -> drop to Native (never
  * show a silently-wrong preview). Atlas switch / undo / redo / open / new drop it via reset_selection. */
 static void preview_target_sync(void) {
-    if (s_preview_target != 0 && !gui_pack_async_busy() &&
-        !gui_pack_preview_result(gui_view_atlas_id())) {
+    if (!gui_preview_target_is_native(&s_preview_target) &&
+        (!preview_target_format() ||
+         (!gui_pack_async_busy() &&
+          !gui_pack_preview_result(gui_view_atlas_id())))) {
         preview_target_reset();
     }
 }
@@ -379,7 +408,8 @@ static gui_pack_done poll_async(
                 set_status_ex(STATUS_WARNING,
                               "Preview inputs changed -- run Preview again.");
             } else if (
-                s_preview_target == 0 &&
+                gui_preview_target_is_native(
+                    &s_preview_target) &&
                 !tp_id128_eq(
                     info.atlas_id,
                     gui_view_atlas_id())) {
@@ -391,7 +421,7 @@ static gui_pack_done poll_async(
                 /* The degradation chip is width-gated (STRIP_CHIP_MIN_W) and drops on common window
                  * sizes, so the pill also carries the summary -- it is width-independent. */
                 const tp_format_descriptor *pe =
-                    gui_project_format_at(s_preview_target - 1);
+                    preview_target_format();
                 if (pe) {
                     char chip[96] = {0};
                     char tip[256] = {0};

@@ -120,11 +120,14 @@ writer produces `project_live`.
 Each CLI invocation owns one catalog derived from
 `<real-executable-directory>/formats/`. The native GUI host likewise owns one
 startup catalog and passes it into every replacement session. Both clients use
-the same executable-path resolver and fall back to the immortal native baseline
-when a candidate catalog is ineligible or still awaits the not-yet-implemented
-isolated Lua compiler. Build staging recreates the executable-relative root for
-both apps from one explicit production package manifest; that manifest is empty
-until the first runtime format ships.
+the same `apps/common` process-host workflow for executable-path resolution,
+scan admission, and native fallback. Its owned result keeps the active catalog,
+an explicit active/fallback/pending-compiler state, and any root-failure report;
+clients do not reconstruct or discard that policy independently. An ineligible
+catalog or one that still awaits the not-yet-implemented isolated Lua compiler
+uses the immortal native baseline. Build staging recreates the
+executable-relative root for both apps from one explicit production package
+manifest; that manifest is empty until the first runtime format ships.
 
 ## Native GUI
 

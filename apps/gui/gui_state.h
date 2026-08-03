@@ -15,6 +15,7 @@
 
 #include "tp_core/tp_id.h"
 #include "tp_core/tp_identity.h"
+#include "tp_core/tp_format.h"
 #include "tp_core/tp_srckey.h"
 
 #include "font/nt_font.h"        /* nt_font_t (s_font) */
@@ -99,12 +100,26 @@ uint32_t gui_stable_entity_ui_id(const char *scope,
                                  tp_id128 entity_id);
 
 /* --- export-target preview (packet EXP-PREVIEW): a view-only overlay that shows what a chosen exporter
- * would produce from the CURRENT settings, without touching the native session pack. `s_preview_target`
- * is the strip selector's choice: 0 = Native (session pack, default); k >= 1 selects a registered format
- * (k-1) via gui_project_format_at. The actual clamped result lives in gui_pack's preview slot; these fields track
- * intent + when to drop it. Shared with the canvas view (selector + chip), actions (start/reset/bind),
- * the selftest and the shot seam, so they can never be view-local. --- */
-extern int s_preview_target;       /* 0 = Native; else 1 + gui_project_format_at index */
+ * would produce from the CURRENT settings, without touching the native session pack. The intent is
+ * retained by stable format id; catalog positions exist only while a selector is being declared. The
+ * actual clamped result lives in gui_pack's preview slot. Shared with the canvas view, actions, selftest,
+ * and shot seam, so it can never be view-local. --- */
+typedef enum gui_preview_target_kind {
+    GUI_PREVIEW_TARGET_NATIVE = 0,
+    GUI_PREVIEW_TARGET_FORMAT,
+} gui_preview_target_kind;
+
+typedef struct gui_preview_target {
+    gui_preview_target_kind kind;
+    char format_id[TP_EXPORTER_ID_MAX];
+} gui_preview_target;
+
+gui_preview_target gui_preview_target_make_native(void);
+bool gui_preview_target_make_format(const char *format_id,
+                                    gui_preview_target *out);
+bool gui_preview_target_is_native(const gui_preview_target *target);
+
+extern gui_preview_target s_preview_target;
 
 /* Animation preview player (canvas ANIM mode). s_preview_time is the master clock; the frame index is
  * a pure function of it (gui_canvas_anim_frame_at), so play/pause/step all reduce to moving the clock. */

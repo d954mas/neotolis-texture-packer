@@ -3667,7 +3667,12 @@ void selftest_pre_frame(void) {
                       native2->page_count == native_pc && "SELFTEST preview: native session result untouched");
 
             /* (c) preview binds while active; back to Native re-binds the session result with no repack */
-            s_preview_target = defold_idx + 1;
+            const bool preview_target_made =
+                gui_preview_target_make_format(
+                    defold_exporter->id,
+                    &s_preview_target);
+            NT_ASSERT(preview_target_made);
+            (void)preview_target_made;
             s_canvas_w = 700.0F; /* single-row tier (>= STRIP_SINGLE_MIN_W) so the preview binds, not compact */
             const tp_result *shown_pv = preview_target_result();
             NT_ASSERT((const void *)shown_pv == (const void *)pv && "SELFTEST preview: preview bound while active");
