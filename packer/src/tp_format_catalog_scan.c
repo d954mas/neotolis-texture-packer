@@ -16,7 +16,9 @@ struct tp_format_catalog_scan {
     char *root;
     tp_format_catalog_owned_row *rows;
     size_t row_count;
+    size_t row_capacity;
     size_t compile_count;
+    size_t admitted_bytes;
     tp_format_diagnostic_report *root_diagnostics;
     bool root_missing;
     bool limit_fail_closed;
@@ -277,8 +279,150 @@ static void make_limit_fail_closed(tp_format_catalog_scan *scan) {
     free(scan->rows);
     scan->rows = NULL;
     scan->row_count = 0U;
+    scan->row_capacity = 0U;
     scan->compile_count = 0U;
+    scan->admitted_bytes = 0U;
     scan->limit_fail_closed = true;
+}
+
+static tp_status scan_append_candidate(
+    tp_format_catalog_scan *scan, tp_format_discovered_candidate *candidate,
+    tp_format_catalog_owned_row **out_row, tp_error *error) {
+    *out_row = NULL;
+    if (scan->row_count >= TP_FORMAT_PACKAGE_MAX) {
+        return tp_error_set(error, TP_STATUS_OUT_OF_BOUNDS,
+                            "format scan row count exceeds its bound");
+    }
+    if (scan->row_count == scan->row_capacity) {
+        size_t new_capacity = scan->row_capacity == 0U
+                                  ? 8U
+                                  : scan->row_capacity * 2U;
+        if (new_capacity > TP_FORMAT_PACKAGE_MAX) {
+            new_capacity = TP_FORMAT_PACKAGE_MAX;
+        }
+        tp_format_catalog_owned_row *resized =
+            (tp_format_catalog_owned_row *)realloc(
+                scan->rows, new_capacity * sizeof *resized);
+        if (!resized) {
+            return tp_error_set(error, TP_STATUS_OOM,
+                                "format scan row allocation failed");
+        }
+        scan->rows = resized;
+        scan->row_capacity = new_capacity;
+    }
+
+    tp_format_catalog_owned_row *row = &scan->rows[scan->row_count++];
+    memset(row, 0, sizeof *row);
+    row->implementation = TP_FORMAT_IMPLEMENTATION_LUA;
+    row->key = candidate->key;
+    candidate->key = NULL;
+    row->package_path = candidate->package_path;
+    candidate->package_path = NULL;
+    row->descriptor_bytes = candidate->descriptor_bytes;
+    row->descriptor_byte_count = candidate->descriptor_byte_count;
+    candidate->descriptor_bytes = NULL;
+    candidate->descriptor_byte_count = 0U;
+    row->source_bytes = candidate->source_bytes;
+    row->source_byte_count = candidate->source_byte_count;
+    candidate->source_bytes = NULL;
+    candidate->source_byte_count = 0U;
+    *out_row = row;
+    return TP_STATUS_OK;
+}
+
+static tp_status scan_visit_candidate(
+    void *context, tp_format_discovered_candidate *candidate,
+    tp_error *error) {
+    tp_format_catalog_scan *scan = (tp_format_catalog_scan *)context;
+    if (scan->limit_fail_closed) {
+        return TP_STATUS_OK;
+    }
+
+    tp_format_catalog_owned_row *row = NULL;
+    tp_status status = scan_append_candidate(scan, candidate, &row, error);
+    if (status != TP_STATUS_OK) {
+        return status;
+    }
+
+    if (candidate->fault_code != 0) {
+        char diagnostic_path[TP_FORMAT_DIAGNOSTIC_PATH_MAX_BYTES + 1U];
+        const char *logical_path = NULL;
+        status = logical_diagnostic_path(
+            row->package_path, candidate->fault_file, diagnostic_path,
+            &logical_path, error);
+        if (status != TP_STATUS_OK) {
+            return status;
+        }
+        return report_one(&row->diagnostics, candidate->fault_code, NULL,
+                          logical_path, 0U, 0U, candidate->fault_message,
+                          error);
+    }
+
+    tp_format_descriptor_parse_result parsed;
+    status = tp_format_descriptor_v1_parse(
+        row->descriptor_bytes, row->descriptor_byte_count, &parsed, error);
+    if (status != TP_STATUS_OK) {
+        return status;
+    }
+    if (parsed.outcome == TP_FORMAT_DESCRIPTOR_REJECTED) {
+        char diagnostic_path[TP_FORMAT_DIAGNOSTIC_PATH_MAX_BYTES + 1U];
+        const char *logical_path = NULL;
+        status = logical_diagnostic_path(
+            row->package_path, TP_FORMAT_DISCOVERY_FAULT_DESCRIPTOR,
+            diagnostic_path, &logical_path, error);
+        if (status == TP_STATUS_OK) {
+            status = report_one(&row->diagnostics, parsed.rejection_code,
+                                NULL, logical_path, parsed.line,
+                                parsed.column, parsed.message, error);
+        }
+        free(row->descriptor_bytes);
+        row->descriptor_bytes = NULL;
+        row->descriptor_byte_count = 0U;
+        free(row->source_bytes);
+        row->source_bytes = NULL;
+        row->source_byte_count = 0U;
+        return status;
+    }
+    row->owned_descriptor = parsed.owned_descriptor;
+
+    char source_message[TP_FORMAT_DIAGNOSTIC_MESSAGE_MAX_BYTES + 1U] = {0};
+    const tp_format_diagnostic_code source_code = source_admission(
+        row->source_bytes, row->source_byte_count, source_message,
+        sizeof source_message);
+    if (source_code != 0) {
+        char diagnostic_path[TP_FORMAT_DIAGNOSTIC_PATH_MAX_BYTES + 1U];
+        const char *logical_path = NULL;
+        status = logical_diagnostic_path(
+            row->package_path, TP_FORMAT_DISCOVERY_FAULT_SOURCE,
+            diagnostic_path, &logical_path, error);
+        if (status == TP_STATUS_OK) {
+            status = report_one(
+                &row->diagnostics, source_code,
+                tp_format_owned_descriptor_view(row->owned_descriptor)->id,
+                logical_path, 0U, 0U, source_message, error);
+        }
+        free(row->descriptor_bytes);
+        row->descriptor_bytes = NULL;
+        row->descriptor_byte_count = 0U;
+        free(row->source_bytes);
+        row->source_bytes = NULL;
+        row->source_byte_count = 0U;
+        return status;
+    }
+
+    if (row->descriptor_byte_count >
+            TP_FORMAT_CATALOG_PACKAGE_BYTES_MAX - scan->admitted_bytes ||
+        row->source_byte_count >
+            TP_FORMAT_CATALOG_PACKAGE_BYTES_MAX - scan->admitted_bytes -
+                row->descriptor_byte_count) {
+        make_limit_fail_closed(scan);
+        return TP_STATUS_OK;
+    }
+    scan->admitted_bytes +=
+        row->descriptor_byte_count + row->source_byte_count;
+    package_fingerprint(row, row->fingerprint);
+    row->pending_compile = true;
+    return TP_STATUS_OK;
 }
 
 tp_status tp_format_catalog_scan_root(
@@ -293,34 +437,43 @@ tp_status tp_format_catalog_scan_root(
         *out_failure_diagnostics = NULL;
     }
 
+    tp_format_catalog_scan *scan =
+        (tp_format_catalog_scan *)calloc(1, sizeof *scan);
+    if (!scan) {
+        return tp_error_set(error, TP_STATUS_OOM,
+                            "format scan allocation failed");
+    }
+
     tp_format_discovery_result discovered;
     tp_format_discovery_failure failure;
     memset(&discovered, 0, sizeof discovered);
     memset(&failure, 0, sizeof failure);
     const tp_status discovery_status = tp_format_discovery_read_root(
-        explicit_root, &discovered, &failure, error);
+        explicit_root, scan_visit_candidate, scan, &discovered, &failure,
+        error);
     if (discovery_status != TP_STATUS_OK) {
         best_effort_failure_report(&failure, out_failure_diagnostics);
+        tp_format_discovery_result_destroy(&discovered);
+        tp_format_catalog_scan_destroy(scan);
         return discovery_status;
     }
 
-    tp_format_catalog_scan *scan =
-        (tp_format_catalog_scan *)calloc(1, sizeof *scan);
-    if (!scan) {
-        tp_format_discovery_result_destroy(&discovered);
-        return tp_error_set(error, TP_STATUS_OOM,
-                            "format scan allocation failed");
-    }
     scan->root = discovered.root;
     discovered.root = NULL;
     scan->root_missing = discovered.root_missing;
-    scan->limit_fail_closed = discovered.limit_fail_closed;
+    if (discovered.limit_fail_closed) {
+        if (!scan->limit_fail_closed) {
+            make_limit_fail_closed(scan);
+        }
+    }
     if (scan->limit_fail_closed) {
-        tp_status status = report_one(
+        const char *message =
+            discovered.limit_fail_closed
+                ? "format discovery exceeded a hard catalog limit; using native formats only"
+                : "admitted format package bytes exceed the catalog limit; using native formats only";
+        const tp_status status = report_one(
             &scan->root_diagnostics, TP_FORMAT_DIAGNOSTIC_CATALOG_LIMIT,
-            NULL, "formats", 0U, 0U,
-            "format discovery exceeded a hard catalog limit; using native formats only",
-            error);
+            NULL, "formats", 0U, 0U, message, error);
         tp_format_discovery_result_destroy(&discovered);
         if (status != TP_STATUS_OK) {
             tp_format_catalog_scan_destroy(scan);
@@ -328,152 +481,6 @@ tp_status tp_format_catalog_scan_root(
         }
         *out_scan = scan;
         return TP_STATUS_OK;
-    }
-
-    if (discovered.candidate_count > 0U) {
-        scan->rows = (tp_format_catalog_owned_row *)calloc(
-            discovered.candidate_count, sizeof *scan->rows);
-        if (!scan->rows) {
-            tp_format_discovery_result_destroy(&discovered);
-            tp_format_catalog_scan_destroy(scan);
-            return tp_error_set(error, TP_STATUS_OOM,
-                                "format scan row allocation failed");
-        }
-    }
-    scan->row_count = discovered.candidate_count;
-    size_t admitted_bytes = 0U;
-    for (size_t i = 0U; i < discovered.candidate_count; ++i) {
-        tp_format_discovered_candidate *candidate =
-            &discovered.candidates[i];
-        tp_format_catalog_owned_row *row = &scan->rows[i];
-        row->implementation = TP_FORMAT_IMPLEMENTATION_LUA;
-        row->key = candidate->key;
-        candidate->key = NULL;
-        row->package_path = candidate->package_path;
-        candidate->package_path = NULL;
-        row->descriptor_bytes = candidate->descriptor_bytes;
-        row->descriptor_byte_count = candidate->descriptor_byte_count;
-        candidate->descriptor_bytes = NULL;
-        candidate->descriptor_byte_count = 0U;
-        row->source_bytes = candidate->source_bytes;
-        row->source_byte_count = candidate->source_byte_count;
-        candidate->source_bytes = NULL;
-        candidate->source_byte_count = 0U;
-
-        if (candidate->fault_code != 0) {
-            char diagnostic_path[TP_FORMAT_DIAGNOSTIC_PATH_MAX_BYTES + 1U];
-            const char *logical_path = NULL;
-            tp_status status = logical_diagnostic_path(
-                row->package_path, candidate->fault_file, diagnostic_path,
-                &logical_path, error);
-            if (status != TP_STATUS_OK) {
-                tp_format_discovery_result_destroy(&discovered);
-                tp_format_catalog_scan_destroy(scan);
-                return status;
-            }
-            status = report_one(
-                &row->diagnostics, candidate->fault_code, NULL,
-                logical_path, 0U, 0U, candidate->fault_message, error);
-            if (status != TP_STATUS_OK) {
-                tp_format_discovery_result_destroy(&discovered);
-                tp_format_catalog_scan_destroy(scan);
-                return status;
-            }
-            continue;
-        }
-
-        tp_format_descriptor_parse_result parsed;
-        tp_status status = tp_format_descriptor_v1_parse(
-            row->descriptor_bytes, row->descriptor_byte_count, &parsed, error);
-        if (status != TP_STATUS_OK) {
-            tp_format_discovery_result_destroy(&discovered);
-            tp_format_catalog_scan_destroy(scan);
-            return status;
-        }
-        if (parsed.outcome == TP_FORMAT_DESCRIPTOR_REJECTED) {
-            char diagnostic_path[TP_FORMAT_DIAGNOSTIC_PATH_MAX_BYTES + 1U];
-            const char *logical_path = NULL;
-            status = logical_diagnostic_path(
-                row->package_path, TP_FORMAT_DISCOVERY_FAULT_DESCRIPTOR,
-                diagnostic_path, &logical_path, error);
-            if (status != TP_STATUS_OK) {
-                tp_format_discovery_result_destroy(&discovered);
-                tp_format_catalog_scan_destroy(scan);
-                return status;
-            }
-            status = report_one(
-                &row->diagnostics, parsed.rejection_code, NULL,
-                logical_path, parsed.line, parsed.column, parsed.message,
-                error);
-            free(row->descriptor_bytes);
-            row->descriptor_bytes = NULL;
-            row->descriptor_byte_count = 0U;
-            free(row->source_bytes);
-            row->source_bytes = NULL;
-            row->source_byte_count = 0U;
-            if (status != TP_STATUS_OK) {
-                tp_format_discovery_result_destroy(&discovered);
-                tp_format_catalog_scan_destroy(scan);
-                return status;
-            }
-            continue;
-        }
-        row->owned_descriptor = parsed.owned_descriptor;
-
-        char source_message[TP_FORMAT_DIAGNOSTIC_MESSAGE_MAX_BYTES + 1U] = {0};
-        const tp_format_diagnostic_code source_code = source_admission(
-            row->source_bytes, row->source_byte_count, source_message,
-            sizeof source_message);
-        if (source_code != 0) {
-            char diagnostic_path[TP_FORMAT_DIAGNOSTIC_PATH_MAX_BYTES + 1U];
-            const char *logical_path = NULL;
-            status = logical_diagnostic_path(
-                row->package_path, TP_FORMAT_DISCOVERY_FAULT_SOURCE,
-                diagnostic_path, &logical_path, error);
-            if (status != TP_STATUS_OK) {
-                tp_format_discovery_result_destroy(&discovered);
-                tp_format_catalog_scan_destroy(scan);
-                return status;
-            }
-            status = report_one(
-                &row->diagnostics, source_code,
-                tp_format_owned_descriptor_view(row->owned_descriptor)->id,
-                logical_path, 0U, 0U, source_message, error);
-            free(row->descriptor_bytes);
-            row->descriptor_bytes = NULL;
-            row->descriptor_byte_count = 0U;
-            free(row->source_bytes);
-            row->source_bytes = NULL;
-            row->source_byte_count = 0U;
-            if (status != TP_STATUS_OK) {
-                tp_format_discovery_result_destroy(&discovered);
-                tp_format_catalog_scan_destroy(scan);
-                return status;
-            }
-            continue;
-        }
-        if (row->descriptor_byte_count >
-                TP_FORMAT_CATALOG_PACKAGE_BYTES_MAX - admitted_bytes ||
-            row->source_byte_count >
-                TP_FORMAT_CATALOG_PACKAGE_BYTES_MAX - admitted_bytes -
-                    row->descriptor_byte_count) {
-            make_limit_fail_closed(scan);
-            status = report_one(
-                &scan->root_diagnostics,
-                TP_FORMAT_DIAGNOSTIC_CATALOG_LIMIT, NULL, "formats", 0U, 0U,
-                "admitted format package bytes exceed the catalog limit; using native formats only",
-                error);
-            tp_format_discovery_result_destroy(&discovered);
-            if (status != TP_STATUS_OK) {
-                tp_format_catalog_scan_destroy(scan);
-                return status;
-            }
-            *out_scan = scan;
-            return TP_STATUS_OK;
-        }
-        admitted_bytes += row->descriptor_byte_count + row->source_byte_count;
-        package_fingerprint(row, row->fingerprint);
-        row->pending_compile = true;
     }
     tp_format_discovery_result_destroy(&discovered);
 

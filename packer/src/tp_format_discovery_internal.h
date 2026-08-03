@@ -26,7 +26,6 @@ typedef struct tp_format_discovered_candidate {
 
 typedef struct tp_format_discovery_result {
     char *root;
-    tp_format_discovered_candidate *candidates;
     size_t candidate_count;
     bool root_missing;
     bool limit_fail_closed;
@@ -37,14 +36,25 @@ typedef struct tp_format_discovery_failure {
     char message[TP_FORMAT_DIAGNOSTIC_MESSAGE_MAX_BYTES + 1U];
 } tp_format_discovery_failure;
 
+/* Called synchronously after one candidate's exact bytes are snapshotted and
+ * before discovery reads the next candidate. The visitor may retain pointer
+ * members by moving them out and setting them to NULL; discovery destroys all
+ * members left in candidate after the call. */
+typedef tp_status (*tp_format_discovery_candidate_visitor)(
+    void *context, tp_format_discovered_candidate *candidate,
+    tp_error *error);
+
 /* Platform implementation. Root is explicit UTF-8 and is never derived from
  * CWD/PATH/argv. A missing root and a fail-closed limit are successful complete
  * results. Root identity/enumeration/OOM faults return non-OK, set failure, and
  * leave out empty/ineligible. */
 tp_status tp_format_discovery_read_root(
-    const char *root, tp_format_discovery_result *out,
+    const char *root, tp_format_discovery_candidate_visitor visit_candidate,
+    void *visit_context, tp_format_discovery_result *out,
     tp_format_discovery_failure *failure, tp_error *error);
 
+void tp_format_discovered_candidate_destroy(
+    tp_format_discovered_candidate *candidate);
 void tp_format_discovery_result_destroy(tp_format_discovery_result *result);
 
 #endif /* TP_CORE_SRC_TP_FORMAT_DISCOVERY_INTERNAL_H */

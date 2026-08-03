@@ -281,6 +281,31 @@ static void test_package_limit_fails_closed_to_native_only(void) {
     tp_fs_remove_tree(root);
 }
 
+static void test_root_entry_limit_counts_non_directory_entries(void) {
+    char root[TP_FORMAT_DIAGNOSTIC_PATH_MAX_BYTES + 1U];
+    char name[32];
+    reset_fixture_directory(root, sizeof root, "format-root-entry-limit");
+
+    for (size_t i = 0U; i <= TP_FORMAT_ROOT_ENTRY_MAX; ++i) {
+        const int written = snprintf(name, sizeof name, "file%04zu.txt", i);
+        TEST_ASSERT_GREATER_THAN_INT(0, written);
+        TEST_ASSERT_LESS_THAN_size_t(sizeof name, (size_t)written);
+        write_child(root, name, "x", 1U);
+    }
+
+    tp_format_catalog *catalog = scan_broken_only_root(root);
+    TEST_ASSERT_TRUE(tp_format_catalog_limit_fail_closed(catalog));
+    TEST_ASSERT_EQUAL_size_t(
+        tp_format_catalog_row_count(tp_format_catalog_native()),
+        tp_format_catalog_row_count(catalog));
+    TEST_ASSERT_TRUE(report_has_code(
+        tp_format_catalog_root_diagnostics(catalog),
+        TP_FORMAT_DIAGNOSTIC_CATALOG_LIMIT));
+
+    tp_format_catalog_release(catalog);
+    tp_fs_remove_tree(root);
+}
+
 static void test_rejected_package_bytes_do_not_consume_admitted_limit(void) {
     static const char descriptor[] = "{}";
     const size_t package_count =
@@ -320,6 +345,60 @@ static void test_rejected_package_bytes_do_not_consume_admitted_limit(void) {
         tp_format_catalog_row_count(catalog));
     TEST_ASSERT_TRUE(catalog_row_has_code(
         catalog, "pkg000", TP_FORMAT_DIAGNOSTIC_DESCRIPTOR_SCHEMA));
+
+    tp_format_catalog_release(catalog);
+    tp_fs_remove_tree(root);
+}
+
+static void test_valid_package_bytes_over_limit_fail_closed(void) {
+    static const char valid_source_prefix[] = "return function() end\n";
+    const size_t package_count =
+        TP_FORMAT_CATALOG_PACKAGE_BYTES_MAX / TP_FORMAT_SOURCE_MAX_BYTES + 1U;
+    TEST_ASSERT_LESS_OR_EQUAL_size_t(TP_FORMAT_PACKAGE_MAX, package_count);
+
+    unsigned char *source =
+        (unsigned char *)malloc(TP_FORMAT_SOURCE_MAX_BYTES);
+    TEST_ASSERT_NOT_NULL(source);
+    memset(source, ' ', TP_FORMAT_SOURCE_MAX_BYTES);
+    memcpy(source, valid_source_prefix, sizeof valid_source_prefix - 1U);
+
+    char root[TP_FORMAT_DIAGNOSTIC_PATH_MAX_BYTES + 1U];
+    char package[TP_FORMAT_DIAGNOSTIC_PATH_MAX_BYTES + 1U];
+    char name[32];
+    char descriptor[512];
+    reset_fixture_directory(root, sizeof root, "format-valid-byte-budget");
+    for (size_t i = 0U; i < package_count; ++i) {
+        const int name_written = snprintf(name, sizeof name, "pkg%03zu", i);
+        TEST_ASSERT_GREATER_THAN_INT(0, name_written);
+        TEST_ASSERT_LESS_THAN_size_t(sizeof name, (size_t)name_written);
+        const int descriptor_written = snprintf(
+            descriptor, sizeof descriptor,
+            "{\"api_version\":1,\"id\":\"overflow-%03zu\","
+            "\"display_name\":\"Overflow %03zu\",\"capabilities\":{"
+            "\"transforms\":[\"identity\"],\"polygons\":false,"
+            "\"pivot\":false,\"slice9\":false,\"multipage\":false,"
+            "\"aliases\":false,\"animations\":false},\"outputs\":[{"
+            "\"id\":\"metadata\",\"suffix\":\".txt\"}]}",
+            i, i);
+        TEST_ASSERT_GREATER_THAN_INT(0, descriptor_written);
+        TEST_ASSERT_LESS_THAN_size_t(sizeof descriptor,
+                                     (size_t)descriptor_written);
+        make_package_directory(package, sizeof package, root, name);
+        write_child(package, "format.json", descriptor,
+                    (size_t)descriptor_written);
+        write_child(package, "export.lua", source,
+                    TP_FORMAT_SOURCE_MAX_BYTES);
+    }
+    free(source);
+
+    tp_format_catalog *catalog = scan_broken_only_root(root);
+    TEST_ASSERT_TRUE(tp_format_catalog_limit_fail_closed(catalog));
+    TEST_ASSERT_EQUAL_size_t(
+        tp_format_catalog_row_count(tp_format_catalog_native()),
+        tp_format_catalog_row_count(catalog));
+    TEST_ASSERT_TRUE(report_has_code(
+        tp_format_catalog_root_diagnostics(catalog),
+        TP_FORMAT_DIAGNOSTIC_CATALOG_LIMIT));
 
     tp_format_catalog_release(catalog);
     tp_fs_remove_tree(root);
@@ -782,7 +861,9 @@ int main(int argc, char **argv) {
     RUN_TEST(test_broken_package_shapes_become_unavailable_rows);
     RUN_TEST(test_oversized_descriptor_becomes_unavailable);
     RUN_TEST(test_package_limit_fails_closed_to_native_only);
+    RUN_TEST(test_root_entry_limit_counts_non_directory_entries);
     RUN_TEST(test_rejected_package_bytes_do_not_consume_admitted_limit);
+    RUN_TEST(test_valid_package_bytes_over_limit_fail_closed);
 #ifdef _WIN32
     RUN_TEST(test_win32_root_scan_requires_stable_directory_identity);
     RUN_TEST(test_win32_package_scan_requires_stable_directory_identity);

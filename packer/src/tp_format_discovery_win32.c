@@ -112,17 +112,6 @@ static tp_status format_root_failure(
     return format_error_set(error, status, root, native_code, message);
 }
 
-static void format_candidate_destroy(tp_format_discovered_candidate *candidate) {
-    if (!candidate) {
-        return;
-    }
-    free(candidate->key);
-    free(candidate->package_path);
-    free(candidate->descriptor_bytes);
-    free(candidate->source_bytes);
-    memset(candidate, 0, sizeof *candidate);
-}
-
 static void format_candidate_set_fault(
     tp_format_discovered_candidate *candidate,
     tp_format_diagnostic_code code, const char *message) {
@@ -478,13 +467,13 @@ static tp_status candidate_initialize(
         snprintf(logical, sizeof logical, "formats/%s", portable);
     if (!candidate->key || logical_length < 0 ||
         (size_t)logical_length >= sizeof logical) {
-        format_candidate_destroy(candidate);
+        tp_format_discovered_candidate_destroy(candidate);
         return tp_error_set(error, TP_STATUS_OOM,
                             "package row allocation failed");
     }
     candidate->package_path = format_string_duplicate(logical);
     if (!candidate->package_path) {
-        format_candidate_destroy(candidate);
+        tp_format_discovered_candidate_destroy(candidate);
         return tp_error_set(error, TP_STATUS_OOM,
                             "package logical-path allocation failed");
     }
@@ -492,7 +481,7 @@ static tp_status candidate_initialize(
     wchar_t *wide_name =
         (wchar_t *)malloc((entry->name_code_units + 1U) * sizeof *wide_name);
     if (!wide_name) {
-        format_candidate_destroy(candidate);
+        tp_format_discovered_candidate_destroy(candidate);
         return tp_error_set(error, TP_STATUS_OOM,
                             "package UTF-16 name allocation failed");
     }
@@ -965,36 +954,9 @@ cleanup:
     return TP_STATUS_OK;
 }
 
-static tp_status append_candidate(tp_format_discovery_result *result,
-                                  tp_format_discovered_candidate *candidate,
-                                  tp_error *error) {
-    const size_t new_count = result->candidate_count + 1U;
-    tp_format_discovered_candidate *resized =
-        (tp_format_discovered_candidate *)realloc(
-            result->candidates, new_count * sizeof *resized);
-    if (!resized) {
-        return tp_error_set(error, TP_STATUS_OOM,
-                            "format candidate array allocation failed");
-    }
-    result->candidates = resized;
-    result->candidates[result->candidate_count] = *candidate;
-    result->candidate_count = new_count;
-    memset(candidate, 0, sizeof *candidate);
-    return TP_STATUS_OK;
-}
-
-static void make_limit_fail_closed(tp_format_discovery_result *result) {
-    for (size_t i = 0U; i < result->candidate_count; ++i) {
-        format_candidate_destroy(&result->candidates[i]);
-    }
-    free(result->candidates);
-    result->candidates = NULL;
-    result->candidate_count = 0U;
-    result->limit_fail_closed = true;
-}
-
 tp_status tp_format_discovery_read_root(
-    const char *root, tp_format_discovery_result *out,
+    const char *root, tp_format_discovery_candidate_visitor visit_candidate,
+    void *visit_context, tp_format_discovery_result *out,
     tp_format_discovery_failure *failure, tp_error *error) {
     if (out) {
         memset(out, 0, sizeof *out);
@@ -1002,13 +964,15 @@ tp_status tp_format_discovery_read_root(
     if (failure) {
         memset(failure, 0, sizeof *failure);
     }
-    if (!root || !out || !failure) {
+    if (!root || !visit_candidate || !out || !failure) {
         if (failure) {
-            format_failure_set(failure, TP_FORMAT_DIAGNOSTIC_ROOT_IO,
-                               "format discovery requires root and outputs");
+            format_failure_set(
+                failure, TP_FORMAT_DIAGNOSTIC_ROOT_IO,
+                "format discovery requires root, visitor, and outputs");
         }
-        return tp_error_set(error, TP_STATUS_INVALID_ARGUMENT,
-                            "format discovery requires root and outputs");
+        return tp_error_set(
+            error, TP_STATUS_INVALID_ARGUMENT,
+            "format discovery requires root, visitor, and outputs");
     }
 
     wchar_t *root_wide = NULL;
@@ -1125,14 +1089,14 @@ tp_status tp_format_discovery_read_root(
         }
         root_entry_count++;
         if (root_entry_count > TP_FORMAT_ROOT_ENTRY_MAX) {
-            make_limit_fail_closed(out);
+            out->limit_fail_closed = true;
             break;
         }
         if ((entry.attributes & FILE_ATTRIBUTE_DIRECTORY) == 0U) {
             continue;
         }
         if (out->candidate_count >= TP_FORMAT_PACKAGE_MAX) {
-            make_limit_fail_closed(out);
+            out->limit_fail_closed = true;
             break;
         }
 
@@ -1155,7 +1119,7 @@ tp_status tp_format_discovery_read_root(
                                   &candidate, error);
             free(package_name);
             if (status != TP_STATUS_OK) {
-                format_candidate_destroy(&candidate);
+                tp_format_discovered_candidate_destroy(&candidate);
                 free(root_final_path);
                 (void)CloseHandle(root_handle);
                 free(root_wide);
@@ -1165,17 +1129,15 @@ tp_status tp_format_discovery_read_root(
                     error);
             }
         }
-
-        status = append_candidate(out, &candidate, error);
+        out->candidate_count++;
+        status = visit_candidate(visit_context, &candidate, error);
+        tp_format_discovered_candidate_destroy(&candidate);
         if (status != TP_STATUS_OK) {
-            format_candidate_destroy(&candidate);
             free(root_final_path);
             (void)CloseHandle(root_handle);
             free(root_wide);
-            return format_root_failure(
-                out, failure, TP_FORMAT_DIAGNOSTIC_ROOT_IO, status, root,
-                ERROR_SUCCESS, "format candidate array allocation failed",
-                error);
+            tp_format_discovery_result_destroy(out);
+            return status;
         }
     }
 

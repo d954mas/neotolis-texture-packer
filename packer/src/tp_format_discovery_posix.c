@@ -71,30 +71,9 @@ static char *logical_package_path(const char *name) {
     return path;
 }
 
-static tp_status append_candidate(tp_format_discovery_result *result,
-                                  const char *name, bool portable_name,
-                                  tp_format_discovered_candidate **out,
-                                  tp_error *error) {
-    *out = NULL;
-    if (result->candidate_count >= TP_FORMAT_PACKAGE_MAX) {
-        result->limit_fail_closed = true;
-        return TP_STATUS_OK;
-    }
-    if (result->candidate_count == SIZE_MAX / sizeof *result->candidates) {
-        return tp_error_set(error, TP_STATUS_OUT_OF_BOUNDS,
-                            "format candidate array overflow");
-    }
-    tp_format_discovered_candidate *grown =
-        (tp_format_discovered_candidate *)realloc(
-            result->candidates,
-            (result->candidate_count + 1U) * sizeof *grown);
-    if (!grown) {
-        return tp_error_set(error, TP_STATUS_OOM,
-                            "format candidate allocation failed");
-    }
-    result->candidates = grown;
-    tp_format_discovered_candidate *candidate =
-        &result->candidates[result->candidate_count++];
+static tp_status candidate_initialize(
+    const char *name, bool portable_name,
+    tp_format_discovered_candidate *candidate, tp_error *error) {
     memset(candidate, 0, sizeof *candidate);
     if (portable_name) {
         candidate->key = discovery_strdup(name);
@@ -105,10 +84,10 @@ static tp_status append_candidate(tp_format_discovery_result *result,
         candidate->key = discovery_strdup(key);
     }
     if (!candidate->key || (portable_name && !candidate->package_path)) {
+        tp_format_discovered_candidate_destroy(candidate);
         return tp_error_set(error, TP_STATUS_OOM,
                             "format candidate name allocation failed");
     }
-    *out = candidate;
     return TP_STATUS_OK;
 }
 
@@ -429,26 +408,15 @@ static tp_status read_candidate(int root_fd, const char *native_name,
     return TP_STATUS_OK;
 }
 
-static void discard_candidate_prefix(tp_format_discovery_result *result) {
-    for (size_t i = 0U; i < result->candidate_count; ++i) {
-        tp_format_discovered_candidate *candidate = &result->candidates[i];
-        free(candidate->key);
-        free(candidate->package_path);
-        free(candidate->descriptor_bytes);
-        free(candidate->source_bytes);
-    }
-    free(result->candidates);
-    result->candidates = NULL;
-    result->candidate_count = 0U;
-}
-
 tp_status tp_format_discovery_read_root(
-    const char *root, tp_format_discovery_result *out,
+    const char *root, tp_format_discovery_candidate_visitor visit_candidate,
+    void *visit_context, tp_format_discovery_result *out,
     tp_format_discovery_failure *failure, tp_error *error) {
-    if (!root || !out || !failure || root[0] != '/' ||
+    if (!root || !visit_candidate || !out || !failure || root[0] != '/' ||
         !tp_utf8_is_valid_c_string(root)) {
-        return tp_error_set(error, TP_STATUS_INVALID_ARGUMENT,
-                            "format root must be an absolute strict-UTF-8 path");
+        return tp_error_set(
+            error, TP_STATUS_INVALID_ARGUMENT,
+            "format root and visitor require an absolute strict-UTF-8 path");
     }
     memset(out, 0, sizeof *out);
     memset(failure, 0, sizeof *failure);
@@ -595,11 +563,15 @@ tp_status tp_format_discovery_read_root(
         if (!S_ISDIR(entry_info.st_mode) && !S_ISLNK(entry_info.st_mode)) {
             continue;
         }
+        if (out->candidate_count >= TP_FORMAT_PACKAGE_MAX) {
+            out->limit_fail_closed = true;
+            break;
+        }
         const bool portable_name =
             tp_format_package_name_is_portable(entry->d_name);
-        tp_format_discovered_candidate *candidate = NULL;
-        tp_status status = append_candidate(out, entry->d_name, portable_name,
-                                            &candidate, error);
+        tp_format_discovered_candidate candidate;
+        tp_status status = candidate_initialize(
+            entry->d_name, portable_name, &candidate, error);
         if (status != TP_STATUS_OK) {
             (void)closedir(directory);
             (void)close(root_fd);
@@ -608,19 +580,19 @@ tp_status tp_format_discovery_read_root(
             tp_format_discovery_result_destroy(out);
             return status;
         }
-        if (out->limit_fail_closed) {
-            break;
-        }
+        out->candidate_count++;
         if (!portable_name) {
             set_candidate_fault(
-                candidate, TP_FORMAT_DIAGNOSTIC_PACKAGE_NAME_INVALID,
+                &candidate, TP_FORMAT_DIAGNOSTIC_PACKAGE_NAME_INVALID,
                 "format package directory name is not portable API-v1 UTF-8");
         } else if (S_ISLNK(entry_info.st_mode)) {
-            set_candidate_fault(candidate, TP_FORMAT_DIAGNOSTIC_PACKAGE_REPARSE,
+            set_candidate_fault(&candidate,
+                                TP_FORMAT_DIAGNOSTIC_PACKAGE_REPARSE,
                                 "format package directory is a symlink");
         } else {
-            status = read_candidate(root_fd, entry->d_name, candidate, error);
+            status = read_candidate(root_fd, entry->d_name, &candidate, error);
             if (status != TP_STATUS_OK) {
+                tp_format_discovered_candidate_destroy(&candidate);
                 (void)closedir(directory);
                 (void)close(root_fd);
                 set_failure(failure, TP_FORMAT_DIAGNOSTIC_ROOT_IO,
@@ -628,6 +600,14 @@ tp_status tp_format_discovery_read_root(
                 tp_format_discovery_result_destroy(out);
                 return status;
             }
+        }
+        status = visit_candidate(visit_context, &candidate, error);
+        tp_format_discovered_candidate_destroy(&candidate);
+        if (status != TP_STATUS_OK) {
+            (void)closedir(directory);
+            (void)close(root_fd);
+            tp_format_discovery_result_destroy(out);
+            return status;
         }
     }
     (void)closedir(directory);
@@ -642,9 +622,6 @@ tp_status tp_format_discovery_read_root(
                                         : TP_STATUS_PATH_RESOLVE_FAILED,
             "format root enumeration failed: %s",
             strerror(enumeration_error));
-    }
-    if (out->limit_fail_closed) {
-        discard_candidate_prefix(out);
     }
     return TP_STATUS_OK;
 }
