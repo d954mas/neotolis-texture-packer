@@ -1065,8 +1065,7 @@ tp_status tp_export_snapshot_job_run_atlas_ex_cancellable(
     };
     status = tp_export_run_ex(job->project, atlas_index, input.descs, input.count,
                               job->work_dir, arena, notices, out_pack_runs,
-                              report || job->dry_run || cancel ? &run_opts : NULL,
-                              err);
+                              &run_opts, err);
     /* tp_export_run_ex initializes its report from scratch; restore the already
      * completed snapshot-admission result after that lower-layer reset. */
     if (report) {

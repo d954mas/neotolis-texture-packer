@@ -1593,6 +1593,93 @@ static bool cancel_export_run(void *ctx) {
     return true;
 }
 
+static bool record_terminal_boundary(void *ctx) {
+    int *calls = ctx;
+    (*calls)++;
+    return true;
+}
+
+static void test_snapshot_wet_run_without_report_uses_retained_catalog_and_terminal_boundary(void) {
+    char source_path[1200];
+    char output_base[1200];
+    char output_page[1200];
+    char output_json[1200];
+    TEST_ASSERT_TRUE(snprintf(source_path, sizeof source_path, "%s-0.png",
+                              g_A) > 0);
+    TEST_ASSERT_TRUE(snprintf(output_base, sizeof output_base,
+                              "%s/snapshot-custom-no-report", g_dir) > 0);
+    TEST_ASSERT_TRUE(snprintf(output_json, sizeof output_json, "%s.json",
+                              output_base) > 0);
+    TEST_ASSERT_TRUE(snprintf(output_page, sizeof output_page, "%s-0.png",
+                              output_base) > 0);
+    (void)remove(output_page);
+    (void)remove(output_json);
+
+    tp_project *project = tp_project_create();
+    TEST_ASSERT_NOT_NULL(project);
+    tp_project_atlas *atlas = tp_project_get_atlas(project, 0);
+    atlas->id = (tp_id128){{0x71U}};
+    atlas->shape = 0;
+    atlas->allow_transform = false;
+    atlas->power_of_two = false;
+    atlas->alpha_threshold = 1;
+    atlas->max_size = 256;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_atlas_add_source(atlas, source_path));
+    atlas->sources[0].id = (tp_id128){{0x72U}};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_atlas_add_target(atlas, "test-capture", output_base, NULL));
+    atlas->targets[0].id = (tp_id128){{0x73U}};
+
+    const tp_exporter *const exporters[] = {&g_capture};
+    tp_format_catalog *catalog = NULL;
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_format_catalog__test_create(exporters, 1U, &catalog, &error));
+    int terminal_calls = 0;
+    const tp_export_snapshot_job_opts opts = {
+        .terminal_boundary = record_terminal_boundary,
+        .terminal_boundary_context = &terminal_calls,
+    };
+    tp_export_snapshot_job *job = NULL;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_export_project_job_create_internal(project, catalog, g_dir, &opts,
+                                              &job, &error));
+    tp_format_catalog_release(catalog);
+    tp_project_destroy(project);
+
+    tp_arena *arena = tp_arena_create(0);
+    TEST_ASSERT_NOT_NULL(arena);
+    tp_export_notices notices;
+    tp_export_notices_init(&notices);
+    g_capture_ir = NULL;
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_export_snapshot_job_run_atlas_ex(job, 0, arena, &notices, NULL,
+                                            NULL, NULL, NULL, &error),
+        error.msg);
+    TEST_ASSERT_NOT_NULL_MESSAGE(
+        g_capture_ir,
+        "the no-report snapshot run must resolve its custom catalog exporter");
+    TEST_ASSERT_TRUE_MESSAGE(
+        tp_fs_exists(output_json),
+        "the custom exporter must publish during a no-report wet run");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        1, terminal_calls,
+        "the no-report snapshot run must preserve its terminal boundary");
+
+    tp_export_notices_free(&notices);
+    tp_arena_destroy(arena);
+    tp_export_snapshot_job_destroy(job);
+    g_capture_ir = NULL;
+    (void)remove(output_page);
+    (void)remove(output_json);
+}
+
 typedef struct cancel_after_poll_count {
     int polls;
     int cancel_at;
@@ -1868,6 +1955,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_export_set_failure_leaves_previous_outputs_byte_identical);
     RUN_TEST(test_snapshot_job_rejects_relative_reroot);
     RUN_TEST(test_snapshot_job_rejects_target_that_escapes_reroot);
+    RUN_TEST(test_snapshot_wet_run_without_report_uses_retained_catalog_and_terminal_boundary);
     RUN_TEST(test_export_run_honors_cancel_before_safe_pack_phase);
     RUN_TEST(test_export_run_cancels_the_pack_worker_before_artifact_publication);
     RUN_TEST(test_snapshot_export_polls_cancel_before_each_output_directory_creation);
