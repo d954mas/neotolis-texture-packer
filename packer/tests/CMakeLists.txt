@@ -580,11 +580,28 @@ tp_add_test(NAME job_worker_process
 
 # Epic 3 Packet 1: immutable catalog/parser semantics, executable-relative
 # discovery, filesystem faults/fail-closed limits, and explicit session context.
+add_test(NAME tp_format_package_staging_contract COMMAND "${CMAKE_COMMAND}"
+    "-DTP_STAGE_SCRIPT=${CMAKE_SOURCE_DIR}/cmake/tp_stage_format_packages_run.cmake"
+    "-DTP_FORMAT_FIXTURE_ROOT=${CMAKE_CURRENT_SOURCE_DIR}/fixtures/format-packages"
+    "-DTP_TEST_ROOT=${CMAKE_BINARY_DIR}/tp_format_package_staging_contract_test"
+    -P "${CMAKE_CURRENT_SOURCE_DIR}/format_package_staging_contract.cmake")
+set_tests_properties(tp_format_package_staging_contract
+    PROPERTIES TIMEOUT 30)
+
 tp_add_test(NAME format_catalog_contract LIBS tp_core unity PRIVATE_SRC
     DEFINES
         TP_FORMAT_FIXTURE_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/format-packages"
         TP_FORMAT_CATALOG_TEST_DIR="${CMAKE_BINARY_DIR}/tp_format_catalog_contract_test"
     MAKE_DIRS "${CMAKE_BINARY_DIR}/tp_format_catalog_contract_test")
+# The fixture assertions intentionally live in the catalog-contract executable:
+# they exercise the same parser/discovery path, not a second fixture reader. The
+# exact package-contract gate reruns that real behavior; serialize the two names
+# because the executable also owns one configured scratch root.
+add_test(NAME tp_format_fixture_contract
+    COMMAND tp_test_format_catalog_contract)
+set_tests_properties(
+    tp_format_catalog_contract tp_format_fixture_contract
+    PROPERTIES RESOURCE_LOCK tp_format_catalog_contract)
 
 tp_add_test(NAME format_catalog_paths LIBS tp_core unity PRIVATE_SRC
     MAKE_DIRS "${CMAKE_BINARY_DIR}/tp_format_catalog_paths_test"

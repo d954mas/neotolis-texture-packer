@@ -1,7 +1,6 @@
-# Defines tp_stage_format_packages(target). Every build request for the target
-# removes and recreates the executable-relative formats/ directory, then copies
-# only the two fixed files of packages named by formats/manifest.cmake. No glob
-# or overlay can retain a deleted/stale package.
+# Defines tp_stage_format_packages(target). Every build request prepares the
+# complete executable-relative formats/ tree from formats/manifest.cmake, then
+# replaces the previous tree. No glob or overlay can retain a deleted package.
 
 function(tp_stage_format_packages target)
     if(NOT TARGET "${target}")
@@ -28,6 +27,6 @@ function(tp_stage_format_packages target)
             -P "${CMAKE_SOURCE_DIR}/cmake/tp_stage_format_packages_run.cmake"
         DEPENDS ${_tp_format_stage_dependencies}
         VERBATIM
-        COMMENT "Recreating executable-relative format package root for ${target}")
+        COMMENT "Staging executable-relative format package root for ${target}")
     add_dependencies("${target}" "${_tp_format_stage_target}")
 endfunction()
