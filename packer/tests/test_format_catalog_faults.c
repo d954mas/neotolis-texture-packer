@@ -2,13 +2,16 @@
 
 #define _CRT_SECURE_NO_WARNINGS
 
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <wchar.h>
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <winioctl.h>
 #else
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -278,9 +281,144 @@ static void test_package_limit_fails_closed_to_native_only(void) {
     tp_fs_remove_tree(root);
 }
 
-static bool create_link(const char *link_path, const char *target_path,
-                        bool directory) {
+static void test_rejected_package_bytes_do_not_consume_admitted_limit(void) {
+    static const char descriptor[] = "{}";
+    const size_t package_count =
+        TP_FORMAT_CATALOG_PACKAGE_BYTES_MAX / TP_FORMAT_SOURCE_MAX_BYTES + 1U;
+    TEST_ASSERT_LESS_OR_EQUAL_size_t(TP_FORMAT_PACKAGE_MAX, package_count);
+    TEST_ASSERT_GREATER_THAN_size_t(
+        TP_FORMAT_CATALOG_PACKAGE_BYTES_MAX,
+        package_count * TP_FORMAT_SOURCE_MAX_BYTES);
+
+    unsigned char *source =
+        (unsigned char *)malloc(TP_FORMAT_SOURCE_MAX_BYTES);
+    TEST_ASSERT_NOT_NULL(source);
+    memset(source, 'x', TP_FORMAT_SOURCE_MAX_BYTES);
+
+    char root[TP_FORMAT_DIAGNOSTIC_PATH_MAX_BYTES + 1U];
+    char package[TP_FORMAT_DIAGNOSTIC_PATH_MAX_BYTES + 1U];
+    char name[32];
+    reset_fixture_directory(root, sizeof root,
+                            "format-rejected-byte-budget");
+    for (size_t i = 0U; i < package_count; ++i) {
+        const int written = snprintf(name, sizeof name, "pkg%03zu", i);
+        TEST_ASSERT_GREATER_THAN_INT(0, written);
+        TEST_ASSERT_LESS_THAN_size_t(sizeof name, (size_t)written);
+        make_package_directory(package, sizeof package, root, name);
+        write_child(package, "format.json", descriptor,
+                    sizeof descriptor - 1U);
+        write_child(package, "export.lua", source,
+                    TP_FORMAT_SOURCE_MAX_BYTES);
+    }
+    free(source);
+
+    tp_format_catalog *catalog = scan_broken_only_root(root);
+    TEST_ASSERT_FALSE(tp_format_catalog_limit_fail_closed(catalog));
+    TEST_ASSERT_EQUAL_size_t(
+        tp_format_catalog_row_count(tp_format_catalog_native()) +
+            package_count,
+        tp_format_catalog_row_count(catalog));
+    TEST_ASSERT_TRUE(catalog_row_has_code(
+        catalog, "pkg000", TP_FORMAT_DIAGNOSTIC_DESCRIPTOR_SCHEMA));
+
+    tp_format_catalog_release(catalog);
+    tp_fs_remove_tree(root);
+}
+
 #ifdef _WIN32
+typedef struct tp_test_mount_point_reparse {
+    ULONG tag;
+    USHORT data_length;
+    USHORT reserved;
+    USHORT substitute_name_offset;
+    USHORT substitute_name_length;
+    USHORT print_name_offset;
+    USHORT print_name_length;
+    WCHAR path_buffer[(MAXIMUM_REPARSE_DATA_BUFFER_SIZE - 16U) /
+                        sizeof(WCHAR)];
+} tp_test_mount_point_reparse;
+
+static bool test_wide_is_separator(wchar_t value) {
+    return value == L'\\' || value == L'/';
+}
+
+static bool create_directory_link(const char *link_path,
+                                  const char *target_path) {
+    wchar_t *link_wide = tp_fs_win32_path_alloc(link_path);
+    wchar_t *target_wide = tp_fs_win32_path_alloc(target_path);
+    if (!link_wide || !target_wide || wcslen(target_wide) < 3U ||
+        target_wide[1] != L':' || !test_wide_is_separator(target_wide[2])) {
+        free(link_wide);
+        free(target_wide);
+        return false;
+    }
+
+    tp_mkdirs(link_path);
+    if (!tp_fs_is_dir(link_path)) {
+        free(link_wide);
+        free(target_wide);
+        return false;
+    }
+    HANDLE link = CreateFileW(
+        link_wide, GENERIC_WRITE, 0U, NULL, OPEN_EXISTING,
+        FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+    if (link == INVALID_HANDLE_VALUE) {
+        free(link_wide);
+        free(target_wide);
+        tp_fs_remove_tree(link_path);
+        return false;
+    }
+
+    static const wchar_t nt_prefix[] = L"\\??\\";
+    const size_t prefix_length = sizeof nt_prefix / sizeof nt_prefix[0] - 1U;
+    const size_t target_length = wcslen(target_wide);
+    const size_t substitute_length = prefix_length + target_length;
+    const size_t path_code_units = substitute_length + 1U + target_length + 1U;
+    const size_t path_offset = offsetof(tp_test_mount_point_reparse,
+                                        path_buffer);
+    const size_t total_bytes =
+        path_offset + path_code_units * sizeof(wchar_t);
+    tp_test_mount_point_reparse reparse;
+    memset(&reparse, 0, sizeof reparse);
+    bool created = false;
+    if (total_bytes <= sizeof reparse) {
+        reparse.tag = IO_REPARSE_TAG_MOUNT_POINT;
+        reparse.data_length = (USHORT)(total_bytes - 8U);
+        reparse.substitute_name_offset = 0U;
+        reparse.substitute_name_length =
+            (USHORT)(substitute_length * sizeof(wchar_t));
+        reparse.print_name_offset =
+            (USHORT)((substitute_length + 1U) * sizeof(wchar_t));
+        reparse.print_name_length =
+            (USHORT)(target_length * sizeof(wchar_t));
+        memcpy(reparse.path_buffer, nt_prefix,
+               prefix_length * sizeof(wchar_t));
+        memcpy(reparse.path_buffer + prefix_length, target_wide,
+               (target_length + 1U) * sizeof(wchar_t));
+        memcpy(reparse.path_buffer + substitute_length + 1U, target_wide,
+               (target_length + 1U) * sizeof(wchar_t));
+        for (size_t i = 0U; i < path_code_units; ++i) {
+            if (reparse.path_buffer[i] == L'/') {
+                reparse.path_buffer[i] = L'\\';
+            }
+        }
+
+        DWORD ignored = 0U;
+        created = DeviceIoControl(
+                      link, FSCTL_SET_REPARSE_POINT, &reparse,
+                      (DWORD)total_bytes, NULL, 0U, &ignored, NULL) != 0;
+    }
+    (void)CloseHandle(link);
+    free(link_wide);
+    free(target_wide);
+    if (!created) {
+        tp_fs_remove_tree(link_path);
+    }
+    return created;
+}
+
+static bool create_file_link(const char *link_path,
+                             const char *target_path) {
     wchar_t *link_wide = tp_fs_win32_path_alloc(link_path);
     wchar_t *target_wide = tp_fs_win32_path_alloc(target_path);
     if (!link_wide || !target_wide) {
@@ -288,7 +426,7 @@ static bool create_link(const char *link_path, const char *target_path,
         free(target_wide);
         return false;
     }
-    DWORD flags = directory ? SYMBOLIC_LINK_FLAG_DIRECTORY : 0U;
+    DWORD flags = 0U;
 #ifdef SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE
     flags |= SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE;
 #endif
@@ -297,11 +435,18 @@ static bool create_link(const char *link_path, const char *target_path,
     free(link_wide);
     free(target_wide);
     return created;
-#else
-    (void)directory;
-    return symlink(target_path, link_path) == 0;
-#endif
 }
+#else
+static bool create_directory_link(const char *link_path,
+                                  const char *target_path) {
+    return symlink(target_path, link_path) == 0;
+}
+
+static bool create_file_link(const char *link_path,
+                             const char *target_path) {
+    return symlink(target_path, link_path) == 0;
+}
+#endif
 
 static void remove_link(const char *link_path, bool directory) {
 #ifdef _WIN32
@@ -339,6 +484,71 @@ static bool create_hard_link(const char *link_path,
 #endif
 }
 
+#ifdef _WIN32
+static HANDLE open_delete_capable_directory(const char *path) {
+    wchar_t *wide = tp_fs_win32_path_alloc(path);
+    if (!wide) {
+        return INVALID_HANDLE_VALUE;
+    }
+    HANDLE handle = CreateFileW(
+        wide, DELETE | FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+        OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    free(wide);
+    return handle;
+}
+
+static void test_win32_root_scan_requires_stable_directory_identity(void) {
+    char root[TP_FORMAT_DIAGNOSTIC_PATH_MAX_BYTES + 1U];
+    reset_fixture_directory(root, sizeof root,
+                            "format-root-delete-capable-handle");
+    HANDLE held = open_delete_capable_directory(root);
+    TEST_ASSERT_NOT_EQUAL(INVALID_HANDLE_VALUE, held);
+
+    tp_format_catalog_scan *scan = NULL;
+    tp_format_diagnostic_report *failure = NULL;
+    tp_error error = {{0}};
+    const tp_status status =
+        tp_format_catalog_scan_root(root, &scan, &failure, &error);
+    const bool rejected =
+        status != TP_STATUS_OK && scan == NULL && failure != NULL &&
+        report_has_code(failure, TP_FORMAT_DIAGNOSTIC_ROOT_IO);
+
+    tp_format_catalog_scan_destroy(scan);
+    tp_format_diagnostic_report_destroy(failure);
+    (void)CloseHandle(held);
+    tp_fs_remove_tree(root);
+    TEST_ASSERT_TRUE_MESSAGE(
+        rejected,
+        "scanner must reject a root whose identity can be replaced");
+}
+
+static void test_win32_package_scan_requires_stable_directory_identity(void) {
+    static const char descriptor[] = "{}";
+    static const char source[] = "return {}\n";
+    char root[TP_FORMAT_DIAGNOSTIC_PATH_MAX_BYTES + 1U];
+    char package[TP_FORMAT_DIAGNOSTIC_PATH_MAX_BYTES + 1U];
+    reset_fixture_directory(root, sizeof root,
+                            "format-package-delete-capable-handle");
+    make_package_directory(package, sizeof package, root, "replaceable");
+    write_child(package, "format.json", descriptor, sizeof descriptor - 1U);
+    write_child(package, "export.lua", source, sizeof source - 1U);
+    HANDLE held = open_delete_capable_directory(package);
+    TEST_ASSERT_NOT_EQUAL(INVALID_HANDLE_VALUE, held);
+
+    tp_format_catalog *catalog = scan_broken_only_root(root);
+    const bool rejected = catalog_row_has_code(
+        catalog, "replaceable", TP_FORMAT_DIAGNOSTIC_PACKAGE_READ_FAILED);
+
+    (void)CloseHandle(held);
+    tp_format_catalog_release(catalog);
+    tp_fs_remove_tree(root);
+    TEST_ASSERT_TRUE_MESSAGE(
+        rejected,
+        "scanner must reject a package whose identity can be replaced");
+}
+#endif
+
 static void test_root_link_is_rejected_when_host_allows_fixture(void) {
     char target[TP_FORMAT_DIAGNOSTIC_PATH_MAX_BYTES + 1U];
     char root_link[TP_FORMAT_DIAGNOSTIC_PATH_MAX_BYTES + 1U];
@@ -347,10 +557,15 @@ static void test_root_link_is_rejected_when_host_allows_fixture(void) {
                                "format-root-link"));
     remove_link(root_link, true);
     tp_fs_remove_tree(root_link);
-    if (!create_link(root_link, target, true)) {
+    if (!create_directory_link(root_link, target)) {
         tp_fs_remove_tree(target);
+#ifdef _WIN32
+        TEST_FAIL_MESSAGE(
+            "unprivileged directory-junction fixture creation failed");
+#else
         TEST_IGNORE_MESSAGE(
             "host policy does not allow creating a directory symlink fixture");
+#endif
     }
 
     tp_format_catalog_scan *scan = NULL;
@@ -369,19 +584,48 @@ static void test_root_link_is_rejected_when_host_allows_fixture(void) {
     tp_fs_remove_tree(target);
 }
 
-static void test_package_and_file_links_become_unavailable_rows(void) {
-    static const char source[] = "return {}\n";
+static void test_package_link_becomes_an_unavailable_row(void) {
     char root[TP_FORMAT_DIAGNOSTIC_PATH_MAX_BYTES + 1U];
     char target_package[TP_FORMAT_DIAGNOSTIC_PATH_MAX_BYTES + 1U];
     char package_link[TP_FORMAT_DIAGNOSTIC_PATH_MAX_BYTES + 1U];
-    char file_package[TP_FORMAT_DIAGNOSTIC_PATH_MAX_BYTES + 1U];
-    char descriptor_target[TP_FORMAT_DIAGNOSTIC_PATH_MAX_BYTES + 1U];
-    char descriptor_link[TP_FORMAT_DIAGNOSTIC_PATH_MAX_BYTES + 1U];
     reset_fixture_directory(root, sizeof root, "format-package-links");
     reset_fixture_directory(target_package, sizeof target_package,
                             "format-package-link-target");
     TEST_ASSERT_TRUE(join_path(package_link, sizeof package_link, root,
                                "linked-package"));
+
+    if (!create_directory_link(package_link, target_package)) {
+        tp_fs_remove_tree(root);
+        tp_fs_remove_tree(target_package);
+#ifdef _WIN32
+        TEST_FAIL_MESSAGE(
+            "unprivileged directory-junction fixture creation failed");
+#else
+        TEST_IGNORE_MESSAGE(
+            "host policy does not allow creating a package-link fixture");
+#endif
+    }
+
+    tp_format_catalog *catalog = scan_broken_only_root(root);
+    TEST_ASSERT_TRUE(catalog_row_has_code(
+        catalog, "linked-package", TP_FORMAT_DIAGNOSTIC_PACKAGE_REPARSE));
+    assert_row_diagnostic_path(
+        catalog, "linked-package", TP_FORMAT_DIAGNOSTIC_PACKAGE_REPARSE,
+        "formats/linked-package");
+
+    tp_format_catalog_release(catalog);
+    remove_link(package_link, true);
+    tp_fs_remove_tree(root);
+    tp_fs_remove_tree(target_package);
+}
+
+static void test_file_link_becomes_an_unavailable_row_when_supported(void) {
+    static const char source[] = "return {}\n";
+    char root[TP_FORMAT_DIAGNOSTIC_PATH_MAX_BYTES + 1U];
+    char file_package[TP_FORMAT_DIAGNOSTIC_PATH_MAX_BYTES + 1U];
+    char descriptor_target[TP_FORMAT_DIAGNOSTIC_PATH_MAX_BYTES + 1U];
+    char descriptor_link[TP_FORMAT_DIAGNOSTIC_PATH_MAX_BYTES + 1U];
+    reset_fixture_directory(root, sizeof root, "format-file-link");
     TEST_ASSERT_TRUE(join_path(descriptor_target, sizeof descriptor_target,
                                g_scratch, "linked-format.json"));
     (void)tp_fs_remove_file(descriptor_target);
@@ -393,26 +637,18 @@ static void test_package_and_file_links_become_unavailable_rows(void) {
                                file_package, "format.json"));
     write_child(file_package, "export.lua", source, sizeof source - 1U);
 
-    if (!create_link(package_link, target_package, true) ||
-        !create_link(descriptor_link, descriptor_target, false)) {
-        remove_link(package_link, true);
+    if (!create_file_link(descriptor_link, descriptor_target)) {
         remove_link(descriptor_link, false);
         tp_fs_remove_tree(root);
-        tp_fs_remove_tree(target_package);
         (void)tp_fs_remove_file(descriptor_target);
         TEST_IGNORE_MESSAGE(
-            "host policy does not allow creating package-link fixtures");
+            "host policy does not allow creating a file-link fixture");
     }
 
     tp_format_catalog *catalog = scan_broken_only_root(root);
     TEST_ASSERT_TRUE(catalog_row_has_code(
-        catalog, "linked-package", TP_FORMAT_DIAGNOSTIC_PACKAGE_REPARSE));
-    TEST_ASSERT_TRUE(catalog_row_has_code(
         catalog, "linked-file",
         TP_FORMAT_DIAGNOSTIC_PACKAGE_FILE_REPARSE));
-    assert_row_diagnostic_path(
-        catalog, "linked-package", TP_FORMAT_DIAGNOSTIC_PACKAGE_REPARSE,
-        "formats/linked-package");
     assert_row_diagnostic_path(
         catalog, "linked-file",
         TP_FORMAT_DIAGNOSTIC_PACKAGE_FILE_REPARSE,
@@ -420,7 +656,6 @@ static void test_package_and_file_links_become_unavailable_rows(void) {
 
     tp_format_catalog_release(catalog);
     tp_fs_remove_tree(root);
-    tp_fs_remove_tree(target_package);
     (void)tp_fs_remove_file(descriptor_target);
 }
 
@@ -547,8 +782,14 @@ int main(int argc, char **argv) {
     RUN_TEST(test_broken_package_shapes_become_unavailable_rows);
     RUN_TEST(test_oversized_descriptor_becomes_unavailable);
     RUN_TEST(test_package_limit_fails_closed_to_native_only);
+    RUN_TEST(test_rejected_package_bytes_do_not_consume_admitted_limit);
+#ifdef _WIN32
+    RUN_TEST(test_win32_root_scan_requires_stable_directory_identity);
+    RUN_TEST(test_win32_package_scan_requires_stable_directory_identity);
+#endif
     RUN_TEST(test_root_link_is_rejected_when_host_allows_fixture);
-    RUN_TEST(test_package_and_file_links_become_unavailable_rows);
+    RUN_TEST(test_package_link_becomes_an_unavailable_row);
+    RUN_TEST(test_file_link_becomes_an_unavailable_row_when_supported);
     RUN_TEST(test_hardlinked_fixed_file_is_rejected);
 #ifndef _WIN32
     RUN_TEST(test_fifo_fixed_file_is_rejected_without_blocking);

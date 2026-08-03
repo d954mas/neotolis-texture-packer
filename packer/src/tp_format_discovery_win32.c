@@ -26,6 +26,9 @@
 
 #define TP_FORMAT_DIRECTORY_BUFFER_BYTES 65536U
 #define TP_FORMAT_WINDOWS_PATH_CODE_UNITS 32767U
+/* Child files are opened by verified paths. Keeping directory handles open
+ * without delete-sharing prevents those paths from being rebound meanwhile. */
+#define TP_FORMAT_DIRECTORY_SHARE_MODE (FILE_SHARE_READ | FILE_SHARE_WRITE)
 
 typedef struct tp_format_directory_entry {
     const wchar_t *name;
@@ -818,7 +821,7 @@ static tp_status scan_package(
 
     HANDLE package = CreateFileW(
         package_path, FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES,
-        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+        TP_FORMAT_DIRECTORY_SHARE_MODE, NULL,
         OPEN_EXISTING,
         FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
     const DWORD open_code =
@@ -1027,7 +1030,7 @@ tp_status tp_format_discovery_read_root(
 
     HANDLE root_handle = CreateFileW(
         root_wide, FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES,
-        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+        TP_FORMAT_DIRECTORY_SHARE_MODE, NULL,
         OPEN_EXISTING,
         FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
     const DWORD open_code =
@@ -1098,7 +1101,6 @@ tp_status tp_format_discovery_read_root(
     tp_format_directory_reader reader;
     directory_reader_init(&reader, root_handle);
     size_t root_entry_count = 0U;
-    size_t package_byte_count = 0U;
     for (;;) {
         tp_format_directory_entry entry;
         const tp_format_directory_next_result next =
@@ -1164,17 +1166,6 @@ tp_status tp_format_discovery_read_root(
             }
         }
 
-        if (candidate.fault_code == 0) {
-            const size_t candidate_bytes = candidate.descriptor_byte_count +
-                                           candidate.source_byte_count;
-            if (package_byte_count >
-                TP_FORMAT_CATALOG_PACKAGE_BYTES_MAX - candidate_bytes) {
-                format_candidate_destroy(&candidate);
-                make_limit_fail_closed(out);
-                break;
-            }
-            package_byte_count += candidate_bytes;
-        }
         status = append_candidate(out, &candidate, error);
         if (status != TP_STATUS_OK) {
             format_candidate_destroy(&candidate);
