@@ -405,6 +405,30 @@ void test_strict_descriptor_parser_accepts_full_surface_and_rejects_fixtures(
     TEST_ASSERT_FALSE(tp_format_package_name_is_portable(del_package_name));
 }
 
+void test_descriptor_rejects_escaped_nul_in_object_key(void) {
+    static const char descriptor[] =
+        "{\"api_version\\u0000ignored\":1,\"id\":\"fixture-nul-key\","
+        "\"display_name\":\"NUL key\",\"capabilities\":{"
+        "\"transforms\":[\"identity\"],\"polygons\":false,"
+        "\"pivot\":false,\"slice9\":false,\"multipage\":false,"
+        "\"aliases\":false,\"animations\":false},\"outputs\":[{"
+        "\"id\":\"metadata\",\"suffix\":\".txt\"}]}";
+    assert_descriptor_text_rejection(
+        descriptor, TP_FORMAT_DIAGNOSTIC_DESCRIPTOR_INVALID_UTF8);
+}
+
+void test_descriptor_rejects_escaped_nul_in_string_value(void) {
+    static const char descriptor[] =
+        "{\"api_version\":1,\"id\":\"fixture-nul\\u0000ignored\","
+        "\"display_name\":\"NUL value\",\"capabilities\":{"
+        "\"transforms\":[\"identity\"],\"polygons\":false,"
+        "\"pivot\":false,\"slice9\":false,\"multipage\":false,"
+        "\"aliases\":false,\"animations\":false},\"outputs\":[{"
+        "\"id\":\"metadata\",\"suffix\":\".txt\"}]}";
+    assert_descriptor_text_rejection(
+        descriptor, TP_FORMAT_DIAGNOSTIC_DESCRIPTOR_INVALID_UTF8);
+}
+
 void test_descriptor_materialization_is_numeric_locale_independent(void) {
     const char *current = setlocale(LC_NUMERIC, NULL);
     char saved_locale[256];
@@ -829,6 +853,8 @@ int main(void) {
     UNITY_BEGIN();
     RUN_TEST(
         test_strict_descriptor_parser_accepts_full_surface_and_rejects_fixtures);
+    RUN_TEST(test_descriptor_rejects_escaped_nul_in_object_key);
+    RUN_TEST(test_descriptor_rejects_escaped_nul_in_string_value);
     RUN_TEST(test_descriptor_materialization_is_numeric_locale_independent);
     RUN_TEST(test_diagnostic_reports_are_deep_owned_and_bounded);
     RUN_TEST(
