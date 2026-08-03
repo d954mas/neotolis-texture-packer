@@ -330,18 +330,24 @@ static tp_status scan_append_candidate(
     return TP_STATUS_OK;
 }
 
-static tp_status scan_visit_candidate(
+static tp_format_discovery_visit_result scan_visit_result(
+    tp_format_discovery_visit_kind kind, tp_status status) {
+    return (tp_format_discovery_visit_result){kind, status};
+}
+
+static tp_format_discovery_visit_result scan_visit_candidate(
     void *context, tp_format_discovered_candidate *candidate,
     tp_error *error) {
     tp_format_catalog_scan *scan = (tp_format_catalog_scan *)context;
     if (scan->limit_fail_closed) {
-        return TP_STATUS_OK;
+        return scan_visit_result(TP_FORMAT_DISCOVERY_VISIT_STOP_SUCCESS,
+                                 TP_STATUS_OK);
     }
 
     tp_format_catalog_owned_row *row = NULL;
     tp_status status = scan_append_candidate(scan, candidate, &row, error);
     if (status != TP_STATUS_OK) {
-        return status;
+        return scan_visit_result(TP_FORMAT_DISCOVERY_VISIT_ERROR, status);
     }
 
     if (candidate->fault_code != 0) {
@@ -351,18 +357,23 @@ static tp_status scan_visit_candidate(
             row->package_path, candidate->fault_file, diagnostic_path,
             &logical_path, error);
         if (status != TP_STATUS_OK) {
-            return status;
+            return scan_visit_result(TP_FORMAT_DISCOVERY_VISIT_ERROR,
+                                     status);
         }
-        return report_one(&row->diagnostics, candidate->fault_code, NULL,
-                          logical_path, 0U, 0U, candidate->fault_message,
-                          error);
+        status = report_one(&row->diagnostics, candidate->fault_code, NULL,
+                            logical_path, 0U, 0U, candidate->fault_message,
+                            error);
+        return scan_visit_result(
+            status == TP_STATUS_OK ? TP_FORMAT_DISCOVERY_VISIT_CONTINUE
+                                   : TP_FORMAT_DISCOVERY_VISIT_ERROR,
+            status);
     }
 
     tp_format_descriptor_parse_result parsed;
     status = tp_format_descriptor_v1_parse(
         row->descriptor_bytes, row->descriptor_byte_count, &parsed, error);
     if (status != TP_STATUS_OK) {
-        return status;
+        return scan_visit_result(TP_FORMAT_DISCOVERY_VISIT_ERROR, status);
     }
     if (parsed.outcome == TP_FORMAT_DESCRIPTOR_REJECTED) {
         char diagnostic_path[TP_FORMAT_DIAGNOSTIC_PATH_MAX_BYTES + 1U];
@@ -381,7 +392,10 @@ static tp_status scan_visit_candidate(
         free(row->source_bytes);
         row->source_bytes = NULL;
         row->source_byte_count = 0U;
-        return status;
+        return scan_visit_result(
+            status == TP_STATUS_OK ? TP_FORMAT_DISCOVERY_VISIT_CONTINUE
+                                   : TP_FORMAT_DISCOVERY_VISIT_ERROR,
+            status);
     }
     row->owned_descriptor = parsed.owned_descriptor;
 
@@ -407,7 +421,10 @@ static tp_status scan_visit_candidate(
         free(row->source_bytes);
         row->source_bytes = NULL;
         row->source_byte_count = 0U;
-        return status;
+        return scan_visit_result(
+            status == TP_STATUS_OK ? TP_FORMAT_DISCOVERY_VISIT_CONTINUE
+                                   : TP_FORMAT_DISCOVERY_VISIT_ERROR,
+            status);
     }
 
     if (row->descriptor_byte_count >
@@ -416,13 +433,15 @@ static tp_status scan_visit_candidate(
             TP_FORMAT_CATALOG_PACKAGE_BYTES_MAX - scan->admitted_bytes -
                 row->descriptor_byte_count) {
         make_limit_fail_closed(scan);
-        return TP_STATUS_OK;
+        return scan_visit_result(TP_FORMAT_DISCOVERY_VISIT_STOP_SUCCESS,
+                                 TP_STATUS_OK);
     }
     scan->admitted_bytes +=
         row->descriptor_byte_count + row->source_byte_count;
     package_fingerprint(row, row->fingerprint);
     row->pending_compile = true;
-    return TP_STATUS_OK;
+    return scan_visit_result(TP_FORMAT_DISCOVERY_VISIT_CONTINUE,
+                             TP_STATUS_OK);
 }
 
 tp_status tp_format_catalog_scan_root(

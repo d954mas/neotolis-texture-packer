@@ -7,6 +7,7 @@
 #include <string.h>
 
 #include "log/nt_log.h"
+#include "core/nt_assert.h"
 
 #include "cli_cmds.h"
 #include "cli_exit.h"
@@ -564,19 +565,8 @@ static int ntpacker_main_utf8(int argc, char **argv) {
     tp_error error = {{0}};
     const tp_status format_status =
         app_format_catalog_open_startup(&formats, &error);
-    if (format_status != TP_STATUS_OK || !formats.catalog) {
-        const tp_status fallback_status =
-            format_status != TP_STATUS_OK
-                ? format_status
-                : tp_error_set(
-                      &error, TP_STATUS_INVALID_ARGUMENT,
-                      "format catalog startup returned no catalog");
-        app_format_catalog_close(&formats);
-        formats.state = APP_FORMAT_CATALOG_NATIVE_FALLBACK;
-        formats.catalog = tp_format_catalog_retain(tp_format_catalog_native());
-        formats.reason_status = fallback_status;
-        formats.reason = error;
-    }
+    NT_ASSERT(format_status == TP_STATUS_OK);
+    NT_ASSERT(format_status != TP_STATUS_OK || formats.catalog != NULL);
     const int result = ntpacker_dispatch_utf8(argc, argv, formats.catalog);
     app_format_catalog_close(&formats);
     return result;

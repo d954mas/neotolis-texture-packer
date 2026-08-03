@@ -48,6 +48,7 @@
 void gui_shell_reset_shown_result(void) {}
 void tp_scan__test_set_alloc_fail(int nth);
 void tp_scan__test_set_stat_error(int error);
+void gui_project__test_set_format_projection_alloc_fail(bool fail);
 
 /* One FOLDER source (pack/ with alpha/beta/gamma.png children) + one FILE
  * source (solo.png) -- enough to drive filter, sort, collapse, and the missing
@@ -2219,6 +2220,38 @@ void test_format_projection_exposes_every_row_and_resolves_preview_by_id(void) {
         native_count, gui_project_format_count());
 }
 
+void test_format_projection_install_failure_preserves_active_generation(void) {
+    const tp_format_descriptor descriptor = {
+        .id = "gui-format-install-failure",
+        .display_name = "GUI format install failure",
+    };
+    const tp_exporter exporter = {
+        .format = &descriptor,
+        .serialize = gui_format_projection_test_serialize,
+    };
+    const tp_exporter *exporters[] = {&exporter};
+    tp_error error = {{0}};
+    tp_format_catalog *candidate = NULL;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_format_catalog__test_create(exporters, 1, &candidate, &error));
+
+    TEST_ASSERT_TRUE(gui_project__test_set_format_catalog(
+        tp_format_catalog_native()));
+    const tp_format_catalog *active = gui_project_format_catalog();
+    const int active_count = gui_project_format_count();
+
+    gui_project__test_set_format_projection_alloc_fail(true);
+    const bool installed =
+        gui_project__test_set_format_catalog(candidate);
+    gui_project__test_set_format_projection_alloc_fail(false);
+
+    TEST_ASSERT_FALSE(installed);
+    TEST_ASSERT_EQUAL_PTR(active, gui_project_format_catalog());
+    TEST_ASSERT_EQUAL_INT(active_count, gui_project_format_count());
+    tp_format_catalog_release(candidate);
+}
+
 int main(int argc, char **argv) {
     if (tp_build_is_worker_invocation(argc, argv)) {
         return tp_build_worker_main();
@@ -2280,5 +2313,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_canvas_buffer_readiness_requires_every_gpu_handle);
     RUN_TEST(
         test_format_projection_exposes_every_row_and_resolves_preview_by_id);
+    RUN_TEST(
+        test_format_projection_install_failure_preserves_active_generation);
     return UNITY_END();
 }

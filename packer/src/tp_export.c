@@ -55,9 +55,18 @@ bool tp_export_caps_supports_flips(const tp_export_caps *caps) {
 
 #ifdef TP_ENABLE_TEST_SEAMS
 static _Thread_local bool s_fail_next_notice_reserve;
+static _Thread_local size_t s_projection_validation_count;
 
 void tp_export_notices__test_fail_next_reserve(void) {
     s_fail_next_notice_reserve = true;
+}
+
+void tp_export_ir_projection__test_reset_work(void) {
+    s_projection_validation_count = 0U;
+}
+
+size_t tp_export_ir_projection__test_validation_count(void) {
+    return s_projection_validation_count;
 }
 #endif
 
@@ -316,6 +325,16 @@ const tp_exporter *tp_native_exporter_find(const char *id) {
     return NULL;
 }
 
+void tp_export_ir_project_for_caps_unchecked(const tp_export_ir *source,
+                                             const tp_export_caps *caps,
+                                             tp_export_ir *out) {
+    *out = *source;
+    if (!caps->animations) {
+        out->animations = NULL;
+        out->animation_count = 0;
+    }
+}
+
 tp_status tp_export_ir_project_for_caps(const tp_export_ir *source,
                                         const tp_export_caps *caps,
                                         tp_export_ir *out,
@@ -324,15 +343,14 @@ tp_status tp_export_ir_project_for_caps(const tp_export_ir *source,
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
                             "Export IR projection requires source, capabilities, and output");
     }
+#ifdef TP_ENABLE_TEST_SEAMS
+    s_projection_validation_count++;
+#endif
     tp_status status = tp_export_ir_validate(source, err);
     if (status != TP_STATUS_OK) {
         return status;
     }
-    *out = *source;
-    if (!caps->animations) {
-        out->animations = NULL;
-        out->animation_count = 0;
-    }
+    tp_export_ir_project_for_caps_unchecked(source, caps, out);
     return TP_STATUS_OK;
 }
 

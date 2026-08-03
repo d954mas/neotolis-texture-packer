@@ -80,8 +80,8 @@ typedef struct gui_recovery_notice {
 } gui_recovery_notice;
 
 const tp_session_snapshot *gui_project_snapshot(void);
-/* Borrowed active immutable format generation plus available-row helpers used
- * by passive GUI selectors. */
+/* Borrowed installed immutable format generation plus its pre-materialized
+ * available-row projection. These passive helpers never allocate. */
 const tp_format_catalog *gui_project_format_catalog(void);
 int gui_project_format_count(void);
 const tp_format_descriptor *gui_project_format_at(int index);

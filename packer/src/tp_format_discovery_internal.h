@@ -36,12 +36,30 @@ typedef struct tp_format_discovery_failure {
     char message[TP_FORMAT_DIAGNOSTIC_MESSAGE_MAX_BYTES + 1U];
 } tp_format_discovery_failure;
 
+typedef enum tp_format_discovery_visit_kind {
+    TP_FORMAT_DISCOVERY_VISIT_CONTINUE = 1,
+    TP_FORMAT_DISCOVERY_VISIT_STOP_SUCCESS,
+    TP_FORMAT_DISCOVERY_VISIT_ERROR,
+} tp_format_discovery_visit_kind;
+
+typedef struct tp_format_discovery_visit_result {
+    tp_format_discovery_visit_kind kind;
+    /* Non-OK only for ERROR; CONTINUE/STOP_SUCCESS use TP_STATUS_OK. */
+    tp_status status;
+} tp_format_discovery_visit_result;
+
 /* Called synchronously after one candidate's exact bytes are snapshotted and
- * before discovery reads the next candidate. The visitor may retain pointer
- * members by moving them out and setting them to NULL; discovery destroys all
- * members left in candidate after the call. */
-typedef tp_status (*tp_format_discovery_candidate_visitor)(
+ * before discovery reads the next candidate. STOP_SUCCESS publishes the
+ * completed prefix without inspecting another root entry. The visitor may
+ * retain pointer members by moving them out and setting them to NULL;
+ * discovery destroys all members left in candidate after the call. */
+typedef tp_format_discovery_visit_result
+    (*tp_format_discovery_candidate_visitor)(
     void *context, tp_format_discovered_candidate *candidate,
+    tp_error *error);
+
+tp_status tp_format_discovery_visit_resolve(
+    tp_format_discovery_visit_result result, bool *out_stop,
     tp_error *error);
 
 /* Platform implementation. Root is explicit UTF-8 and is never derived from

@@ -246,26 +246,24 @@ static tp_status create_fresh_candidate(
         s_project.formats.catalog, &rng, out, err);
 }
 
-static void create_startup_format_catalog(void) {
-    app_format_catalog_close(&s_project.formats);
-    tp_error error = {{0}};
+static tp_status create_startup_format_catalog(tp_error *error) {
+    app_format_catalog candidate = {0};
     const tp_status status =
-        app_format_catalog_open_startup(&s_project.formats, &error);
-    if (status != TP_STATUS_OK || !s_project.formats.catalog) {
-        const tp_status fallback_status =
-            status != TP_STATUS_OK
-                ? status
-                : tp_error_set(
-                      &error, TP_STATUS_INVALID_ARGUMENT,
-                      "format catalog startup returned no catalog");
-        app_format_catalog_close(&s_project.formats);
-        s_project.formats.catalog =
-            tp_format_catalog_retain(tp_format_catalog_native());
-        s_project.formats.state =
-            APP_FORMAT_CATALOG_NATIVE_FALLBACK;
-        s_project.formats.reason_status = fallback_status;
-        s_project.formats.reason = error;
+        app_format_catalog_open_startup(&candidate, error);
+    NT_ASSERT(status == TP_STATUS_OK);
+    NT_ASSERT(status != TP_STATUS_OK || candidate.catalog != NULL);
+    if (status != TP_STATUS_OK || !candidate.catalog) {
+        app_format_catalog_close(&candidate);
+        return status != TP_STATUS_OK
+                   ? status
+                   : tp_error_set(
+                         error, TP_STATUS_INVALID_ARGUMENT,
+                         "format catalog startup returned no catalog");
     }
+    const tp_status install_status =
+        gui_project__install_format_catalog(&candidate, error);
+    app_format_catalog_close(&candidate);
+    return install_status;
 }
 
 static bool current_identity_is(
@@ -294,10 +292,16 @@ void gui_project_init(void) {
     if (s_project.session) {
         return;
     }
-    if (!s_project.formats.catalog) {
-        create_startup_format_catalog();
-    }
     tp_error err = {{0}};
+    if (!s_project.formats.catalog) {
+        const tp_status format_status =
+            create_startup_format_catalog(&err);
+        if (format_status != TP_STATUS_OK) {
+            gui_project__note_session_reject(
+                format_status, &err);
+            return;
+        }
+    }
     tp_session *initial = NULL;
     const tp_status create_status =
         create_fresh_candidate(

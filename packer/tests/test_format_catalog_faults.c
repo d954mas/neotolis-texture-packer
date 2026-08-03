@@ -22,6 +22,7 @@
 #include "tp_core/tp_format.h"
 #include "tp_core/tp_scan.h"
 #include "tp_fs_internal.h"
+#include "tp_format_discovery_internal.h"
 #include "unity.h"
 
 static const char *g_scratch;
@@ -138,6 +139,46 @@ static tp_format_catalog *scan_broken_only_root(const char *root) {
     TEST_ASSERT_NULL(scan);
     TEST_ASSERT_NOT_NULL(catalog);
     return catalog;
+}
+
+typedef struct stop_success_probe {
+    size_t visits;
+} stop_success_probe;
+
+static tp_format_discovery_visit_result
+stop_discovery_after_first_candidate(
+    void *context, tp_format_discovered_candidate *candidate,
+    tp_error *error) {
+    stop_success_probe *probe = (stop_success_probe *)context;
+    (void)candidate;
+    (void)error;
+    probe->visits++;
+    return (tp_format_discovery_visit_result){
+        TP_FORMAT_DISCOVERY_VISIT_STOP_SUCCESS, TP_STATUS_OK};
+}
+
+static void test_discovery_stop_success_keeps_a_complete_prefix(void) {
+    char root[TP_FORMAT_DIAGNOSTIC_PATH_MAX_BYTES + 1U];
+    char package[TP_FORMAT_DIAGNOSTIC_PATH_MAX_BYTES + 1U];
+    reset_fixture_directory(root, sizeof root, "format-stop-success");
+    make_package_directory(package, sizeof package, root, "first");
+    make_package_directory(package, sizeof package, root, "second");
+
+    stop_success_probe probe = {0};
+    tp_format_discovery_result result = {0};
+    tp_format_discovery_failure failure = {0};
+    tp_error error = {{0}};
+    const tp_status status = tp_format_discovery_read_root(
+        root, stop_discovery_after_first_candidate, &probe, &result,
+        &failure, &error);
+
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, status);
+    TEST_ASSERT_EQUAL_size_t(1U, probe.visits);
+    TEST_ASSERT_EQUAL_size_t(1U, result.candidate_count);
+    TEST_ASSERT_EQUAL_INT(0, failure.code);
+
+    tp_format_discovery_result_destroy(&result);
+    tp_fs_remove_tree(root);
 }
 
 static void test_regular_file_root_is_rejected_with_root_diagnostic(void) {
@@ -857,6 +898,7 @@ int main(int argc, char **argv) {
     }
     g_scratch = argv[1];
     UNITY_BEGIN();
+    RUN_TEST(test_discovery_stop_success_keeps_a_complete_prefix);
     RUN_TEST(test_regular_file_root_is_rejected_with_root_diagnostic);
     RUN_TEST(test_broken_package_shapes_become_unavailable_rows);
     RUN_TEST(test_oversized_descriptor_becomes_unavailable);

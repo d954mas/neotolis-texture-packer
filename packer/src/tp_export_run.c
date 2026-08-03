@@ -619,24 +619,6 @@ tp_status tp_export_run_ex(const tp_project *project, int atlas_index, const tp_
         tp_export_report_target *rt = (report && rtidx[t] >= 0) ? &report->targets[rtidx[t]] : NULL;
 
         const tp_export_ir *ir = &groups[target_group[t]].ir;
-        tp_export_ir projected_ir = {0};
-        st = tp_export_ir_project_for_caps(
-            ir, &exp->format->caps, &projected_ir, err);
-        if (st != TP_STATUS_OK) {
-            if (!report) {
-                return st;
-            }
-            if (rt) {
-                rt->error = report_error_copy(
-                    arena, err && err->msg[0]
-                               ? err->msg
-                               : "Export IR projection failed");
-            }
-            if (first_fail == TP_STATUS_OK) {
-                first_fail = st;
-            }
-            continue;
-        }
         tp_export_artifact_plan plan;
         st = tp_export_artifact_plan_build(exp->format, ir, out_bases[t], arena,
                                            &plan, err);
@@ -652,6 +634,9 @@ tp_status tp_export_run_ex(const tp_project *project, int atlas_index, const tp_
             }
             continue;
         }
+        tp_export_ir projected_ir;
+        tp_export_ir_project_for_caps_unchecked(
+            ir, &exp->format->caps, &projected_ir);
         int nbefore = notices ? notices->count : 0;
         if (rt) {
             rt->notice_begin = nbefore;

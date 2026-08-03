@@ -10,7 +10,7 @@ typedef struct gui_project_state {
      * context. Keeping the shared result whole makes its close operation the
      * only lifecycle authority when that result grows. */
     app_format_catalog formats;
-    /* Derived available-row projection for this exact retained generation. */
+    /* Installed atomically with `formats` for this exact retained generation. */
     tp_format_catalog *format_projection_catalog;
     const tp_format_descriptor **available_formats;
     int available_format_count;
@@ -68,5 +68,12 @@ void gui_project__publish_view(
     const struct tp_session_view *view);
 void gui_project__reduce_view(void);
 void gui_project__clear_format_projection(void);
+/* Consumes `candidate` only on success. Projection materialization completes
+ * before the active catalog/projection pair is replaced. */
+tp_status gui_project__install_format_catalog(
+    app_format_catalog *candidate, tp_error *err);
+#ifdef TP_ENABLE_TEST_SEAMS
+void gui_project__test_set_format_projection_alloc_fail(bool fail);
+#endif
 
 #endif /* NTPACKER_GUI_PROJECT_INTERNAL_H */

@@ -35,6 +35,13 @@ const tp_exporter *tp_native_exporter_find(const char *id);
 int tp_native_exporter_count(void);
 const tp_exporter *tp_native_exporter_at(int index);
 
+/* Internal O(1) projection for an IR already admitted by the caller's owning
+ * boundary. Public callers use tp_export_ir_project_for_caps(), which performs
+ * full validation first. */
+void tp_export_ir_project_for_caps_unchecked(const tp_export_ir *source,
+                                             const tp_export_caps *caps,
+                                             tp_export_ir *out);
+
 tp_status tp_export_publish(const tp_exporter *exp,
                             const tp_export_ir *ir,
                             const tp_result *packed,
@@ -60,6 +67,8 @@ tp_status tp_export_defold_serialize(const tp_export_serialize_ctx *ctx,
 #ifdef TP_ENABLE_TEST_SEAMS
 void tp_export_notices__test_fail_next_reserve(void);
 void tp_export_publish__test_fail_rename_at(int nth);
+void tp_export_ir_projection__test_reset_work(void);
+size_t tp_export_ir_projection__test_validation_count(void);
 #endif
 
 #endif /* TP_CORE_SRC_TP_EXPORT_INTERNAL_H */

@@ -31,8 +31,6 @@ tp_status tp_format_descriptor_v1_parse(
 
 const tp_format_descriptor *tp_format_owned_descriptor_view(
     const tp_format_owned_descriptor *descriptor);
-tp_format_owned_descriptor *tp_format_owned_descriptor_clone(
-    const tp_format_descriptor *descriptor, tp_error *error);
 void tp_format_owned_descriptor_destroy(
     tp_format_owned_descriptor *descriptor);
 

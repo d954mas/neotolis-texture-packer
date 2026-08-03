@@ -329,10 +329,18 @@ static bool final_path_is_immediate_child(const wchar_t *parent,
                            expected_name, expected_length);
 }
 
-static void directory_reader_init(tp_format_directory_reader *reader,
-                                  HANDLE handle) {
-    memset(reader, 0, sizeof *reader);
+static tp_format_directory_reader *directory_reader_create(HANDLE handle) {
+    tp_format_directory_reader *reader =
+        (tp_format_directory_reader *)calloc(1, sizeof *reader);
+    if (!reader) {
+        return NULL;
+    }
     reader->handle = handle;
+    return reader;
+}
+
+static void directory_reader_destroy(tp_format_directory_reader *reader) {
+    free(reader);
 }
 
 static tp_format_directory_next_result directory_reader_next(
@@ -497,21 +505,26 @@ static bool package_has_exact_entries(
     DWORD *native_code) {
     bool descriptor_found = false;
     bool source_found = false;
-    tp_format_directory_reader reader;
-    directory_reader_init(&reader, package_handle);
+    bool complete = false;
+    tp_format_directory_reader *reader =
+        directory_reader_create(package_handle);
+    if (!reader) {
+        *native_code = ERROR_OUTOFMEMORY;
+        return false;
+    }
     for (;;) {
         tp_format_directory_entry entry;
         const tp_format_directory_next_result next =
-            directory_reader_next(&reader, &entry);
+            directory_reader_next(reader, &entry);
         if (next == TP_FORMAT_DIRECTORY_NEXT_END) {
             break;
         }
         if (next == TP_FORMAT_DIRECTORY_NEXT_ERROR) {
-            *native_code = reader.error_code;
+            *native_code = reader->error_code;
             format_candidate_set_win32_fault(
                 candidate, TP_FORMAT_DIAGNOSTIC_PACKAGE_READ_FAILED,
-                "package directory enumeration failed", reader.error_code);
-            return false;
+                "package directory enumeration failed", reader->error_code);
+            goto done;
         }
         if (directory_entry_is_dot(&entry)) {
             continue;
@@ -522,7 +535,7 @@ static bool package_has_exact_entries(
                 format_candidate_set_fault(
                     candidate, TP_FORMAT_DIAGNOSTIC_PACKAGE_EXTRA_ENTRY,
                     "package contains duplicate format.json entries");
-                return false;
+                goto done;
             }
             descriptor_found = true;
         } else if (wide_span_equal(
@@ -532,14 +545,14 @@ static bool package_has_exact_entries(
                 format_candidate_set_fault(
                     candidate, TP_FORMAT_DIAGNOSTIC_PACKAGE_EXTRA_ENTRY,
                     "package contains duplicate export.lua entries");
-                return false;
+                goto done;
             }
             source_found = true;
         } else {
             format_candidate_set_fault(
                 candidate, TP_FORMAT_DIAGNOSTIC_PACKAGE_EXTRA_ENTRY,
                 "package contains an entry other than format.json and export.lua");
-            return false;
+            goto done;
         }
     }
     if (!descriptor_found) {
@@ -547,17 +560,21 @@ static bool package_has_exact_entries(
         format_candidate_set_fault(candidate,
                                    TP_FORMAT_DIAGNOSTIC_DESCRIPTOR_MISSING,
                                    "package is missing format.json");
-        return false;
+        goto done;
     }
     if (!source_found) {
         candidate->fault_file = TP_FORMAT_DISCOVERY_FAULT_SOURCE;
         format_candidate_set_fault(candidate,
                                    TP_FORMAT_DIAGNOSTIC_SOURCE_MISSING,
                                    "package is missing export.lua");
-        return false;
+        goto done;
     }
     *native_code = ERROR_SUCCESS;
-    return true;
+    complete = true;
+
+done:
+    directory_reader_destroy(reader);
+    return complete;
 }
 
 static tp_status read_package_file(
@@ -1062,18 +1079,28 @@ tp_status tp_format_discovery_read_root(
             error);
     }
 
-    tp_format_directory_reader reader;
-    directory_reader_init(&reader, root_handle);
+    tp_format_directory_reader *reader =
+        directory_reader_create(root_handle);
+    if (!reader) {
+        free(root_final_path);
+        (void)CloseHandle(root_handle);
+        free(root_wide);
+        return format_root_failure(
+            out, failure, TP_FORMAT_DIAGNOSTIC_ROOT_IO, TP_STATUS_OOM,
+            root, ERROR_OUTOFMEMORY,
+            "format root reader allocation failed", error);
+    }
     size_t root_entry_count = 0U;
     for (;;) {
         tp_format_directory_entry entry;
         const tp_format_directory_next_result next =
-            directory_reader_next(&reader, &entry);
+            directory_reader_next(reader, &entry);
         if (next == TP_FORMAT_DIRECTORY_NEXT_END) {
             break;
         }
         if (next == TP_FORMAT_DIRECTORY_NEXT_ERROR) {
-            const DWORD enumeration_code = reader.error_code;
+            const DWORD enumeration_code = reader->error_code;
+            directory_reader_destroy(reader);
             free(root_final_path);
             (void)CloseHandle(root_handle);
             free(root_wide);
@@ -1105,6 +1132,7 @@ tp_status tp_format_discovery_read_root(
         status = candidate_initialize(&entry, &candidate, &package_name,
                                       error);
         if (status != TP_STATUS_OK) {
+            directory_reader_destroy(reader);
             free(root_final_path);
             (void)CloseHandle(root_handle);
             free(root_wide);
@@ -1120,6 +1148,7 @@ tp_status tp_format_discovery_read_root(
             free(package_name);
             if (status != TP_STATUS_OK) {
                 tp_format_discovered_candidate_destroy(&candidate);
+                directory_reader_destroy(reader);
                 free(root_final_path);
                 (void)CloseHandle(root_handle);
                 free(root_wide);
@@ -1130,17 +1159,26 @@ tp_status tp_format_discovery_read_root(
             }
         }
         out->candidate_count++;
-        status = visit_candidate(visit_context, &candidate, error);
+        const tp_format_discovery_visit_result visit =
+            visit_candidate(visit_context, &candidate, error);
+        bool stop_success = false;
+        status = tp_format_discovery_visit_resolve(
+            visit, &stop_success, error);
         tp_format_discovered_candidate_destroy(&candidate);
         if (status != TP_STATUS_OK) {
+            directory_reader_destroy(reader);
             free(root_final_path);
             (void)CloseHandle(root_handle);
             free(root_wide);
             tp_format_discovery_result_destroy(out);
             return status;
         }
+        if (stop_success) {
+            break;
+        }
     }
 
+    directory_reader_destroy(reader);
     free(root_final_path);
     (void)CloseHandle(root_handle);
     free(root_wide);

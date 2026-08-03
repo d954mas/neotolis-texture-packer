@@ -103,7 +103,10 @@ static tp_status capture_serialize(const tp_export_serialize_ctx *ctx,
                                              err);
 }
 
-void setUp(void) { tp_export_run__test_reset_all(); }
+void setUp(void) {
+    tp_export_run__test_reset_all();
+    tp_export_ir_projection__test_reset_work();
+}
 void tearDown(void) { tp_export_run__test_reset_all(); }
 
 static void fill(uint8_t *p, int n, uint8_t r, uint8_t g, uint8_t b) {
@@ -1593,6 +1596,40 @@ static bool cancel_export_run(void *ctx) {
     return true;
 }
 
+void test_export_run_does_not_repeat_full_ir_validation_for_projection(void) {
+    tp_pack_sprite_desc sprites[3];
+    memset(sprites, 0, sizeof sprites);
+    sprites[0] = (tp_pack_sprite_desc){
+        .name = "wide", .rgba = g_wide, .w = 120, .h = 24,
+        .origin_x = 0.5F, .origin_y = 0.5F};
+    sprites[1] = (tp_pack_sprite_desc){
+        .name = "tall", .rgba = g_tall, .w = 24, .h = 100,
+        .origin_x = 0.5F, .origin_y = 0.5F};
+    sprites[2] = (tp_pack_sprite_desc){
+        .name = "piv", .rgba = g_piv, .w = 30, .h = 20,
+        .origin_x = 1.5F, .origin_y = -0.25F};
+
+    tp_arena *arena = tp_arena_create(0);
+    TEST_ASSERT_NOT_NULL(arena);
+    tp_export_notices notices;
+    tp_export_notices_init(&notices);
+    tp_error error = {{0}};
+    const tp_export_run_opts opts = {
+        .dry_run = true,
+        .catalog = g_catalog,
+    };
+
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_export_run_ex(g_proj, 0, sprites, 3, g_dir, arena, &notices,
+                         NULL, &opts, &error));
+    TEST_ASSERT_EQUAL_size_t(
+        0U, tp_export_ir_projection__test_validation_count());
+
+    tp_export_notices_free(&notices);
+    tp_arena_destroy(arena);
+}
+
 static bool record_terminal_boundary(void *ctx) {
     int *calls = ctx;
     (*calls)++;
@@ -1931,6 +1968,7 @@ int main(int argc, char **argv) {
     }
     UNITY_BEGIN();
     RUN_TEST(test_shared_run_count);
+    RUN_TEST(test_export_run_does_not_repeat_full_ir_validation_for_projection);
     RUN_TEST(test_targets_in_one_pack_group_share_one_export_ir);
     RUN_TEST(test_full_target_has_diagonal);
     RUN_TEST(test_norot_target_is_identity);

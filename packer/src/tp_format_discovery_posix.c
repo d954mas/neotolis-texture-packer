@@ -601,13 +601,20 @@ tp_status tp_format_discovery_read_root(
                 return status;
             }
         }
-        status = visit_candidate(visit_context, &candidate, error);
+        const tp_format_discovery_visit_result visit =
+            visit_candidate(visit_context, &candidate, error);
+        bool stop_success = false;
+        status = tp_format_discovery_visit_resolve(
+            visit, &stop_success, error);
         tp_format_discovered_candidate_destroy(&candidate);
         if (status != TP_STATUS_OK) {
             (void)closedir(directory);
             (void)close(root_fd);
             tp_format_discovery_result_destroy(out);
             return status;
+        }
+        if (stop_success) {
+            break;
         }
     }
     (void)closedir(directory);

@@ -243,24 +243,6 @@ const char *tp_format_catalog_root(const tp_format_catalog *catalog);
 bool tp_format_catalog_root_missing(const tp_format_catalog *catalog);
 bool tp_format_catalog_limit_fail_closed(const tp_format_catalog *catalog);
 
-typedef struct tp_format_package_snapshot {
-    tp_format_implementation_kind implementation;
-    const tp_format_descriptor *descriptor;
-    char fingerprint[33];
-    const unsigned char *descriptor_bytes;
-    size_t descriptor_byte_count;
-    const unsigned char *source_bytes;
-    size_t source_byte_count;
-    void *owned_storage;
-} tp_format_package_snapshot;
-
-/* Deep-copies the exact admitted bytes and descriptor of an available runtime
- * row.  Native rows have no package bytes and return NOT_FOUND. */
-tp_status tp_format_catalog_package_snapshot_create(
-    const tp_format_catalog *catalog, const char *id,
-    tp_format_package_snapshot *out, tp_error *err);
-void tp_format_package_snapshot_destroy(tp_format_package_snapshot *snapshot);
-
 /* Host byte/descriptor scan handoff.  It is deliberately not an installable
  * catalog while one or more candidates still require isolated Lua compilation.
  * Packet 2 consumes the same snapshots through its compile-validator; Packet 1
