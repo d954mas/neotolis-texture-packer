@@ -32,6 +32,8 @@
 #define TP_PROC_TEST_REAPED_TREE_ARG "__proc-job-transport-reaped-tree"
 #define TP_PROC_TEST_GRANDCHILD_ARG "__proc-job-transport-grandchild"
 #define TP_PROC_TEST_SLOW_STDIN_ARG "__proc-job-transport-slow-stdin"
+#define TP_PROC_TEST_ANNOUNCE_STDIN_ARG \
+    "__proc-job-transport-announce-stdin"
 #define TP_PROC_TEST_PROGRESS_BYTES (256U * 1024U)
 #define TP_PROC_TEST_TREE_MARKER "tp_proc_tree_survived.tmp"
 #define TP_PROC_TEST_TREE_READY_MARKER "tp_proc_tree_ready.tmp"
@@ -289,6 +291,25 @@ static int run_slow_stdin_child(void) {
     return fwrite(reply, 1U, strlen(reply), stdout) == strlen(reply) ? 0 : 3;
 }
 
+static int run_announce_stdin_child(void) {
+#if defined(_WIN32)
+    (void)_setmode(_fileno(stdin), _O_BINARY);
+#endif
+    sleep_ms(100U);
+    uint8_t *request = (uint8_t *)malloc(TP_PROC_TEST_PROGRESS_BYTES);
+    if (!request) {
+        return 4;
+    }
+    const bool read = read_exact_stdin(request, TP_PROC_TEST_PROGRESS_BYTES);
+    free(request);
+    if (!read) {
+        return 2;
+    }
+    return fwrite("announce", 1U, 8U, stdout) == 8U && fflush(stdout) == 0
+               ? 0
+               : 3;
+}
+
 static bool wait_finished(tp_proc *proc, tp_proc_result *out) {
     bool finished = false;
     for (int i = 0; i < 2000 && !finished; i++) {
@@ -529,6 +550,62 @@ void test_nonblocking_stdin_pump_reports_backpressure_and_completes(void) {
     free(request);
     tp_proc_destroy(proc);
 }
+
+#if defined(_WIN32)
+void test_pending_stdin_completion_can_be_confirmed_after_child_reply(void) {
+    char self[4096];
+    TEST_ASSERT_TRUE(tp_proc_self_path(self, sizeof self));
+    tp_proc *proc = tp_proc_spawn_owned_tree(
+        self, TP_PROC_TEST_ANNOUNCE_STDIN_ARG, NULL);
+    TEST_ASSERT_NOT_NULL(proc);
+    uint8_t *request = (uint8_t *)malloc(TP_PROC_TEST_PROGRESS_BYTES);
+    TEST_ASSERT_NOT_NULL(request);
+    memset(request, 0x5a, TP_PROC_TEST_PROGRESS_BYTES);
+
+    size_t consumed = 0U;
+    bool would_block = false;
+    TEST_ASSERT_TRUE(tp_proc_try_write_stdin(
+        proc, request, TP_PROC_TEST_PROGRESS_BYTES, &consumed, &would_block));
+    TEST_ASSERT_EQUAL_size_t(0U, consumed);
+    TEST_ASSERT_TRUE_MESSAGE(
+        would_block, "owned-tree stdin did not create an overlapped write");
+
+    uint8_t reply[8];
+    size_t total = 0U;
+    bool eof = false;
+    for (int i = 0; i < 5000 && total < sizeof reply; ++i) {
+        size_t got = 0U;
+        TEST_ASSERT_TRUE(tp_proc_try_read_stdout(
+            proc, reply + total, sizeof reply - total, &got, &eof));
+        total += got;
+        if (got == 0U) {
+            sleep_one_ms();
+        }
+    }
+    TEST_ASSERT_EQUAL_size_t(sizeof reply, total);
+    TEST_ASSERT_EQUAL_MEMORY("announce", reply, sizeof reply);
+
+    bool pending = true;
+    TEST_ASSERT_TRUE(tp_proc_poll_pending_stdin_write(
+        proc, &consumed, &pending));
+    TEST_ASSERT_FALSE(pending);
+    TEST_ASSERT_EQUAL_size_t(TP_PROC_TEST_PROGRESS_BYTES, consumed);
+    consumed = SIZE_MAX;
+    pending = true;
+    TEST_ASSERT_TRUE(tp_proc_poll_pending_stdin_write(
+        proc, &consumed, &pending));
+    TEST_ASSERT_FALSE(pending);
+    TEST_ASSERT_EQUAL_size_t(0U, consumed);
+    TEST_ASSERT_TRUE(tp_proc_close_stdin(proc));
+
+    tp_proc_result result;
+    TEST_ASSERT_TRUE(wait_finished(proc, &result));
+    TEST_ASSERT_EQUAL_INT(TP_PROC_END_EXITED, result.how);
+    TEST_ASSERT_EQUAL_INT(0, result.code);
+    free(request);
+    tp_proc_destroy(proc);
+}
+#endif
 
 void test_real_export_reports_committed_files_before_later_writer_failure(void) {
     char root[1200];
@@ -919,6 +996,9 @@ int main(int argc, char **argv) {
     if (argc >= 2 && strcmp(argv[1], TP_PROC_TEST_SLOW_STDIN_ARG) == 0) {
         return run_slow_stdin_child();
     }
+    if (argc >= 2 && strcmp(argv[1], TP_PROC_TEST_ANNOUNCE_STDIN_ARG) == 0) {
+        return run_announce_stdin_child();
+    }
 
     UNITY_BEGIN();
     RUN_TEST(test_keep_open_allows_later_cancel_signal);
@@ -930,6 +1010,10 @@ int main(int argc, char **argv) {
     RUN_TEST(test_reaped_tree_leader_cleans_nested_worker_before_reap);
 #endif
     RUN_TEST(test_nonblocking_stdin_pump_reports_backpressure_and_completes);
+#if defined(_WIN32)
+    RUN_TEST(
+        test_pending_stdin_completion_can_be_confirmed_after_child_reply);
+#endif
     RUN_TEST(
         test_real_export_reports_committed_files_before_later_writer_failure);
     RUN_TEST(test_real_export_skips_an_empty_atlas_and_still_succeeds);

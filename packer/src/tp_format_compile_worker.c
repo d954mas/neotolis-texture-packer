@@ -232,6 +232,55 @@ static tp_status validate_snapshot(
         request->package_path, out_report, error);
 }
 
+#ifdef TP_ENABLE_TEST_SEAMS
+static tp_status replace_with_hostile_diagnostic(
+    const tp_format_compile_proto_request *request,
+    tp_format_diagnostic_report **report, bool wrong_id, tp_error *error) {
+    tp_format_diagnostic_report *hostile = NULL;
+    tp_status status =
+        tp_format_diagnostic_report_create_internal(&hostile, error);
+    if (status != TP_STATUS_OK) {
+        return status;
+    }
+    const tp_format_diagnostic diagnostic = {
+        .severity = TP_FORMAT_DIAGNOSTIC_ERROR,
+        .code = TP_FORMAT_DIAGNOSTIC_COMPILE_ERROR,
+        .phase = TP_FORMAT_PHASE_COMPILE,
+        .format_id = wrong_id ? "wrong-diagnostic-id" : request->format_id,
+        .package_path = wrong_id ? request->package_path
+                                 : "formats/wrong-package/export.lua",
+        .message = "hostile compile diagnostic attribution",
+    };
+    status = tp_format_diagnostic_report_append_internal(
+        hostile, &diagnostic, error);
+    if (status != TP_STATUS_OK) {
+        tp_format_diagnostic_report_destroy(hostile);
+        return status;
+    }
+    tp_format_diagnostic_report_destroy(*report);
+    *report = hostile;
+    return TP_STATUS_OK;
+}
+
+static tp_status replace_with_marker_only_diagnostic(
+    tp_format_diagnostic_report **report, tp_error *error) {
+    tp_format_diagnostic_report *marker_only = NULL;
+    tp_status status =
+        tp_format_diagnostic_report_create_internal(&marker_only, error);
+    if (status == TP_STATUS_OK) {
+        status = tp_format_diagnostic_report_mark_truncated_internal(
+            marker_only, TP_FORMAT_PHASE_COMPILE, error);
+    }
+    if (status != TP_STATUS_OK) {
+        tp_format_diagnostic_report_destroy(marker_only);
+        return status;
+    }
+    tp_format_diagnostic_report_destroy(*report);
+    *report = marker_only;
+    return TP_STATUS_OK;
+}
+#endif
+
 static int service_request(const tp_format_compile_proto_request *request) {
 #ifdef TP_ENABLE_TEST_SEAMS
     if (test_action_for("global_oom_before_announce",
@@ -278,6 +327,35 @@ static int service_request(const tp_format_compile_proto_request *request) {
     tp_error error = {{0}};
     tp_format_diagnostic_report *report = NULL;
     const tp_status status = validate_snapshot(request, &report, &error);
+#ifdef TP_ENABLE_TEST_SEAMS
+    if (report &&
+        (test_action_for("wrong_diagnostic_id", request->candidate_index) ||
+         test_action_for("wrong_diagnostic_path", request->candidate_index))) {
+        const bool wrong_id =
+            test_action_for("wrong_diagnostic_id", request->candidate_index);
+        const tp_status hostile_status = replace_with_hostile_diagnostic(
+            request, &report, wrong_id, &error);
+        if (hostile_status != TP_STATUS_OK) {
+            tp_format_diagnostic_report_destroy(report);
+            return write_global_result(request->candidate_index,
+                                       hostile_status)
+                       ? 0
+                       : 5;
+        }
+    }
+    if (report &&
+        test_action_for("marker_only_diagnostic", request->candidate_index)) {
+        const tp_status hostile_status =
+            replace_with_marker_only_diagnostic(&report, &error);
+        if (hostile_status != TP_STATUS_OK) {
+            tp_format_diagnostic_report_destroy(report);
+            return write_global_result(request->candidate_index,
+                                       hostile_status)
+                       ? 0
+                       : 5;
+        }
+    }
+#endif
     const bool row_rejection = status == TP_STATUS_INVALID_ARGUMENT && report;
     const bool available = status == TP_STATUS_OK && !report;
     if (!available && !row_rejection) {
@@ -731,6 +809,22 @@ static tp_status send_request_frame(compile_process *process,
                        : TP_STATUS_BUILDER_FAILED;
         }
         if (process->stream.length != 0U) {
+            size_t completed = 0U;
+            if (!tp_proc_poll_pending_stdin_write(
+                    process->proc, &completed, NULL)) {
+                return tp_error_set(
+                    error, TP_STATUS_BUILDER_CRASHED,
+                    "compile worker request completion poll failed");
+            }
+            if (completed > length - offset) {
+                return tp_error_set(
+                    error, TP_STATUS_BUILDER_FAILED,
+                    "compile worker request completion is out of bounds");
+            }
+            offset += completed;
+            if (offset == length) {
+                return TP_STATUS_OK;
+            }
             return tp_error_set(error, TP_STATUS_BUILDER_FAILED,
                                 "compile worker responded before a request completed");
         }
@@ -763,7 +857,8 @@ static tp_status send_request_frame(compile_process *process,
 
 static tp_status make_worker_failed_result(
     const tp_format_compile_candidate *candidate,
-    tp_format_compile_row_result *out, const char *message, tp_error *error) {
+    const char *source_path, tp_format_compile_row_result *out,
+    const char *message, tp_error *error) {
     tp_format_diagnostic_report *report = NULL;
     tp_status status =
         tp_format_diagnostic_report_create_internal(&report, error);
@@ -775,7 +870,7 @@ static tp_status make_worker_failed_result(
         .code = TP_FORMAT_DIAGNOSTIC_COMPILE_WORKER_FAILED,
         .phase = TP_FORMAT_PHASE_COMPILE,
         .format_id = candidate->descriptor->id,
-        .package_path = candidate->package_path,
+        .package_path = source_path,
         .message = message,
     };
     status = tp_format_diagnostic_report_append_internal(
@@ -788,6 +883,49 @@ static tp_status make_worker_failed_result(
     out->available = false;
     out->diagnostics = report;
     return TP_STATUS_OK;
+}
+
+static tp_status logical_source_path(
+    const char *package_path,
+    char out[TP_FORMAT_DIAGNOSTIC_PATH_MAX_BYTES + 1U], tp_error *error) {
+    const int written = snprintf(
+        out, TP_FORMAT_DIAGNOSTIC_PATH_MAX_BYTES + 1U, "%s/export.lua",
+        package_path ? package_path : "");
+    if (!package_path || written < 0 ||
+        (size_t)written > TP_FORMAT_DIAGNOSTIC_PATH_MAX_BYTES) {
+        return tp_error_set(error, TP_STATUS_OUT_OF_BOUNDS,
+                            "compile logical source path exceeds its bound");
+    }
+    return TP_STATUS_OK;
+}
+
+static bool diagnostics_match_candidate(
+    const tp_format_diagnostic_report *report, const char *format_id,
+    const char *source_path) {
+    const size_t count = tp_format_diagnostic_report_count(report);
+    bool saw_attributed_diagnostic = false;
+    for (size_t i = 0U; i < count; ++i) {
+        const tp_format_diagnostic *diagnostic =
+            tp_format_diagnostic_report_at(report, i);
+        if (!diagnostic) {
+            return false;
+        }
+        if (diagnostic->code ==
+            TP_FORMAT_DIAGNOSTIC_DIAGNOSTICS_TRUNCATED) {
+            if (!tp_format_diagnostic_truncation_marker_canonical_internal(
+                    diagnostic)) {
+                return false;
+            }
+            continue;
+        }
+        if (!diagnostic->format_id || !diagnostic->package_path ||
+            strcmp(diagnostic->format_id, format_id) != 0 ||
+            strcmp(diagnostic->package_path, source_path) != 0) {
+            return false;
+        }
+        saw_attributed_diagnostic = true;
+    }
+    return saw_attributed_diagnostic;
 }
 
 static void destroy_results(tp_format_compile_row_result *results,
@@ -911,10 +1049,18 @@ tp_status tp_format_compile_worker_run(
                                TP_STATUS_INVALID_ARGUMENT, error,
                                "compile candidate snapshot is missing");
         }
+        char source_path[TP_FORMAT_DIAGNOSTIC_PATH_MAX_BYTES + 1U];
+        tp_status status =
+            logical_source_path(candidate.package_path, source_path, error);
+        if (status != TP_STATUS_OK) {
+            return fail_global(scan, results, result_count, &process, status,
+                               error,
+                               "compile logical source path is invalid");
+        }
         tp_format_compile_proto_request request = {
             .candidate_index = candidate.candidate_index,
             .format_id = candidate.descriptor->id,
-            .package_path = candidate.package_path,
+            .package_path = source_path,
             .descriptor_bytes = candidate.descriptor_bytes,
             .descriptor_byte_count = candidate.descriptor_byte_count,
             .source_bytes = candidate.source_bytes,
@@ -922,7 +1068,7 @@ tp_status tp_format_compile_worker_run(
         };
         uint8_t *encoded = NULL;
         size_t encoded_length = 0U;
-        tp_status status = tp_format_compile_proto_encode_request(
+        status = tp_format_compile_proto_encode_request(
             &request, &encoded, &encoded_length, error);
         if (status != TP_STATUS_OK ||
             !reserve_request(&attempt, encoded_length,
@@ -977,7 +1123,8 @@ tp_status tp_format_compile_worker_run(
                                       : "compile worker crashed after ANNOUNCE";
             process_destroy(&process);
             status = make_worker_failed_result(
-                &candidate, &results[result_count], failure, error);
+                &candidate, source_path, &results[result_count], failure,
+                error);
             if (status != TP_STATUS_OK) {
                 return fail_global(scan, results, result_count, &process,
                                    status, error,
@@ -1012,6 +1159,18 @@ tp_status tp_format_compile_worker_run(
             tp_format_compile_proto_message_free(&message);
             return fail_global(scan, results, result_count, &process, status,
                                error, "compile worker reported a global failure");
+        }
+        if (message.result.diagnostics &&
+            !diagnostics_match_candidate(message.result.diagnostics,
+                                         candidate.descriptor->id,
+                                         source_path)) {
+            tp_format_compile_proto_message_free(&message);
+            status = tp_error_set(
+                error, TP_STATUS_BUILDER_FAILED,
+                "compile worker diagnostic attribution is invalid");
+            return fail_global(scan, results, result_count, &process, status,
+                               error,
+                               "compile worker diagnostic attribution failed");
         }
         results[result_count].candidate_index = candidate.candidate_index;
         results[result_count].available = message.result.available;

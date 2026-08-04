@@ -198,7 +198,8 @@ static tp_format_diagnostic_code source_admission(
     return (tp_format_diagnostic_code)0;
 }
 
-static int scan_row_compare(const void *left_value, const void *right_value) {
+static int scan_row_compile_compare(const void *left_value,
+                                    const void *right_value) {
     const tp_format_catalog_owned_row *left =
         (const tp_format_catalog_owned_row *)left_value;
     const tp_format_catalog_owned_row *right =
@@ -512,7 +513,7 @@ tp_status tp_format_catalog_scan_root(
     }
     if (scan->row_count > 1U) {
         qsort(scan->rows, scan->row_count, sizeof *scan->rows,
-              scan_row_compare);
+              scan_row_compile_compare);
     }
     scan->compile_count = 0U;
     for (size_t i = 0U; i < scan->row_count; ++i) {
@@ -525,6 +526,26 @@ tp_status tp_format_catalog_scan_root(
     }
     *out_scan = scan;
     return TP_STATUS_OK;
+}
+
+static int scan_row_catalog_compare(const void *left_value,
+                                    const void *right_value) {
+    const tp_format_catalog_owned_row *left =
+        (const tp_format_catalog_owned_row *)left_value;
+    const tp_format_catalog_owned_row *right =
+        (const tp_format_catalog_owned_row *)right_value;
+    if (left->available != right->available) {
+        return left->available ? -1 : 1;
+    }
+    if (left->available) {
+        const char *left_id =
+            tp_format_owned_descriptor_view(left->owned_descriptor)->id;
+        const char *right_id =
+            tp_format_owned_descriptor_view(right->owned_descriptor)->id;
+        const int id_order = strcmp(left_id, right_id);
+        return id_order != 0 ? id_order : strcmp(left->key, right->key);
+    }
+    return strcmp(left->key, right->key);
 }
 
 size_t tp_format_catalog_scan_compile_count(
@@ -625,6 +646,10 @@ tp_status tp_format_catalog_scan_complete_compile_internal(
         result->diagnostics = NULL;
         row->available = result->available;
         row->pending_compile = false;
+    }
+    if (scan->row_count > 1U) {
+        qsort(scan->rows, scan->row_count, sizeof *scan->rows,
+              scan_row_catalog_compare);
     }
     scan->compile_state = TP_FORMAT_COMPILE_BATCH_COMPLETE;
     return TP_STATUS_OK;

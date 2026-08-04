@@ -124,7 +124,7 @@ static tp_lua_runtime_input fixture_input(const char *source, bool hidden) {
         {.id = "separator", .value = "|"}};
     return (tp_lua_runtime_input){
         .source = (const unsigned char *)source,
-        .source_byte_count = strlen(source),
+        .source_byte_count = source ? strlen(source) : 0U,
         .format_id = "sandbox-test",
         .package_path = "formats/sandbox-test/export.lua",
         .projected_ir = hidden ? &hidden_projected : &projected,
@@ -307,6 +307,7 @@ static int run_child(void) {
         case 'O': source = notices; break;
         case 'X': source = invalid_error; break;
         case 'F': source = framed_error; break;
+        case 'E': source = NULL; break;
         case 'G':
             owned_source = large_result_source();
             if (!owned_source) return 4;
@@ -438,6 +439,37 @@ static void test_chunk_shape_and_handler_return_arity_are_exact(void) {
     assert_diagnostic('R', TP_FORMAT_DIAGNOSTIC_HANDLER_CONTRACT);
 }
 
+static void test_canonical_null_empty_source_is_handler_contract(void) {
+    assert_diagnostic('E', TP_FORMAT_DIAGNOSTIC_HANDLER_CONTRACT);
+}
+
+static void test_null_source_shape_is_validated_on_compile_and_runtime_paths(void) {
+    tp_format_diagnostic_report *report = NULL;
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_lua_compile_validate(NULL, 0U, "sandbox-test",
+                                "formats/sandbox-test/export.lua", &report,
+                                &error),
+        error.msg);
+    TEST_ASSERT_NULL(report);
+
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_INVALID_ARGUMENT,
+        tp_lua_compile_validate(NULL, 1U, "sandbox-test",
+                                "formats/sandbox-test/export.lua", &report,
+                                &error));
+    TEST_ASSERT_NULL(report);
+
+    tp_lua_runtime_input input = fixture_input(NULL, false);
+    input.source_byte_count = 1U;
+    tp_lua_runtime_result result = {0};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_INVALID_ARGUMENT,
+        tp_lua_runtime_serialize(&input, &result, &error));
+    tp_lua_runtime_result_destroy(&result);
+}
+
 static void test_retained_writer_cannot_write_after_finish(void) {
     assert_diagnostic('W',
                       TP_FORMAT_DIAGNOSTIC_DOCUMENT_WRITE_AFTER_FINISH);
@@ -490,6 +522,9 @@ int main(int argc, char **argv) {
     RUN_TEST(test_projected_visibility_hides_unsupported_fields);
     RUN_TEST(test_bad_indices_and_types_are_handler_contract);
     RUN_TEST(test_chunk_shape_and_handler_return_arity_are_exact);
+    RUN_TEST(test_canonical_null_empty_source_is_handler_contract);
+    RUN_TEST(
+        test_null_source_shape_is_validated_on_compile_and_runtime_paths);
     RUN_TEST(test_retained_writer_cannot_write_after_finish);
     RUN_TEST(test_notices_preserve_deterministic_order);
     RUN_TEST(test_invalid_lua_error_text_uses_fixed_fallback);

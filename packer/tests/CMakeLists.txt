@@ -624,13 +624,16 @@ tp_add_test(NAME format_binding_protocol LIBS tp_core unity PRIVATE_SRC)
 # Worker-only runtime gates. Each executable re-enters itself as the child that
 # owns lua_State; the Unity controller performs only process I/O. The limits
 # gate recompiles the two host TUs with fenced lowered ceilings, leaving the
-# production tp_build constants immutable.
-tp_add_test(NAME lua_sandbox_contract LIBS tp_build unity PRIVATE_SRC)
+# production tp_build constants immutable. These normally complete in under a
+# second; 30 seconds leaves ample slow-runner margin while bounding an
+# instruction-hook or child-process regression so it cannot wedge CI.
+tp_add_test(NAME lua_sandbox_contract LIBS tp_build unity PRIVATE_SRC TIMEOUT 30)
 tp_add_test(NAME lua_limits_faults
     SOURCES test_lua_limits_faults.c
         ../src/tp_lua_host.c ../src/tp_lua_bindings.c
-    LIBS tp_build tp_lua_vendor unity PRIVATE_SRC SEAMS)
-tp_add_test(NAME lua_determinism LIBS tp_build unity PRIVATE_SRC)
+    LIBS tp_build tp_lua_vendor unity PRIVATE_SRC SEAMS
+    TIMEOUT 30)
+tp_add_test(NAME lua_determinism LIBS tp_build unity PRIVATE_SRC TIMEOUT 30)
 
 # Persistent compile-validation FSM. Recompile only the controller/service TU
 # with fenced fault actions; the shipped tp_build copy has no environment fault

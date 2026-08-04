@@ -7,6 +7,7 @@
 
 #include "tp_export_internal.h"
 #include "tp_format_descriptor_internal.h"
+#include "tp_format_diagnostic_internal.h"
 #include "tp_hex.h"
 #include "tp_utf8_internal.h"
 
@@ -40,6 +41,7 @@ typedef struct diagnostic_shape {
     uint32_t package_path_length;
     uint32_t message_length;
     size_t variable_bytes;
+    size_t owned_storage_bytes;
     size_t encoded_bytes;
 } diagnostic_shape;
 
@@ -138,16 +140,6 @@ static bool bounded_cstr(const char *text, size_t cap, uint32_t *out_length) {
     return false;
 }
 
-static bool diagnostic_enums_valid(const tp_format_diagnostic *diagnostic) {
-    return diagnostic &&
-           diagnostic->severity >= TP_FORMAT_DIAGNOSTIC_WARNING &&
-           diagnostic->severity <= TP_FORMAT_DIAGNOSTIC_ERROR &&
-           diagnostic->phase >= TP_FORMAT_PHASE_DISCOVERY &&
-           diagnostic->phase <= TP_FORMAT_PHASE_OUTPUT &&
-           diagnostic->code >= TP_FORMAT_DIAGNOSTIC_CATALOG_LIMIT &&
-           diagnostic->code <= TP_FORMAT_DIAGNOSTIC_DIAGNOSTICS_TRUNCATED;
-}
-
 static tp_status validate_optional_text(const char *text, uint32_t length,
                                         const char *label, tp_error *error) {
     if (length == UINT32_MAX) {
@@ -160,7 +152,11 @@ static tp_status diagnostic_measure(const tp_format_diagnostic *diagnostic,
                                     diagnostic_shape *out,
                                     tp_error *error) {
     memset(out, 0, sizeof *out);
-    if (!diagnostic_enums_valid(diagnostic) ||
+    if (!tp_format_diagnostic_semantics_valid_internal(diagnostic) ||
+        (diagnostic->code ==
+             TP_FORMAT_DIAGNOSTIC_DIAGNOSTICS_TRUNCATED &&
+         !tp_format_diagnostic_truncation_marker_canonical_internal(
+             diagnostic)) ||
         diagnostic->frame_count > TP_FORMAT_DIAGNOSTIC_FRAME_MAX ||
         (diagnostic->frame_count > 0U && !diagnostic->frames) ||
         !bounded_cstr(diagnostic->format_id, TP_FORMAT_ID_MAX_BYTES,
@@ -234,6 +230,30 @@ static tp_status diagnostic_measure(const tp_format_diagnostic *diagnostic,
                             "tp_format_binding_proto: diagnostic bytes overflow");
     }
     out->variable_bytes = variable;
+    out->owned_storage_bytes = variable;
+    if (out->format_id_length != UINT32_MAX) {
+        out->owned_storage_bytes++;
+    }
+    if (out->package_path_length != UINT32_MAX) {
+        out->owned_storage_bytes++;
+    }
+    if (out->message_length != UINT32_MAX) {
+        out->owned_storage_bytes++;
+    }
+    if (!add_size(&out->owned_storage_bytes, diagnostic->frame_count)) {
+        return tp_error_set(
+            error, TP_STATUS_OUT_OF_BOUNDS,
+            "tp_format_binding_proto: diagnostic owned bytes overflow");
+    }
+    if (diagnostic->frame_count >
+        (SIZE_MAX - out->owned_storage_bytes) /
+            sizeof(tp_format_diagnostic_frame)) {
+        return tp_error_set(
+            error, TP_STATUS_OUT_OF_BOUNDS,
+            "tp_format_binding_proto: diagnostic owned bytes overflow");
+    }
+    out->owned_storage_bytes +=
+        diagnostic->frame_count * sizeof(tp_format_diagnostic_frame);
     out->encoded_bytes = encoded;
     return TP_STATUS_OK;
 }
@@ -482,6 +502,171 @@ static tp_status resolution_validate(
                         "tp_format_binding_proto: invalid resolution");
 }
 
+static size_t report_vector_capacity(size_t ordinary_count) {
+    size_t capacity = 0U;
+    while (capacity < ordinary_count) {
+        capacity = capacity > 0U ? capacity * 2U : 8U;
+        if (capacity > TP_FORMAT_DIAGNOSTIC_MAX - 1U) {
+            capacity = TP_FORMAT_DIAGNOSTIC_MAX - 1U;
+        }
+    }
+    return capacity;
+}
+
+static tp_status report_layout_measure(size_t *out_base_bytes,
+                                       size_t *out_entry_bytes,
+                                       tp_error *error) {
+    tp_format_diagnostic_report *report = NULL;
+    tp_status status =
+        tp_format_diagnostic_report_create_internal(&report, error);
+    if (status != TP_STATUS_OK) {
+        return status;
+    }
+    const size_t base_bytes =
+        tp_format_diagnostic_report_dynamic_bytes_internal(report);
+    const tp_format_diagnostic probe = {
+        .severity = TP_FORMAT_DIAGNOSTIC_ERROR,
+        .code = TP_FORMAT_DIAGNOSTIC_COMPILE_ERROR,
+        .phase = TP_FORMAT_PHASE_COMPILE,
+    };
+    status = tp_format_diagnostic_report_append_internal(report, &probe,
+                                                          error);
+    const size_t first_entry_bytes =
+        tp_format_diagnostic_report_dynamic_bytes_internal(report);
+    tp_format_diagnostic_report_destroy(report);
+    if (status != TP_STATUS_OK) {
+        return status;
+    }
+    if (first_entry_bytes <= base_bytes ||
+        (first_entry_bytes - base_bytes) % 8U != 0U) {
+        return tp_error_set(
+            error, TP_STATUS_INVALID_ARGUMENT,
+            "tp_format_binding_proto: diagnostic report layout is invalid");
+    }
+    *out_base_bytes = base_bytes;
+    *out_entry_bytes = (first_entry_bytes - base_bytes) / 8U;
+    return TP_STATUS_OK;
+}
+
+static tp_status unavailable_slice_validate(
+    const tp_format_binding_proto_resolution *resolution,
+    const tp_format_diagnostic *diagnostics,
+    const size_t *owned_storage_prefix, const size_t *marker_prefix,
+    size_t report_base_bytes, size_t report_entry_bytes, tp_error *error) {
+    if (resolution->kind != TP_FORMAT_BINDING_RESOLUTION_UNAVAILABLE) {
+        return TP_STATUS_OK;
+    }
+    const size_t offset = resolution->diagnostic_offset;
+    const size_t count = resolution->diagnostic_count;
+    if (count > TP_FORMAT_DIAGNOSTIC_MAX) {
+        return tp_error_set(
+            error, TP_STATUS_OUT_OF_BOUNDS,
+            "tp_format_binding_proto: unavailable diagnostic count exceeds report cap");
+    }
+    const size_t end = offset + count;
+    const size_t marker_count = marker_prefix[end] - marker_prefix[offset];
+    const bool has_marker = marker_count != 0U;
+    if (marker_count > 1U ||
+        (has_marker &&
+         (diagnostics[end - 1U].code !=
+              TP_FORMAT_DIAGNOSTIC_DIAGNOSTICS_TRUNCATED ||
+          !tp_format_diagnostic_truncation_marker_canonical_internal(
+              &diagnostics[end - 1U])))) {
+        return tp_error_set(
+            error, TP_STATUS_INVALID_ARGUMENT,
+            "tp_format_binding_proto: unavailable truncation marker is invalid");
+    }
+    const size_t ordinary_count = count - (has_marker ? 1U : 0U);
+    if (ordinary_count > TP_FORMAT_DIAGNOSTIC_MAX - 1U) {
+        return tp_error_set(
+            error, TP_STATUS_OUT_OF_BOUNDS,
+            "tp_format_binding_proto: unavailable diagnostics cannot materialize");
+    }
+    const size_t ordinary_end = end - (has_marker ? 1U : 0U);
+    const size_t storage_bytes =
+        owned_storage_prefix[ordinary_end] - owned_storage_prefix[offset];
+    const size_t capacity = report_vector_capacity(ordinary_count);
+    if (report_base_bytes > TP_FORMAT_DIAGNOSTIC_DYNAMIC_BYTES_MAX ||
+        capacity >
+            (TP_FORMAT_DIAGNOSTIC_DYNAMIC_BYTES_MAX - report_base_bytes) /
+                report_entry_bytes ||
+        storage_bytes >
+            TP_FORMAT_DIAGNOSTIC_DYNAMIC_BYTES_MAX - report_base_bytes -
+                capacity * report_entry_bytes) {
+        return tp_error_set(
+            error, TP_STATUS_OUT_OF_BOUNDS,
+            "tp_format_binding_proto: unavailable diagnostic bytes exceed report cap");
+    }
+    return TP_STATUS_OK;
+}
+
+static tp_status unavailable_slices_validate(
+    const tp_format_binding_proto_value *value, tp_error *error) {
+    bool has_unavailable =
+        value->preview.kind == TP_FORMAT_BINDING_RESOLUTION_UNAVAILABLE;
+    for (size_t i = 0U; !has_unavailable && i < value->target_count; ++i) {
+        has_unavailable = value->targets[i].resolution.kind ==
+                          TP_FORMAT_BINDING_RESOLUTION_UNAVAILABLE;
+    }
+    if (!has_unavailable) {
+        return TP_STATUS_OK;
+    }
+
+    size_t *owned_storage_prefix = (size_t *)calloc(
+        value->diagnostic_count + 1U, sizeof *owned_storage_prefix);
+    size_t *marker_prefix = (size_t *)calloc(value->diagnostic_count + 1U,
+                                             sizeof *marker_prefix);
+    if (!owned_storage_prefix || !marker_prefix) {
+        free(owned_storage_prefix);
+        free(marker_prefix);
+        return tp_error_set(
+            error, TP_STATUS_OOM,
+            "tp_format_binding_proto: diagnostic slice allocation failed");
+    }
+    tp_status status = TP_STATUS_OK;
+    for (size_t i = 0U; i < value->diagnostic_count; ++i) {
+        diagnostic_shape shape;
+        status = diagnostic_measure(&value->diagnostics[i], &shape, error);
+        if (status != TP_STATUS_OK ||
+            owned_storage_prefix[i] > SIZE_MAX - shape.owned_storage_bytes) {
+            if (status == TP_STATUS_OK) {
+                status = tp_error_set(
+                    error, TP_STATUS_OUT_OF_BOUNDS,
+                    "tp_format_binding_proto: diagnostic owned bytes overflow");
+            }
+            break;
+        }
+        owned_storage_prefix[i + 1U] =
+            owned_storage_prefix[i] + shape.owned_storage_bytes;
+        marker_prefix[i + 1U] =
+            marker_prefix[i] +
+            (value->diagnostics[i].code ==
+                     TP_FORMAT_DIAGNOSTIC_DIAGNOSTICS_TRUNCATED
+                 ? 1U
+                 : 0U);
+    }
+    size_t report_base_bytes = 0U, report_entry_bytes = 0U;
+    if (status == TP_STATUS_OK) {
+        status = report_layout_measure(&report_base_bytes,
+                                       &report_entry_bytes, error);
+    }
+    if (status == TP_STATUS_OK) {
+        status = unavailable_slice_validate(
+            &value->preview, value->diagnostics, owned_storage_prefix,
+            marker_prefix, report_base_bytes, report_entry_bytes, error);
+    }
+    for (size_t i = 0U; status == TP_STATUS_OK && i < value->target_count;
+         ++i) {
+        status = unavailable_slice_validate(
+            &value->targets[i].resolution, value->diagnostics,
+            owned_storage_prefix, marker_prefix, report_base_bytes,
+            report_entry_bytes, error);
+    }
+    free(owned_storage_prefix);
+    free(marker_prefix);
+    return status;
+}
+
 static void write_resolution(binding_writer *writer,
                              const tp_format_binding_proto_resolution *value) {
     wr_u32(writer, (uint32_t)value->kind);
@@ -710,6 +895,11 @@ tp_status tp_format_binding_proto_encode(
                                       "tp_format_binding_proto: diagnostics exceed cap");
         }
     }
+    status = unavailable_slices_validate(value, error);
+    if (status != TP_STATUS_OK) {
+        free(shapes);
+        return status;
+    }
     if (diagnostic_bytes > TP_FORMAT_BINDING_PROTO_MAX_DIAGNOSTIC_BYTES ||
         payload > TP_FORMAT_BINDING_PROTO_MAX_FRAME_BYTES ||
         payload > UINT32_MAX || payload > SIZE_MAX - TP_BINDING_FRAME_HEADER_BYTES) {
@@ -882,10 +1072,11 @@ static tp_status decode_diagnostic(binding_reader *reader,
     out->severity = (tp_format_diagnostic_severity)severity;
     out->code = (tp_format_diagnostic_code)code;
     out->phase = (tp_format_diagnostic_phase)phase;
-    if (!diagnostic_enums_valid(out) || reserved != 0U ||
+    if (!tp_format_diagnostic_semantics_valid_internal(out) ||
+        reserved != 0U ||
         frame_count > TP_FORMAT_DIAGNOSTIC_FRAME_MAX) {
         return tp_error_set(error, TP_STATUS_INVALID_ARGUMENT,
-                            "tp_format_binding_proto: invalid diagnostic fields");
+                            "tp_format_binding_proto: invalid diagnostic semantics");
     }
 
     /* Decode into temporary independently allocated strings, then coalesce the
@@ -926,6 +1117,21 @@ static tp_status decode_diagnostic(binding_reader *reader,
         !tp_format_id_is_runtime_token(format)) {
         status = tp_error_set(error, TP_STATUS_INVALID_ARGUMENT,
                               "tp_format_binding_proto: invalid diagnostic format id");
+    }
+    if (status == TP_STATUS_OK &&
+        out->code == TP_FORMAT_DIAGNOSTIC_DIAGNOSTICS_TRUNCATED) {
+        tp_format_diagnostic complete = *out;
+        complete.format_id = format;
+        complete.package_path = path;
+        complete.message = message;
+        complete.frames = frame_count > 0U ? frames : NULL;
+        complete.frame_count = frame_count;
+        if (!tp_format_diagnostic_truncation_marker_canonical_internal(
+                &complete)) {
+            status = tp_error_set(
+                error, TP_STATUS_INVALID_ARGUMENT,
+                "tp_format_binding_proto: invalid truncation marker");
+        }
     }
     if (status != TP_STATUS_OK) {
         free(format);
@@ -982,7 +1188,7 @@ static tp_status decode_diagnostic(binding_reader *reader,
                 cursor += n;
             }
 #undef COPY_DIAGNOSTIC_STRING
-            out->frames = owned_frames;
+            out->frames = frame_count > 0U ? owned_frames : NULL;
             out->frame_count = frame_count;
             *out_block = block;
             *out_dynamic = dynamic;
@@ -1242,6 +1448,10 @@ tp_status tp_format_binding_proto_decode(
         if (status != TP_STATUS_OK) {
             goto fail;
         }
+    }
+    status = unavailable_slices_validate(out_value, error);
+    if (status != TP_STATUS_OK) {
+        goto fail;
     }
     return TP_STATUS_OK;
 

@@ -414,8 +414,10 @@ tp_status tp_lua_compile_validate(
     char chunk_name[TP_FORMAT_ID_MAX_BYTES + 32U];
     (void)snprintf(chunk_name, sizeof chunk_name,
                    "@formats/%s/export.lua", format_id);
+    const unsigned char *source_text =
+        source ? source : (const unsigned char *)"";
     const int load_status = luaL_loadbufferx(
-        state, (const char *)source, source_byte_count, chunk_name, "t");
+        state, (const char *)source_text, source_byte_count, chunk_name, "t");
     if (load_status != LUA_OK) {
         lua_error_message(state, message, sizeof message,
                           "Lua text compilation failed");
@@ -449,7 +451,8 @@ static bool c_text_valid(const char *text, size_t max_bytes) {
 
 static tp_status validate_runtime_input(const tp_lua_runtime_input *input,
                                         tp_error *error) {
-    if (!input || !input->source || !input->format_id ||
+    if (!input || (!input->source && input->source_byte_count != 0U) ||
+        !input->format_id ||
         !input->package_path || !input->projected_ir ||
         !input->projected_ir->value ||
         input->source_byte_count > TP_FORMAT_SOURCE_MAX_BYTES ||
@@ -681,8 +684,10 @@ tp_status tp_lua_runtime_serialize(const tp_lua_runtime_input *input,
             context.cancelled = true;
             lua_status = LUA_ERRRUN;
         } else {
+            const unsigned char *source_text =
+                input->source ? input->source : (const unsigned char *)"";
             lua_status = luaL_loadbufferx(
-                state, (const char *)input->source,
+                state, (const char *)source_text,
                 input->source_byte_count, chunk_name, "t");
             if (tp_cancel_requested(input->cancel)) {
                 context.cancelled = true;

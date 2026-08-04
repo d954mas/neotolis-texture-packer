@@ -227,14 +227,16 @@ tp_status tp_format_compile_proto_encode_announce(
     return status;
 }
 
-static bool diagnostic_enum_valid(const tp_format_diagnostic *diagnostic) {
-    return diagnostic &&
-           diagnostic->severity >= TP_FORMAT_DIAGNOSTIC_WARNING &&
-           diagnostic->severity <= TP_FORMAT_DIAGNOSTIC_ERROR &&
-           diagnostic->code >= TP_FORMAT_DIAGNOSTIC_CATALOG_LIMIT &&
-           diagnostic->code <= TP_FORMAT_DIAGNOSTIC_DIAGNOSTICS_TRUNCATED &&
-           diagnostic->phase >= TP_FORMAT_PHASE_DISCOVERY &&
-           diagnostic->phase <= TP_FORMAT_PHASE_OUTPUT;
+static bool compile_diagnostic_code_valid(
+    tp_format_diagnostic_code code) {
+    switch (code) {
+        case TP_FORMAT_DIAGNOSTIC_SOURCE_INVALID_UTF8:
+        case TP_FORMAT_DIAGNOSTIC_SOURCE_BINARY:
+        case TP_FORMAT_DIAGNOSTIC_COMPILE_ERROR:
+        case TP_FORMAT_DIAGNOSTIC_MEMORY_LIMIT:
+        case TP_FORMAT_DIAGNOSTIC_DIAGNOSTICS_TRUNCATED: return true;
+        default: return false;
+    }
 }
 
 static bool optional_shape(const char *text, size_t maximum,
@@ -255,7 +257,12 @@ static tp_status measure_diagnostic(const tp_format_diagnostic *diagnostic,
                                     diagnostic_shape *out,
                                     tp_error *error) {
     memset(out, 0, sizeof *out);
-    if (!diagnostic_enum_valid(diagnostic) ||
+    if (!tp_format_diagnostic_semantics_valid_internal(diagnostic) ||
+        !compile_diagnostic_code_valid(diagnostic->code) ||
+        (diagnostic->code ==
+             TP_FORMAT_DIAGNOSTIC_DIAGNOSTICS_TRUNCATED &&
+         !tp_format_diagnostic_truncation_marker_canonical_internal(
+             diagnostic)) ||
         diagnostic->frame_count > TP_FORMAT_DIAGNOSTIC_FRAME_MAX ||
         (diagnostic->frame_count > 0U && !diagnostic->frames) ||
         !optional_shape(diagnostic->format_id, TP_FORMAT_ID_MAX_BYTES,
@@ -395,6 +402,14 @@ tp_status tp_format_compile_proto_encode_result(
     for (size_t i = 0U; i < diagnostic_count; ++i) {
         const tp_format_diagnostic *diagnostic =
             tp_format_diagnostic_report_at(result->diagnostics, i);
+        if (diagnostic &&
+            diagnostic->code ==
+                TP_FORMAT_DIAGNOSTIC_DIAGNOSTICS_TRUNCATED &&
+            i + 1U != diagnostic_count) {
+            free(shapes);
+            return tp_error_set(error, TP_STATUS_INVALID_ARGUMENT,
+                                "compile truncation marker must be final");
+        }
         status = measure_diagnostic(diagnostic, &shapes[i], error);
         if (status != TP_STATUS_OK || !add_size(&payload, shapes[i].bytes) ||
             payload > TP_FORMAT_COMPILE_PROTO_MAX_RESULT_PAYLOAD_BYTES) {
@@ -694,9 +709,10 @@ static tp_status decode_diagnostic(compile_reader *reader,
     out->severity = (tp_format_diagnostic_severity)severity;
     out->code = (tp_format_diagnostic_code)code;
     out->phase = (tp_format_diagnostic_phase)phase;
-    if (!diagnostic_enum_valid(out)) {
+    if (!tp_format_diagnostic_semantics_valid_internal(out) ||
+        !compile_diagnostic_code_valid(out->code)) {
         return tp_error_set(error, TP_STATUS_INVALID_ARGUMENT,
-                            "compile diagnostic enums are invalid");
+                            "compile diagnostic semantics are invalid");
     }
     char *format_id = NULL;
     char *package_path = NULL;
@@ -744,12 +760,20 @@ static tp_status decode_diagnostic(compile_reader *reader,
         frames[i].text = text;
     }
     if (status == TP_STATUS_OK) {
-        out->format_id = format_id;
-        out->package_path = package_path;
-        out->message = message;
-        out->frames = frames;
-        out->frame_count = frame_count;
-        return TP_STATUS_OK;
+        tp_format_diagnostic complete = *out;
+        complete.format_id = format_id;
+        complete.package_path = package_path;
+        complete.message = message;
+        complete.frames = frames;
+        complete.frame_count = frame_count;
+        if (complete.code != TP_FORMAT_DIAGNOSTIC_DIAGNOSTICS_TRUNCATED ||
+            tp_format_diagnostic_truncation_marker_canonical_internal(
+                &complete)) {
+            *out = complete;
+            return TP_STATUS_OK;
+        }
+        status = tp_error_set(error, TP_STATUS_INVALID_ARGUMENT,
+                              "compile truncation marker is invalid");
     }
     free(format_id);
     free(package_path);
@@ -818,8 +842,8 @@ static tp_status decode_result_payload(
                    diagnostic.code ==
                        TP_FORMAT_DIAGNOSTIC_DIAGNOSTICS_TRUNCATED) {
             if (i + 1U != diagnostic_count ||
-                diagnostic.severity != TP_FORMAT_DIAGNOSTIC_WARNING ||
-                diagnostic.frame_count != 0U) {
+                !tp_format_diagnostic_truncation_marker_canonical_internal(
+                    &diagnostic)) {
                 status = tp_error_set(error, TP_STATUS_INVALID_ARGUMENT,
                                       "compile truncation marker is invalid");
             } else {

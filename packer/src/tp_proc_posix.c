@@ -279,6 +279,17 @@ bool tp_proc_try_write_stdin(tp_proc *proc, const void *data, size_t size,
     return true;
 }
 
+bool tp_proc_poll_pending_stdin_write(tp_proc *proc, size_t *out_consumed,
+                                      bool *out_pending) {
+    if (out_consumed) {
+        *out_consumed = 0U;
+    }
+    if (out_pending) {
+        *out_pending = false;
+    }
+    return proc && proc->stdin_w >= 0;
+}
+
 bool tp_proc_send_cancel(tp_proc *proc) {
     const unsigned char signal = TP_PROC_CANCEL_BYTE;
     return tp_proc_write_stdin_keep_open(proc, &signal, sizeof signal);

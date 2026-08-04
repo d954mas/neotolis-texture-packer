@@ -95,6 +95,40 @@ static bool copy_fixture_package(const char *root, const char *package_name,
            copy_fixture_file(package_name, "unexpected.txt", destination);
 }
 
+static bool copy_fixture_package_with_id(const char *root,
+                                         const char *package_name,
+                                         const char *format_id) {
+    static const char source_id[] = "fixture-minimal";
+    char destination[FORMAT_TEST_PATH_CAP];
+    char descriptor_path[FORMAT_TEST_PATH_CAP];
+    if (strlen(format_id) != sizeof source_id - 1U ||
+        !path_join(destination, sizeof destination, root, package_name) ||
+        !tp_fs_create_dir(destination) ||
+        !copy_fixture_file("valid-minimal", "format.json", destination) ||
+        !copy_fixture_file("valid-minimal", "export.lua", destination) ||
+        !path_join(descriptor_path, sizeof descriptor_path, destination,
+                   "format.json")) {
+        return false;
+    }
+    unsigned char *bytes = NULL;
+    size_t byte_count = 0U;
+    if (!read_file_owned(descriptor_path, &bytes, &byte_count)) {
+        return false;
+    }
+    bool replaced = false;
+    for (size_t i = 0U; i + sizeof source_id - 1U <= byte_count; ++i) {
+        if (memcmp(bytes + i, source_id, sizeof source_id - 1U) == 0) {
+            memcpy(bytes + i, format_id, sizeof source_id - 1U);
+            replaced = true;
+            break;
+        }
+    }
+    const bool written =
+        replaced && tp_fs_write_file(descriptor_path, bytes, byte_count);
+    free(bytes);
+    return written;
+}
+
 static bool prepare_broken_root(char out[FORMAT_TEST_PATH_CAP]) {
     static const struct {
         const char *name;
@@ -799,6 +833,80 @@ void test_compile_batch_applies_only_as_one_complete_catalog(void) {
     tp_format_catalog_release(catalog);
 }
 
+void test_compiled_catalog_restores_contract_order_after_candidate_order(void) {
+    char root[FORMAT_TEST_PATH_CAP];
+    TEST_ASSERT_TRUE(path_join(root, sizeof root, TP_FORMAT_CATALOG_TEST_DIR,
+                               "compiled-order-root"));
+    TEST_ASSERT_TRUE(tp_fs_create_dir(root));
+    TEST_ASSERT_TRUE(copy_fixture_package_with_id(
+        root, "aaa-a-package", "zzz-runtime-two"));
+    TEST_ASSERT_TRUE(copy_fixture_package_with_id(
+        root, "zzz-a-package", "aaa-runtime-one"));
+    TEST_ASSERT_TRUE(copy_fixture_package_with_id(
+        root, "bbb-u-package", "yyy-runtime-two"));
+    TEST_ASSERT_TRUE(copy_fixture_package_with_id(
+        root, "yyy-u-package", "bbb-runtime-one"));
+
+    tp_format_catalog_scan *scan = NULL;
+    tp_format_diagnostic_report *failure = NULL;
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_format_catalog_scan_root(root, &scan, &failure, &error),
+        error.msg);
+    TEST_ASSERT_NULL(failure);
+    TEST_ASSERT_EQUAL_size_t(4U, tp_format_catalog_scan_compile_count(scan));
+    tp_format_compile_row_result results[4] = {0};
+    for (size_t i = 0U; i < 4U; ++i) {
+        tp_format_compile_candidate candidate = {0};
+        TEST_ASSERT_TRUE(
+            tp_format_catalog_scan_compile_at(scan, i, &candidate));
+        results[i].candidate_index = candidate.candidate_index;
+        results[i].available =
+            strcmp(candidate.descriptor->id, "aaa-runtime-one") == 0 ||
+            strcmp(candidate.descriptor->id, "zzz-runtime-two") == 0;
+        if (!results[i].available) {
+            results[i].diagnostics = make_compile_report(
+                candidate.descriptor->id, "syntax error");
+        }
+    }
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_format_catalog_scan_complete_compile_internal(scan, results, 4U,
+                                                         &error),
+        error.msg);
+
+    tp_format_catalog *catalog = NULL;
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_format_catalog_scan_finish_compiled_internal(&scan, &catalog,
+                                                        &error),
+        error.msg);
+    const size_t native_count =
+        tp_format_catalog_row_count(tp_format_catalog_native());
+    for (size_t i = 0U; i < native_count; ++i) {
+        tp_format_catalog_row native = {0};
+        TEST_ASSERT_TRUE(tp_format_catalog_row_at(catalog, i, &native));
+        TEST_ASSERT_EQUAL_INT(TP_FORMAT_IMPLEMENTATION_NATIVE,
+                              native.implementation);
+    }
+    static const char *expected_ids[] = {
+        "aaa-runtime-one", "zzz-runtime-two", "yyy-runtime-two",
+        "bbb-runtime-one"};
+    static const char *expected_keys[] = {
+        "zzz-a-package", "aaa-a-package", "bbb-u-package",
+        "yyy-u-package"};
+    for (size_t i = 0U; i < 4U; ++i) {
+        tp_format_catalog_row row = {0};
+        TEST_ASSERT_TRUE(
+            tp_format_catalog_row_at(catalog, native_count + i, &row));
+        TEST_ASSERT_EQUAL_INT(i < 2U, row.available);
+        TEST_ASSERT_EQUAL_STRING(expected_ids[i], row.descriptor->id);
+        TEST_ASSERT_EQUAL_STRING(expected_keys[i], row.key);
+    }
+    tp_format_catalog_release(catalog);
+}
+
 void test_invalid_compile_batch_poisoning_prevents_prefix_publication(void) {
     tp_format_catalog_scan *scan = NULL;
     tp_format_diagnostic_report *failure = NULL;
@@ -1005,6 +1113,8 @@ int main(void) {
         test_fixture_scan_is_deterministic_and_cannot_install_before_compile);
     RUN_TEST(test_duplicate_id_includes_source_rejected_descriptor);
     RUN_TEST(test_compile_batch_applies_only_as_one_complete_catalog);
+    RUN_TEST(
+        test_compiled_catalog_restores_contract_order_after_candidate_order);
     RUN_TEST(
         test_invalid_compile_batch_poisoning_prevents_prefix_publication);
     RUN_TEST(

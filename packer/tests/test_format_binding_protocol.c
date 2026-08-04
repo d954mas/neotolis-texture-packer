@@ -9,6 +9,7 @@
 #include "tp_core/tp_id.h"
 #include "tp_format_binding_proto_internal.h"
 #include "tp_format_descriptor_internal.h"
+#include "tp_format_diagnostic_internal.h"
 #include "tp_hex.h"
 
 static const unsigned char g_descriptor[] =
@@ -307,6 +308,66 @@ void test_lua_encode_rejects_same_id_semantic_mismatch_and_unterminated_id(
         tp_format_binding_proto_encode(&value, &bytes, &length, &error));
     TEST_ASSERT_NULL(bytes);
     tp_format_owned_descriptor_destroy(owned);
+}
+
+void test_diagnostic_semantics_are_rejected_on_encode_and_decode(void) {
+    tp_format_diagnostic diagnostic = {
+        .severity = TP_FORMAT_DIAGNOSTIC_ERROR,
+        .code = TP_FORMAT_DIAGNOSTIC_COMPILE_ERROR,
+        .phase = TP_FORMAT_PHASE_RUNTIME,
+        .message = "hostile",
+    };
+    tp_format_binding_proto_value value = {
+        .preview = {.kind = TP_FORMAT_BINDING_RESOLUTION_UNAVAILABLE,
+                    .binding_index = UINT32_MAX,
+                    .diagnostic_offset = 0U,
+                    .diagnostic_count = 1U},
+        .diagnostics = &diagnostic,
+        .diagnostic_count = 1U,
+    };
+    uint8_t *bytes = NULL;
+    size_t length = 0U;
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_INVALID_ARGUMENT,
+        tp_format_binding_proto_encode(&value, &bytes, &length, &error));
+    TEST_ASSERT_NULL(bytes);
+
+    diagnostic.phase = TP_FORMAT_PHASE_COMPILE;
+    diagnostic.severity = TP_FORMAT_DIAGNOSTIC_WARNING;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_INVALID_ARGUMENT,
+        tp_format_binding_proto_encode(&value, &bytes, &length, &error));
+    diagnostic.severity = TP_FORMAT_DIAGNOSTIC_ERROR;
+    diagnostic.code = TP_FORMAT_DIAGNOSTIC_MEMORY_LIMIT;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_INVALID_ARGUMENT,
+        tp_format_binding_proto_encode(&value, &bytes, &length, &error));
+    diagnostic.code = TP_FORMAT_DIAGNOSTIC_COMPILE_ERROR;
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_format_binding_proto_encode(&value, &bytes, &length, &error),
+        error.msg);
+    const size_t diagnostic_offset =
+        12U + TP_FORMAT_BINDING_PROTO_FIXED_PAYLOAD_BYTES;
+    tp_format_binding_proto_value decoded = {0};
+
+    put_u32(bytes + diagnostic_offset, TP_FORMAT_DIAGNOSTIC_WARNING);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_INVALID_ARGUMENT,
+        tp_format_binding_proto_decode(bytes, length, &decoded, &error));
+    put_u32(bytes + diagnostic_offset, TP_FORMAT_DIAGNOSTIC_ERROR);
+    put_u32(bytes + diagnostic_offset + 8U, TP_FORMAT_PHASE_RUNTIME);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_INVALID_ARGUMENT,
+        tp_format_binding_proto_decode(bytes, length, &decoded, &error));
+    put_u32(bytes + diagnostic_offset + 8U, TP_FORMAT_PHASE_COMPILE);
+    put_u32(bytes + diagnostic_offset + 4U,
+            TP_FORMAT_DIAGNOSTIC_MEMORY_LIMIT);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_INVALID_ARGUMENT,
+        tp_format_binding_proto_decode(bytes, length, &decoded, &error));
+    free(bytes);
 }
 
 static void assert_bad_source_rejected(const unsigned char *source,
@@ -676,12 +737,34 @@ void test_exact_binding_diagnostic_and_target_count_boundaries_round_trip(void) 
             .message = maximum_message,
         };
     }
+    enum { DIAGNOSTIC_SLICE_COUNT = 17 };
+    tp_format_binding_proto_target_ref diagnostic_targets
+        [DIAGNOSTIC_SLICE_COUNT] = {{0}};
+    size_t diagnostic_offset = 0U;
+    for (size_t i = 0U; i < DIAGNOSTIC_SLICE_COUNT; ++i) {
+        const size_t remaining =
+            TP_FORMAT_BINDING_PROTO_MAX_DIAGNOSTICS - diagnostic_offset;
+        const size_t slice_count =
+            remaining < TP_FORMAT_DIAGNOSTIC_MAX - 1U
+                ? remaining
+                : TP_FORMAT_DIAGNOSTIC_MAX - 1U;
+        diagnostic_targets[i].atlas_id = test_id(1U);
+        diagnostic_targets[i].target_id = test_id((uint8_t)(i + 1U));
+        diagnostic_targets[i].resolution =
+            (tp_format_binding_proto_resolution){
+                .kind = TP_FORMAT_BINDING_RESOLUTION_UNAVAILABLE,
+                .binding_index = UINT32_MAX,
+                .diagnostic_offset = (uint32_t)diagnostic_offset,
+                .diagnostic_count = (uint32_t)slice_count,
+            };
+        diagnostic_offset += slice_count;
+    }
+    TEST_ASSERT_EQUAL_size_t(TP_FORMAT_BINDING_PROTO_MAX_DIAGNOSTICS,
+                             diagnostic_offset);
     value = (tp_format_binding_proto_value){
-        .preview = {.kind = TP_FORMAT_BINDING_RESOLUTION_UNAVAILABLE,
-                    .binding_index = UINT32_MAX,
-                    .diagnostic_offset = 0U,
-                    .diagnostic_count =
-                        TP_FORMAT_BINDING_PROTO_MAX_DIAGNOSTICS},
+        .preview = diagnostic_targets[0].resolution,
+        .targets = diagnostic_targets,
+        .target_count = DIAGNOSTIC_SLICE_COUNT,
         .diagnostics = diagnostics,
         .diagnostic_count = TP_FORMAT_BINDING_PROTO_MAX_DIAGNOSTICS,
     };
@@ -742,6 +825,318 @@ void test_exact_binding_diagnostic_and_target_count_boundaries_round_trip(void) 
     tp_format_binding_proto_value_free(&decoded);
     free(bytes);
     free(targets);
+}
+
+void test_unavailable_slice_count_cap_is_enforced_on_encode_and_decode(void) {
+    enum { DIAGNOSTIC_COUNT = TP_FORMAT_DIAGNOSTIC_MAX + 1U };
+    tp_format_diagnostic diagnostics[DIAGNOSTIC_COUNT];
+    for (size_t i = 0U; i < DIAGNOSTIC_COUNT; ++i) {
+        diagnostics[i] = (tp_format_diagnostic){
+            .severity = TP_FORMAT_DIAGNOSTIC_ERROR,
+            .code = TP_FORMAT_DIAGNOSTIC_COMPILE_ERROR,
+            .phase = TP_FORMAT_PHASE_COMPILE,
+            .message = "x",
+        };
+    }
+    tp_format_binding_proto_target_ref target = {
+        .atlas_id = {{0}},
+        .target_id = {{0}},
+        .resolution = {
+            .kind = TP_FORMAT_BINDING_RESOLUTION_UNAVAILABLE,
+            .binding_index = UINT32_MAX,
+            .diagnostic_offset = 129U,
+            .diagnostic_count = DIAGNOSTIC_COUNT - 129U,
+        },
+    };
+    target.atlas_id = test_id(1U);
+    target.target_id = test_id(2U);
+    tp_format_binding_proto_value value = {
+        .preview = {.kind = TP_FORMAT_BINDING_RESOLUTION_UNAVAILABLE,
+                    .binding_index = UINT32_MAX,
+                    .diagnostic_offset = 0U,
+                    .diagnostic_count = DIAGNOSTIC_COUNT},
+        .targets = &target,
+        .target_count = 1U,
+        .diagnostics = diagnostics,
+        .diagnostic_count = DIAGNOSTIC_COUNT,
+    };
+    uint8_t *bytes = NULL;
+    size_t length = 0U;
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OUT_OF_BOUNDS,
+        tp_format_binding_proto_encode(&value, &bytes, &length, &error));
+    TEST_ASSERT_NULL(bytes);
+
+    value.preview.diagnostic_count = 129U;
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_format_binding_proto_encode(&value, &bytes, &length, &error),
+        error.msg);
+    put_u32(bytes + 48U, DIAGNOSTIC_COUNT);
+    tp_format_binding_proto_value decoded = {0};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OUT_OF_BOUNDS,
+        tp_format_binding_proto_decode(bytes, length, &decoded, &error));
+    free(bytes);
+}
+
+void test_unavailable_slice_byte_cap_is_enforced_on_encode_and_decode(void) {
+    enum { DIAGNOSTIC_COUNT = TP_FORMAT_DIAGNOSTIC_MAX - 1U };
+    tp_format_diagnostic diagnostics[DIAGNOSTIC_COUNT];
+    char maximum_path[TP_FORMAT_DIAGNOSTIC_PATH_MAX_BYTES + 1U];
+    char maximum_message[TP_FORMAT_DIAGNOSTIC_MESSAGE_MAX_BYTES + 1U];
+    memset(maximum_path, 'p', sizeof maximum_path - 1U);
+    maximum_path[sizeof maximum_path - 1U] = '\0';
+    memset(maximum_message, 'm', sizeof maximum_message - 1U);
+    maximum_message[sizeof maximum_message - 1U] = '\0';
+    for (size_t i = 0U; i < DIAGNOSTIC_COUNT; ++i) {
+        diagnostics[i] = (tp_format_diagnostic){
+            .severity = TP_FORMAT_DIAGNOSTIC_ERROR,
+            .code = TP_FORMAT_DIAGNOSTIC_COMPILE_ERROR,
+            .phase = TP_FORMAT_PHASE_COMPILE,
+            .package_path = maximum_path,
+            .message = maximum_message,
+        };
+    }
+    tp_format_binding_proto_target_ref target = {
+        .resolution = {
+            .kind = TP_FORMAT_BINDING_RESOLUTION_UNAVAILABLE,
+            .binding_index = UINT32_MAX,
+            .diagnostic_offset = 128U,
+            .diagnostic_count = DIAGNOSTIC_COUNT - 128U,
+        },
+    };
+    target.atlas_id = test_id(1U);
+    target.target_id = test_id(2U);
+    tp_format_binding_proto_value value = {
+        .preview = {.kind = TP_FORMAT_BINDING_RESOLUTION_UNAVAILABLE,
+                    .binding_index = UINT32_MAX,
+                    .diagnostic_offset = 0U,
+                    .diagnostic_count = DIAGNOSTIC_COUNT},
+        .targets = &target,
+        .target_count = 1U,
+        .diagnostics = diagnostics,
+        .diagnostic_count = DIAGNOSTIC_COUNT,
+    };
+    uint8_t *bytes = NULL;
+    size_t length = 0U;
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OUT_OF_BOUNDS,
+        tp_format_binding_proto_encode(&value, &bytes, &length, &error));
+    TEST_ASSERT_NULL(bytes);
+
+    value.preview.diagnostic_count = 128U;
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_format_binding_proto_encode(&value, &bytes, &length, &error),
+        error.msg);
+    put_u32(bytes + 48U, DIAGNOSTIC_COUNT);
+    tp_format_binding_proto_value decoded = {0};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OUT_OF_BOUNDS,
+        tp_format_binding_proto_decode(bytes, length, &decoded, &error));
+    free(bytes);
+}
+
+void test_unavailable_slice_frame_terminators_are_counted_on_encode_and_decode(
+    void) {
+    enum {
+        DIAGNOSTIC_COUNT = TP_FORMAT_DIAGNOSTIC_MAX - 1U,
+        FRAMES_PER_DIAGNOSTIC = TP_FORMAT_DIAGNOSTIC_FRAME_MAX,
+        TOTAL_FRAME_COUNT = DIAGNOSTIC_COUNT * FRAMES_PER_DIAGNOSTIC,
+    };
+    tp_error error = {{0}};
+    tp_format_diagnostic_report *report = NULL;
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_format_diagnostic_report_create_internal(&report, &error),
+        error.msg);
+    const size_t report_base_bytes =
+        tp_format_diagnostic_report_dynamic_bytes_internal(report);
+    const tp_format_diagnostic probe = {
+        .severity = TP_FORMAT_DIAGNOSTIC_ERROR,
+        .code = TP_FORMAT_DIAGNOSTIC_COMPILE_ERROR,
+        .phase = TP_FORMAT_PHASE_COMPILE,
+    };
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_format_diagnostic_report_append_internal(report, &probe, &error),
+        error.msg);
+    const size_t first_entry_bytes =
+        tp_format_diagnostic_report_dynamic_bytes_internal(report);
+    tp_format_diagnostic_report_destroy(report);
+    report = NULL;
+    TEST_ASSERT_GREATER_THAN_size_t(report_base_bytes, first_entry_bytes);
+    TEST_ASSERT_EQUAL_size_t(0U,
+                             (first_entry_bytes - report_base_bytes) % 8U);
+    const size_t report_entry_bytes =
+        (first_entry_bytes - report_base_bytes) / 8U;
+    const size_t vector_bytes =
+        DIAGNOSTIC_COUNT * report_entry_bytes;
+    TEST_ASSERT_GREATER_THAN_size_t(
+        report_base_bytes + vector_bytes,
+        TP_FORMAT_DIAGNOSTIC_DYNAMIC_BYTES_MAX);
+    const size_t storage_budget =
+        TP_FORMAT_DIAGNOSTIC_DYNAMIC_BYTES_MAX - report_base_bytes -
+        vector_bytes;
+    const size_t frame_array_bytes =
+        TOTAL_FRAME_COUNT * sizeof(tp_format_diagnostic_frame);
+    TEST_ASSERT_GREATER_THAN_size_t(frame_array_bytes, storage_budget);
+    const size_t text_budget = storage_budget - frame_array_bytes;
+    const size_t short_length = text_budget / TOTAL_FRAME_COUNT;
+    const size_t long_frame_count = text_budget % TOTAL_FRAME_COUNT;
+    TEST_ASSERT_GREATER_THAN_size_t(0U, short_length);
+    TEST_ASSERT_TRUE(short_length + (long_frame_count > 0U ? 1U : 0U) <=
+                     TP_FORMAT_DIAGNOSTIC_FRAME_MAX_BYTES);
+
+    char short_text[TP_FORMAT_DIAGNOSTIC_FRAME_MAX_BYTES + 1U];
+    char long_text[TP_FORMAT_DIAGNOSTIC_FRAME_MAX_BYTES + 1U];
+    memset(short_text, 's', short_length);
+    short_text[short_length] = '\0';
+    memset(long_text, 'l', short_length + 1U);
+    long_text[short_length + 1U] = '\0';
+    tp_format_diagnostic *diagnostics =
+        (tp_format_diagnostic *)calloc(DIAGNOSTIC_COUNT,
+                                       sizeof *diagnostics);
+    tp_format_diagnostic_frame *frames =
+        (tp_format_diagnostic_frame *)calloc(TOTAL_FRAME_COUNT,
+                                             sizeof *frames);
+    TEST_ASSERT_NOT_NULL(diagnostics);
+    TEST_ASSERT_NOT_NULL(frames);
+    for (size_t i = 0U; i < TOTAL_FRAME_COUNT; ++i) {
+        frames[i].text = i < long_frame_count ? long_text : short_text;
+        frames[i].line = 1U;
+    }
+    for (size_t i = 0U; i < DIAGNOSTIC_COUNT; ++i) {
+        diagnostics[i] = (tp_format_diagnostic){
+            .severity = TP_FORMAT_DIAGNOSTIC_ERROR,
+            .code = TP_FORMAT_DIAGNOSTIC_COMPILE_ERROR,
+            .phase = TP_FORMAT_PHASE_COMPILE,
+            .frames = &frames[i * FRAMES_PER_DIAGNOSTIC],
+            .frame_count = FRAMES_PER_DIAGNOSTIC,
+        };
+    }
+
+    const size_t old_accounted_bytes =
+        report_base_bytes + vector_bytes + frame_array_bytes + text_budget;
+    TEST_ASSERT_EQUAL_size_t(TP_FORMAT_DIAGNOSTIC_DYNAMIC_BYTES_MAX,
+                             old_accounted_bytes);
+    TEST_ASSERT_GREATER_THAN_size_t(
+        TP_FORMAT_DIAGNOSTIC_DYNAMIC_BYTES_MAX,
+        old_accounted_bytes + TOTAL_FRAME_COUNT);
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_format_diagnostic_report_create_internal(&report, &error),
+        error.msg);
+    for (size_t i = 0U; i < DIAGNOSTIC_COUNT; ++i) {
+        TEST_ASSERT_EQUAL_INT_MESSAGE(
+            TP_STATUS_OK,
+            tp_format_diagnostic_report_append_internal(report,
+                                                        &diagnostics[i],
+                                                        &error),
+            error.msg);
+    }
+    TEST_ASSERT_TRUE(tp_format_diagnostic_report_truncated(report));
+    tp_format_diagnostic_report_destroy(report);
+
+    tp_format_binding_proto_value value = {
+        .preview = {.kind = TP_FORMAT_BINDING_RESOLUTION_UNAVAILABLE,
+                    .binding_index = UINT32_MAX,
+                    .diagnostic_offset = 0U,
+                    .diagnostic_count = DIAGNOSTIC_COUNT},
+        .diagnostics = diagnostics,
+        .diagnostic_count = DIAGNOSTIC_COUNT,
+    };
+    uint8_t *bytes = NULL;
+    size_t length = 0U;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OUT_OF_BOUNDS,
+        tp_format_binding_proto_encode(&value, &bytes, &length, &error));
+    TEST_ASSERT_NULL(bytes);
+
+    value.preview.diagnostic_count = 1U;
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_format_binding_proto_encode(&value, &bytes, &length, &error),
+        error.msg);
+    put_u32(bytes + 48U, DIAGNOSTIC_COUNT);
+    tp_format_binding_proto_value decoded = {0};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OUT_OF_BOUNDS,
+        tp_format_binding_proto_decode(bytes, length, &decoded, &error));
+    free(bytes);
+    free(frames);
+    free(diagnostics);
+}
+
+void test_unavailable_truncation_marker_must_be_canonical_and_final(void) {
+    static const char marker_message[] =
+        "diagnostic report truncated by a hard limit";
+    const tp_format_diagnostic ordinary = {
+        .severity = TP_FORMAT_DIAGNOSTIC_ERROR,
+        .code = TP_FORMAT_DIAGNOSTIC_COMPILE_ERROR,
+        .phase = TP_FORMAT_PHASE_COMPILE,
+        .message = "ordinary",
+    };
+    tp_format_diagnostic marker = {
+        .severity = TP_FORMAT_DIAGNOSTIC_WARNING,
+        .code = TP_FORMAT_DIAGNOSTIC_DIAGNOSTICS_TRUNCATED,
+        .phase = TP_FORMAT_PHASE_COMPILE,
+        .message = marker_message,
+    };
+    tp_format_diagnostic diagnostics[2] = {ordinary, marker};
+    tp_format_binding_proto_value value = {
+        .preview = {.kind = TP_FORMAT_BINDING_RESOLUTION_UNAVAILABLE,
+                    .binding_index = UINT32_MAX,
+                    .diagnostic_offset = 0U,
+                    .diagnostic_count = 2U},
+        .diagnostics = diagnostics,
+        .diagnostic_count = 2U,
+    };
+    uint8_t *bytes = NULL;
+    size_t length = 0U;
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_format_binding_proto_encode(&value, &bytes, &length, &error),
+        error.msg);
+    tp_format_binding_proto_value decoded = {0};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_format_binding_proto_decode(bytes, length, &decoded, &error),
+        error.msg);
+    tp_format_binding_proto_value_free(&decoded);
+    const size_t marker_offset =
+        12U + TP_FORMAT_BINDING_PROTO_FIXED_PAYLOAD_BYTES +
+        TP_FORMAT_BINDING_PROTO_DIAGNOSTIC_FIXED_BYTES +
+        strlen(ordinary.message);
+    put_u32(bytes + marker_offset, TP_FORMAT_DIAGNOSTIC_ERROR);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_INVALID_ARGUMENT,
+        tp_format_binding_proto_decode(bytes, length, &decoded, &error));
+    free(bytes);
+
+    diagnostics[0] = marker;
+    diagnostics[1] = ordinary;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_INVALID_ARGUMENT,
+        tp_format_binding_proto_encode(&value, &bytes, &length, &error));
+    diagnostics[0] = ordinary;
+    diagnostics[1] = marker;
+    diagnostics[1].severity = TP_FORMAT_DIAGNOSTIC_ERROR;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_INVALID_ARGUMENT,
+        tp_format_binding_proto_encode(&value, &bytes, &length, &error));
+    const tp_format_diagnostic_frame frame = {.text = "frame", .line = 1U};
+    diagnostics[1] = marker;
+    diagnostics[1].frames = &frame;
+    diagnostics[1].frame_count = 1U;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_INVALID_ARGUMENT,
+        tp_format_binding_proto_encode(&value, &bytes, &length, &error));
 }
 
 void test_frame_cap_is_the_checked_frozen_component_derivation(void) {
@@ -822,6 +1217,7 @@ void test_reachable_frames_match_the_fixed_wire_derivation(void) {
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_round_trip_preserves_exact_bindings_refs_and_diagnostics);
+    RUN_TEST(test_diagnostic_semantics_are_rejected_on_encode_and_decode);
     RUN_TEST(
         test_lua_fingerprint_descriptor_and_source_tampering_is_rejected);
     RUN_TEST(test_native_binding_must_match_compiled_in_table);
@@ -840,6 +1236,14 @@ int main(void) {
     RUN_TEST(test_duplicate_stable_target_pair_is_rejected);
     RUN_TEST(
         test_exact_binding_diagnostic_and_target_count_boundaries_round_trip);
+    RUN_TEST(
+        test_unavailable_slice_count_cap_is_enforced_on_encode_and_decode);
+    RUN_TEST(
+        test_unavailable_slice_byte_cap_is_enforced_on_encode_and_decode);
+    RUN_TEST(
+        test_unavailable_slice_frame_terminators_are_counted_on_encode_and_decode);
+    RUN_TEST(
+        test_unavailable_truncation_marker_must_be_canonical_and_final);
     RUN_TEST(test_frame_cap_is_the_checked_frozen_component_derivation);
     RUN_TEST(test_reachable_frames_match_the_fixed_wire_derivation);
     return UNITY_END();

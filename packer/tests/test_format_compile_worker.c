@@ -175,6 +175,267 @@ static void write_u32le(uint8_t *bytes, uint32_t value) {
     }
 }
 
+static uint32_t read_u32le(const uint8_t *bytes) {
+    uint32_t value = 0U;
+    for (unsigned int i = 0U; i < 4U; ++i) {
+        value |= (uint32_t)bytes[i] << (i * 8U);
+    }
+    return value;
+}
+
+typedef struct diagnostic_semantics_case {
+    tp_format_diagnostic_code code;
+    tp_format_diagnostic_phase phase;
+} diagnostic_semantics_case;
+
+void test_diagnostic_vocabulary_has_exact_phase_and_severity(void) {
+    static const diagnostic_semantics_case cases[] = {
+        {TP_FORMAT_DIAGNOSTIC_CATALOG_LIMIT, TP_FORMAT_PHASE_DISCOVERY},
+        {TP_FORMAT_DIAGNOSTIC_ROOT_NOT_DIRECTORY, TP_FORMAT_PHASE_DISCOVERY},
+        {TP_FORMAT_DIAGNOSTIC_ROOT_REPARSE, TP_FORMAT_PHASE_DISCOVERY},
+        {TP_FORMAT_DIAGNOSTIC_ROOT_IO, TP_FORMAT_PHASE_DISCOVERY},
+        {TP_FORMAT_DIAGNOSTIC_PACKAGE_NAME_INVALID,
+         TP_FORMAT_PHASE_DISCOVERY},
+        {TP_FORMAT_DIAGNOSTIC_PACKAGE_REPARSE, TP_FORMAT_PHASE_DISCOVERY},
+        {TP_FORMAT_DIAGNOSTIC_PACKAGE_EXTRA_ENTRY,
+         TP_FORMAT_PHASE_DISCOVERY},
+        {TP_FORMAT_DIAGNOSTIC_DESCRIPTOR_MISSING,
+         TP_FORMAT_PHASE_DISCOVERY},
+        {TP_FORMAT_DIAGNOSTIC_SOURCE_MISSING, TP_FORMAT_PHASE_DISCOVERY},
+        {TP_FORMAT_DIAGNOSTIC_PACKAGE_FILE_TYPE,
+         TP_FORMAT_PHASE_DISCOVERY},
+        {TP_FORMAT_DIAGNOSTIC_PACKAGE_FILE_REPARSE,
+         TP_FORMAT_PHASE_DISCOVERY},
+        {TP_FORMAT_DIAGNOSTIC_PACKAGE_FILE_TOO_LARGE,
+         TP_FORMAT_PHASE_DISCOVERY},
+        {TP_FORMAT_DIAGNOSTIC_PACKAGE_READ_FAILED,
+         TP_FORMAT_PHASE_DISCOVERY},
+        {TP_FORMAT_DIAGNOSTIC_DESCRIPTOR_INVALID_UTF8,
+         TP_FORMAT_PHASE_DESCRIPTOR},
+        {TP_FORMAT_DIAGNOSTIC_DESCRIPTOR_INVALID_JSON,
+         TP_FORMAT_PHASE_DESCRIPTOR},
+        {TP_FORMAT_DIAGNOSTIC_DESCRIPTOR_SCHEMA, TP_FORMAT_PHASE_DESCRIPTOR},
+        {TP_FORMAT_DIAGNOSTIC_API_UNSUPPORTED, TP_FORMAT_PHASE_DESCRIPTOR},
+        {TP_FORMAT_DIAGNOSTIC_FORMAT_ID_INVALID, TP_FORMAT_PHASE_DESCRIPTOR},
+        {TP_FORMAT_DIAGNOSTIC_FORMAT_ID_RESERVED, TP_FORMAT_PHASE_DESCRIPTOR},
+        {TP_FORMAT_DIAGNOSTIC_OUTPUT_INVALID, TP_FORMAT_PHASE_DESCRIPTOR},
+        {TP_FORMAT_DIAGNOSTIC_OUTPUT_CONFLICT, TP_FORMAT_PHASE_DESCRIPTOR},
+        {TP_FORMAT_DIAGNOSTIC_HOST_FACT_INVALID, TP_FORMAT_PHASE_DESCRIPTOR},
+        {TP_FORMAT_DIAGNOSTIC_DUPLICATE_FORMAT_ID,
+         TP_FORMAT_PHASE_DESCRIPTOR},
+        {TP_FORMAT_DIAGNOSTIC_SOURCE_INVALID_UTF8, TP_FORMAT_PHASE_COMPILE},
+        {TP_FORMAT_DIAGNOSTIC_SOURCE_BINARY, TP_FORMAT_PHASE_COMPILE},
+        {TP_FORMAT_DIAGNOSTIC_COMPILE_ERROR, TP_FORMAT_PHASE_COMPILE},
+        {TP_FORMAT_DIAGNOSTIC_COMPILE_WORKER_FAILED,
+         TP_FORMAT_PHASE_COMPILE},
+        {TP_FORMAT_DIAGNOSTIC_COMPILE_PROTOCOL, TP_FORMAT_PHASE_COMPILE},
+        {TP_FORMAT_DIAGNOSTIC_COMPILE_BUDGET, TP_FORMAT_PHASE_COMPILE},
+        {TP_FORMAT_DIAGNOSTIC_HANDLER_CONTRACT, TP_FORMAT_PHASE_RUNTIME},
+        {TP_FORMAT_DIAGNOSTIC_HANDLER_FAILED, TP_FORMAT_PHASE_RUNTIME},
+        {TP_FORMAT_DIAGNOSTIC_HANDLER_PANIC, TP_FORMAT_PHASE_RUNTIME},
+        {TP_FORMAT_DIAGNOSTIC_MEMORY_LIMIT, TP_FORMAT_PHASE_LIMIT},
+        {TP_FORMAT_DIAGNOSTIC_INSTRUCTION_LIMIT, TP_FORMAT_PHASE_LIMIT},
+        {TP_FORMAT_DIAGNOSTIC_HOST_CALL_LIMIT, TP_FORMAT_PHASE_LIMIT},
+        {TP_FORMAT_DIAGNOSTIC_OUTPUT_LIMIT, TP_FORMAT_PHASE_LIMIT},
+        {TP_FORMAT_DIAGNOSTIC_NOTICE_LIMIT, TP_FORMAT_PHASE_LIMIT},
+        {TP_FORMAT_DIAGNOSTIC_DOCUMENT_UNKNOWN, TP_FORMAT_PHASE_OUTPUT},
+        {TP_FORMAT_DIAGNOSTIC_DOCUMENT_DUPLICATE, TP_FORMAT_PHASE_OUTPUT},
+        {TP_FORMAT_DIAGNOSTIC_DOCUMENT_UNFINISHED, TP_FORMAT_PHASE_OUTPUT},
+        {TP_FORMAT_DIAGNOSTIC_DOCUMENT_MISSING, TP_FORMAT_PHASE_OUTPUT},
+        {TP_FORMAT_DIAGNOSTIC_DOCUMENT_WRITE_AFTER_FINISH,
+         TP_FORMAT_PHASE_OUTPUT},
+        {TP_FORMAT_DIAGNOSTIC_DOCUMENT_INVALID_UTF8,
+         TP_FORMAT_PHASE_OUTPUT},
+        {TP_FORMAT_DIAGNOSTIC_DOCUMENT_CONTAINS_NUL, TP_FORMAT_PHASE_OUTPUT},
+        {TP_FORMAT_DIAGNOSTIC_DIAGNOSTICS_TRUNCATED,
+         TP_FORMAT_PHASE_DISCOVERY},
+    };
+    TEST_ASSERT_EQUAL_size_t(
+        (size_t)TP_FORMAT_DIAGNOSTIC_DIAGNOSTICS_TRUNCATED,
+        sizeof cases / sizeof cases[0]);
+
+    for (size_t i = 0U; i < sizeof cases / sizeof cases[0]; ++i) {
+        const diagnostic_semantics_case *test_case = &cases[i];
+        TEST_ASSERT_EQUAL_INT((int)i + 1, test_case->code);
+        tp_format_diagnostic diagnostic = {
+            .severity = test_case->code ==
+                                TP_FORMAT_DIAGNOSTIC_DIAGNOSTICS_TRUNCATED
+                            ? TP_FORMAT_DIAGNOSTIC_WARNING
+                            : TP_FORMAT_DIAGNOSTIC_ERROR,
+            .code = test_case->code,
+            .phase = test_case->phase,
+        };
+        TEST_ASSERT_TRUE_MESSAGE(
+            tp_format_diagnostic_semantics_valid_internal(&diagnostic),
+            tp_format_diagnostic_code_id(test_case->code));
+
+        if (test_case->code ==
+            TP_FORMAT_DIAGNOSTIC_DIAGNOSTICS_TRUNCATED) {
+            diagnostic.severity = TP_FORMAT_DIAGNOSTIC_ERROR;
+            TEST_ASSERT_FALSE(
+                tp_format_diagnostic_semantics_valid_internal(&diagnostic));
+            diagnostic.severity = TP_FORMAT_DIAGNOSTIC_WARNING;
+            for (int phase = TP_FORMAT_PHASE_DISCOVERY;
+                 phase <= TP_FORMAT_PHASE_OUTPUT; ++phase) {
+                diagnostic.phase = (tp_format_diagnostic_phase)phase;
+                TEST_ASSERT_TRUE(tp_format_diagnostic_semantics_valid_internal(
+                    &diagnostic));
+            }
+        } else {
+            diagnostic.severity = TP_FORMAT_DIAGNOSTIC_WARNING;
+            TEST_ASSERT_FALSE_MESSAGE(
+                tp_format_diagnostic_semantics_valid_internal(&diagnostic),
+                tp_format_diagnostic_code_id(test_case->code));
+            diagnostic.severity = TP_FORMAT_DIAGNOSTIC_ERROR;
+            diagnostic.phase =
+                test_case->phase == TP_FORMAT_PHASE_DISCOVERY
+                    ? TP_FORMAT_PHASE_DESCRIPTOR
+                    : TP_FORMAT_PHASE_DISCOVERY;
+            TEST_ASSERT_FALSE_MESSAGE(
+                tp_format_diagnostic_semantics_valid_internal(&diagnostic),
+                tp_format_diagnostic_code_id(test_case->code));
+        }
+    }
+}
+
+static void encode_truncation_result(bool with_ordinary,
+                                     uint8_t **out_encoded,
+                                     size_t *out_encoded_length) {
+    tp_error error = {{0}};
+    tp_format_diagnostic_report *report = NULL;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_format_diagnostic_report_create_internal(&report, &error));
+    if (with_ordinary) {
+        const tp_format_diagnostic diagnostic = {
+            .severity = TP_FORMAT_DIAGNOSTIC_ERROR,
+            .code = TP_FORMAT_DIAGNOSTIC_COMPILE_ERROR,
+            .phase = TP_FORMAT_PHASE_COMPILE,
+            .message = "compile rejected",
+        };
+        TEST_ASSERT_EQUAL_INT(
+            TP_STATUS_OK,
+            tp_format_diagnostic_report_append_internal(report, &diagnostic,
+                                                        &error));
+    }
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_format_diagnostic_report_mark_truncated_internal(
+            report, TP_FORMAT_PHASE_COMPILE, &error));
+    const tp_format_compile_proto_result result = {
+        .candidate_index = 11U,
+        .status = TP_STATUS_INVALID_ARGUMENT,
+        .available = false,
+        .diagnostics = report,
+    };
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_format_compile_proto_encode_result(
+            &result, out_encoded, out_encoded_length, &error),
+        error.msg);
+    tp_format_diagnostic_report_destroy(report);
+}
+
+static size_t encoded_diagnostic_size(const uint8_t *diagnostic) {
+    size_t size = TP_FORMAT_COMPILE_PROTO_DIAGNOSTIC_FIXED_BYTES;
+    for (size_t offset = 24U; offset <= 32U; offset += 4U) {
+        const uint32_t length = read_u32le(diagnostic + offset);
+        if (length != UINT32_MAX) {
+            size += length;
+        }
+    }
+    const uint32_t frame_count = read_u32le(diagnostic + 20U);
+    const uint8_t *frame = diagnostic + size;
+    for (uint32_t i = 0U; i < frame_count; ++i) {
+        const uint32_t text_length = read_u32le(frame + 4U);
+        size += TP_FORMAT_COMPILE_PROTO_FRAME_FIXED_BYTES + text_length;
+        frame += TP_FORMAT_COMPILE_PROTO_FRAME_FIXED_BYTES + text_length;
+    }
+    return size;
+}
+
+void test_compile_protocol_round_trips_canonical_truncation_marker(void) {
+    uint8_t *encoded = NULL;
+    size_t encoded_length = 0U;
+    encode_truncation_result(false, &encoded, &encoded_length);
+    tp_error error = {{0}};
+    tp_format_compile_proto_message decoded = {0};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_format_compile_proto_decode_response_message(
+            encoded, encoded_length, &decoded, &error),
+        error.msg);
+    TEST_ASSERT_TRUE(
+        tp_format_diagnostic_report_truncated(decoded.result.diagnostics));
+    TEST_ASSERT_EQUAL_size_t(
+        1U, tp_format_diagnostic_report_count(decoded.result.diagnostics));
+    const tp_format_diagnostic *marker =
+        tp_format_diagnostic_report_at(decoded.result.diagnostics, 0U);
+    TEST_ASSERT_TRUE(
+        tp_format_diagnostic_truncation_marker_canonical_internal(marker));
+    TEST_ASSERT_EQUAL_INT(TP_FORMAT_PHASE_COMPILE, marker->phase);
+    tp_format_compile_proto_message_free(&decoded);
+    free(encoded);
+}
+
+void test_compile_protocol_rejects_nonfinal_framed_attributed_and_wrong_message_markers(
+    void) {
+    const size_t diagnostic_offset =
+        TP_FORMAT_COMPILE_PROTO_HEADER_BYTES +
+        TP_FORMAT_COMPILE_PROTO_RESULT_FIXED_BYTES;
+    tp_error error = {{0}};
+    tp_format_compile_proto_message decoded = {0};
+
+    uint8_t *encoded = NULL;
+    size_t encoded_length = 0U;
+    encode_truncation_result(true, &encoded, &encoded_length);
+    uint8_t *first = encoded + diagnostic_offset;
+    const size_t first_size = encoded_diagnostic_size(first);
+    uint8_t *marker = first + first_size;
+    const size_t marker_size = encoded_diagnostic_size(marker);
+    uint8_t *reordered = (uint8_t *)malloc(first_size + marker_size);
+    TEST_ASSERT_NOT_NULL(reordered);
+    memcpy(reordered, marker, marker_size);
+    memcpy(reordered + marker_size, first, first_size);
+    memcpy(first, reordered, first_size + marker_size);
+    free(reordered);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_INVALID_ARGUMENT,
+        tp_format_compile_proto_decode_response_message(
+            encoded, encoded_length, &decoded, &error));
+    free(encoded);
+
+    encode_truncation_result(false, &encoded, &encoded_length);
+    marker = encoded + diagnostic_offset;
+    const size_t frame_bytes = TP_FORMAT_COMPILE_PROTO_FRAME_FIXED_BYTES + 1U;
+    uint8_t *framed = (uint8_t *)malloc(encoded_length + frame_bytes);
+    TEST_ASSERT_NOT_NULL(framed);
+    memcpy(framed, encoded, encoded_length);
+    write_u32le(framed + diagnostic_offset + 20U, 1U);
+    write_u32le(framed + 8U, read_u32le(framed + 8U) + (uint32_t)frame_bytes);
+    write_u32le(framed + encoded_length, 7U);
+    write_u32le(framed + encoded_length + 4U, 1U);
+    framed[encoded_length + 8U] = 'x';
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_INVALID_ARGUMENT,
+        tp_format_compile_proto_decode_response_message(
+            framed, encoded_length + frame_bytes, &decoded, &error));
+    free(framed);
+
+    write_u32le(marker + 24U, 0U);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_INVALID_ARGUMENT,
+        tp_format_compile_proto_decode_response_message(
+            encoded, encoded_length, &decoded, &error));
+    write_u32le(marker + 24U, UINT32_MAX);
+    marker[TP_FORMAT_COMPILE_PROTO_DIAGNOSTIC_FIXED_BYTES] ^= 1U;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_INVALID_ARGUMENT,
+        tp_format_compile_proto_decode_response_message(
+            encoded, encoded_length, &decoded, &error));
+    free(encoded);
+}
+
 void test_compile_protocol_round_trips_candidate_and_diagnostics(void) {
     static const unsigned char descriptor[] = "{}";
     static const unsigned char source[] = "return function() end";
@@ -264,6 +525,98 @@ void test_compile_protocol_round_trips_candidate_and_diagnostics(void) {
     tp_format_compile_proto_message_free(&decoded);
     tp_format_diagnostic_report_destroy(report);
     free(encoded);
+}
+
+void test_compile_protocol_rejects_hostile_diagnostic_semantics(void) {
+    tp_error error = {{0}};
+    tp_format_diagnostic_report *report = NULL;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_format_diagnostic_report_create_internal(&report, &error));
+    tp_format_diagnostic diagnostic = {
+        .severity = TP_FORMAT_DIAGNOSTIC_ERROR,
+        .code = TP_FORMAT_DIAGNOSTIC_COMPILE_ERROR,
+        .phase = TP_FORMAT_PHASE_RUNTIME,
+        .format_id = "compile-hostile",
+        .package_path = "formats/package-hostile/export.lua",
+        .message = "hostile",
+    };
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_format_diagnostic_report_append_internal(report, &diagnostic,
+                                                    &error));
+    tp_format_compile_proto_result result = {
+        .candidate_index = 0U,
+        .status = TP_STATUS_INVALID_ARGUMENT,
+        .available = false,
+        .diagnostics = report,
+    };
+    uint8_t *encoded = NULL;
+    size_t encoded_length = 0U;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_INVALID_ARGUMENT,
+        tp_format_compile_proto_encode_result(
+            &result, &encoded, &encoded_length, &error));
+    TEST_ASSERT_NULL(encoded);
+    tp_format_diagnostic_report_destroy(report);
+
+    report = NULL;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_format_diagnostic_report_create_internal(&report, &error));
+    diagnostic.code = TP_FORMAT_DIAGNOSTIC_HANDLER_FAILED;
+    diagnostic.phase = TP_FORMAT_PHASE_RUNTIME;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_format_diagnostic_report_append_internal(report, &diagnostic,
+                                                    &error));
+    result.diagnostics = report;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_INVALID_ARGUMENT,
+        tp_format_compile_proto_encode_result(
+            &result, &encoded, &encoded_length, &error));
+    TEST_ASSERT_NULL(encoded);
+    tp_format_diagnostic_report_destroy(report);
+
+    report = NULL;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_format_diagnostic_report_create_internal(&report, &error));
+    diagnostic.code = TP_FORMAT_DIAGNOSTIC_COMPILE_ERROR;
+    diagnostic.phase = TP_FORMAT_PHASE_COMPILE;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_format_diagnostic_report_append_internal(report, &diagnostic,
+                                                    &error));
+    result.diagnostics = report;
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_format_compile_proto_encode_result(
+            &result, &encoded, &encoded_length, &error),
+        error.msg);
+
+    const size_t diagnostic_offset =
+        TP_FORMAT_COMPILE_PROTO_HEADER_BYTES +
+        TP_FORMAT_COMPILE_PROTO_RESULT_FIXED_BYTES;
+    tp_format_compile_proto_message decoded = {0};
+    write_u32le(encoded + diagnostic_offset,
+                TP_FORMAT_DIAGNOSTIC_WARNING);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_INVALID_ARGUMENT,
+        tp_format_compile_proto_decode_response_message(
+            encoded, encoded_length, &decoded, &error));
+    write_u32le(encoded + diagnostic_offset,
+                TP_FORMAT_DIAGNOSTIC_ERROR);
+    write_u32le(encoded + diagnostic_offset + 4U,
+                TP_FORMAT_DIAGNOSTIC_HANDLER_FAILED);
+    write_u32le(encoded + diagnostic_offset + 8U,
+                TP_FORMAT_PHASE_RUNTIME);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_INVALID_ARGUMENT,
+        tp_format_compile_proto_decode_response_message(
+            encoded, encoded_length, &decoded, &error));
+    free(encoded);
+    tp_format_diagnostic_report_destroy(report);
 }
 
 void test_compile_protocol_rejects_bad_headers_caps_and_trailing_bytes(void) {
@@ -403,6 +756,9 @@ void test_compile_worker_commits_only_after_complete_batch(void) {
         catalog, "compile-001", TP_FORMAT_RESOLUTION_UNAVAILABLE);
     TEST_ASSERT_EQUAL_INT(TP_FORMAT_DIAGNOSTIC_COMPILE_ERROR,
                           diagnostic->code);
+    TEST_ASSERT_EQUAL_STRING("compile-001", diagnostic->format_id);
+    TEST_ASSERT_EQUAL_STRING("formats/package-001/export.lua",
+                             diagnostic->package_path);
     tp_format_catalog_release(catalog);
 }
 
@@ -433,6 +789,9 @@ void test_announced_crash_is_row_local_and_later_row_compiles(void) {
         catalog, "compile-000", TP_FORMAT_RESOLUTION_UNAVAILABLE);
     TEST_ASSERT_EQUAL_INT(TP_FORMAT_DIAGNOSTIC_COMPILE_WORKER_FAILED,
                           diagnostic->code);
+    TEST_ASSERT_EQUAL_STRING("compile-000", diagnostic->format_id);
+    TEST_ASSERT_EQUAL_STRING("formats/package-000/export.lua",
+                             diagnostic->package_path);
     (void)first_resolution_diagnostic(
         catalog, "compile-001", TP_FORMAT_RESOLUTION_AVAILABLE);
     tp_format_catalog_release(catalog);
@@ -470,6 +829,30 @@ static void assert_action_invalidates(const char *action, size_t count,
     tp_format_catalog_scan_destroy(scan);
     TEST_ASSERT_TRUE(set_env_value(TEST_ACTION_ENV, NULL));
     TEST_ASSERT_TRUE(set_env_value(TEST_INDEX_ENV, NULL));
+}
+
+static void assert_hostile_diagnostic_invalidates(const char *action) {
+    TEST_ASSERT_TRUE(prepare_packages(1U, 0U));
+    TEST_ASSERT_TRUE(set_env_value(TEST_ACTION_ENV, action));
+    TEST_ASSERT_TRUE(set_env_value(TEST_INDEX_ENV, "0"));
+    tp_format_catalog_scan *scan = scan_packages(1U);
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_BUILDER_FAILED,
+                          run_with_options(scan, 1000, &error));
+    TEST_ASSERT_EQUAL_INT(TP_FORMAT_COMPILE_BATCH_INELIGIBLE,
+                          tp_format_catalog_scan_compile_state_internal(scan));
+    tp_format_catalog_scan_destroy(scan);
+    TEST_ASSERT_TRUE(set_env_value(TEST_ACTION_ENV, NULL));
+    TEST_ASSERT_TRUE(set_env_value(TEST_INDEX_ENV, NULL));
+}
+
+void test_worker_diagnostic_identity_and_path_mismatch_invalidate_batch(void) {
+    assert_hostile_diagnostic_invalidates("wrong_diagnostic_id");
+    assert_hostile_diagnostic_invalidates("wrong_diagnostic_path");
+}
+
+void test_worker_marker_only_diagnostic_invalidates_batch(void) {
+    assert_hostile_diagnostic_invalidates("marker_only_diagnostic");
 }
 
 void test_unannounced_and_unattributed_exits_invalidate_batch(void) {
@@ -539,7 +922,12 @@ int main(int argc, char **argv) {
         return tp_build_worker_main();
     }
     UNITY_BEGIN();
+    RUN_TEST(test_diagnostic_vocabulary_has_exact_phase_and_severity);
     RUN_TEST(test_compile_protocol_round_trips_candidate_and_diagnostics);
+    RUN_TEST(test_compile_protocol_round_trips_canonical_truncation_marker);
+    RUN_TEST(
+        test_compile_protocol_rejects_nonfinal_framed_attributed_and_wrong_message_markers);
+    RUN_TEST(test_compile_protocol_rejects_hostile_diagnostic_semantics);
     RUN_TEST(test_compile_protocol_rejects_bad_headers_caps_and_trailing_bytes);
     RUN_TEST(
         test_compile_attempt_global_budgets_accept_boundary_and_reject_plus_one);
@@ -550,6 +938,9 @@ int main(int argc, char **argv) {
     RUN_TEST(test_unannounced_and_unattributed_exits_invalidate_batch);
     RUN_TEST(test_unannounced_worker_oom_is_a_global_oom);
     RUN_TEST(test_malformed_wrong_duplicate_and_partial_frames_invalidate_batch);
+    RUN_TEST(
+        test_worker_diagnostic_identity_and_path_mismatch_invalidate_batch);
+    RUN_TEST(test_worker_marker_only_diagnostic_invalidates_batch);
     RUN_TEST(test_missing_complete_and_trailing_response_invalidate_batch);
     RUN_TEST(
         test_restart_process_budget_accepts_boundary_and_rejects_plus_one);
