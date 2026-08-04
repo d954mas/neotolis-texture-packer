@@ -103,13 +103,13 @@ void *tp_lua_allocator_fn(void *userdata, void *pointer, size_t old_size,
     tp_lua_allocator *allocator = (tp_lua_allocator *)userdata;
     if (!allocator) return NULL;
     if (new_size == 0U) {
-        free(pointer);
         if (pointer) {
             allocator->live_bytes =
                 old_size <= allocator->live_bytes
                     ? allocator->live_bytes - old_size
                     : 0U;
         }
+        free(pointer);
         return NULL;
     }
     const bool retries_pending_failure = allocator_pending_matches(

@@ -493,6 +493,7 @@ static void test_allocator_retry_clears_only_the_recovered_failure(void) {
     TEST_ASSERT_TRUE(allocator.limit_hit);
     TEST_ASSERT_TRUE(allocator.failure_pending);
     (void)tp_lua_allocator_fn(&allocator, garbage, 8U, 0U);
+    TEST_ASSERT_EQUAL_size_t(8U, allocator.live_bytes);
     kept = tp_lua_allocator_fn(&allocator, kept, 8U, 12U);
     TEST_ASSERT_NOT_NULL(kept);
     TEST_ASSERT_FALSE(allocator.limit_hit);
@@ -509,6 +510,7 @@ static void test_allocator_retry_clears_only_the_recovered_failure(void) {
     TEST_ASSERT_FALSE(allocator.host_oom);
     TEST_ASSERT_FALSE(allocator.failure_pending);
     (void)tp_lua_allocator_fn(&allocator, kept, 14U, 0U);
+    TEST_ASSERT_EQUAL_size_t(0U, allocator.live_bytes);
 }
 
 static void test_runtime_accepts_emergency_gc_allocation_recovery(void) {
