@@ -74,6 +74,30 @@ tp_lua_effective_limits tp_lua_effective_limits_get(void) {
     return result;
 }
 
+static bool allocator_pending_matches(const tp_lua_allocator *allocator,
+                                      void *pointer, size_t old_size,
+                                      size_t new_size) {
+    return allocator->failure_pending &&
+           allocator->pending_pointer == pointer &&
+           allocator->pending_old_size == old_size &&
+           allocator->pending_new_size == new_size;
+}
+
+static void allocator_record_failure(tp_lua_allocator *allocator,
+                                     void *pointer, size_t old_size,
+                                     size_t new_size, bool limit_hit) {
+    if (!allocator_pending_matches(allocator, pointer, old_size, new_size)) {
+        allocator->pending_prior_limit_hit = allocator->limit_hit;
+        allocator->pending_prior_host_oom = allocator->host_oom;
+    }
+    allocator->limit_hit = allocator->limit_hit || limit_hit;
+    allocator->host_oom = allocator->host_oom || !limit_hit;
+    allocator->failure_pending = true;
+    allocator->pending_pointer = pointer;
+    allocator->pending_old_size = old_size;
+    allocator->pending_new_size = new_size;
+}
+
 void *tp_lua_allocator_fn(void *userdata, void *pointer, size_t old_size,
                           size_t new_size) {
     tp_lua_allocator *allocator = (tp_lua_allocator *)userdata;
@@ -88,24 +112,37 @@ void *tp_lua_allocator_fn(void *userdata, void *pointer, size_t old_size,
         }
         return NULL;
     }
+    const bool retries_pending_failure = allocator_pending_matches(
+        allocator, pointer, old_size, new_size);
     if (allocator->fail_next) {
         allocator->fail_next = false;
-        allocator->host_oom = true;
+        allocator_record_failure(allocator, pointer, old_size, new_size,
+                                 false);
         return NULL;
     }
     const size_t retained = pointer ? old_size : 0U;
     if (retained > allocator->live_bytes ||
         new_size > SIZE_MAX - (allocator->live_bytes - retained) ||
         allocator->live_bytes - retained + new_size > allocator->limit) {
-        allocator->limit_hit = true;
+        allocator_record_failure(allocator, pointer, old_size, new_size,
+                                 true);
         return NULL;
     }
     void *resized = realloc(pointer, new_size);
     if (!resized) {
-        allocator->host_oom = true;
+        allocator_record_failure(allocator, pointer, old_size, new_size,
+                                 false);
         return NULL;
     }
     allocator->live_bytes = allocator->live_bytes - retained + new_size;
+    if (retries_pending_failure) {
+        allocator->limit_hit = allocator->pending_prior_limit_hit;
+        allocator->host_oom = allocator->pending_prior_host_oom;
+        allocator->failure_pending = false;
+        allocator->pending_pointer = NULL;
+        allocator->pending_old_size = 0U;
+        allocator->pending_new_size = 0U;
+    }
     return resized;
 }
 
@@ -692,6 +729,13 @@ tp_status tp_lua_runtime_serialize(const tp_lua_runtime_input *input,
             lua_status = luaL_loadbufferx(
                 state, (const char *)source_text,
                 input->source_byte_count, chunk_name, "t");
+#ifdef TP_ENABLE_TEST_SEAMS
+            if (lua_status == LUA_OK &&
+                g_test_limits.fail_runtime_allocation_after_load) {
+                context.allocator.fail_next = true;
+                g_test_limits.fail_runtime_allocation_after_load = false;
+            }
+#endif
             if (tp_cancel_requested(input->cancel)) {
                 context.cancelled = true;
                 lua_status = LUA_ERRRUN;

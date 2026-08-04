@@ -11,6 +11,7 @@
 #endif
 
 #include "tp_lua_host_internal.h"
+#include "tp_lua_host_private.h"
 #include "tp_proc_internal.h"
 #include "unity.h"
 
@@ -268,6 +269,12 @@ static int run_child(void) {
             tp_lua__test_fail_next_allocation();
             return write_runtime_reply(
                 "return function(atlas, host) end\n", NULL);
+        case 'r':
+            limits.fail_runtime_allocation_after_load = true;
+            tp_lua__test_set_limits(&limits);
+            return write_runtime_reply(
+                "local recovered = {}; return function(atlas, host) "
+                "local w=host:document('meta'); w:finish() end\n", NULL);
         case 'm':
             limits.live_bytes = 1024U;
             tp_lua__test_set_limits(&limits);
@@ -476,6 +483,38 @@ static void test_allocator_fault_stays_primary_oom_without_diagnostic(void) {
     assert_host_oom('a');
 }
 
+static void test_allocator_retry_clears_only_the_recovered_failure(void) {
+    tp_lua_allocator allocator = {.limit = 16U};
+    void *kept = tp_lua_allocator_fn(&allocator, NULL, 0U, 8U);
+    void *garbage = tp_lua_allocator_fn(&allocator, NULL, 0U, 8U);
+    TEST_ASSERT_NOT_NULL(kept);
+    TEST_ASSERT_NOT_NULL(garbage);
+    TEST_ASSERT_NULL(tp_lua_allocator_fn(&allocator, kept, 8U, 12U));
+    TEST_ASSERT_TRUE(allocator.limit_hit);
+    TEST_ASSERT_TRUE(allocator.failure_pending);
+    (void)tp_lua_allocator_fn(&allocator, garbage, 8U, 0U);
+    kept = tp_lua_allocator_fn(&allocator, kept, 8U, 12U);
+    TEST_ASSERT_NOT_NULL(kept);
+    TEST_ASSERT_FALSE(allocator.limit_hit);
+    TEST_ASSERT_FALSE(allocator.host_oom);
+    TEST_ASSERT_FALSE(allocator.failure_pending);
+
+    allocator.fail_next = true;
+    TEST_ASSERT_NULL(tp_lua_allocator_fn(&allocator, kept, 12U, 14U));
+    TEST_ASSERT_TRUE(allocator.host_oom);
+    TEST_ASSERT_TRUE(allocator.failure_pending);
+    kept = tp_lua_allocator_fn(&allocator, kept, 12U, 14U);
+    TEST_ASSERT_NOT_NULL(kept);
+    TEST_ASSERT_FALSE(allocator.limit_hit);
+    TEST_ASSERT_FALSE(allocator.host_oom);
+    TEST_ASSERT_FALSE(allocator.failure_pending);
+    (void)tp_lua_allocator_fn(&allocator, kept, 14U, 0U);
+}
+
+static void test_runtime_accepts_emergency_gc_allocation_recovery(void) {
+    assert_success('r');
+}
+
 static void test_preflight_cancellation_stays_cancelled(void) {
     const child_observation observation = invoke('C');
     TEST_ASSERT_EQUAL_INT(TP_PROC_END_EXITED, observation.process.how);
@@ -538,6 +577,8 @@ int main(int argc, char **argv) {
     RUN_TEST(test_compile_allocator_ceiling_is_package_diagnostic);
     RUN_TEST(test_runtime_allocator_ceiling_is_package_diagnostic);
     RUN_TEST(test_allocator_fault_stays_primary_oom_without_diagnostic);
+    RUN_TEST(test_allocator_retry_clears_only_the_recovered_failure);
+    RUN_TEST(test_runtime_accepts_emergency_gc_allocation_recovery);
     RUN_TEST(test_preflight_cancellation_stays_cancelled);
     RUN_TEST(test_cancellation_is_polled_after_text_compilation);
     RUN_TEST(test_host_fact_boundary_and_plus_one);

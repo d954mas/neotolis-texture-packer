@@ -28,6 +28,12 @@ typedef struct tp_lua_allocator {
     bool limit_hit;
     bool host_oom;
     bool fail_next;
+    bool failure_pending;
+    bool pending_prior_limit_hit;
+    bool pending_prior_host_oom;
+    void *pending_pointer;
+    size_t pending_old_size;
+    size_t pending_new_size;
 } tp_lua_allocator;
 
 typedef struct tp_lua_document_state {
