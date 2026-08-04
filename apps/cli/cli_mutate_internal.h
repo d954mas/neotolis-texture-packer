@@ -38,7 +38,8 @@ typedef struct cli_edit {
 } cli_edit;
 
 void edit_close(cli_edit *edit);
-int edit_open(cli_edit *edit, const char *path, bool dry_run, bool json, bool quiet);
+int edit_open(cli_edit *edit, tp_format_catalog *catalog, const char *path,
+              bool dry_run, bool json, bool quiet);
 int edit_resolve(cli_edit *edit, tp_id128 atlas_scope,
                  tp_selector_kind kind, const char *selector,
                  tp_selector_result *result, bool json, bool quiet);
@@ -46,7 +47,8 @@ int edit_resolve_sprite(cli_edit *edit, tp_id128 atlas_id,
                         const char *selector, tp_selector_result *result,
                         tp_id128 *source_id, char *source_key,
                         size_t source_key_capacity, bool json, bool quiet);
-int edit_open_atlas(cli_edit *edit, const char *path, const char *selector,
+int edit_open_atlas(cli_edit *edit, tp_format_catalog *catalog,
+                    const char *path, const char *selector,
                     const tp_snapshot_atlas **atlas, bool dry_run, bool json, bool quiet);
 int edit_fail_usage(cli_edit *edit, bool json, bool quiet,
                     const char *id, const char *msg);
@@ -55,15 +57,23 @@ int commit_session_ops(cli_edit *edit, tp_operation *ops, int nops,
                        bool json, bool quiet);
 void free_ops(tp_operation *ops, int n);
 
-int do_add(const char *const *pos, int npos, const char *opt_kind,
+int do_add(tp_format_catalog *catalog, const char *const *pos, int npos,
+           const char *opt_kind,
            bool dry_run, bool json, bool quiet);
-int do_remove_source(const char *const *pos, int npos, bool dry_run, bool json, bool quiet);
-int do_set(const char *const *pos, int npos, bool dry_run, bool json, bool quiet);
-int do_atlas(const char *const *pos, int npos, bool dry_run, bool json, bool quiet);
-int do_sprite_set(const char *const *pos, int npos, bool dry_run, bool json, bool quiet);
-int do_sprite_unset(const char *const *pos, int npos, bool dry_run, bool json, bool quiet);
-int do_anim(const char *const *pos, int npos, const char *opt_at,
+int do_remove_source(tp_format_catalog *catalog, const char *const *pos,
+                     int npos, bool dry_run, bool json, bool quiet);
+int do_set(tp_format_catalog *catalog, const char *const *pos, int npos,
+           bool dry_run, bool json, bool quiet);
+int do_atlas(tp_format_catalog *catalog, const char *const *pos, int npos,
+             bool dry_run, bool json, bool quiet);
+int do_sprite_set(tp_format_catalog *catalog, const char *const *pos,
+                  int npos, bool dry_run, bool json, bool quiet);
+int do_sprite_unset(tp_format_catalog *catalog, const char *const *pos,
+                    int npos, bool dry_run, bool json, bool quiet);
+int do_anim(tp_format_catalog *catalog, const char *const *pos, int npos,
+            const char *opt_at,
             bool dry_run, bool json, bool quiet);
-int do_target(const char *const *pos, int npos, bool dry_run, bool json, bool quiet);
+int do_target(tp_format_catalog *catalog, const char *const *pos, int npos,
+              bool dry_run, bool json, bool quiet);
 
 #endif /* NTPACKER_CLI_MUTATE_INTERNAL_H */

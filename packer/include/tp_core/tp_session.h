@@ -19,6 +19,7 @@ typedef struct tp_txn_request tp_txn_request;
 typedef struct tp_txn_result tp_txn_result;
 typedef struct tp_project tp_project;
 typedef struct tp_journal tp_journal;
+typedef struct tp_format_catalog tp_format_catalog;
 
 /* ---- shared visible History (docs/architecture/model-operations-and-session.md) *
  * One session-owned enumerable History surface shared by every view (GUI/MCP/Dev
@@ -214,11 +215,24 @@ typedef struct tp_session_save_result {
 /* Creates a synchronous single-writer session over a new default project. The
  * session is the sole owner of its model. `rng` is used for session/structural IDs. */
 tp_status tp_session_create(const tp_rng *rng, tp_session **out, tp_error *err);
+tp_status tp_session_create_with_catalog(tp_format_catalog *catalog,
+                                         const tp_rng *rng,
+                                         tp_session **out, tp_error *err);
 tp_status tp_session_create_default_project(const tp_rng *rng,
-                                            tp_session **out,
-                                            tp_error *err);
+                                             tp_session **out,
+                                             tp_error *err);
+tp_status tp_session_create_default_project_with_catalog(
+    tp_format_catalog *catalog, const tp_rng *rng, tp_session **out,
+    tp_error *err);
 tp_status tp_session_open(const char *path, const tp_rng *rng,
-                          tp_session **out, tp_error *err);
+                           tp_session **out, tp_error *err);
+tp_status tp_session_open_with_catalog(const char *path,
+                                       tp_format_catalog *catalog,
+                                       const tp_rng *rng,
+                                       tp_session **out, tp_error *err);
+
+/* Borrowed immutable generation retained by the session. */
+tp_format_catalog *tp_session_format_catalog(const tp_session *session);
 
 void tp_session_destroy(tp_session *session);
 
@@ -279,7 +293,12 @@ tp_status tp_session_snapshot_create(const tp_session *session,
  * inspect/validate/pack clients. Relative project paths use the same canonical
  * identity owner as tp_session_open(). */
 tp_status tp_session_snapshot_load(const char *path,
-                                   tp_session_snapshot **out, tp_error *err);
+                                    tp_session_snapshot **out, tp_error *err);
+tp_status tp_session_snapshot_load_with_catalog(
+    const char *path, tp_format_catalog *catalog,
+    tp_session_snapshot **out, tp_error *err);
+tp_format_catalog *tp_session_snapshot_format_catalog(
+    const tp_session_snapshot *snapshot);
 /* Applies one transaction to an isolated clone of `snapshot` and returns the
  * same structured result as the live session path. The snapshot and any live
  * session remain unchanged; no writer lease, journal, event, Save, or other

@@ -1425,14 +1425,59 @@ void test_preview_request_is_deferred_and_selection_reset_stops_it(void) {
     };
     gui_rows_select_primary(&selected_row);
     TEST_ASSERT_TRUE(gui_rows_primary_is_set());
-    s_preview_target = 1;
+    TEST_ASSERT_TRUE(gui_preview_target_make_format(
+        "defold", &s_preview_target));
     reset_selection();
     TEST_ASSERT_FALSE(gui_rows_primary_is_set());
     TEST_ASSERT_EQUAL_INT(
         -1, gui_view_animation_index(gui_project_snapshot()));
     TEST_ASSERT_FALSE(s_preview_active);
     TEST_ASSERT_FALSE(s_preview_playing);
-    TEST_ASSERT_EQUAL_INT(0, s_preview_target);
+    TEST_ASSERT_TRUE(gui_preview_target_is_native(
+        &s_preview_target));
+}
+
+void test_preview_format_intent_copies_stable_id_before_deferred_drain(void) {
+    char selected_id[] =
+        TP_EXPORTER_ID_JSON_NEOTOLIS;
+
+    gui_request_preview_target_format(selected_id);
+    selected_id[0] = 'x';
+
+    TEST_ASSERT_EQUAL_INT(1, s_actions.intent_count);
+    TEST_ASSERT_EQUAL_INT(
+        GUI_INTENT_PREVIEW_TARGET,
+        s_actions.intents[0].kind);
+    TEST_ASSERT_EQUAL_INT(
+        GUI_PREVIEW_TARGET_FORMAT,
+        s_actions.intents[0]
+            .payload.preview_target.kind);
+    TEST_ASSERT_EQUAL_STRING(
+        TP_EXPORTER_ID_JSON_NEOTOLIS,
+        s_actions.intents[0]
+            .payload.preview_target.format_id);
+    TEST_ASSERT_FALSE(gui_preview_target_is_native(
+        &s_actions.intents[0]
+             .payload.preview_target));
+
+    const gui_preview_target invalid_kind = {
+        .kind = (gui_preview_target_kind)99,
+        .format_id = TP_EXPORTER_ID_JSON_NEOTOLIS,
+    };
+    const gui_preview_target empty_format = {
+        .kind = GUI_PREVIEW_TARGET_FORMAT,
+    };
+    TEST_ASSERT_TRUE(gui_preview_target_is_native(
+        &invalid_kind));
+    TEST_ASSERT_TRUE(gui_preview_target_is_native(
+        &empty_format));
+
+    gui_actions__clear_pending();
+    gui_request_preview_target_native();
+    TEST_ASSERT_EQUAL_INT(1, s_actions.intent_count);
+    TEST_ASSERT_TRUE(gui_preview_target_is_native(
+        &s_actions.intents[0]
+             .payload.preview_target));
 }
 
 int main(int argc, char **argv) {
@@ -1474,5 +1519,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_deferred_frame_delete_clears_selection_only_after_commit);
     RUN_TEST(test_deferred_action_mutates_before_publishing_success_status);
     RUN_TEST(test_preview_request_is_deferred_and_selection_reset_stops_it);
+    RUN_TEST(
+        test_preview_format_intent_copies_stable_id_before_deferred_drain);
     return UNITY_END();
 }

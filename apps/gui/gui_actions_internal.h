@@ -6,6 +6,7 @@
 #include "gui_actions_driver.h"
 #include "gui_project.h"
 #include "gui_project_driver.h"
+#include "gui_state.h"
 
 #include "tp_core/tp_export.h"
 #include "tp_core/tp_srckey.h"
@@ -114,8 +115,8 @@ typedef struct gui_intent {
             tp_op_sprite_ref *frames; /* owned */
             int frame_count;
         } create_animation;
-        /* GUI_INTENT_PREVIEW_TARGET: exporter option, not a target entity index */
-        int exporter_slot;
+        /* GUI_INTENT_PREVIEW_TARGET: explicit Native or copied stable id. */
+        gui_preview_target preview_target;
     } payload;
 } gui_intent;
 
@@ -295,7 +296,8 @@ void gui_actions__browse_target(const gui_target_ref *target);
 void gui_actions__refresh(void);
 void gui_actions__cancel(void);
 void gui_actions__export(void);
-void gui_actions__preview_target_start(int combo_index);
+void gui_actions__preview_target_start(
+    const gui_preview_target *target);
 gui_pack_done gui_actions__consume_completion(
     tp_session_job_result *completion,
     gui_pack_result_info *out);

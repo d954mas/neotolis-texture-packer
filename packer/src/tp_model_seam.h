@@ -4,11 +4,14 @@
 #include "tp_core/tp_project.h"
 #include "tp_core/tp_transaction.h"
 
+struct tp_format_catalog;
+
 typedef struct tp_project_generation tp_project_generation;
 
 /* The live project (immutable borrowed view; valid until the next model replace
  * or destruction). Core-only: clients read owned session snapshots. */
 const tp_project *tp_model_project(const tp_model *model);
+struct tp_format_catalog *tp_model_format_catalog(const tp_model *model);
 
 /* Lazily installs a shared owner for the current immutable project generation
  * and returns one retained reference. The model remains unchanged on OOM. */
@@ -30,7 +33,8 @@ uint64_t tp_model__recovery_health_generation(const tp_model *model);
 /* Applies against an isolated project clone at `revision`. The caller's
  * project remains immutable and the returned transaction result owns its data. */
 tp_status tp_model__apply_snapshot_preview(
-    const tp_project *project, int64_t revision,
+    const tp_project *project, struct tp_format_catalog *catalog,
+    int64_t revision,
     const tp_txn_request *request, tp_txn_result *result, tp_error *error);
 /* Degraded-Save compaction that stages the full live retained-id window and
  * restores the exact prior bytes/index if the replacement checkpoint cannot

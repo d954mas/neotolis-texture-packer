@@ -13,7 +13,8 @@
 /* add / remove source                                                */
 /* ------------------------------------------------------------------ */
 
-int do_add(const char *const *pos, int npos, const char *opt_kind,
+int do_add(tp_format_catalog *catalog, const char *const *pos, int npos,
+           const char *opt_kind,
            bool dry_run, bool json, bool quiet) {
     if (npos < 4) {
         cli_emit_error(json, quiet, "usage", "add needs <project> <atlas> <path>... ; try 'ntpacker help'");
@@ -34,7 +35,8 @@ int do_add(const char *const *pos, int npos, const char *opt_kind,
     }
     cli_edit edit;
     const tp_snapshot_atlas *atlas_dto = NULL;
-    int rc = edit_open_atlas(&edit, path, atlas, &atlas_dto, dry_run, json, quiet);
+    int rc = edit_open_atlas(&edit, catalog, path, atlas, &atlas_dto,
+                             dry_run, json, quiet);
     if (rc != CLI_EXIT_OK) {
         return rc;
     }
@@ -125,7 +127,8 @@ int do_add(const char *const *pos, int npos, const char *opt_kind,
     return rc;
 }
 
-int do_remove_source(const char *const *pos, int npos, bool dry_run, bool json, bool quiet) {
+int do_remove_source(tp_format_catalog *catalog, const char *const *pos,
+                     int npos, bool dry_run, bool json, bool quiet) {
     if (npos != 4) {
         cli_emit_error(json, quiet, "usage", "remove needs <project> <atlas> <source>; try 'ntpacker help'");
         return CLI_EXIT_USAGE;
@@ -135,7 +138,8 @@ int do_remove_source(const char *const *pos, int npos, bool dry_run, bool json, 
     const char *src = pos[3];
     cli_edit edit;
     const tp_snapshot_atlas *atlas_dto = NULL;
-    int rc = edit_open_atlas(&edit, path, atlas, &atlas_dto, dry_run, json, quiet);
+    int rc = edit_open_atlas(&edit, catalog, path, atlas, &atlas_dto,
+                             dry_run, json, quiet);
     if (rc != CLI_EXIT_OK) {
         return rc;
     }

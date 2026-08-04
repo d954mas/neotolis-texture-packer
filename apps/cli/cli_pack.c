@@ -155,6 +155,7 @@ static const char *notice_field_name(int field_id) {
         case TP_NOTICE_FIELD_PIVOT: return "pivot";
         case TP_NOTICE_FIELD_ALIAS: return "alias";
         case TP_NOTICE_FIELD_MULTIPAGE: return "multipage";
+        case TP_NOTICE_FIELD_ANIMATION: return "animation";
         default: return "none";
     }
 }
@@ -433,10 +434,11 @@ static void print_atlas_human(const char *name, int sprite_count, int missing_so
     }
 }
 
-int cmd_pack(const char *project_path, const char *opt_atlas, const char *opt_target, const char *opt_out_dir,
+int cmd_pack(tp_format_catalog *catalog, const char *project_path,
+             const char *opt_atlas, const char *opt_target, const char *opt_out_dir,
              bool dry_run, bool json, bool quiet) {
     tp_session_snapshot *snapshot = NULL;
-    int rc = cli_load_snapshot(project_path, json, quiet, &snapshot);
+    int rc = cli_load_snapshot(catalog, project_path, json, quiet, &snapshot);
     if (rc != CLI_EXIT_OK) {
         return rc;
     }

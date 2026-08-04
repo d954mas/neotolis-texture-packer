@@ -6,6 +6,8 @@
 
 #include "tp_proc_internal.h"
 
+#include "tp_core/tp_format.h"
+
 #ifdef TP_ENABLE_TEST_SEAMS
 static unsigned int s_test_destroy_kill_calls;
 static unsigned int s_test_destroy_blocking_wait_calls;
@@ -29,10 +31,6 @@ static bool s_test_fail_next_kill;
 
 #include "tinycthread.h"
 
-#if defined(__APPLE__)
-#include <mach-o/dyld.h>
-#endif
-
 struct tp_proc {
     pid_t pid;
     pid_t pgid;   /* pid when this handle owns a process group, -1 otherwise */
@@ -54,32 +52,7 @@ static void ignore_sigpipe_once(void) {
 }
 
 bool tp_proc_self_path(char *out, size_t out_cap) {
-    if (!out || out_cap == 0U) {
-        return false;
-    }
-    out[0] = '\0';
-#if defined(__APPLE__)
-    uint32_t size = (uint32_t)(out_cap > 0xFFFFFFFFU ? 0xFFFFFFFFU : out_cap);
-    if (_NSGetExecutablePath(out, &size) != 0) {
-        out[0] = '\0';
-        return false;
-    }
-    return true;
-#else
-    /* Linux (and compatible /proc): the canonical, argv-independent self path. */
-    ssize_t n = readlink("/proc/self/exe", out, out_cap - 1U);
-    if (n <= 0 || (size_t)n >= out_cap) {
-        out[0] = '\0';
-        return false;
-    }
-    out[n] = '\0';
-    return true;
-#endif
-    /* No argv[0]/PATH fallback: every supported host resolves its own image
-     * without argv (Windows GetModuleFileNameW, Linux /proc/self/exe, macOS
-     * _NSGetExecutablePath). An argv[0] search would be strictly less reliable
-     * (a caller can spawn us with any argv[0]) and only matters on platforms this
-     * tool does not target, so containment fails closed there instead. */
+    return tp_executable_path(out, out_cap, NULL) == TP_STATUS_OK;
 }
 
 /* Create a pipe with BOTH ends close-on-exec, so only the two fds the child dup2's

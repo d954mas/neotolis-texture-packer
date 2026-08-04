@@ -21,6 +21,7 @@
 #include <stdint.h>
 
 #include "tp_core/tp_error.h"
+#include "tp_core/tp_format.h"
 #include "tp_core/tp_id.h"
 #include "tp_core/tp_identity.h"
 #include "tp_core/tp_pack_result.h"
@@ -39,10 +40,6 @@ struct tp_session_snapshot;
  * §4 boundary gate: no exporter-id literals in apps/). */
 #define TP_EXPORTER_ID_JSON_NEOTOLIS "json-neotolis"
 
-/* Canonical format/exporter identifier capacity, including NUL. Package ids
- * are machine tokens (typically reverse-DNS), not unbounded display names. */
-#define TP_EXPORTER_ID_MAX 256
-
 /* Validates non-empty, strict UTF-8, and the shared byte bound. */
 tp_status tp_exporter_id_validate(const char *id, tp_error *err);
 
@@ -58,16 +55,6 @@ tp_status tp_exporter_id_validate(const char *id, tp_error *err);
  * The clamp (tp_export_effective_settings) maps them onto what nt_builder can
  * actually restrict to; the writer uses them to decide what to emit and where
  * to raise a metadata-loss notice. */
-typedef struct tp_export_caps {
-    uint8_t transform_mask; /* exact set of representable tp_sprite.transform values */
-    bool polygons;  /* format stores polygon verts + indices (else quad only) */
-    bool pivot;     /* format stores a per-sprite pivot */
-    bool slice9;    /* format stores 9-slice borders */
-    bool multipage; /* format supports multiple pages */
-    bool aliases;   /* format links aliased names to their shared frame */
-    /* room to grow: append new flags, never reorder. */
-} tp_export_caps;
-
 /* All-true caps (the json-neotolis reference target holds everything). */
 tp_export_caps tp_export_caps_full(void);
 /* Coarse presentation values derived from transform_mask; never policy inputs. */
@@ -92,6 +79,7 @@ typedef enum tp_notice_field {
     TP_NOTICE_FIELD_PIVOT,     /* per-sprite pivot dropped */
     TP_NOTICE_FIELD_ALIAS,     /* alias link dropped */
     TP_NOTICE_FIELD_MULTIPAGE, /* multi-page atlas against a single-page target */
+    TP_NOTICE_FIELD_ANIMATION = 7, /* explicit animations dropped */
 } tp_notice_field;
 
 typedef enum tp_notice_reason {
@@ -221,6 +209,14 @@ typedef struct tp_export_ir {
     int animation_count; /* sorted ascending by id */
 } tp_export_ir;
 
+/* Creates a borrowed, read-only target view. The view owns no memory and must
+ * not outlive `source`. API v1 hides unsupported animations completely; loss
+ * reporting remains the caller's separate tp_export_predict_loss step. */
+tp_status tp_export_ir_project_for_caps(const tp_export_ir *source,
+                                        const tp_export_caps *caps,
+                                        tp_export_ir *out,
+                                        tp_error *err);
+
 /* Builds `out` from `result` + `opts`. Final names are computed (override ->
  * folder-strip -> ext-strip), sprites are sorted by final name (determinism
  * key), aliases keep their link, and animations are the explicit project
@@ -291,25 +287,6 @@ tp_status tp_export_page_path(const char *out_path_base, int page,
 /* ------------------------------------------------------------------ */
 /* Native format descriptor and artifact plan. */
 /* ------------------------------------------------------------------ */
-
-typedef struct tp_format_artifact_decl {
-    const char *id;     /* stable logical id, e.g. "metadata" */
-    const char *suffix; /* appended to the target output base, including dot */
-} tp_format_artifact_decl;
-
-typedef struct tp_format_descriptor {
-    const char *id;
-    const char *display_name;
-    tp_export_caps caps;
-    const tp_format_artifact_decl *artifacts;
-    int artifact_count;
-} tp_format_descriptor;
-
-/* Descriptor-only discovery for public clients. Native serializers remain an
- * internal implementation detail of the fixed built-in registry. */
-const tp_format_descriptor *tp_format_find(const char *id);
-int tp_format_count(void);
-const tp_format_descriptor *tp_format_at(int index);
 
 typedef enum tp_export_artifact_kind {
     TP_EXPORT_ARTIFACT_DOCUMENT = 1,

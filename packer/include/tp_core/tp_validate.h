@@ -8,6 +8,7 @@
 #include "tp_core/tp_id.h"
 
 struct tp_session_snapshot;
+struct tp_format_catalog;
 
 #ifdef __cplusplus
 extern "C" {
@@ -93,6 +94,11 @@ typedef struct {
 /* Loads and validates one saved project. The caller never receives a project
  * pointer. On failure, `out` remains safely freeable and owns no findings. */
 tp_status tp_validate_project_file(const char *path, tp_validation_report *out, tp_error *err);
+/* Catalog-explicit file validation. The immutable catalog is borrowed for the
+ * call; unavailable format IDs remain project-validation findings. */
+tp_status tp_validate_project_file_with_catalog(
+    const char *path, const struct tp_format_catalog *catalog,
+    tp_validation_report *out, tp_error *err);
 /* Validates one immutable session snapshot without reloading or exposing a model. */
 tp_status tp_validate_session_snapshot(const struct tp_session_snapshot *snapshot,
                                        tp_validation_report *out, tp_error *err);

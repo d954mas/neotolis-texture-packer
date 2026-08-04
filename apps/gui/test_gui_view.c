@@ -37,6 +37,8 @@
 #include "tp_core/tp_build_worker.h"
 #include "tp_core/tp_input.h"
 #include "tp_core/tp_scan.h"
+#include "tp_export_internal.h"
+#include "tp_format_catalog_internal.h"
 #include "tp_test_seams.h"
 
 #include "unity.h"
@@ -46,6 +48,7 @@
 void gui_shell_reset_shown_result(void) {}
 void tp_scan__test_set_alloc_fail(int nth);
 void tp_scan__test_set_stat_error(int error);
+void gui_project__test_set_format_projection_alloc_fail(bool fail);
 
 /* One FOLDER source (pack/ with alpha/beta/gamma.png children) + one FILE
  * source (solo.png) -- enough to drive filter, sort, collapse, and the missing
@@ -2097,6 +2100,158 @@ void test_canvas_buffer_readiness_requires_every_gpu_handle(void) {
     TEST_ASSERT_FALSE(gui_canvas_resource_handles_ready(&canvas));
 }
 
+enum { GUI_FORMAT_PROJECTION_TEST_COUNT = 30 };
+
+static tp_status gui_format_projection_test_serialize(
+    const tp_export_serialize_ctx *ctx,
+    tp_export_document *documents,
+    int document_count, tp_error *error) {
+    (void)ctx;
+    (void)documents;
+    (void)document_count;
+    (void)error;
+    return TP_STATUS_OK;
+}
+
+void test_format_projection_exposes_every_row_and_resolves_preview_by_id(void) {
+    char ids[GUI_FORMAT_PROJECTION_TEST_COUNT][32];
+    tp_format_descriptor descriptors[
+        GUI_FORMAT_PROJECTION_TEST_COUNT] = {0};
+    tp_exporter exporters[
+        GUI_FORMAT_PROJECTION_TEST_COUNT] = {0};
+    const tp_exporter *forward[
+        GUI_FORMAT_PROJECTION_TEST_COUNT] = {0};
+    const tp_exporter *reverse[
+        GUI_FORMAT_PROJECTION_TEST_COUNT] = {0};
+
+    for (int index = 0;
+         index < GUI_FORMAT_PROJECTION_TEST_COUNT;
+         ++index) {
+        (void)snprintf(
+            ids[index], sizeof ids[index],
+            "gui-format-%02d", index);
+        descriptors[index].id = ids[index];
+        descriptors[index].display_name = ids[index];
+        exporters[index].format =
+            &descriptors[index];
+        exporters[index].serialize =
+            gui_format_projection_test_serialize;
+        forward[index] = &exporters[index];
+        reverse[GUI_FORMAT_PROJECTION_TEST_COUNT -
+                index - 1] = &exporters[index];
+    }
+
+    tp_error error = {{0}};
+    tp_format_catalog *catalog_forward = NULL;
+    tp_format_catalog *catalog_reverse = NULL;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_format_catalog__test_create(
+            forward,
+            GUI_FORMAT_PROJECTION_TEST_COUNT,
+            &catalog_forward, &error));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_format_catalog__test_create(
+            reverse,
+            GUI_FORMAT_PROJECTION_TEST_COUNT,
+            &catalog_reverse, &error));
+
+    TEST_ASSERT_TRUE(
+        gui_project__test_set_format_catalog(
+            tp_format_catalog_native()));
+    const int native_count =
+        gui_project_format_count();
+
+    TEST_ASSERT_TRUE(
+        gui_project__test_set_format_catalog(
+            catalog_forward));
+    tp_format_catalog_release(catalog_forward);
+    TEST_ASSERT_EQUAL_INT(
+        native_count +
+            GUI_FORMAT_PROJECTION_TEST_COUNT,
+        gui_project_format_count());
+    TEST_ASSERT_GREATER_THAN(
+        24, gui_project_format_count());
+    for (int index = 0;
+         index < GUI_FORMAT_PROJECTION_TEST_COUNT;
+         ++index) {
+        TEST_ASSERT_NOT_NULL(
+            gui_project_format_find(ids[index]));
+    }
+    const tp_format_descriptor *last_format =
+        gui_project_format_at(
+            native_count +
+            GUI_FORMAT_PROJECTION_TEST_COUNT - 1);
+    TEST_ASSERT_NOT_NULL(last_format);
+    TEST_ASSERT_EQUAL_STRING(
+        ids[GUI_FORMAT_PROJECTION_TEST_COUNT - 1],
+        last_format->id);
+
+    const int stable_index = native_count + 5;
+    const tp_format_descriptor *selected =
+        gui_project_format_at(stable_index);
+    TEST_ASSERT_NOT_NULL(selected);
+    TEST_ASSERT_EQUAL_STRING(
+        ids[5], selected->id);
+    TEST_ASSERT_TRUE(gui_preview_target_make_format(
+        selected->id, &s_preview_target));
+
+    TEST_ASSERT_TRUE(
+        gui_project__test_set_format_catalog(
+            catalog_reverse));
+    tp_format_catalog_release(catalog_reverse);
+    const tp_format_descriptor *same_position =
+        gui_project_format_at(stable_index);
+    TEST_ASSERT_NOT_NULL(same_position);
+    TEST_ASSERT_TRUE(strcmp(
+        selected->id, same_position->id) != 0);
+    const tp_format_descriptor *resolved =
+        preview_target_format();
+    TEST_ASSERT_NOT_NULL(resolved);
+    TEST_ASSERT_EQUAL_STRING(
+        selected->id, resolved->id);
+
+    preview_target_reset();
+    TEST_ASSERT_TRUE(
+        gui_project__test_set_format_catalog(
+            tp_format_catalog_native()));
+    TEST_ASSERT_EQUAL_INT(
+        native_count, gui_project_format_count());
+}
+
+void test_format_projection_install_failure_preserves_active_generation(void) {
+    const tp_format_descriptor descriptor = {
+        .id = "gui-format-install-failure",
+        .display_name = "GUI format install failure",
+    };
+    const tp_exporter exporter = {
+        .format = &descriptor,
+        .serialize = gui_format_projection_test_serialize,
+    };
+    const tp_exporter *exporters[] = {&exporter};
+    tp_error error = {{0}};
+    tp_format_catalog *candidate = NULL;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_format_catalog__test_create(exporters, 1, &candidate, &error));
+
+    TEST_ASSERT_TRUE(gui_project__test_set_format_catalog(
+        tp_format_catalog_native()));
+    const tp_format_catalog *active = gui_project_format_catalog();
+    const int active_count = gui_project_format_count();
+
+    gui_project__test_set_format_projection_alloc_fail(true);
+    const bool installed =
+        gui_project__test_set_format_catalog(candidate);
+    gui_project__test_set_format_projection_alloc_fail(false);
+
+    TEST_ASSERT_FALSE(installed);
+    TEST_ASSERT_EQUAL_PTR(active, gui_project_format_catalog());
+    TEST_ASSERT_EQUAL_INT(active_count, gui_project_format_count());
+    tp_format_catalog_release(candidate);
+}
+
 int main(int argc, char **argv) {
     if (tp_build_is_worker_invocation(argc, argv)) {
         return tp_build_worker_main();
@@ -2156,5 +2311,9 @@ int main(int argc, char **argv) {
     RUN_TEST(test_canvas_menu_owner_cancels_raw_gesture_and_double_click);
     RUN_TEST(test_empty_canvas_hit_clears_shared_sprite_selection);
     RUN_TEST(test_canvas_buffer_readiness_requires_every_gpu_handle);
+    RUN_TEST(
+        test_format_projection_exposes_every_row_and_resolves_preview_by_id);
+    RUN_TEST(
+        test_format_projection_install_failure_preserves_active_generation);
     return UNITY_END();
 }

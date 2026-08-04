@@ -24,6 +24,7 @@ saved project / live operator
 - `packer/tp_core` owns the project model, canonical identity, validation,
   operation catalog, transactions, session, snapshots, persistence, history,
   recovery, source scanning, immutable Export IR, native format descriptors,
+  the immutable format catalog and strict package discovery/diagnostics,
   artifact planning/publication, and pack-result metadata.
 - `packer/tp_build` owns fallible builder execution, worker-process transport,
   packing, parse-back, and export orchestration.
@@ -81,10 +82,15 @@ in-process live-headless session capability shape. MCP and Dev API transports
 are not implemented. Their target contract is in
 [`../spec/automation.md`](../spec/automation.md).
 
-Current format support is two fixed built-in native exporters over Export IR v1
-and the common artifact planner/publisher. There is no production runtime C
-registration surface. Template and sandboxed Lua export handlers are later
-target architecture; Import and linked-atlas ingestion are outside this slice.
+Current format execution remains two fixed built-in native exporters over
+Export IR v1 and the common artifact planner/publisher. Format discovery now
+builds an explicit immutable owned catalog from the executable-relative
+`formats/` root, with strict API-v1 descriptor parsing, deterministic
+unavailable rows, fingerprints, and bounded owned diagnostics. A valid Lua
+candidate remains pending isolated compilation and cannot become available in
+the current implementation. There is no production runtime C registration
+surface, Lua execution, or Reload Formats operation. Import and linked-atlas
+ingestion remain outside this slice.
 The future export-handler contract is documented in
 [`../spec/format-ecosystem.md`](../spec/format-ecosystem.md).
 

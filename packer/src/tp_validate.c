@@ -4,6 +4,7 @@
 
 #include <string.h>
 
+#include "tp_core/tp_format.h"
 #include "tp_core/tp_project.h"
 #include "tp_session_internal.h"
 #include "tp_validate_internal.h"
@@ -67,23 +68,27 @@ tp_validate_work_stats tp_validate__test_work_get(void) {
     return (tp_validate_work_stats){tp_validate_work_probes};
 }
 
-static void validate_atlas(validation_builder *fs, const tp_project *p, int ai,
+static void validate_atlas(validation_builder *fs,
+                           const tp_format_catalog *catalog,
+                           const tp_project *p, int ai,
                            const target_path_index *target_paths) {
     const tp_project_atlas *a = &p->atlases[ai];
 
     validate_source_domain(fs, p, a);
     validate_sprite_animation_domain(fs, p, ai, a);
-    validate_target_settings_domain(fs, p, ai, a, target_paths);
+    validate_target_settings_domain(fs, catalog, p, ai, a, target_paths);
 }
 
-static tp_status validate_project(const tp_project *project,
+static tp_status validate_project(const tp_format_catalog *catalog,
+                                  const tp_project *project,
                                   tp_validation_report *out, tp_error *err) {
     if (!out) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "validate: NULL report");
     }
     memset(out, 0, sizeof *out);
-    if (!project) {
-        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "validate: NULL project");
+    if (!catalog || !project) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "validate: NULL catalog or project");
     }
 
     target_path_index target_paths = {0};
@@ -94,7 +99,7 @@ static tp_status validate_project(const tp_project *project,
 
     validation_builder builder = {0};
     for (int atlas_index = 0; atlas_index < project->atlas_count; atlas_index++) {
-        validate_atlas(&builder, project, atlas_index, &target_paths);
+        validate_atlas(&builder, catalog, project, atlas_index, &target_paths);
         if (builder.oom) {
             break;
         }
@@ -112,22 +117,34 @@ tp_status tp_validate_session_snapshot(const tp_session_snapshot *snapshot,
         }
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "validate: NULL snapshot");
     }
-    return validate_project(tp_session_snapshot_project_internal(snapshot), out, err);
+    return validate_project(
+        tp_session_snapshot_format_catalog(snapshot),
+        tp_session_snapshot_project_internal(snapshot), out, err);
 }
 
-tp_status tp_validate_project_file(const char *path, tp_validation_report *out, tp_error *err) {
+tp_status tp_validate_project_file_with_catalog(
+    const char *path, const tp_format_catalog *catalog,
+    tp_validation_report *out, tp_error *err) {
     if (!out) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "validate: NULL report");
     }
     memset(out, 0, sizeof *out);
-    if (!path || path[0] == '\0') {
-        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "validate: empty project path");
+    if (!catalog || !path || path[0] == '\0') {
+        return tp_error_set(
+            err, TP_STATUS_INVALID_ARGUMENT,
+            "validate: catalog and non-empty project path are required");
     }
     tp_project *project = NULL;
     tp_status status = tp_project_load(path, &project, err);
     if (status == TP_STATUS_OK) {
-        status = validate_project(project, out, err);
+        status = validate_project(catalog, project, out, err);
     }
     tp_project_destroy(project);
     return status;
+}
+
+tp_status tp_validate_project_file(const char *path, tp_validation_report *out,
+                                   tp_error *err) {
+    return tp_validate_project_file_with_catalog(
+        path, tp_format_catalog_native(), out, err);
 }

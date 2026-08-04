@@ -59,7 +59,8 @@
         "pivot": true,
         "slice9": true,
         "multipage": true,
-        "aliases": true
+        "aliases": true,
+        "animations": true
       }
     },
     {
@@ -74,7 +75,8 @@
         "pivot": true,
         "slice9": false,
         "multipage": true,
-        "aliases": true
+        "aliases": true,
+        "animations": true
       }
     }
   ]

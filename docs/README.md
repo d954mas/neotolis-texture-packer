@@ -33,7 +33,11 @@ availability:
 
 - [`spec/automation.md`](spec/automation.md) — Dev API and MCP.
 - [`spec/format-ecosystem.md`](spec/format-ecosystem.md) —
-  later template and sandboxed Lua export handlers over the native export core.
+  bundled sandboxed Lua export handlers over the native export core.
+- [`formats/lua-package-v1.md`](formats/lua-package-v1.md) — exact target
+  package descriptor, Lua API, sandbox, diagnostics, and fixed limits.
+- [`formats/phaser-3-multiatlas.md`](formats/phaser-3-multiatlas.md) — exact
+  target wire contract for the first non-Defold runtime consumer.
 - [`spec/ux.md`](spec/ux.md) — two-level canvas and future workspace model.
 
 Repository-wide working rules remain in [`../AGENTS.md`](../AGENTS.md).

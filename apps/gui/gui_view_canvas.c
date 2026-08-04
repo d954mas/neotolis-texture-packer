@@ -9,7 +9,7 @@
 #include "ui/nt_ui_image.h"
 #include "ui/nt_ui_menu.h"
 
-#include "tp_core/tp_export.h" /* exporter registry -> the preview-target selector list */
+#include "tp_core/tp_export.h" /* export capability vocabulary */
 
 #include "gui_defs.h"
 #include "gui_state.h"
@@ -138,15 +138,18 @@ static bool s_dd_preview_open; /* the strip preview-target combo open bit */
 
 /* Short trigger label for the strip combo: "Native", or an exporter's display_name up to its first
  * " (" note (so "Defold (.tpinfo + .tpatlas)" -> "Defold", "JSON (neotolis, ...)" -> "JSON"). */
-static void preview_target_short(int combo_index, char *out, size_t cap) {
-    if (combo_index <= 0) {
+static void preview_target_short(char *out, size_t cap) {
+    if (gui_preview_target_is_native(
+            &s_preview_target)) {
         (void)snprintf(out, cap, "Native");
         return;
     }
-    const tp_format_descriptor *e = tp_format_at(combo_index - 1);
+    const tp_format_descriptor *e =
+        preview_target_format();
     const char *dn = (e && e->display_name)
                          ? e->display_name
-                         : (e ? e->id : "?");
+                         : (e ? e->id
+                              : s_preview_target.format_id);
     const char *paren = strstr(dn, " (");
     size_t len = paren ? (size_t)(paren - dn) : strlen(dn);
     if (len >= cap) {
@@ -160,10 +163,12 @@ static void preview_target_short(int combo_index, char *out, size_t cap) {
  * exporter's full display_name. A pick queues a preview-target intent (applied next frame). Disabled to a
  * static label while a pack/export/preview is in flight (only one worker op at a time). */
 static void strip_preview_selector(nt_ui_context_t *ctx, float h) {
-    const int ne = tp_format_count();
+    const int ne = gui_project_format_count();
     char trig[48];
-    preview_target_short(s_preview_target, trig, sizeof trig);
+    preview_target_short(trig, sizeof trig);
     const bool busy = gui_pack_async_busy();
+    const uint32_t combo_id =
+        nt_ui_id("ntpacker/strip_preview");
     CLAY({.layout = {.sizing = {CLAY_SIZING_FIT(0), CLAY_SIZING_FIXED(S(h))},
                      .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
         if (busy) {
@@ -173,18 +178,36 @@ static void strip_preview_selector(nt_ui_context_t *ctx, float h) {
         } else {
             const uint16_t saved_mw = s_dd_style.min_width;
             s_dd_style.min_width = (uint16_t)S(88.0F); /* fits the short labels; a longer one FITs wider */
-            if (nt_ui_combo_begin(ctx, NT_UI_DATA_LAYER(LAYER_IMG), LAYER_TEXT, nt_ui_id("ntpacker/strip_preview"),
+            if (nt_ui_combo_begin(ctx, NT_UI_DATA_LAYER(LAYER_IMG), LAYER_TEXT, combo_id,
                                   trig, &s_dd_style, &s_dd_preview_open)) {
-                if (nt_ui_combo_selectable(ctx, 0U, "Native", s_preview_target == 0)) {
-                    gui_request_preview_target(0);
+                if (nt_ui_combo_selectable(
+                        ctx, nt_ui_child_id(
+                                 combo_id,
+                                 "native-choice"),
+                        "Native",
+                        gui_preview_target_is_native(
+                            &s_preview_target))) {
+                    gui_request_preview_target_native();
                 }
                 for (int i = 0; i < ne; i++) {
-                    const tp_format_descriptor *e = tp_format_at(i);
-                    const char *lbl = (e && e->display_name)
+                    const tp_format_descriptor *e = gui_project_format_at(i);
+                    if (!e) {
+                        continue;
+                    }
+                    const char *lbl = e->display_name
                                           ? e->display_name
-                                          : (e ? e->id : "?");
-                    if (nt_ui_combo_selectable(ctx, (uint32_t)(i + 1), lbl, s_preview_target == i + 1)) {
-                        gui_request_preview_target(i + 1);
+                                          : e->id;
+                    const bool selected =
+                        s_preview_target.kind ==
+                            GUI_PREVIEW_TARGET_FORMAT &&
+                        strcmp(s_preview_target.format_id,
+                               e->id) == 0;
+                    if (nt_ui_combo_selectable(
+                            ctx, nt_ui_child_id(
+                                     combo_id, e->id),
+                            lbl, selected)) {
+                        gui_request_preview_target_format(
+                            e->id);
                     }
                 }
                 nt_ui_combo_end(ctx);
@@ -202,7 +225,7 @@ static void strip_preview_selector(nt_ui_context_t *ctx, float h) {
  * active target and the degradation detail waits for room. */
 static bool strip_preview_chip(nt_ui_context_t *ctx, float h) {
     const tp_format_descriptor *e =
-        (s_preview_target > 0) ? tp_format_at(s_preview_target - 1) : NULL;
+        preview_target_format();
     if (!e) {
         return false;
     }
@@ -308,7 +331,9 @@ static void declare_canvas_strip(nt_ui_context_t *ctx, bool atlas) {
          * STRIP_CHIP_MIN_W headroom on top (same stop as the stale chip). */
         if (s_pack_has_sources && s_canvas_w >= S(STRIP_PREVIEW_MIN_W)) {
             strip_preview_selector(ctx, 26.0F);
-            if (s_preview_target != 0 && s_canvas_w >= S(STRIP_CHIP_MIN_W)) {
+            if (!gui_preview_target_is_native(
+                    &s_preview_target) &&
+                s_canvas_w >= S(STRIP_CHIP_MIN_W)) {
                 strip_preview_chip(ctx, 24.0F);
             }
         }
@@ -324,7 +349,10 @@ static void declare_canvas_strip(nt_ui_context_t *ctx, bool atlas) {
          * stop so the trailing chip never pushes the row off the canvas; below it the amber Pack carries it.
          * Suppressed while a preview target is active (the preview is fresh from current settings; the amber
          * degradation chip near the selector speaks instead, and the native stale state is not on screen). */
-        if (accent && s_preview_target == 0 && s_canvas_w >= S(STRIP_CHIP_MIN_W)) {
+        if (accent &&
+            gui_preview_target_is_native(
+                &s_preview_target) &&
+            s_canvas_w >= S(STRIP_CHIP_MIN_W)) {
             if (ui_icon_btn(ctx, nt_ui_id("ntpacker/stale_chip"), &s_ic_triangle_alert, 14.0F, "outdated",
                             &g_btn_stale, true, 0.0F, 24.0F, &g_onwarn)) {
                 gui_request_pack();

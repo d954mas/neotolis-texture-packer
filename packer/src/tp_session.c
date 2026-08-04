@@ -1,4 +1,5 @@
 #include "tp_core/tp_session.h"
+#include "tp_core/tp_format.h"
 
 #include <stdlib.h>
 #include <stdio.h>
@@ -303,9 +304,11 @@ static void history_fill_marker(const tp_session *session, size_t mi, int pos,
 // #endregion
 
 // #region lifetime
-static tp_status session_adopt_owned(tp_project *project, const tp_rng *rng,
-                                     tp_session **out, tp_error *err) {
-    if (!project || !rng || !rng->fill || !out) {
+static tp_status session_adopt_owned(tp_project *project,
+                                     tp_format_catalog *catalog,
+                                     const tp_rng *rng, tp_session **out,
+                                     tp_error *err) {
+    if (!project || !catalog || !rng || !rng->fill || !out) {
         tp_project_destroy(project);
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
                             "session adopt requires project, rng, and output");
@@ -337,7 +340,7 @@ static tp_status session_adopt_owned(tp_project *project, const tp_rng *rng,
         free(session);
         return status;
     }
-    session->model = tp_model_wrap(project);
+    session->model = tp_model_wrap_with_catalog(project, catalog);
     if (!session->model) {
         tp_project_destroy(project);
         free(session);
@@ -356,10 +359,13 @@ static tp_status session_adopt_owned(tp_project *project, const tp_rng *rng,
 
 tp_status tp_session_adopt_owned(tp_project *project, const tp_rng *rng,
                                  tp_session **out, tp_error *err) {
-    return session_adopt_owned(project, rng, out, err);
+    return session_adopt_owned(project, tp_format_catalog_native(), rng, out,
+                               err);
 }
 
-tp_status tp_session_create(const tp_rng *rng, tp_session **out, tp_error *err) {
+tp_status tp_session_create_with_catalog(tp_format_catalog *catalog,
+                                         const tp_rng *rng, tp_session **out,
+                                         tp_error *err) {
     if (!out) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "session output is required");
     }
@@ -368,12 +374,17 @@ tp_status tp_session_create(const tp_rng *rng, tp_session **out, tp_error *err) 
     if (!project) {
         return tp_error_set(err, TP_STATUS_OOM, "project allocation failed");
     }
-    return tp_session_adopt_owned(project, rng, out, err);
+    return session_adopt_owned(project, catalog, rng, out, err);
 }
 
-tp_status tp_session_create_default_project(const tp_rng *rng,
-                                            tp_session **out,
-                                            tp_error *err) {
+tp_status tp_session_create(const tp_rng *rng, tp_session **out, tp_error *err) {
+    return tp_session_create_with_catalog(tp_format_catalog_native(), rng, out,
+                                          err);
+}
+
+tp_status tp_session_create_default_project_with_catalog(
+    tp_format_catalog *catalog, const tp_rng *rng, tp_session **out,
+    tp_error *err) {
     if (!out) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
                             "session output is required");
@@ -388,7 +399,14 @@ tp_status tp_session_create_default_project(const tp_rng *rng,
         return tp_error_set(err, TP_STATUS_OOM,
                             "default project target allocation failed");
     }
-    return tp_session_adopt_owned(project, rng, out, err);
+    return session_adopt_owned(project, catalog, rng, out, err);
+}
+
+tp_status tp_session_create_default_project(const tp_rng *rng,
+                                             tp_session **out,
+                                             tp_error *err) {
+    return tp_session_create_default_project_with_catalog(
+        tp_format_catalog_native(), rng, out, err);
 }
 
 tp_status tp_session_create_detached_recovery(tp_project *project,
@@ -396,7 +414,8 @@ tp_status tp_session_create_detached_recovery(tp_project *project,
                                               tp_id128 recovery_token,
                                               tp_session **out,
                                               tp_error *err) {
-    tp_status status = tp_session_adopt_owned(project, rng, out, err);
+    tp_status status = session_adopt_owned(
+        project, tp_format_catalog_native(), rng, out, err);
     if (status == TP_STATUS_OK) {
         (*out)->recovery_token = recovery_token;
         (*out)->has_recovery_token = true;
@@ -404,9 +423,11 @@ tp_status tp_session_create_detached_recovery(tp_project *project,
     return status;
 }
 
-tp_status tp_session_open(const char *path, const tp_rng *rng,
-                          tp_session **out, tp_error *err) {
-    if (!path || !rng || !rng->fill || !out) {
+tp_status tp_session_open_with_catalog(const char *path,
+                                       tp_format_catalog *catalog,
+                                       const tp_rng *rng,
+                                       tp_session **out, tp_error *err) {
+    if (!path || !catalog || !rng || !rng->fill || !out) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
                             "session open requires path, rng, and output");
     }
@@ -442,7 +463,7 @@ tp_status tp_session_open(const char *path, const tp_rng *rng,
                             "project changed while it was opened");
     }
     tp_session *session = NULL;
-    status = session_adopt_owned(project, rng, &session, err);
+    status = session_adopt_owned(project, catalog, rng, &session, err);
     if (status != TP_STATUS_OK) {
         tp_project_lease_release(lease);
         return status;
@@ -461,6 +482,16 @@ tp_status tp_session_open(const char *path, const tp_rng *rng,
     session->has_saved_file_fingerprint = true;
     *out = session;
     return TP_STATUS_OK;
+}
+
+tp_status tp_session_open(const char *path, const tp_rng *rng,
+                          tp_session **out, tp_error *err) {
+    return tp_session_open_with_catalog(path, tp_format_catalog_native(), rng,
+                                        out, err);
+}
+
+tp_format_catalog *tp_session_format_catalog(const tp_session *session) {
+    return session ? tp_model_format_catalog(session->model) : NULL;
 }
 
 void tp_session_destroy(tp_session *session) {

@@ -7,16 +7,19 @@
 #include <string.h>
 
 #include "log/nt_log.h"
+#include "core/nt_assert.h"
 
 #include "cli_cmds.h"
 #include "cli_exit.h"
 #include "cli_out.h"
+#include "app_format_catalog.h"
 #include "ntpacker_version.h"
 #if defined(_WIN32)
 #include "nt_utf8_argv.h"
 #endif
 #include "tp_core/tp_build_worker.h"
 #include "tp_core/tp_export.h"
+#include "tp_core/tp_identity.h"
 #include "tp_core/tp_project.h"
 
 enum {
@@ -51,7 +54,8 @@ static void emit_caps(tp_sb *sb, int depth, const tp_export_caps *c) {
         {"rotate90", tp_export_caps_supports_rotate90(c)},
         {"flips", tp_export_caps_supports_flips(c)},
         {"polygons", c->polygons}, {"pivot", c->pivot},
-        {"slice9", c->slice9},     {"multipage", c->multipage}, {"aliases", c->aliases},
+        {"slice9", c->slice9},     {"multipage", c->multipage},
+        {"aliases", c->aliases},   {"animations", c->animations},
     };
     int n = (int)(sizeof fields / sizeof fields[0]);
     tp_sb_str(sb, "{\n");
@@ -73,10 +77,10 @@ static void emit_caps(tp_sb *sb, int depth, const tp_export_caps *c) {
 
 /* The `version --json` schema manifest (plan "CLI v1 contract"): app version,
  * on-disk project schema, each JSON-emitting verb's payload schema, known export
- * formats + versions, and the live exporter registry with capabilities. Every
- * number/id is sourced from a core constant or the registry -- no hand-copied
+ * formats + versions, and the invocation-owned format catalog. Every
+ * number/id is sourced from a core constant or the catalog -- no hand-copied
  * values, no exporter-id literals (boundary gate R2). */
-static void build_manifest(tp_sb *sb) {
+static void build_manifest(tp_sb *sb, const tp_format_catalog *catalog) {
     tp_sb_str(sb, "{\n");
     indent(sb, 1);
     tp_sb_json_string(sb, "schema");
@@ -171,13 +175,27 @@ static void build_manifest(tp_sb *sb) {
     indent(sb, 1);
     tp_sb_str(sb, "},\n");
 
-    /* Formats: the fixed built-in native registry. */
+    /* Formats: every available row in this invocation's immutable catalog. */
     indent(sb, 1);
     tp_sb_json_string(sb, "exporters");
     tp_sb_str(sb, ": [\n");
-    int count = tp_format_count();
-    for (int i = 0; i < count; i++) {
-        const tp_format_descriptor *e = tp_format_at(i);
+    const size_t row_count = tp_format_catalog_row_count(catalog);
+    size_t available_count = 0U;
+    for (size_t i = 0U; i < row_count; ++i) {
+        tp_format_catalog_row row = {0};
+        if (tp_format_catalog_row_at(catalog, i, &row) &&
+            row.available && row.descriptor) {
+            ++available_count;
+        }
+    }
+    size_t emitted = 0U;
+    for (size_t i = 0U; i < row_count; ++i) {
+        tp_format_catalog_row row = {0};
+        if (!tp_format_catalog_row_at(catalog, i, &row) ||
+            !row.available || !row.descriptor) {
+            continue;
+        }
+        const tp_format_descriptor *e = row.descriptor;
         indent(sb, 2);
         tp_sb_str(sb, "{\n");
         indent(sb, 3);
@@ -202,7 +220,8 @@ static void build_manifest(tp_sb *sb) {
         tp_sb_str(sb, "\n");
         indent(sb, 2);
         tp_sb_char(sb, '}');
-        tp_sb_str(sb, (i + 1 < count) ? ",\n" : "\n");
+        ++emitted;
+        tp_sb_str(sb, emitted < available_count ? ",\n" : "\n");
     }
     indent(sb, 1);
     tp_sb_str(sb, "]\n");
@@ -211,13 +230,13 @@ static void build_manifest(tp_sb *sb) {
 
 static void print_usage(FILE *out);
 
-static int cmd_version(bool json) {
+static int cmd_version(const tp_format_catalog *catalog, bool json) {
     if (!json) {
         (void)printf("ntpacker %s\n", NTPACKER_VERSION);
         return CLI_EXIT_OK;
     }
     tp_sb sb = {0};
-    build_manifest(&sb);
+    build_manifest(&sb, catalog);
     if (sb.oom) {
         tp_sb_free(&sb);
         cli_emit_error(true, false, "oom", "out of memory building version manifest");
@@ -366,7 +385,8 @@ static void print_usage(FILE *out) {
                   NTPACKER_VERSION);
 }
 
-static int ntpacker_main_utf8(int argc, char **argv) {
+static int ntpacker_dispatch_utf8(int argc, char **argv,
+                                  tp_format_catalog *catalog) {
     /* BLOCKER-3: pin dot-decimal float formatting for every payload, before any
      * output. tp_core's %.9g writers and the CLI's tp_sb_num both depend on it. */
     (void)setlocale(LC_NUMERIC, "C");
@@ -457,7 +477,7 @@ static int ntpacker_main_utf8(int argc, char **argv) {
 
     /* --version / --help short-circuit any verb (standard CLI behavior). */
     if (want_version) {
-        return cmd_version(json);
+        return cmd_version(catalog, json);
     }
     if (want_help) {
         return cmd_help(json);
@@ -493,7 +513,7 @@ static int ntpacker_main_utf8(int argc, char **argv) {
         return CLI_EXIT_USAGE;
     }
     if (strcmp(verb, "version") == 0) {
-        return cmd_version(json);
+        return cmd_version(catalog, json);
     }
     if (strcmp(verb, "help") == 0) {
         return cmd_help(json);
@@ -507,7 +527,8 @@ static int ntpacker_main_utf8(int argc, char **argv) {
             cli_emit_error(json, quiet, "usage", "%s needs exactly one <project> path; try 'ntpacker help'", verb);
             return CLI_EXIT_USAGE;
         }
-        return cmd_pack(positionals[1], opt_atlas, opt_target, opt_out_dir, dry_run, json, quiet);
+        return cmd_pack(catalog, positionals[1], opt_atlas, opt_target,
+                        opt_out_dir, dry_run, json, quiet);
     }
     if (strcmp(verb, "inspect") == 0 || strcmp(verb, "validate") == 0) {
         if (npos != 2) {
@@ -519,9 +540,9 @@ static int ntpacker_main_utf8(int argc, char **argv) {
                 cli_emit_error(json, quiet, "usage", "--strict is only valid for validate");
                 return CLI_EXIT_USAGE;
             }
-            return cmd_inspect(positionals[1], json, quiet);
+            return cmd_inspect(catalog, positionals[1], json, quiet);
         }
-        return cmd_validate(positionals[1], json, quiet, strict);
+        return cmd_validate(catalog, positionals[1], json, quiet, strict);
     }
     /* Wave-2 mutation verbs (B4). --strict is validate-only; --at is anim-only. Other
      * pack-only flags were already rejected above (the !is_pack guard). */
@@ -532,10 +553,23 @@ static int ntpacker_main_utf8(int argc, char **argv) {
             cli_emit_error(json, quiet, "usage", "--strict is only valid for validate");
             return CLI_EXIT_USAGE;
         }
-        return cmd_mutate(npos, positionals, opt_at, opt_kind, dry_run, json, quiet);
+        return cmd_mutate(catalog, npos, positionals, opt_at, opt_kind,
+                          dry_run, json, quiet);
     }
     cli_emit_error(json, quiet, "usage", "unknown command '%s'; try 'ntpacker help'", verb);
     return CLI_EXIT_USAGE;
+}
+
+static int ntpacker_main_utf8(int argc, char **argv) {
+    app_format_catalog formats = {0};
+    tp_error error = {{0}};
+    const tp_status format_status =
+        app_format_catalog_open_startup(&formats, &error);
+    NT_ASSERT(format_status == TP_STATUS_OK);
+    NT_ASSERT(format_status != TP_STATUS_OK || formats.catalog != NULL);
+    const int result = ntpacker_dispatch_utf8(argc, argv, formats.catalog);
+    app_format_catalog_close(&formats);
+    return result;
 }
 
 #if defined(_WIN32)

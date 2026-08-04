@@ -47,8 +47,10 @@ void gui_request_remove_animation_ref(const gui_animation_ref *animation);
 void gui_request_add_target(tp_id128 atlas_id, int64_t expected_revision);
 void gui_request_remove_target_ref(const gui_target_ref *target);
 void gui_request_browse_target_ref(const gui_target_ref *target);
-/* boundary-ok: an exporter option slot, not a target entity index */
-void gui_request_preview_target(int exporter_slot);
+/* The view resolves an ephemeral selector row before ingress. Deferred state
+ * carries either explicit Native or a copied stable format id. */
+void gui_request_preview_target_native(void);
+void gui_request_preview_target_format(const char *format_id);
 
 /* --- new/open/exit draft resolution + unsaved-changes confirm flow --- */
 typedef enum gui_lifecycle_request {
@@ -187,6 +189,7 @@ void preview_stop(void);
 
 /* --- export-target preview (packet EXP-PREVIEW) --- */
 void preview_target_reset(void);              /* back to Native: drop preview state + free the preview slot */
+const tp_format_descriptor *preview_target_format(void); /* stable-id resolution in the active catalog */
 const tp_result *preview_target_result(void); /* the result the canvas binds this frame (preview or native) */
 uint64_t preview_target_result_version(void);
 bool preview_target_result_is_export(void);

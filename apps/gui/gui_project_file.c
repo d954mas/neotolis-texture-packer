@@ -242,8 +242,28 @@ static tp_status begin_candidate(
 static tp_status create_fresh_candidate(
     tp_session **out, tp_error *err) {
     tp_rng rng = tp_rng_os();
-    return tp_session_create_default_project(
-        &rng, out, err);
+    return tp_session_create_default_project_with_catalog(
+        s_project.formats.catalog, &rng, out, err);
+}
+
+static tp_status create_startup_format_catalog(tp_error *error) {
+    app_format_catalog candidate = {0};
+    const tp_status status =
+        app_format_catalog_open_startup(&candidate, error);
+    NT_ASSERT(status == TP_STATUS_OK);
+    NT_ASSERT(status != TP_STATUS_OK || candidate.catalog != NULL);
+    if (status != TP_STATUS_OK || !candidate.catalog) {
+        app_format_catalog_close(&candidate);
+        return status != TP_STATUS_OK
+                   ? status
+                   : tp_error_set(
+                         error, TP_STATUS_INVALID_ARGUMENT,
+                         "format catalog startup returned no catalog");
+    }
+    const tp_status install_status =
+        gui_project__install_format_catalog(&candidate, error);
+    app_format_catalog_close(&candidate);
+    return install_status;
 }
 
 static bool current_identity_is(
@@ -273,6 +293,15 @@ void gui_project_init(void) {
         return;
     }
     tp_error err = {{0}};
+    if (!s_project.formats.catalog) {
+        const tp_status format_status =
+            create_startup_format_catalog(&err);
+        if (format_status != TP_STATUS_OK) {
+            gui_project__note_session_reject(
+                format_status, &err);
+            return;
+        }
+    }
     tp_session *initial = NULL;
     const tp_status create_status =
         create_fresh_candidate(
@@ -316,6 +345,8 @@ void gui_project_shutdown(void) {
     s_project.save_notice_pending = false;
     s_project.save_notice[0] = '\0';
     s_project.refresh_pending = false;
+    gui_project__clear_format_projection();
+    app_format_catalog_close(&s_project.formats);
 }
 
 tp_status gui_project_lifecycle_begin_new(
@@ -370,8 +401,8 @@ tp_status gui_project_lifecycle_begin_open(
     ++s_test_open_call_count;
 #endif
     const tp_status open_status =
-        tp_session_open(
-            canonical_path, &rng,
+        tp_session_open_with_catalog(
+            canonical_path, s_project.formats.catalog, &rng,
             &candidate, err);
     if (open_status != TP_STATUS_OK) {
         return open_status;

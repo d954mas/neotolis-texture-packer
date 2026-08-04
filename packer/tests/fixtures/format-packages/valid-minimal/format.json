@@ -1,0 +1,17 @@
+{
+  "api_version": 1,
+  "id": "fixture-minimal",
+  "display_name": "Fixture Minimal",
+  "capabilities": {
+    "transforms": ["identity"],
+    "polygons": false,
+    "pivot": false,
+    "slice9": false,
+    "multipage": false,
+    "aliases": false,
+    "animations": false
+  },
+  "outputs": [
+    {"id": "metadata", "suffix": ".txt"}
+  ]
+}

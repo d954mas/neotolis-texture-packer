@@ -93,7 +93,7 @@ static int count_occurrences(const char *hay, const char *needle) {
 }
 
 static const tp_export_caps *defold_caps(void) {
-    const tp_exporter *e = tp_exporter_find("defold");
+    const tp_exporter *e = tp_native_exporter_find("defold");
     return e ? &e->format->caps : NULL;
 }
 
@@ -1405,7 +1405,7 @@ void test_defold_output_listing_rejects_suffix_overflow_atomically(void) {
 
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OUT_OF_BOUNDS,
-        tp_export_artifact_plan_build(tp_exporter_find("defold")->format, &prep, base,
+        tp_export_artifact_plan_build(tp_native_exporter_find("defold")->format, &prep, base,
                                       arena, &plan, &err));
     TEST_ASSERT_TRUE(strlen(err.msg) > 0U);
     tp_arena_destroy(arena);
@@ -1442,7 +1442,7 @@ void test_artifact_plan_rejects_unsupported_transform(void) {
     prep.sprite_count = 1;
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_INVALID_ARGUMENT,
-        tp_export_artifact_plan_build(tp_exporter_find("defold")->format, &prep,
+        tp_export_artifact_plan_build(tp_native_exporter_find("defold")->format, &prep,
                                       "plan-boundary", arena, &plan, &error));
     tp_arena_destroy(arena);
 }

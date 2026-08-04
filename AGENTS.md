@@ -5,9 +5,9 @@
 Standalone native texture/atlas packer built on neotolis-engine. The current
 baseline has one shared packing/export core, typed operation/session ownership,
 stable structural IDs, canonical-v5 tagged sources, semantic history/recovery,
-and thin CLI and native GUI clients. Target work adds canonical Import/Export
-IRs, the unified format registry, and capability-equivalent MCP and Dev API
-clients.
+and thin CLI and native GUI clients. Approved target work adds the unified
+runtime Export format registry and capability-equivalent MCP and Dev API
+clients. Import requires its own separately approved target contract.
 
 `docs/spec/product.md` is the current product contract. Approved future behavior
 is explicitly labeled `Target contract` under `docs/spec/`. Current ownership
@@ -63,9 +63,9 @@ handling of invalid input.
 - Sources are tagged records. Path files/folders and linked atlases share one
   runtime status boundary. External refresh never changes project revision,
   dirty state, or Undo history and never starts Pack automatically.
-- Built-in, template, and sandboxed Lua formats share one package descriptor,
-  exact capability vocabulary, and versioned Import/Export IRs. Adding a format
-  must not modify pack orchestration.
+- Built-in and sandboxed Lua formats share one exact capability vocabulary and
+  versioned Export IR. Runtime Lua formats use one strict package descriptor.
+  Adding a format must not modify pack orchestration.
 
 ## Working Rules
 

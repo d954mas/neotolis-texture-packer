@@ -18,6 +18,7 @@ typedef struct tp_snapshot_atlas_storage {
 
 struct tp_session_snapshot {
     tp_project_generation *generation;
+    struct tp_format_catalog *format_catalog;
     const tp_project *project;
     tp_snapshot_atlas_storage *atlases;
     int atlas_count;

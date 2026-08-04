@@ -1,0 +1,36 @@
+{
+  "api_version": 1,
+  "id": "fixture-full",
+  "display_name": "Fixture Full Surface",
+  "capabilities": {
+    "transforms": [
+      "identity",
+      "flip_h",
+      "flip_v",
+      "rotate_180",
+      "transpose",
+      "rotate_90_cw",
+      "rotate_90_ccw",
+      "anti_transpose"
+    ],
+    "polygons": true,
+    "pivot": true,
+    "slice9": true,
+    "multipage": true,
+    "aliases": true,
+    "animations": true
+  },
+  "outputs": [
+    {"id": "metadata", "suffix": ".txt"},
+    {"id": "index", "suffix": ".index.json"}
+  ],
+  "host_facts": [
+    {
+      "id": "metadata_resource",
+      "kind": "project_resource",
+      "output": "metadata",
+      "root_marker": "game.project",
+      "missing": "basename_notice"
+    }
+  ]
+}

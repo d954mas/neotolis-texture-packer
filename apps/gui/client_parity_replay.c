@@ -613,7 +613,8 @@ static int outcome_notice(const char *path) {
         tp_session_destroy(session);
         return fail("notice snapshot", status, &err);
     }
-    const tp_format_descriptor *exporter = tp_format_find("defold");
+    const tp_format_descriptor *exporter =
+        tp_format_catalog_find_available(tp_format_catalog_native(), "defold");
     tp_export_notices notices;
     tp_export_notices_init(&notices);
     status = exporter

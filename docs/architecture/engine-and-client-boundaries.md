@@ -25,12 +25,23 @@ The builder is fallible and is treated as such even where engine internals use
 assertions. Production job boundaries convert malformed input, worker crash,
 timeout, protocol error, and invalid binary output into `tp_status` diagnostics.
 
-## Native export boundary
+## Format and native export boundary
 
-The native registry is fixed to built-in formats. Production does not accept
-runtime C exporters; custom formats belong to the later template/Lua layer.
-Public clients enumerate descriptor metadata only; native serializer bindings,
-the publisher, and raw project/sprite orchestration remain internal boundaries.
+The immutable native handler table is fixed to built-in formats. It is the
+always-present prefix of an explicit refcounted `tp_format_catalog`; there is no
+mutable active registry. Production does not accept runtime C exporters.
+Public clients enumerate catalog rows and descriptor metadata only; native
+serializer bindings, the publisher, and raw project/sprite orchestration remain
+internal boundaries.
+
+The shared scanner receives an explicit absolute root derived from the real
+executable image. It performs bounded no-follow package reads, strict API-v1
+descriptor/source admission, exact-byte fingerprints, deterministic duplicate
+handling, and owned primary-plus-report diagnostics. Missing `formats/` is a
+successful native-only catalog; broken packages remain unavailable rows and a
+catalog/root limit fails closed to native-only. Candidate descriptors that need
+Lua compilation are a separate scanner handoff and cannot be finalized or
+executed yet.
 Each built-in binds two separate pieces:
 
 - a descriptor with stable ID, display name, exact D4 transform mask, other
@@ -47,7 +58,7 @@ memory documents; they do not write files or enumerate outputs.
 The bundled Defold serializer retains one explicit exception: a bounded,
 read-only upward probe for `game.project` used to form its resource reference.
 That trusted built-in environment lookup is not a general handler capability and
-does not grant future template/Lua drivers filesystem access.
+does not grant future Lua drivers filesystem access.
 
 After full preflight, the core acquires non-blocking OS-backed leases for the
 plan's destination files in stable path order. A partially overlapping Export
@@ -69,9 +80,9 @@ analyze the same effective settings and IR. A descriptor that declares
 single-page output rejects a multi-page IR before its serializer runs;
 serializers do not reimplement capability policy.
 
-`json-neotolis` and `defold` both use this path. The production registry has no
-generic native registration API; test binaries may compile a narrow injection
-seam for capability and failure coverage.
+`json-neotolis` and `defold` both use this path. The production catalog has no
+generic native registration API; test binaries may build a private immutable
+catalog for capability and failure coverage.
 
 ## Client shapes
 
@@ -105,6 +116,18 @@ orchestrator.
 
 The CLI is not a back door into an already-open GUI session. A conflicting live
 writer produces `project_live`.
+
+Each CLI invocation owns one catalog derived from
+`<real-executable-directory>/formats/`. The native GUI host likewise owns one
+startup catalog and passes it into every replacement session. Both clients use
+the same `apps/common` process-host workflow for executable-path resolution,
+scan admission, and native fallback. Its owned result keeps the active catalog,
+an explicit active/fallback/pending-compiler state, and any root-failure report;
+clients do not reconstruct or discard that policy independently. An ineligible
+catalog or one that still awaits the not-yet-implemented isolated Lua compiler
+uses the immortal native baseline. Build staging recreates the
+executable-relative root for both apps from one explicit production package
+manifest; that manifest is empty until the first runtime format ships.
 
 ## Native GUI
 

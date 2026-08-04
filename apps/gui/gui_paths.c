@@ -10,10 +10,9 @@
 #ifdef _WIN32
 #include <windows.h>
 #include "nt_utf8_argv.h"
-#else
-#include <unistd.h>
 #endif
 
+#include "tp_core/tp_format.h"
 #include "tp_core/tp_scan.h" /* tp_mkdirs (shared dir-creation) + tp_scan_is_dir (verify) */
 #include "tp_core/tp_utf8.h"
 
@@ -103,34 +102,10 @@ bool gui_paths_relativize_to_project(const char *input,
 
 // #region public API
 void gui_paths_exe_dir(char *out, size_t out_size) {
-    if (out == NULL || out_size == 0) {
-        return;
+    tp_error error = {{0}};
+    if (tp_executable_directory(out, out_size, &error) != TP_STATUS_OK) {
+        clear_output(out, out_size);
     }
-#ifdef _WIN32
-    char exe[GUI_PATHS_MAX];
-    char error[160] = {0};
-    if (nt_win_module_path_utf8(exe, sizeof exe, error, sizeof error)) {
-        char *slash = strrchr(exe, '\\');
-        char *forward = strrchr(exe, '/');
-        if (!slash || (forward && forward > slash)) {
-            slash = forward;
-        }
-        if (slash != NULL) {
-            *slash = '\0';
-            const int copied = snprintf(out, out_size, "%s", exe);
-            if (copied >= 0 && (size_t)copied < out_size) {
-                return;
-            }
-        }
-    }
-#else
-    /* Absolute CWD, not "." -- a relative base made the headless selftest write scratch to the CWD
-     * while source paths resolved elsewhere, so sources looked "missing" on Linux CI. */
-    if (getcwd(out, out_size) != NULL) {
-        return;
-    }
-#endif
-    (void)snprintf(out, out_size, ".");
 }
 
 bool gui_paths_app_data_root(char *out, size_t out_size) {
@@ -165,6 +140,9 @@ bool gui_paths_app_data_root(char *out, size_t out_size) {
     /* Neither env resolved -> park the data next to the exe so we still have a writable place. */
     char exe_dir[GUI_PATHS_MAX];
     gui_paths_exe_dir(exe_dir, sizeof exe_dir);
+    if (exe_dir[0] == '\0') {
+        return false;
+    }
     n = snprintf(out, out_size, "%s/ntpacker-data", exe_dir);
     return n >= 0 && (size_t)n < out_size;
 }

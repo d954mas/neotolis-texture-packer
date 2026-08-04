@@ -4,7 +4,7 @@
 #include "tp_core/tp_export.h"
 
 /* Native serializers are an implementation detail of the fixed built-in
- * registry. Public clients discover descriptor metadata through tp_format_*.
+ * table. Public clients discover descriptor metadata through tp_format_catalog_*.
  */
 typedef struct tp_export_document {
     void *data;
@@ -28,9 +28,19 @@ typedef struct tp_exporter {
     tp_export_serialize_fn serialize;
 } tp_exporter;
 
-const tp_exporter *tp_exporter_find(const char *id);
-int tp_exporter_count(void);
-const tp_exporter *tp_exporter_at(int index);
+/* Fixed compiled-in handler table. Active lookup always goes through an
+ * explicit tp_format_catalog; these helpers expose only the immutable native
+ * prefix used to materialize/query a catalog. */
+const tp_exporter *tp_native_exporter_find(const char *id);
+int tp_native_exporter_count(void);
+const tp_exporter *tp_native_exporter_at(int index);
+
+/* Internal O(1) projection for an IR already admitted by the caller's owning
+ * boundary. Public callers use tp_export_ir_project_for_caps(), which performs
+ * full validation first. */
+void tp_export_ir_project_for_caps_unchecked(const tp_export_ir *source,
+                                             const tp_export_caps *caps,
+                                             tp_export_ir *out);
 
 tp_status tp_export_publish(const tp_exporter *exp,
                             const tp_export_ir *ir,
@@ -55,9 +65,10 @@ tp_status tp_export_defold_serialize(const tp_export_serialize_ctx *ctx,
                                      tp_error *err);
 
 #ifdef TP_ENABLE_TEST_SEAMS
-tp_status tp_exporter_register(const tp_exporter *e);
 void tp_export_notices__test_fail_next_reserve(void);
 void tp_export_publish__test_fail_rename_at(int nth);
+void tp_export_ir_projection__test_reset_work(void);
+size_t tp_export_ir_projection__test_validation_count(void);
 #endif
 
 #endif /* TP_CORE_SRC_TP_EXPORT_INTERNAL_H */

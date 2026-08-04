@@ -3,6 +3,7 @@
  * It reads committed state through tp_session_layout.h on the session's owner
  * thread and never mutates the live model or its project. */
 #include "tp_core/tp_session.h"
+#include "tp_core/tp_format.h"
 
 #include <stdlib.h>
 #include <stdio.h>
@@ -120,6 +121,14 @@ tp_status tp_session_snapshot__capture(
         return status;
     }
     snapshot->generation = generation;
+    snapshot->format_catalog = tp_format_catalog_retain(
+        tp_model_format_catalog(session->model));
+    if (!snapshot->format_catalog) {
+        tp_project_generation_release(generation);
+        free(snapshot);
+        return tp_error_set(err, TP_STATUS_OOM,
+                            "snapshot catalog retain failed");
+    }
     snapshot->project = tp_project_generation_project(generation);
     snapshot->atlas_count = snapshot->project->atlas_count;
     snapshot->revision = tp_model_revision(session->model);
@@ -151,6 +160,8 @@ static bool snapshot_matches_session(
     }
     return snapshot->revision ==
                tp_model_revision(session->model) &&
+           snapshot->format_catalog ==
+               tp_model_format_catalog(session->model) &&
            snapshot->admission_sequence ==
                session->admission_sequence &&
            snapshot->model_generation ==
@@ -367,9 +378,10 @@ static tp_status snapshot_materialize(tp_session_snapshot *snapshot,
     return TP_STATUS_OK;
 }
 
-tp_status tp_session_snapshot_load(const char *path,
-                                   tp_session_snapshot **out, tp_error *err) {
-    if (!path || !out) {
+tp_status tp_session_snapshot_load_with_catalog(
+    const char *path, tp_format_catalog *catalog,
+    tp_session_snapshot **out, tp_error *err) {
+    if (!path || !catalog || !out) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
                             "snapshot load requires path and output");
     }
@@ -410,6 +422,13 @@ tp_status tp_session_snapshot_load(const char *path,
         return tp_error_set(err, TP_STATUS_OOM,
                             "snapshot project generation allocation failed");
     }
+    snapshot->format_catalog = tp_format_catalog_retain(catalog);
+    if (!snapshot->format_catalog) {
+        tp_project_generation_release(snapshot->generation);
+        free(snapshot);
+        return tp_error_set(err, TP_STATUS_OOM,
+                            "snapshot catalog retain failed");
+    }
     snapshot->project = tp_project_generation_project(snapshot->generation);
     snapshot->atlas_count = snapshot->project->atlas_count;
     snapshot->identity.kind = TP_IDENTITY_SAVED;
@@ -425,6 +444,17 @@ tp_status tp_session_snapshot_load(const char *path,
     return TP_STATUS_OK;
 }
 
+tp_status tp_session_snapshot_load(const char *path,
+                                   tp_session_snapshot **out, tp_error *err) {
+    return tp_session_snapshot_load_with_catalog(
+        path, tp_format_catalog_native(), out, err);
+}
+
+tp_format_catalog *tp_session_snapshot_format_catalog(
+    const tp_session_snapshot *snapshot) {
+    return snapshot ? snapshot->format_catalog : NULL;
+}
+
 tp_status tp_session_snapshot_apply_preview(
     const tp_session_snapshot *snapshot, const tp_txn_request *request,
     tp_txn_result *result, tp_error *err) {
@@ -433,7 +463,8 @@ tp_status tp_session_snapshot_apply_preview(
                             "snapshot preview requires snapshot and request");
     }
     return tp_model__apply_snapshot_preview(
-        snapshot->project, snapshot->revision, request, result, err);
+        snapshot->project, snapshot->format_catalog, snapshot->revision,
+        request, result, err);
 }
 
 void tp_session_snapshot_destroy(tp_session_snapshot *snapshot) {
@@ -452,5 +483,6 @@ void tp_session_snapshot_destroy(tp_session_snapshot *snapshot) {
     }
     free(snapshot->atlases);
     tp_project_generation_release(snapshot->generation);
+    tp_format_catalog_release(snapshot->format_catalog);
     free(snapshot);
 }

@@ -1,7 +1,10 @@
 #include "gui_project.h"
 #include "gui_project_internal.h"
 
+#include <limits.h>
 #include <stdio.h>
+#include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 
 
@@ -16,6 +19,144 @@
  * immutable snapshot. Feature-local draft owners submit one typed transaction per gesture. */
 
 gui_project_state s_project;
+
+typedef struct gui_format_projection_candidate {
+    tp_format_catalog *catalog;
+    const tp_format_descriptor **available_formats;
+    int available_format_count;
+} gui_format_projection_candidate;
+
+#ifdef TP_ENABLE_TEST_SEAMS
+static bool s_format_projection_alloc_fail;
+
+void gui_project__test_set_format_projection_alloc_fail(bool fail) {
+    s_format_projection_alloc_fail = fail;
+}
+#endif
+
+static void *format_projection_alloc(size_t size) {
+#ifdef TP_ENABLE_TEST_SEAMS
+    if (s_format_projection_alloc_fail) {
+        return NULL;
+    }
+#endif
+    return malloc(size);
+}
+
+static void format_projection_candidate_destroy(
+    gui_format_projection_candidate *candidate) {
+    if (!candidate) {
+        return;
+    }
+    free(candidate->available_formats);
+    tp_format_catalog_release(candidate->catalog);
+    memset(candidate, 0, sizeof *candidate);
+}
+
+static tp_status format_projection_candidate_create(
+    tp_format_catalog *catalog,
+    gui_format_projection_candidate *out,
+    tp_error *error) {
+    if (!catalog || !out) {
+        return tp_error_set(
+            error, TP_STATUS_INVALID_ARGUMENT,
+            "GUI format projection requires a catalog and output");
+    }
+    memset(out, 0, sizeof *out);
+    const size_t row_count = tp_format_catalog_row_count(catalog);
+    if (row_count > (size_t)INT_MAX ||
+        row_count > SIZE_MAX / sizeof *out->available_formats) {
+        return tp_error_set(
+            error, TP_STATUS_OUT_OF_BOUNDS,
+            "GUI format projection exceeds its row bound");
+    }
+    const tp_format_descriptor **available =
+        row_count > 0U
+            ? (const tp_format_descriptor **)format_projection_alloc(
+                  row_count * sizeof *available)
+            : NULL;
+    if (row_count > 0U && !available) {
+        return tp_error_set(
+            error, TP_STATUS_OOM,
+            "GUI format projection allocation failed");
+    }
+    size_t available_count = 0U;
+    for (size_t index = 0U; index < row_count; ++index) {
+        tp_format_catalog_row row = {0};
+        if (tp_format_catalog_row_at(catalog, index, &row) &&
+            row.available && row.descriptor) {
+            available[available_count++] = row.descriptor;
+        }
+    }
+    out->catalog = tp_format_catalog_retain(catalog);
+    if (!out->catalog) {
+        free(available);
+        return tp_error_set(
+            error, TP_STATUS_OOM,
+            "GUI format projection catalog retain failed");
+    }
+    out->available_formats = available;
+    out->available_format_count = (int)available_count;
+    return TP_STATUS_OK;
+}
+
+static bool format_projection_is_coherent(void) {
+    if (!s_project.formats.catalog) {
+        return !s_project.format_projection_catalog &&
+               !s_project.available_formats &&
+               s_project.available_format_count == 0;
+    }
+    return s_project.format_projection_catalog ==
+               s_project.formats.catalog &&
+           s_project.available_format_count >= 0 &&
+           (s_project.available_format_count == 0 ||
+            s_project.available_formats);
+}
+
+void gui_project__clear_format_projection(void) {
+    free(s_project.available_formats);
+    tp_format_catalog_release(
+        s_project.format_projection_catalog);
+    s_project.format_projection_catalog = NULL;
+    s_project.available_formats = NULL;
+    s_project.available_format_count = 0;
+}
+
+tp_status gui_project__install_format_catalog(
+    app_format_catalog *candidate, tp_error *error) {
+    if (!candidate || !candidate->catalog) {
+        return tp_error_set(
+            error, TP_STATUS_INVALID_ARGUMENT,
+            "GUI format install requires an owned catalog result");
+    }
+
+    gui_format_projection_candidate projection = {0};
+    tp_status status = format_projection_candidate_create(
+        candidate->catalog, &projection, error);
+    if (status != TP_STATUS_OK) {
+        format_projection_candidate_destroy(&projection);
+        return status;
+    }
+
+    app_format_catalog previous_formats = s_project.formats;
+    tp_format_catalog *previous_projection_catalog =
+        s_project.format_projection_catalog;
+    const tp_format_descriptor **previous_available_formats =
+        s_project.available_formats;
+
+    s_project.formats = *candidate;
+    memset(candidate, 0, sizeof *candidate);
+    s_project.format_projection_catalog = projection.catalog;
+    s_project.available_formats = projection.available_formats;
+    s_project.available_format_count = projection.available_format_count;
+    memset(&projection, 0, sizeof projection);
+
+    free(previous_available_formats);
+    tp_format_catalog_release(previous_projection_catalog);
+    app_format_catalog_close(&previous_formats);
+    NT_ASSERT(format_projection_is_coherent());
+    return TP_STATUS_OK;
+}
 
 // #region helpers
 static void reduce_project_display_name(
@@ -225,6 +366,35 @@ const tp_session_snapshot *gui_project_snapshot(void) {
                    s_project.view
                ? s_project.view->snapshot
                : NULL;
+}
+
+const tp_format_catalog *gui_project_format_catalog(void) {
+    NT_ASSERT(format_projection_is_coherent());
+    return s_project.formats.catalog;
+}
+
+int gui_project_format_count(void) {
+    NT_ASSERT(format_projection_is_coherent());
+    return s_project.formats.catalog
+               ? s_project.available_format_count
+               : 0;
+}
+
+const tp_format_descriptor *gui_project_format_at(int index) {
+    if (index < 0) {
+        return NULL;
+    }
+    NT_ASSERT(format_projection_is_coherent());
+    if (!s_project.formats.catalog ||
+        index >= s_project.available_format_count) {
+        return NULL;
+    }
+    return s_project.available_formats[index];
+}
+
+const tp_format_descriptor *gui_project_format_find(const char *id) {
+    const tp_format_catalog *catalog = gui_project_format_catalog();
+    return catalog ? tp_format_catalog_find_available(catalog, id) : NULL;
 }
 
 const tp_source_runtime_projection *gui_project_sources(void) {
@@ -552,6 +722,25 @@ void gui_project__sync_recovery_notice(void) {
 tp_session *gui_project__test_session(void) {
     return gui_project__borrow_active_session();
 }
+
+#ifdef TP_ENABLE_TEST_SEAMS
+bool gui_project__test_set_format_catalog(
+    tp_format_catalog *catalog) {
+    app_format_catalog candidate = {
+        .state = APP_FORMAT_CATALOG_ACTIVE,
+        .catalog = tp_format_catalog_retain(catalog),
+        .reason_status = TP_STATUS_OK,
+    };
+    if (!candidate.catalog) {
+        return false;
+    }
+    tp_error error = {{0}};
+    const tp_status status = gui_project__install_format_catalog(
+        &candidate, &error);
+    app_format_catalog_close(&candidate);
+    return status == TP_STATUS_OK;
+}
+#endif
 
 #endif
 // #endregion

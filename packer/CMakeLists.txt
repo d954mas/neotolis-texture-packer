@@ -18,6 +18,11 @@ add_library(tp_core STATIC
     src/tp_pack_hash.c src/tp_pack_result_cache.c
     src/tp_export.c src/tp_normalize.c src/tp_export_png.c src/tp_export_json_neotolis.c
     src/tp_export_defold.c
+    # Owned immutable format catalog, strict package descriptor admission, and
+    # executable-relative runtime root. Discovery's OS backend is selected below.
+    src/tp_format_catalog.c src/tp_format_catalog_scan.c
+    src/tp_format_descriptor.c src/tp_format_diagnostic.c
+    src/tp_format_discovery.c src/tp_runtime_path.c
     # Project identity, canonical paths, leases, source plans, and recovery.
     src/tp_id.c src/tp_identity.c src/tp_identity_session.c src/tp_source_path_text.c src/tp_source_plan.c
     src/tp_file_lease.c src/tp_project_lease.c src/tp_recovery.c src/tp_recovery_store.c src/tp_recovery_claim.c src/tp_recovery_scan.c
@@ -45,9 +50,13 @@ add_library(tp_core STATIC
     # Durable recovery journal and injectable I/O seam.
     src/tp_journal.c src/tp_journal_read.c src/tp_journal_wire.c src/tp_journal_io.c)
 if(WIN32)
-    target_sources(tp_core PRIVATE src/tp_fs_win32.c src/tp_recovery_backend_win32.c)
+    target_sources(tp_core PRIVATE
+        src/tp_fs_win32.c src/tp_recovery_backend_win32.c
+        src/tp_format_discovery_win32.c src/tp_runtime_path_win32.c)
 else()
-    target_sources(tp_core PRIVATE src/tp_fs_posix.c src/tp_recovery_backend_posix.c)
+    target_sources(tp_core PRIVATE
+        src/tp_fs_posix.c src/tp_recovery_backend_posix.c
+        src/tp_format_discovery_posix.c src/tp_runtime_path_posix.c)
 endif()
 target_include_directories(tp_core PUBLIC include)
 # tp_pack_settings.c includes nt_builder.h for the header-only nt_atlas_opts_defaults()

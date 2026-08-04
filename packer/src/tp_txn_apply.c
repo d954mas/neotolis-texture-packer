@@ -186,7 +186,8 @@ tp_status tp_txn__commit_validated(tp_model *m, const tp_txn_request *req, tp_tx
 
     for (int i = 0; i < req->op_count; i++) {
         tp_op_reject rej;
-        tp_status st = tp_operation_validate(clone, &req->ops[i], &rej);
+        tp_status st = tp_operation_validate_with_catalog(
+            m->format_catalog, clone, &req->ops[i], &rej);
         if (st != TP_STATUS_OK) {
             if (rec) {
                 (void)tp_diff__record_budget_end(NULL);

@@ -13,7 +13,7 @@
 
 #include "gui_shell_quote.h" /* POSIX quoting for file-manager commands. */
 
-#include "tp_core/tp_export.h" /* exporter registry -> target dropdown (export modal) */
+#include "tp_core/tp_export.h" /* export capability vocabulary */
 #include "tp_core/tp_journal.h" /* recovery status labels */
 
 #include "gui_defs.h"
@@ -559,7 +559,6 @@ void declare_export_modal(nt_ui_context_t *ctx) {
             nt_ui_modal_end(ctx);
             return;
         }
-        const int ne = tp_format_count();
         float list_h = (float)line_count * S(30.0F) + S(6.0F);
         const float list_cap = S(330.0F);
         if (list_h > list_cap) {
@@ -585,16 +584,14 @@ void declare_export_modal(nt_ui_context_t *ctx) {
                     const uint32_t rid =
                         gui_stable_entity_ui_id(
                             "export/target", t->id);
-                    const char *exp_name = t->exporter_id;
-                    for (int i = 0; i < ne; i++) {
-                        const tp_format_descriptor *e = tp_format_at(i);
-                        if (e && strcmp(e->id, t->exporter_id) == 0) {
-                            exp_name = (e->display_name && e->display_name[0])
-                                           ? e->display_name
-                                           : e->id;
-                            break;
-                        }
-                    }
+                    const tp_format_descriptor *format =
+                        gui_project_format_find(
+                            t->exporter_id);
+                    const char *exp_name =
+                        format && format->display_name &&
+                                format->display_name[0]
+                            ? format->display_name
+                            : t->exporter_id;
                     const bool has_path = (t->out_path && t->out_path[0] != '\0');
                     const nt_ui_events_t pev = nt_ui_events(ctx, nt_ui_child_id(rid, "path"), NULL);
                     if (pev.clicked) {

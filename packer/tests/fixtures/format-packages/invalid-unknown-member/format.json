@@ -1,0 +1,18 @@
+{
+  "api_version": 1,
+  "id": "fixture-unknown-member",
+  "display_name": "Fixture Unknown Member",
+  "capabilities": {
+    "transforms": ["identity"],
+    "polygons": false,
+    "pivot": false,
+    "slice9": false,
+    "multipage": false,
+    "aliases": false,
+    "animations": false
+  },
+  "outputs": [
+    {"id": "metadata", "suffix": ".txt"}
+  ],
+  "package_version": "1.0.0"
+}
