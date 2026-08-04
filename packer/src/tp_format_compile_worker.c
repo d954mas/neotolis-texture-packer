@@ -140,6 +140,17 @@ static uint32_t fixed_rd_u32(const uint8_t *bytes) {
            ((uint32_t)bytes[2] << 16U) | ((uint32_t)bytes[3] << 24U);
 }
 
+#ifdef TP_ENABLE_TEST_SEAMS
+static bool test_action_for(const char *action, uint32_t candidate_index);
+#endif
+
+typedef enum request_frame_read {
+    TP_REQUEST_FRAME_OK = 0,
+    TP_REQUEST_FRAME_CLEAN_EOF,
+    TP_REQUEST_FRAME_ERROR,
+    TP_REQUEST_FRAME_OOM,
+} request_frame_read;
+
 static bool read_exact_file(uint8_t *bytes, size_t length,
                             bool *out_clean_eof) {
     *out_clean_eof = false;
@@ -155,33 +166,40 @@ static bool read_exact_file(uint8_t *bytes, size_t length,
     return true;
 }
 
-static bool read_request_frame(uint8_t **out_bytes, size_t *out_length,
-                               bool *out_clean_eof) {
+static request_frame_read read_request_frame(uint8_t **out_bytes,
+                                             size_t *out_length) {
     *out_bytes = NULL;
     *out_length = 0U;
     uint8_t header[TP_FORMAT_COMPILE_PROTO_HEADER_BYTES];
-    if (!read_exact_file(header, sizeof header, out_clean_eof)) {
-        return false;
+    bool clean_eof = false;
+    if (!read_exact_file(header, sizeof header, &clean_eof)) {
+        return clean_eof ? TP_REQUEST_FRAME_CLEAN_EOF
+                         : TP_REQUEST_FRAME_ERROR;
     }
     size_t frame_size = 0U;
     if (tp_format_compile_proto_frame_size(
             header, true, &frame_size, NULL) != TP_STATUS_OK) {
-        return false;
+        return TP_REQUEST_FRAME_ERROR;
     }
+#ifdef TP_ENABLE_TEST_SEAMS
+    if (test_action_for("oom_read_request_frame", 0U)) {
+        return TP_REQUEST_FRAME_OOM;
+    }
+#endif
     uint8_t *frame = (uint8_t *)malloc(frame_size);
     if (!frame) {
-        return false;
+        return TP_REQUEST_FRAME_OOM;
     }
     memcpy(frame, header, sizeof header);
     bool ignored_eof = false;
     if (!read_exact_file(frame + sizeof header, frame_size - sizeof header,
                          &ignored_eof)) {
         free(frame);
-        return false;
+        return TP_REQUEST_FRAME_ERROR;
     }
     *out_bytes = frame;
     *out_length = frame_size;
-    return true;
+    return TP_REQUEST_FRAME_OK;
 }
 
 #ifdef TP_ENABLE_TEST_SEAMS
@@ -471,10 +489,14 @@ int tp_format_compile_worker_main_request(const uint8_t *bytes,
         if (service_status != 0) {
             return service_status;
         }
-        bool clean_eof = false;
-        if (!read_request_frame(&owned_frame, &frame_length, &clean_eof)) {
+        const request_frame_read read_status =
+            read_request_frame(&owned_frame, &frame_length);
+        if (read_status != TP_REQUEST_FRAME_OK) {
             free(owned_frame);
-            return clean_eof ? 13 : 14;
+            if (read_status == TP_REQUEST_FRAME_OOM) {
+                return TP_FORMAT_COMPILE_WORKER_EXIT_OOM;
+            }
+            return read_status == TP_REQUEST_FRAME_CLEAN_EOF ? 13 : 14;
         }
         frame = owned_frame;
     }
@@ -801,6 +823,39 @@ static bool process_spawn(compile_process *process, compile_attempt *attempt,
     return true;
 }
 
+static tp_status classify_request_channel_failure(
+    compile_process *process, int timeout_ms, bool *out_worker_unavailable,
+    const char *message, tp_error *error) {
+    /* A worker can consume the frame header, fail its frame allocation, and
+     * exit while the parent still has a backpressured payload write in flight.
+     * Reap that terminal state before deciding whether this is an ordinary
+     * unavailable worker or the process-wide OOM sentinel. */
+    const double grace_deadline =
+        compile_now_ms() + (timeout_ms < 1000 ? timeout_ms : 1000);
+    while (!process->finished && compile_now_ms() < grace_deadline) {
+        bool finished = false;
+        if (!tp_proc_wait_slice(process->proc, TP_FORMAT_COMPILE_POLL_MS,
+                                &process->result, &finished)) {
+            break;
+        }
+        process->finished = finished;
+    }
+    if (process->finished &&
+        process->result.how == TP_PROC_END_EXITED &&
+        process->result.code == TP_FORMAT_COMPILE_WORKER_EXIT_OOM) {
+        return tp_error_set(error, TP_STATUS_OOM,
+                            "compile worker host allocation failed");
+    }
+    *out_worker_unavailable = true;
+    return tp_error_set(
+        error,
+        process->finished && process->result.how == TP_PROC_END_EXITED &&
+                process->result.code == 0
+            ? TP_STATUS_BUILDER_FAILED
+            : TP_STATUS_BUILDER_CRASHED,
+        "%s", message);
+}
+
 static tp_status send_request_frame(compile_process *process,
                                     compile_attempt *attempt,
                                     const uint8_t *bytes, size_t length,
@@ -819,9 +874,9 @@ static tp_status send_request_frame(compile_process *process,
         if (!tp_proc_try_write_stdin(process->proc, bytes + offset,
                                      length - offset, &consumed,
                                      &would_block)) {
-            *out_worker_unavailable = true;
-            return tp_error_set(error, TP_STATUS_BUILDER_CRASHED,
-                                "compile worker request channel write failed");
+            return classify_request_channel_failure(
+                process, timeout_ms, out_worker_unavailable,
+                "compile worker request channel write failed", error);
         }
         offset += consumed;
         if (offset == length) {
@@ -840,9 +895,9 @@ static tp_status send_request_frame(compile_process *process,
             size_t completed = 0U;
             if (!tp_proc_poll_pending_stdin_write(
                     process->proc, &completed, NULL)) {
-                return tp_error_set(
-                    error, TP_STATUS_BUILDER_CRASHED,
-                    "compile worker request completion poll failed");
+                return classify_request_channel_failure(
+                    process, timeout_ms, out_worker_unavailable,
+                    "compile worker request completion poll failed", error);
             }
             if (completed > length - offset) {
                 return tp_error_set(
@@ -866,14 +921,9 @@ static tp_status send_request_frame(compile_process *process,
             process->finished = finished;
         }
         if (process->finished) {
-            *out_worker_unavailable = true;
-            return tp_error_set(
-                error,
-                process->result.how == TP_PROC_END_ABNORMAL ||
-                        process->result.code != 0
-                    ? TP_STATUS_BUILDER_CRASHED
-                    : TP_STATUS_BUILDER_FAILED,
-                "compile worker exited while receiving a request");
+            return classify_request_channel_failure(
+                process, timeout_ms, out_worker_unavailable,
+                "compile worker exited while receiving a request", error);
         }
         if (compile_now_ms() - process->started_ms >= (double)timeout_ms) {
             tp_proc_kill(process->proc);
@@ -1093,9 +1143,12 @@ tp_status tp_format_compile_worker_run(
         }
         exe = self_path;
     }
-    const int timeout_ms = options && options->timeout_ms > 0
-                               ? options->timeout_ms
-                               : TP_FORMAT_COMPILE_TIMEOUT_MS;
+    int timeout_ms = TP_FORMAT_COMPILE_TIMEOUT_MS;
+#ifdef TP_ENABLE_TEST_SEAMS
+    if (options && options->timeout_ms > 0) {
+        timeout_ms = options->timeout_ms;
+    }
+#endif
     tp_format_compile_row_result *results =
         (tp_format_compile_row_result *)calloc(candidate_count,
                                                 sizeof *results);

@@ -13,7 +13,9 @@
 
 typedef struct tp_format_compile_worker_options {
     const char *worker_exe;
+#ifdef TP_ENABLE_TEST_SEAMS
     int timeout_ms;
+#endif
 } tp_format_compile_worker_options;
 
 /* Validate every pending candidate through one persistent self-reexec worker.

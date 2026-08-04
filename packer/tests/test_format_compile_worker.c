@@ -91,6 +91,29 @@ static bool prepare_packages(size_t count, size_t invalid_index) {
     return true;
 }
 
+static bool write_large_source(unsigned int index) {
+    const size_t length = TP_FORMAT_SOURCE_MAX_BYTES;
+    char *source = (char *)malloc(length);
+    if (!source) {
+        return false;
+    }
+    memset(source, 'x', length);
+    source[0] = '-';
+    source[1] = '-';
+    char package_name[32];
+    char package_path[TEST_PATH_CAP];
+    char source_path[TEST_PATH_CAP];
+    (void)snprintf(package_name, sizeof package_name, "package-%03u", index);
+    const bool paths_ok =
+        join_path(package_path, sizeof package_path,
+                  TP_FORMAT_COMPILE_TEST_DIR, package_name) &&
+        join_path(source_path, sizeof source_path, package_path, "export.lua");
+    const bool wrote =
+        paths_ok && tp_fs_write_file(source_path, source, length);
+    free(source);
+    return wrote;
+}
+
 static tp_format_catalog_scan *scan_packages(size_t expected_count) {
     tp_format_catalog_scan *scan = NULL;
     tp_format_diagnostic_report *failure = NULL;
@@ -936,6 +959,24 @@ void test_unannounced_worker_oom_is_a_global_oom(void) {
     TEST_ASSERT_TRUE(set_env_value(TEST_INDEX_ENV, NULL));
 }
 
+void test_subsequent_request_frame_oom_is_a_global_oom(void) {
+    TEST_ASSERT_TRUE(prepare_packages(2U, SIZE_MAX));
+    /* Keep the parent writing after the worker has consumed the second frame
+     * header and taken the OOM seam. This covers the broken/pending pipe path,
+     * not only the later wait-for-message exit classification. */
+    TEST_ASSERT_TRUE(write_large_source(1U));
+    TEST_ASSERT_TRUE(set_env_value(TEST_ACTION_ENV,
+                                   "oom_read_request_frame"));
+    tp_format_catalog_scan *scan = scan_packages(2U);
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OOM,
+                          run_with_options(scan, 1000, &error));
+    TEST_ASSERT_EQUAL_INT(TP_FORMAT_COMPILE_BATCH_INELIGIBLE,
+                          tp_format_catalog_scan_compile_state_internal(scan));
+    tp_format_catalog_scan_destroy(scan);
+    TEST_ASSERT_TRUE(set_env_value(TEST_ACTION_ENV, NULL));
+}
+
 void test_malformed_wrong_duplicate_and_partial_frames_invalidate_batch(void) {
     assert_action_invalidates("wrong_announce", 1U, "0");
     assert_action_invalidates("wrong_result", 1U, "0");
@@ -995,6 +1036,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_unannounced_and_unattributed_exits_invalidate_batch);
     RUN_TEST(test_post_result_worker_failures_are_row_local);
     RUN_TEST(test_unannounced_worker_oom_is_a_global_oom);
+    RUN_TEST(test_subsequent_request_frame_oom_is_a_global_oom);
     RUN_TEST(test_malformed_wrong_duplicate_and_partial_frames_invalidate_batch);
     RUN_TEST(
         test_worker_diagnostic_identity_and_path_mismatch_invalidate_batch);
