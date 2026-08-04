@@ -22,6 +22,7 @@ struct tp_format_catalog_scan {
     tp_format_diagnostic_report *root_diagnostics;
     bool root_missing;
     bool limit_fail_closed;
+    tp_format_compile_batch_state compile_state;
 };
 
 static void scan_row_destroy(tp_format_catalog_owned_row *row) {
@@ -462,6 +463,7 @@ tp_status tp_format_catalog_scan_root(
         return tp_error_set(error, TP_STATUS_OOM,
                             "format scan allocation failed");
     }
+    scan->compile_state = TP_FORMAT_COMPILE_BATCH_PENDING;
 
     tp_format_discovery_result discovered;
     tp_format_discovery_failure failure;
@@ -518,6 +520,9 @@ tp_status tp_format_catalog_scan_root(
             scan->rows[i].candidate_index = (uint32_t)scan->compile_count++;
         }
     }
+    if (scan->compile_count == 0U) {
+        scan->compile_state = TP_FORMAT_COMPILE_BATCH_COMPLETE;
+    }
     *out_scan = scan;
     return TP_STATUS_OK;
 }
@@ -554,6 +559,113 @@ bool tp_format_catalog_scan_compile_at(
     return false;
 }
 
+tp_format_compile_batch_state tp_format_catalog_scan_compile_state_internal(
+    const tp_format_catalog_scan *scan) {
+    return scan ? scan->compile_state : TP_FORMAT_COMPILE_BATCH_INELIGIBLE;
+}
+
+void tp_format_catalog_scan_invalidate_compile_internal(
+    tp_format_catalog_scan *scan) {
+    if (scan && scan->compile_state == TP_FORMAT_COMPILE_BATCH_PENDING) {
+        scan->compile_state = TP_FORMAT_COMPILE_BATCH_INELIGIBLE;
+    }
+}
+
+tp_status tp_format_catalog_scan_complete_compile_internal(
+    tp_format_catalog_scan *scan, tp_format_compile_row_result *results,
+    size_t result_count, tp_error *error) {
+    if (!scan || (result_count != 0U && !results)) {
+        return tp_error_set(error, TP_STATUS_INVALID_ARGUMENT,
+                            "compile batch requires a scan and results");
+    }
+    if (scan->compile_state != TP_FORMAT_COMPILE_BATCH_PENDING) {
+        return tp_error_set(error, TP_STATUS_INVALID_ARGUMENT,
+                            "compile batch is not pending");
+    }
+    if (result_count != scan->compile_count) {
+        scan->compile_state = TP_FORMAT_COMPILE_BATCH_INELIGIBLE;
+        return tp_error_set(error, TP_STATUS_OUT_OF_BOUNDS,
+                            "compile batch result count does not match candidates");
+    }
+
+    bool seen[TP_FORMAT_PACKAGE_MAX] = {false};
+    for (size_t i = 0U; i < result_count; ++i) {
+        const uint32_t index = results[i].candidate_index;
+        const bool has_diagnostics = results[i].diagnostics != NULL;
+        if (index >= scan->compile_count || seen[index] ||
+            results[i].available == has_diagnostics) {
+            scan->compile_state = TP_FORMAT_COMPILE_BATCH_INELIGIBLE;
+            return tp_error_set(error, TP_STATUS_INVALID_ARGUMENT,
+                                "compile batch contains an invalid row result");
+        }
+        seen[index] = true;
+    }
+
+    /* Validation above is allocation-free and precedes every mutation. */
+    for (size_t i = 0U; i < scan->row_count; ++i) {
+        tp_format_catalog_owned_row *row = &scan->rows[i];
+        if (!row->pending_compile) {
+            continue;
+        }
+        tp_format_compile_row_result *result = NULL;
+        for (size_t j = 0U; j < result_count; ++j) {
+            if (results[j].candidate_index == row->candidate_index) {
+                result = &results[j];
+                break;
+            }
+        }
+        if (!result) {
+            /* Unreachable after the exact count/unique/range validation. */
+            scan->compile_state = TP_FORMAT_COMPILE_BATCH_INELIGIBLE;
+            return tp_error_set(error, TP_STATUS_INVALID_ARGUMENT,
+                                "compile batch lost a validated row result");
+        }
+        tp_format_diagnostic_report_destroy(row->diagnostics);
+        row->diagnostics = result->diagnostics;
+        result->diagnostics = NULL;
+        row->available = result->available;
+        row->pending_compile = false;
+    }
+    scan->compile_state = TP_FORMAT_COMPILE_BATCH_COMPLETE;
+    return TP_STATUS_OK;
+}
+
+static tp_status finish_scan(tp_format_catalog_scan **owned_scan,
+                             tp_format_catalog **out_catalog,
+                             tp_error *error) {
+    tp_format_catalog_scan *scan = *owned_scan;
+    tp_format_catalog *catalog = tp_format_catalog_create_owned_internal(
+        scan->root, scan->rows, scan->row_count, scan->root_diagnostics,
+        scan->root_missing, scan->limit_fail_closed, error);
+    if (!catalog) {
+        return TP_STATUS_OOM;
+    }
+    scan->root = NULL;
+    scan->rows = NULL;
+    scan->row_count = 0U;
+    scan->root_diagnostics = NULL;
+    free(scan);
+    *owned_scan = NULL;
+    *out_catalog = catalog;
+    return TP_STATUS_OK;
+}
+
+tp_status tp_format_catalog_scan_finish_compiled_internal(
+    tp_format_catalog_scan **owned_scan, tp_format_catalog **out_catalog,
+    tp_error *error) {
+    if (!owned_scan || !*owned_scan || !out_catalog) {
+        return tp_error_set(error, TP_STATUS_INVALID_ARGUMENT,
+                            "compiled scan finish requires owned scan and output");
+    }
+    *out_catalog = NULL;
+    if ((*owned_scan)->compile_count == 0U ||
+        (*owned_scan)->compile_state != TP_FORMAT_COMPILE_BATCH_COMPLETE) {
+        return tp_error_set(error, TP_STATUS_INVALID_ARGUMENT,
+                            "compiled scan is not eligible for finalization");
+    }
+    return finish_scan(owned_scan, out_catalog, error);
+}
+
 tp_status tp_format_catalog_scan_finish_without_compile(
     tp_format_catalog_scan **owned_scan, tp_format_catalog **out_catalog,
     tp_error *error) {
@@ -569,18 +681,5 @@ tp_status tp_format_catalog_scan_finish_without_compile(
             "format scan has %zu candidates awaiting isolated Lua compilation",
             scan->compile_count);
     }
-    tp_format_catalog *catalog = tp_format_catalog_create_owned_internal(
-        scan->root, scan->rows, scan->row_count, scan->root_diagnostics,
-        scan->root_missing, scan->limit_fail_closed, error);
-    if (!catalog) {
-        return TP_STATUS_OOM;
-    }
-    scan->root = NULL;
-    scan->rows = NULL;
-    scan->row_count = 0U;
-    scan->root_diagnostics = NULL;
-    free(scan);
-    *owned_scan = NULL;
-    *out_catalog = catalog;
-    return TP_STATUS_OK;
+    return finish_scan(owned_scan, out_catalog, error);
 }

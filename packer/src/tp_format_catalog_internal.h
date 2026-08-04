@@ -26,6 +26,31 @@ typedef struct tp_format_catalog_owned_row {
     uint32_t candidate_index;
 } tp_format_catalog_owned_row;
 
+typedef enum tp_format_compile_batch_state {
+    TP_FORMAT_COMPILE_BATCH_PENDING = 0,
+    TP_FORMAT_COMPILE_BATCH_COMPLETE,
+    TP_FORMAT_COMPILE_BATCH_INELIGIBLE,
+} tp_format_compile_batch_state;
+
+/* One validated worker result. The report remains caller-owned until the
+ * complete batch is accepted, then ownership is transferred into the scan. */
+typedef struct tp_format_compile_row_result {
+    uint32_t candidate_index;
+    bool available;
+    tp_format_diagnostic_report *diagnostics;
+} tp_format_compile_row_result;
+
+tp_format_compile_batch_state tp_format_catalog_scan_compile_state_internal(
+    const tp_format_catalog_scan *scan);
+tp_status tp_format_catalog_scan_complete_compile_internal(
+    tp_format_catalog_scan *scan, tp_format_compile_row_result *results,
+    size_t result_count, tp_error *error);
+void tp_format_catalog_scan_invalidate_compile_internal(
+    tp_format_catalog_scan *scan);
+tp_status tp_format_catalog_scan_finish_compiled_internal(
+    tp_format_catalog_scan **owned_scan, tp_format_catalog **out_catalog,
+    tp_error *error);
+
 tp_format_catalog *tp_format_catalog_create_owned_internal(
     char *owned_root, tp_format_catalog_owned_row *owned_rows,
     size_t owned_row_count,

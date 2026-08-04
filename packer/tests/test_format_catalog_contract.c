@@ -8,6 +8,7 @@
 
 #include "tp_core/tp_format.h"
 #include "tp_core/tp_id.h"
+#include "tp_format_catalog_internal.h"
 #include "tp_format_descriptor_internal.h"
 #include "tp_format_diagnostic_internal.h"
 #include "tp_fs_internal.h"
@@ -718,6 +719,149 @@ void test_duplicate_id_includes_source_rejected_descriptor(void) {
     tp_format_catalog_release(catalog);
 }
 
+static tp_format_diagnostic_report *make_compile_report(
+    const char *format_id, const char *message) {
+    tp_format_diagnostic_report *report = NULL;
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_format_diagnostic_report_create_internal(&report, &error),
+        error.msg);
+    const tp_format_diagnostic diagnostic = {
+        .severity = TP_FORMAT_DIAGNOSTIC_ERROR,
+        .code = TP_FORMAT_DIAGNOSTIC_COMPILE_ERROR,
+        .phase = TP_FORMAT_PHASE_COMPILE,
+        .format_id = format_id,
+        .package_path = "formats/fixture/export.lua",
+        .line = 2U,
+        .column = 7U,
+        .message = message,
+    };
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_format_diagnostic_report_append_internal(report, &diagnostic,
+                                                     &error),
+        error.msg);
+    return report;
+}
+
+void test_compile_batch_applies_only_as_one_complete_catalog(void) {
+    tp_format_catalog_scan *scan = NULL;
+    tp_format_diagnostic_report *failure = NULL;
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_format_catalog_scan_root(TP_FORMAT_FIXTURE_ROOT, &scan, &failure,
+                                    &error),
+        error.msg);
+    TEST_ASSERT_NULL(failure);
+    TEST_ASSERT_EQUAL_size_t(2U, tp_format_catalog_scan_compile_count(scan));
+    TEST_ASSERT_EQUAL_INT(
+        TP_FORMAT_COMPILE_BATCH_PENDING,
+        tp_format_catalog_scan_compile_state_internal(scan));
+
+    tp_format_compile_row_result results[2] = {
+        {.candidate_index = 0U, .available = true, .diagnostics = NULL},
+        {.candidate_index = 1U,
+         .available = false,
+         .diagnostics = make_compile_report("fixture-minimal", "syntax error")},
+    };
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_format_catalog_scan_complete_compile_internal(scan, results, 2U,
+                                                         &error),
+        error.msg);
+    TEST_ASSERT_NULL(results[1].diagnostics);
+    TEST_ASSERT_EQUAL_INT(
+        TP_FORMAT_COMPILE_BATCH_COMPLETE,
+        tp_format_catalog_scan_compile_state_internal(scan));
+
+    tp_format_catalog *catalog = NULL;
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_format_catalog_scan_finish_compiled_internal(&scan, &catalog,
+                                                        &error),
+        error.msg);
+    TEST_ASSERT_NULL(scan);
+    TEST_ASSERT_NOT_NULL(catalog);
+    TEST_ASSERT_NOT_NULL(
+        tp_format_catalog_find_available(catalog, "fixture-full"));
+    tp_format_resolution resolution = {0};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_format_catalog_resolve(catalog, "fixture-minimal", &resolution,
+                                  &error));
+    TEST_ASSERT_EQUAL_INT(TP_FORMAT_RESOLUTION_UNAVAILABLE,
+                          resolution.state);
+    TEST_ASSERT_NOT_NULL(resolution.diagnostics);
+    TEST_ASSERT_TRUE(diagnostic_report_has_code(
+        resolution.diagnostics, TP_FORMAT_DIAGNOSTIC_COMPILE_ERROR));
+    tp_format_catalog_release(catalog);
+}
+
+void test_invalid_compile_batch_poisoning_prevents_prefix_publication(void) {
+    tp_format_catalog_scan *scan = NULL;
+    tp_format_diagnostic_report *failure = NULL;
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_format_catalog_scan_root(TP_FORMAT_FIXTURE_ROOT, &scan, &failure,
+                                    &error),
+        error.msg);
+    TEST_ASSERT_NULL(failure);
+    tp_format_compile_row_result duplicate[2] = {
+        {.candidate_index = 0U, .available = true},
+        {.candidate_index = 0U, .available = true},
+    };
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_INVALID_ARGUMENT,
+        tp_format_catalog_scan_complete_compile_internal(scan, duplicate, 2U,
+                                                         &error));
+    TEST_ASSERT_EQUAL_INT(
+        TP_FORMAT_COMPILE_BATCH_INELIGIBLE,
+        tp_format_catalog_scan_compile_state_internal(scan));
+    tp_format_catalog *catalog = NULL;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_INVALID_ARGUMENT,
+        tp_format_catalog_scan_finish_compiled_internal(&scan, &catalog,
+                                                        &error));
+    TEST_ASSERT_NOT_NULL(scan);
+    TEST_ASSERT_NULL(catalog);
+    tp_format_catalog_scan_destroy(scan);
+}
+
+void test_available_compile_result_cannot_carry_failure_diagnostics(void) {
+    tp_format_catalog_scan *scan = NULL;
+    tp_format_diagnostic_report *failure = NULL;
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_format_catalog_scan_root(TP_FORMAT_FIXTURE_ROOT, &scan, &failure,
+                                    &error),
+        error.msg);
+    TEST_ASSERT_NULL(failure);
+    tp_format_compile_row_result results[2] = {
+        {.candidate_index = 0U,
+         .available = true,
+         .diagnostics = make_compile_report("fixture-full", "impossible")},
+        {.candidate_index = 1U,
+         .available = false,
+         .diagnostics = make_compile_report("fixture-minimal", "syntax error")},
+    };
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_INVALID_ARGUMENT,
+        tp_format_catalog_scan_complete_compile_internal(scan, results, 2U,
+                                                         &error));
+    TEST_ASSERT_EQUAL_INT(
+        TP_FORMAT_COMPILE_BATCH_INELIGIBLE,
+        tp_format_catalog_scan_compile_state_internal(scan));
+    TEST_ASSERT_NOT_NULL(results[0].diagnostics);
+    TEST_ASSERT_NOT_NULL(results[1].diagnostics);
+    tp_format_diagnostic_report_destroy(results[0].diagnostics);
+    tp_format_diagnostic_report_destroy(results[1].diagnostics);
+    tp_format_catalog_scan_destroy(scan);
+}
+
 void test_broken_only_catalog_rows_and_diagnostics_are_deterministic(void) {
     char root[FORMAT_TEST_PATH_CAP];
     TEST_ASSERT_TRUE(prepare_broken_root(root));
@@ -860,6 +1004,11 @@ int main(void) {
     RUN_TEST(
         test_fixture_scan_is_deterministic_and_cannot_install_before_compile);
     RUN_TEST(test_duplicate_id_includes_source_rejected_descriptor);
+    RUN_TEST(test_compile_batch_applies_only_as_one_complete_catalog);
+    RUN_TEST(
+        test_invalid_compile_batch_poisoning_prevents_prefix_publication);
+    RUN_TEST(
+        test_available_compile_result_cannot_carry_failure_diagnostics);
     RUN_TEST(
         test_broken_only_catalog_rows_and_diagnostics_are_deterministic);
     return UNITY_END();

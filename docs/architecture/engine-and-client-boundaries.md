@@ -40,8 +40,23 @@ descriptor/source admission, exact-byte fingerprints, deterministic duplicate
 handling, and owned primary-plus-report diagnostics. Missing `formats/` is a
 successful native-only catalog; broken packages remain unavailable rows and a
 catalog/root limit fails closed to native-only. Candidate descriptors that need
-Lua compilation are a separate scanner handoff and cannot be finalized or
-executed yet.
+Lua compilation are a separate scanner handoff. The dormant compile controller
+uses the existing self-reexec worker boundary and accepts a catalog batch only
+after the exact `REQUEST -> ANNOUNCE -> RESULT` sequence for every row followed
+by `END -> COMPLETE`. Results remain separate from the scan until that terminal
+frame; a global protocol/process/budget failure makes the whole attempt
+ineligible, so a validated prefix cannot be published.
+
+Lua 5.5 state ownership and the Lua C API exist only in worker-side `tp_build`.
+Each compile or runtime attempt gets a fresh bounded state. The runtime kernel
+accepts prepared projected Export IR, prepared host facts, declared documents,
+diagnostic/notice sinks, and cancellation; it owns no filesystem probing, path
+planning, pixel access, capability policy, PNG work, or publication. A
+standalone bounded binding codec can capture exact admitted package snapshots
+and unavailable/absent references without reopening `formats/`. These are
+dormant infrastructure seams: current CLI/GUI startup does not invoke the
+compiler, does not install a Lua catalog, and does not send bindings to the live
+job protocol.
 Each built-in binds two separate pieces:
 
 - a descriptor with stable ID, display name, exact D4 transform mask, other
@@ -124,7 +139,7 @@ the same `apps/common` process-host workflow for executable-path resolution,
 scan admission, and native fallback. Its owned result keeps the active catalog,
 an explicit active/fallback/pending-compiler state, and any root-failure report;
 clients do not reconstruct or discard that policy independently. An ineligible
-catalog or one that still awaits the not-yet-implemented isolated Lua compiler
+catalog or one that still awaits the currently dormant isolated Lua compiler
 uses the immortal native baseline. Build staging recreates the
 executable-relative root for both apps from one explicit production package
 manifest; that manifest is empty until the first runtime format ships.
