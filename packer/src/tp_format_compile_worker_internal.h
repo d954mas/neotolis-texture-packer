@@ -39,7 +39,10 @@ typedef struct tp_format_compile_worker_test_budget {
 
 tp_status tp_format_compile_worker__test_reserve_request(
     tp_format_compile_worker_test_budget *budget, size_t frame_bytes,
-    size_t source_bytes, tp_error *error);
+    tp_error *error);
+tp_status tp_format_compile_worker__test_charge_source_bytes(
+    tp_format_compile_worker_test_budget *budget, size_t source_bytes,
+    tp_error *error);
 tp_status tp_format_compile_worker__test_reserve_response_frame(
     tp_format_compile_worker_test_budget *budget, tp_error *error);
 tp_status tp_format_compile_worker__test_charge_response_bytes(

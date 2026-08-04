@@ -19,6 +19,7 @@ typedef struct tp_lua_effective_limits {
     size_t notices;
     size_t notice_message_bytes;
     size_t notice_total_bytes;
+    bool instruction_hook_enabled;
 } tp_lua_effective_limits;
 
 typedef struct tp_lua_allocator {

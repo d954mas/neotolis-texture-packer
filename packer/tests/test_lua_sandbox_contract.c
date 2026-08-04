@@ -278,6 +278,15 @@ static int run_child(void) {
         "local retained\n"
         "return function(atlas, host) retained=host:document('meta'); "
         "retained:finish(); retained:write('late') end\n";
+    static const char escaped_writer_argument[] =
+        "return function(atlas, host) local w=host:document('meta'); "
+        "w:write_json_string('\\n\\n'); w:finish() end\n";
+    static const char positive_f32_overflow[] =
+        "return function(atlas, host) local w=host:document('meta'); "
+        "w:write_f32(1e300) end\n";
+    static const char negative_f32_overflow[] =
+        "return function(atlas, host) local w=host:document('meta'); "
+        "w:write_f32(-1e300) end\n";
     static const char notices[] =
         "return function(atlas, host) host:notice('first'); "
         "host:notice('second'); local w=host:document('meta'); "
@@ -304,6 +313,9 @@ static int run_child(void) {
         case 'N': source = chunk_not_handler; break;
         case 'R': source = handler_return; break;
         case 'W': source = retained_writer; break;
+        case 'J': source = escaped_writer_argument; break;
+        case 'P': source = positive_f32_overflow; break;
+        case 'M': source = negative_f32_overflow; break;
         case 'O': source = notices; break;
         case 'X': source = invalid_error; break;
         case 'F': source = framed_error; break;
@@ -314,6 +326,10 @@ static int run_child(void) {
             source = owned_source;
             break;
         default: break;
+    }
+    if (scenario == 'J') {
+        const tp_lua_test_limits limits = {.writer_argument_bytes = 3U};
+        tp_lua__test_set_limits(&limits);
     }
     const tp_lua_runtime_input input = fixture_input(source, use_hidden);
     tp_lua_runtime_result result = {0};
@@ -475,6 +491,19 @@ static void test_retained_writer_cannot_write_after_finish(void) {
                       TP_FORMAT_DIAGNOSTIC_DOCUMENT_WRITE_AFTER_FINISH);
 }
 
+static void test_json_writer_argument_limit_applies_before_escaping(void) {
+    const child_reply reply = invoke('J');
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, reply.status);
+    TEST_ASSERT_EQUAL_UINT32(6U, reply.document_length);
+    TEST_ASSERT_EQUAL_MEMORY("\"\\n\\n\"", reply.document,
+                             reply.document_length);
+}
+
+static void test_f32_writer_rejects_values_outside_binary32_range(void) {
+    assert_diagnostic('P', TP_FORMAT_DIAGNOSTIC_HANDLER_CONTRACT);
+    assert_diagnostic('M', TP_FORMAT_DIAGNOSTIC_HANDLER_CONTRACT);
+}
+
 static void test_notices_preserve_deterministic_order(void) {
     const child_reply reply = invoke('O');
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, reply.status);
@@ -526,6 +555,8 @@ int main(int argc, char **argv) {
     RUN_TEST(
         test_null_source_shape_is_validated_on_compile_and_runtime_paths);
     RUN_TEST(test_retained_writer_cannot_write_after_finish);
+    RUN_TEST(test_json_writer_argument_limit_applies_before_escaping);
+    RUN_TEST(test_f32_writer_rejects_values_outside_binary32_range);
     RUN_TEST(test_notices_preserve_deterministic_order);
     RUN_TEST(test_invalid_lua_error_text_uses_fixed_fallback);
     RUN_TEST(test_frames_contain_only_target_lua_positive_lines);

@@ -116,6 +116,7 @@ typedef struct tp_lua_test_limits {
     size_t notice_message_bytes;
     size_t notice_total_bytes;
     bool fail_next_allocation;
+    bool disable_instruction_hook;
 } tp_lua_test_limits;
 
 /* Process-local and worker-test-only. NULL restores the frozen production

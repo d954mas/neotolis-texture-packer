@@ -1,5 +1,6 @@
 #include "tp_lua_host_private.h"
 
+#include <float.h>
 #include <inttypes.h>
 #include <math.h>
 #include <stdio.h>
@@ -633,13 +634,15 @@ static tp_lua_document_state *writer_document(lua_State *state,
 
 static int append_document(lua_State *state, tp_lua_runtime_context *context,
                            tp_lua_document_state *document,
-                           const char *bytes, size_t length) {
+                           const char *bytes, size_t length,
+                           bool enforce_argument_limit) {
     if (document->finished) {
         return tp_lua_raise(
             state, TP_FORMAT_DIAGNOSTIC_DOCUMENT_WRITE_AFTER_FINISH,
             TP_FORMAT_PHASE_OUTPUT, "document writer was used after finish");
     }
-    if (length > context->limits.writer_argument_bytes ||
+    if ((enforce_argument_limit &&
+         length > context->limits.writer_argument_bytes) ||
         length > context->limits.document_bytes - document->bytes.len ||
         length > context->limits.document_total_bytes -
                      context->document_total_bytes) {
@@ -676,7 +679,8 @@ static int writer_write(lua_State *state) {
         return contract(
             state, "writer:write expects valid UTF-8 text without NUL");
     }
-    return append_document(state, writer->context, document, text, length);
+    return append_document(state, writer->context, document, text, length,
+                           true);
 }
 
 static size_t json_escaped_length(const unsigned char *text, size_t length) {
@@ -752,7 +756,7 @@ static int writer_write_json_string(lua_State *state) {
             "host allocation failed while escaping JSON text");
     }
     const int result = append_document(state, writer->context, document,
-                                       scratch.buf, scratch.len);
+                                       scratch.buf, scratch.len, false);
     tp_sb_free(&scratch);
     return result;
 }
@@ -762,7 +766,8 @@ static int writer_number_text(lua_State *state, const char *text) {
     tp_lua_document_state *document = writer_document(state, &writer);
     if (!document)
         return contract(state, "writer method expects a writer");
-    return append_document(state, writer->context, document, text, strlen(text));
+    return append_document(state, writer->context, document, text, strlen(text),
+                           false);
 }
 
 static int writer_write_i64(lua_State *state) {
@@ -794,11 +799,12 @@ static int writer_write_f32(lua_State *state) {
         return contract(state, "writer:write_f32 expects a finite number");
     }
     const lua_Number value = lua_tonumber(state, 2);
-    const float rounded = (float)value;
-    if (!isfinite((double)value) || !isfinite((double)rounded)) {
+    if (!isfinite((double)value) || value > (lua_Number)FLT_MAX ||
+        value < (lua_Number)-FLT_MAX) {
         return contract(state,
                         "writer:write_f32 expects a finite binary32 value");
     }
+    const float rounded = (float)value;
     char text[64];
     (void)snprintf(text, sizeof text, "%.9g", (double)rounded);
     return writer_number_text(state, text);

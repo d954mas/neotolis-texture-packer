@@ -627,7 +627,11 @@ tp_add_test(NAME format_binding_protocol LIBS tp_core unity PRIVATE_SRC)
 # production tp_build constants immutable. These normally complete in under a
 # second; 30 seconds leaves ample slow-runner margin while bounding an
 # instruction-hook or child-process regression so it cannot wedge CI.
-tp_add_test(NAME lua_sandbox_contract LIBS tp_build unity PRIVATE_SRC TIMEOUT 30)
+tp_add_test(NAME lua_sandbox_contract
+    SOURCES test_lua_sandbox_contract.c
+        ../src/tp_lua_host.c ../src/tp_lua_bindings.c
+    LIBS tp_build tp_lua_vendor unity PRIVATE_SRC SEAMS
+    TIMEOUT 30)
 tp_add_test(NAME lua_limits_faults
     SOURCES test_lua_limits_faults.c
         ../src/tp_lua_host.c ../src/tp_lua_bindings.c

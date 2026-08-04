@@ -47,6 +47,7 @@ tp_lua_effective_limits tp_lua_effective_limits_get(void) {
         .notices = TP_LUA_NOTICE_MAX,
         .notice_message_bytes = TP_LUA_NOTICE_MESSAGE_MAX_BYTES,
         .notice_total_bytes = TP_LUA_NOTICE_TOTAL_MAX_BYTES,
+        .instruction_hook_enabled = true,
     };
 #ifdef TP_ENABLE_TEST_SEAMS
 #define TP_TEST_LIMIT(field)                 \
@@ -66,6 +67,8 @@ tp_lua_effective_limits tp_lua_effective_limits_get(void) {
     TP_TEST_LIMIT(notices);
     TP_TEST_LIMIT(notice_message_bytes);
     TP_TEST_LIMIT(notice_total_bytes);
+    if (g_test_limits.disable_instruction_hook)
+        result.instruction_hook_enabled = false;
 #undef TP_TEST_LIMIT
 #endif
     return result;
@@ -697,8 +700,10 @@ tp_status tp_lua_runtime_serialize(const tp_lua_runtime_input *input,
         if (lua_status == LUA_OK) {
             lua_pushvalue(state, 1); /* sandbox environment */
             (void)lua_setupvalue(state, -2, 1);
-            lua_sethook(state, instruction_hook, LUA_MASKCOUNT,
-                        context.limits.hook_interval);
+            if (context.limits.instruction_hook_enabled) {
+                lua_sethook(state, instruction_hook, LUA_MASKCOUNT,
+                            context.limits.hook_interval);
+            }
             lua_status = lua_pcall(state, 0, LUA_MULTRET, message_handler);
             if (lua_status == LUA_OK &&
                 (lua_gettop(state) != message_handler + 1 ||

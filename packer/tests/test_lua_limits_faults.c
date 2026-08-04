@@ -26,6 +26,7 @@ typedef struct child_observation {
     tp_proc_result process;
     size_t reply_length;
     bool eof;
+    bool watchdog_expired;
 } child_observation;
 
 void setUp(void) {}
@@ -127,6 +128,11 @@ static int run_child(void) {
         case 'I':
             limits.instructions = 1000U;
             limits.hook_interval = 100;
+            tp_lua__test_set_limits(&limits);
+            return write_runtime_reply(
+                "return function(atlas, host) while true do end end\n", NULL);
+        case 'Z':
+            limits.disable_instruction_hook = true;
             tp_lua__test_set_limits(&limits);
             return write_runtime_reply(
                 "return function(atlas, host) while true do end end\n", NULL);
@@ -322,18 +328,35 @@ static int run_child(void) {
 static child_observation invoke(char scenario) {
     char self[4096];
     TEST_ASSERT_TRUE(tp_proc_self_path(self, sizeof self));
-    tp_proc *process = tp_proc_spawn(self, TP_LUA_LIMIT_CHILD_ARG, NULL);
+    tp_proc *process =
+        tp_proc_spawn_owned_tree(self, TP_LUA_LIMIT_CHILD_ARG, NULL);
     TEST_ASSERT_NOT_NULL(process);
     TEST_ASSERT_TRUE(tp_proc_write_stdin(process, &scenario, 1U));
     child_observation observation = {0};
     unsigned char wire[sizeof observation.reply + 1U] = {0};
-    TEST_ASSERT_TRUE(tp_proc_read_stdout(process, wire, sizeof wire,
-                                         &observation.reply_length,
-                                         &observation.eof));
+    bool finished = false;
+    enum { WATCHDOG_SLICES = 200, WATCHDOG_SLICE_MS = 10 };
+    for (unsigned int slice = 0U;
+         slice < WATCHDOG_SLICES && !observation.eof; ++slice) {
+        size_t received = 0U;
+        TEST_ASSERT_TRUE(tp_proc_try_read_stdout(
+            process, wire + observation.reply_length,
+            sizeof wire - observation.reply_length, &received,
+            &observation.eof));
+        observation.reply_length += received;
+        if (observation.eof) {
+            break;
+        }
+        TEST_ASSERT_TRUE(tp_proc_wait_slice(
+            process, WATCHDOG_SLICE_MS, &observation.process, &finished));
+    }
+    if (!observation.eof) {
+        observation.watchdog_expired = true;
+        tp_proc_kill(process);
+    }
     if (observation.reply_length >= sizeof observation.reply) {
         memcpy(&observation.reply, wire, sizeof observation.reply);
     }
-    bool finished = false;
     TEST_ASSERT_TRUE(tp_proc_wait_slice(process, 5000, &observation.process,
                                         &finished));
     TEST_ASSERT_TRUE(finished);
@@ -393,6 +416,15 @@ static void test_api_v1_ceiling_constants_are_frozen(void) {
 
 static void test_instruction_ceiling_fails_closed(void) {
     assert_limit('I', TP_FORMAT_DIAGNOSTIC_INSTRUCTION_LIMIT);
+}
+
+static void test_instruction_watchdog_kills_and_reaps_a_hook_regression(void) {
+    const child_observation observation = invoke('Z');
+    TEST_ASSERT_TRUE(observation.watchdog_expired);
+    TEST_ASSERT_FALSE(observation.eof);
+    TEST_ASSERT_EQUAL_size_t(0U, observation.reply_length);
+    TEST_ASSERT_TRUE(observation.process.how == TP_PROC_END_ABNORMAL ||
+                     observation.process.code != 0);
 }
 
 static void test_host_call_ceiling_fails_closed(void) {
@@ -494,6 +526,7 @@ int main(int argc, char **argv) {
     UNITY_BEGIN();
     RUN_TEST(test_api_v1_ceiling_constants_are_frozen);
     RUN_TEST(test_instruction_ceiling_fails_closed);
+    RUN_TEST(test_instruction_watchdog_kills_and_reaps_a_hook_regression);
     RUN_TEST(test_host_call_ceiling_fails_closed);
     RUN_TEST(test_writer_call_ceiling_uses_frozen_host_call_diagnostic);
     RUN_TEST(test_writer_argument_ceiling_fails_closed);

@@ -546,21 +546,30 @@ static tp_status stream_next(compile_stream *stream, compile_attempt *attempt,
 }
 
 static bool reserve_request(compile_attempt *attempt, size_t frame_bytes,
-                            size_t source_bytes, tp_error *error) {
+                            tp_error *error) {
     if (attempt->frame_count >= TP_FORMAT_COMPILE_PROTO_MAX_FRAMES ||
         attempt->request_bytes >
             TP_FORMAT_COMPILE_PROTO_MAX_REQUEST_STREAM_BYTES ||
         frame_bytes > TP_FORMAT_COMPILE_PROTO_MAX_REQUEST_STREAM_BYTES -
-                          attempt->request_bytes ||
-        attempt->source_bytes > TP_FORMAT_CATALOG_PACKAGE_BYTES_MAX ||
-        source_bytes > TP_FORMAT_CATALOG_PACKAGE_BYTES_MAX -
-                           attempt->source_bytes) {
+                          attempt->request_bytes) {
         (void)tp_error_set(error, TP_STATUS_OUT_OF_BOUNDS,
-                           "compile validation request/work budget exhausted");
+                           "compile validation request budget exhausted");
         return false;
     }
     attempt->frame_count++;
     attempt->request_bytes += frame_bytes;
+    return true;
+}
+
+static bool charge_source_bytes(compile_attempt *attempt,
+                                size_t source_bytes, tp_error *error) {
+    if (attempt->source_bytes > TP_FORMAT_CATALOG_PACKAGE_BYTES_MAX ||
+        source_bytes > TP_FORMAT_CATALOG_PACKAGE_BYTES_MAX -
+                           attempt->source_bytes) {
+        (void)tp_error_set(error, TP_STATUS_OUT_OF_BOUNDS,
+                           "compile validation work budget exhausted");
+        return false;
+    }
     attempt->source_bytes += source_bytes;
     return true;
 }
@@ -603,13 +612,28 @@ static void test_budget_from_attempt(
 
 tp_status tp_format_compile_worker__test_reserve_request(
     tp_format_compile_worker_test_budget *budget, size_t frame_bytes,
-    size_t source_bytes, tp_error *error) {
+    tp_error *error) {
     if (!budget) {
         return tp_error_set(error, TP_STATUS_INVALID_ARGUMENT,
                             "compile test budget is required");
     }
     compile_attempt attempt = test_budget_to_attempt(budget);
-    if (!reserve_request(&attempt, frame_bytes, source_bytes, error)) {
+    if (!reserve_request(&attempt, frame_bytes, error)) {
+        return TP_STATUS_OUT_OF_BOUNDS;
+    }
+    test_budget_from_attempt(budget, &attempt);
+    return TP_STATUS_OK;
+}
+
+tp_status tp_format_compile_worker__test_charge_source_bytes(
+    tp_format_compile_worker_test_budget *budget, size_t source_bytes,
+    tp_error *error) {
+    if (!budget) {
+        return tp_error_set(error, TP_STATUS_INVALID_ARGUMENT,
+                            "compile test budget is required");
+    }
+    compile_attempt attempt = test_budget_to_attempt(budget);
+    if (!charge_source_bytes(&attempt, source_bytes, error)) {
         return TP_STATUS_OUT_OF_BOUNDS;
     }
     test_budget_from_attempt(budget, &attempt);
@@ -780,7 +804,10 @@ static bool process_spawn(compile_process *process, compile_attempt *attempt,
 static tp_status send_request_frame(compile_process *process,
                                     compile_attempt *attempt,
                                     const uint8_t *bytes, size_t length,
-                                    int timeout_ms, tp_error *error) {
+                                    int timeout_ms,
+                                    bool *out_worker_unavailable,
+                                    tp_error *error) {
+    *out_worker_unavailable = false;
     if (process->stream.length != 0U) {
         return tp_error_set(error, TP_STATUS_BUILDER_FAILED,
                             "compile worker emitted an unattributed response");
@@ -792,6 +819,7 @@ static tp_status send_request_frame(compile_process *process,
         if (!tp_proc_try_write_stdin(process->proc, bytes + offset,
                                      length - offset, &consumed,
                                      &would_block)) {
+            *out_worker_unavailable = true;
             return tp_error_set(error, TP_STATUS_BUILDER_CRASHED,
                                 "compile worker request channel write failed");
         }
@@ -838,6 +866,7 @@ static tp_status send_request_frame(compile_process *process,
             process->finished = finished;
         }
         if (process->finished) {
+            *out_worker_unavailable = true;
             return tp_error_set(
                 error,
                 process->result.how == TP_PROC_END_ABNORMAL ||
@@ -848,6 +877,7 @@ static tp_status send_request_frame(compile_process *process,
         }
         if (compile_now_ms() - process->started_ms >= (double)timeout_ms) {
             tp_proc_kill(process->proc);
+            *out_worker_unavailable = true;
             return tp_error_set(error, TP_STATUS_BUILDER_CRASHED,
                                 "compile worker timed out while receiving a request");
         }
@@ -882,6 +912,39 @@ static tp_status make_worker_failed_result(
     out->candidate_index = candidate->candidate_index;
     out->available = false;
     out->diagnostics = report;
+    return TP_STATUS_OK;
+}
+
+static tp_status replace_with_worker_failed_result(
+    const tp_format_compile_candidate *candidate, const char *source_path,
+    tp_format_compile_row_result *result, const char *message,
+    tp_error *error) {
+    tp_format_diagnostic_report_destroy(result->diagnostics);
+    memset(result, 0, sizeof *result);
+    return make_worker_failed_result(candidate, source_path, result, message,
+                                     error);
+}
+
+static tp_status restart_after_pending_result_failure(
+    const tp_format_compile_candidate *candidate, const char *source_path,
+    tp_format_compile_row_result *result, const char *message,
+    compile_process *process, compile_attempt *attempt, const char *exe,
+    tp_error *error) {
+    process_destroy(process);
+    if (error) {
+        memset(error, 0, sizeof *error);
+    }
+    tp_status status = replace_with_worker_failed_result(
+        candidate, source_path, result, message, error);
+    if (status != TP_STATUS_OK) {
+        return status;
+    }
+    const bool restart_budget_exhausted =
+        attempt->process_count >= TP_FORMAT_COMPILE_PROTO_MAX_PROCESSES;
+    if (!process_spawn(process, attempt, exe, error)) {
+        return restart_budget_exhausted ? TP_STATUS_OUT_OF_BOUNDS
+                                        : TP_STATUS_BUILDER_CRASHED;
+    }
     return TP_STATUS_OK;
 }
 
@@ -937,6 +1000,16 @@ static void destroy_results(tp_format_compile_row_result *results,
         tp_format_diagnostic_report_destroy(results[i].diagnostics);
     }
     free(results);
+}
+
+static tp_status complete_scan_with_results(
+    tp_format_catalog_scan *scan, tp_format_compile_row_result *results,
+    size_t result_count, tp_error *error) {
+    const tp_status status =
+        tp_format_catalog_scan_complete_compile_internal(
+            scan, results, result_count, error);
+    destroy_results(results, result_count);
+    return status;
 }
 
 static tp_status fail_global(tp_format_catalog_scan *scan,
@@ -1042,7 +1115,10 @@ tp_status tp_format_compile_worker_run(
     }
 
     size_t result_count = 0U;
-    for (size_t index = 0U; index < candidate_count; ++index) {
+    bool has_pending_result = false;
+    tp_format_compile_candidate pending_candidate = {0};
+    char pending_source_path[TP_FORMAT_DIAGNOSTIC_PATH_MAX_BYTES + 1U] = {0};
+    for (size_t index = 0U; index < candidate_count;) {
         tp_format_compile_candidate candidate = {0};
         if (!tp_format_catalog_scan_compile_at(scan, index, &candidate)) {
             return fail_global(scan, results, result_count, &process,
@@ -1071,18 +1147,35 @@ tp_status tp_format_compile_worker_run(
         status = tp_format_compile_proto_encode_request(
             &request, &encoded, &encoded_length, error);
         if (status != TP_STATUS_OK ||
-            !reserve_request(&attempt, encoded_length,
-                             candidate.source_byte_count, error)) {
+            !reserve_request(&attempt, encoded_length, error)) {
             free(encoded);
             return fail_global(
                 scan, results, result_count, &process,
                 status != TP_STATUS_OK ? status : TP_STATUS_OUT_OF_BOUNDS,
                 error, "compile request budget failed");
         }
+        bool worker_unavailable = false;
         status = send_request_frame(&process, &attempt, encoded,
-                                    encoded_length, timeout_ms, error);
+                                    encoded_length, timeout_ms,
+                                    &worker_unavailable, error);
         if (status != TP_STATUS_OK) {
             free(encoded);
+            if (has_pending_result && worker_unavailable) {
+                status = restart_after_pending_result_failure(
+                    &pending_candidate, pending_source_path,
+                    &results[result_count - 1U],
+                    "compile worker failed after RESULT", &process, &attempt,
+                    exe, error);
+                has_pending_result = false;
+                if (status == TP_STATUS_OK) {
+                    continue;
+                }
+                return fail_global(
+                    scan, results, result_count, &process, status, error,
+                    status == TP_STATUS_OUT_OF_BOUNDS
+                        ? "compile worker restart budget exhausted"
+                        : "compile worker restart failed");
+            }
             return fail_global(scan, results, result_count, &process,
                                status, error,
                                "compile worker request write failed before ANNOUNCE");
@@ -1094,6 +1187,30 @@ tp_status tp_format_compile_worker_run(
             &process, &attempt, TP_FORMAT_COMPILE_PROTO_ANNOUNCE,
             candidate.candidate_index, timeout_ms, &message, error);
         if (outcome != TP_COMPILE_WAIT_MESSAGE) {
+            if (has_pending_result &&
+                (outcome == TP_COMPILE_WAIT_TIMEOUT ||
+                 outcome == TP_COMPILE_WAIT_ABNORMAL ||
+                 outcome == TP_COMPILE_WAIT_CLEAN_EXIT)) {
+                const char *failure =
+                    outcome == TP_COMPILE_WAIT_TIMEOUT
+                        ? "compile worker timed out after RESULT"
+                        : outcome == TP_COMPILE_WAIT_CLEAN_EXIT
+                              ? "compile worker exited after RESULT"
+                              : "compile worker crashed after RESULT";
+                status = restart_after_pending_result_failure(
+                    &pending_candidate, pending_source_path,
+                    &results[result_count - 1U], failure, &process, &attempt,
+                    exe, error);
+                has_pending_result = false;
+                if (status == TP_STATUS_OK) {
+                    continue;
+                }
+                return fail_global(
+                    scan, results, result_count, &process, status, error,
+                    status == TP_STATUS_OUT_OF_BOUNDS
+                        ? "compile worker restart budget exhausted"
+                        : "compile worker restart failed");
+            }
             return fail_global(
                 scan, results, result_count, &process,
                 outcome == TP_COMPILE_WAIT_GLOBAL_OOM
@@ -1107,6 +1224,13 @@ tp_status tp_format_compile_worker_run(
                 error, "compile worker failed before ANNOUNCE");
         }
         tp_format_compile_proto_message_free(&message);
+        has_pending_result = false;
+        if (!charge_source_bytes(&attempt, candidate.source_byte_count,
+                                 error)) {
+            return fail_global(scan, results, result_count, &process,
+                               TP_STATUS_OUT_OF_BOUNDS, error,
+                               "compile source work budget exhausted");
+        }
 
         outcome = wait_message(
             &process, &attempt, TP_FORMAT_COMPILE_PROTO_RESULT,
@@ -1143,6 +1267,7 @@ tp_status tp_format_compile_worker_run(
                                               ? "compile worker restart budget exhausted"
                                               : "compile worker restart failed");
             }
+            index++;
             continue;
         }
         if (outcome != TP_COMPILE_WAIT_MESSAGE) {
@@ -1179,14 +1304,20 @@ tp_status tp_format_compile_worker_run(
         message.result.diagnostics = NULL;
         tp_format_compile_proto_message_free(&message);
         result_count++;
+        pending_candidate = candidate;
+        (void)memcpy(pending_source_path, source_path,
+                     sizeof pending_source_path);
+        has_pending_result = true;
+        index++;
     }
 
+send_end:;
     uint8_t *end = NULL;
     size_t end_length = 0U;
     tp_status status =
         tp_format_compile_proto_encode_end(&end, &end_length, error);
     if (status != TP_STATUS_OK ||
-        !reserve_request(&attempt, end_length, 0U, error)) {
+        !reserve_request(&attempt, end_length, error)) {
         free(end);
         return fail_global(scan, results, result_count, &process,
                            status != TP_STATUS_OK ? status
@@ -1196,6 +1327,22 @@ tp_status tp_format_compile_worker_run(
     const bool end_written = tp_proc_write_stdin(process.proc, end, end_length);
     free(end);
     if (!end_written) {
+        if (has_pending_result) {
+            status = restart_after_pending_result_failure(
+                &pending_candidate, pending_source_path,
+                &results[result_count - 1U],
+                "compile worker failed after final RESULT", &process,
+                &attempt, exe, error);
+            has_pending_result = false;
+            if (status == TP_STATUS_OK) {
+                goto send_end;
+            }
+            return fail_global(
+                scan, results, result_count, &process, status, error,
+                status == TP_STATUS_OUT_OF_BOUNDS
+                    ? "compile worker restart budget exhausted"
+                    : "compile worker restart failed");
+        }
         return fail_global(scan, results, result_count, &process,
                            TP_STATUS_BUILDER_FAILED, error,
                            "compile END write failed");
@@ -1205,19 +1352,41 @@ tp_status tp_format_compile_worker_run(
         &process, &attempt, TP_FORMAT_COMPILE_PROTO_COMPLETE, 0U, timeout_ms,
         &complete, error);
     if (complete_outcome != TP_COMPILE_WAIT_MESSAGE) {
+        if (has_pending_result &&
+            (complete_outcome == TP_COMPILE_WAIT_TIMEOUT ||
+             complete_outcome == TP_COMPILE_WAIT_ABNORMAL ||
+             complete_outcome == TP_COMPILE_WAIT_CLEAN_EXIT)) {
+            const char *failure =
+                complete_outcome == TP_COMPILE_WAIT_TIMEOUT
+                    ? "compile worker timed out after final RESULT"
+                    : complete_outcome == TP_COMPILE_WAIT_CLEAN_EXIT
+                          ? "compile worker exited after final RESULT"
+                          : "compile worker crashed after final RESULT";
+            status = restart_after_pending_result_failure(
+                &pending_candidate, pending_source_path,
+                &results[result_count - 1U], failure, &process, &attempt,
+                exe, error);
+            has_pending_result = false;
+            if (status == TP_STATUS_OK) {
+                goto send_end;
+            }
+            return fail_global(
+                scan, results, result_count, &process, status, error,
+                status == TP_STATUS_OUT_OF_BOUNDS
+                    ? "compile worker restart budget exhausted"
+                    : "compile worker restart failed");
+        }
         return fail_global(scan, results, result_count, &process,
                            TP_STATUS_BUILDER_FAILED, error,
                            "compile worker did not produce COMPLETE");
     }
     tp_format_compile_proto_message_free(&complete);
+    has_pending_result = false;
     status = verify_complete_exit(&process, &attempt, timeout_ms, error);
     process_destroy(&process);
     if (status != TP_STATUS_OK) {
         return fail_global(scan, results, result_count, NULL, status, error,
                            "compile worker completion was not clean");
     }
-    status = tp_format_catalog_scan_complete_compile_internal(
-        scan, results, result_count, error);
-    destroy_results(results, result_count);
-    return status;
+    return complete_scan_with_results(scan, results, result_count, error);
 }

@@ -666,13 +666,13 @@ void test_compile_attempt_global_budgets_accept_boundary_and_reject_plus_one(voi
     };
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
-        tp_format_compile_worker__test_reserve_request(&budget, 0U, 0U,
+        tp_format_compile_worker__test_reserve_request(&budget, 0U,
                                                        &error));
     TEST_ASSERT_EQUAL_size_t(TP_FORMAT_COMPILE_PROTO_MAX_FRAMES,
                              budget.frame_count);
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OUT_OF_BOUNDS,
-        tp_format_compile_worker__test_reserve_request(&budget, 0U, 0U,
+        tp_format_compile_worker__test_reserve_request(&budget, 0U,
                                                        &error));
 
     budget = (tp_format_compile_worker_test_budget){
@@ -681,11 +681,11 @@ void test_compile_attempt_global_budgets_accept_boundary_and_reject_plus_one(voi
     };
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
-        tp_format_compile_worker__test_reserve_request(&budget, 1U, 0U,
+        tp_format_compile_worker__test_reserve_request(&budget, 1U,
                                                        &error));
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OUT_OF_BOUNDS,
-        tp_format_compile_worker__test_reserve_request(&budget, 1U, 0U,
+        tp_format_compile_worker__test_reserve_request(&budget, 1U,
                                                        &error));
 
     budget = (tp_format_compile_worker_test_budget){
@@ -693,12 +693,18 @@ void test_compile_attempt_global_budgets_accept_boundary_and_reject_plus_one(voi
     };
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
-        tp_format_compile_worker__test_reserve_request(&budget, 0U, 1U,
+        tp_format_compile_worker__test_reserve_request(&budget, 0U,
                                                        &error));
+    TEST_ASSERT_EQUAL_size_t(TP_FORMAT_CATALOG_PACKAGE_BYTES_MAX - 1U,
+                             budget.source_bytes);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_format_compile_worker__test_charge_source_bytes(&budget, 1U,
+                                                           &error));
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OUT_OF_BOUNDS,
-        tp_format_compile_worker__test_reserve_request(&budget, 0U, 1U,
-                                                       &error));
+        tp_format_compile_worker__test_charge_source_bytes(&budget, 1U,
+                                                           &error));
 
     budget = (tp_format_compile_worker_test_budget){
         .response_bytes =
@@ -733,7 +739,12 @@ void test_compile_attempt_global_budgets_accept_boundary_and_reject_plus_one(voi
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OUT_OF_BOUNDS,
         tp_format_compile_worker__test_reserve_request(&budget, SIZE_MAX,
-                                                       SIZE_MAX, &error));
+                                                       &error));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OUT_OF_BOUNDS,
+        tp_format_compile_worker__test_charge_source_bytes(&budget,
+                                                           SIZE_MAX,
+                                                           &error));
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OUT_OF_BOUNDS,
         tp_format_compile_worker__test_charge_response_bytes(&budget,
@@ -831,6 +842,41 @@ static void assert_action_invalidates(const char *action, size_t count,
     TEST_ASSERT_TRUE(set_env_value(TEST_INDEX_ENV, NULL));
 }
 
+static void assert_after_result_is_row_local(
+    const char *action, size_t count, const char *index_text,
+    size_t failed_index, int timeout_ms) {
+    TEST_ASSERT_TRUE(prepare_packages(count, SIZE_MAX));
+    TEST_ASSERT_TRUE(set_env_value(TEST_ACTION_ENV, action));
+    TEST_ASSERT_TRUE(set_env_value(TEST_INDEX_ENV, index_text));
+    tp_format_catalog_scan *scan = scan_packages(count);
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK, run_with_options(scan, timeout_ms, &error), error.msg);
+    TEST_ASSERT_EQUAL_INT(TP_FORMAT_COMPILE_BATCH_COMPLETE,
+                          tp_format_catalog_scan_compile_state_internal(scan));
+    tp_format_catalog *catalog = finish_scan(&scan);
+    for (size_t i = 0U; i < count; ++i) {
+        char format_id[32];
+        (void)snprintf(format_id, sizeof format_id, "compile-%03u",
+                       (unsigned int)i);
+        if (i == failed_index) {
+            const tp_format_diagnostic *diagnostic =
+                first_resolution_diagnostic(
+                    catalog, format_id, TP_FORMAT_RESOLUTION_UNAVAILABLE);
+            TEST_ASSERT_EQUAL_INT(
+                TP_FORMAT_DIAGNOSTIC_COMPILE_WORKER_FAILED,
+                diagnostic->code);
+            TEST_ASSERT_EQUAL_STRING(format_id, diagnostic->format_id);
+        } else {
+            (void)first_resolution_diagnostic(
+                catalog, format_id, TP_FORMAT_RESOLUTION_AVAILABLE);
+        }
+    }
+    tp_format_catalog_release(catalog);
+    TEST_ASSERT_TRUE(set_env_value(TEST_ACTION_ENV, NULL));
+    TEST_ASSERT_TRUE(set_env_value(TEST_INDEX_ENV, NULL));
+}
+
 static void assert_hostile_diagnostic_invalidates(const char *action) {
     TEST_ASSERT_TRUE(prepare_packages(1U, 0U));
     TEST_ASSERT_TRUE(set_env_value(TEST_ACTION_ENV, action));
@@ -858,9 +904,20 @@ void test_worker_marker_only_diagnostic_invalidates_batch(void) {
 void test_unannounced_and_unattributed_exits_invalidate_batch(void) {
     assert_action_invalidates("crash_before_announce", 1U, "0");
     assert_action_invalidates("clean_exit_after_announce", 1U, "0");
-    assert_action_invalidates("crash_after_result", 2U, "0");
-    assert_action_invalidates("clean_exit_after_result", 2U, "0");
-    assert_action_invalidates("hang_after_result", 2U, "0");
+}
+
+void test_post_result_worker_failures_are_row_local(void) {
+    static const char *actions[] = {
+        "crash_after_result", "clean_exit_after_result",
+        "hang_after_result"};
+    for (size_t i = 0U; i < sizeof actions / sizeof actions[0]; ++i) {
+        const int timeout_ms =
+            strcmp(actions[i], "hang_after_result") == 0 ? 75 : 5000;
+        assert_after_result_is_row_local(
+            actions[i], 2U, "0", 0U, timeout_ms);
+        assert_after_result_is_row_local(
+            actions[i], 2U, "1", 1U, timeout_ms);
+    }
 }
 
 void test_unannounced_worker_oom_is_a_global_oom(void) {
@@ -936,6 +993,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_announced_crash_is_row_local_and_later_row_compiles);
     RUN_TEST(test_announced_timeout_is_row_local);
     RUN_TEST(test_unannounced_and_unattributed_exits_invalidate_batch);
+    RUN_TEST(test_post_result_worker_failures_are_row_local);
     RUN_TEST(test_unannounced_worker_oom_is_a_global_oom);
     RUN_TEST(test_malformed_wrong_duplicate_and_partial_frames_invalidate_batch);
     RUN_TEST(
