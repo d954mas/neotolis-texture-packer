@@ -304,13 +304,16 @@ static tp_status measure_diagnostic(const tp_format_diagnostic *diagnostic,
         }
     }
     for (size_t i = 0U; i < diagnostic->frame_count; ++i) {
+        const tp_format_diagnostic_frame *frame = &diagnostic->frames[i];
         size_t length = 0U;
-        if (!bounded_length(diagnostic->frames[i].text,
-                            TP_FORMAT_DIAGNOSTIC_FRAME_MAX_BYTES, &length)) {
+        if (frame->line == 0U ||
+            !bounded_length(frame->text,
+                            TP_FORMAT_DIAGNOSTIC_FRAME_MAX_BYTES, &length) ||
+            length == 0U) {
             return tp_error_set(error, TP_STATUS_INVALID_ARGUMENT,
                                 "compile diagnostic frame is invalid");
         }
-        tp_status status = validate_text(diagnostic->frames[i].text, length,
+        tp_status status = validate_text(frame->text, length,
                                          "compile diagnostic frame", error);
         if (status != TP_STATUS_OK ||
             !add_size(&out->bytes,
@@ -748,6 +751,7 @@ static tp_status decode_diagnostic(compile_reader *reader,
         uint32_t text_length = 0U;
         if (!rd_u32(reader, &frames[i].line) ||
             !rd_u32(reader, &text_length) ||
+            frames[i].line == 0U || text_length == 0U ||
             text_length > TP_FORMAT_DIAGNOSTIC_FRAME_MAX_BYTES) {
             status = tp_error_set(error, TP_STATUS_INVALID_ARGUMENT,
                                   "compile diagnostic frame is invalid");

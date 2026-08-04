@@ -642,6 +642,98 @@ void test_compile_protocol_rejects_hostile_diagnostic_semantics(void) {
     tp_format_diagnostic_report_destroy(report);
 }
 
+void test_compile_protocol_rejects_zero_line_and_empty_frames(void) {
+    tp_error error = {{0}};
+    const tp_format_diagnostic_frame valid_frame = {
+        .text = "frame", .line = 7U};
+    tp_format_diagnostic diagnostic = {
+        .severity = TP_FORMAT_DIAGNOSTIC_ERROR,
+        .code = TP_FORMAT_DIAGNOSTIC_COMPILE_ERROR,
+        .phase = TP_FORMAT_PHASE_COMPILE,
+        .format_id = "compile-frame",
+        .package_path = "formats/compile-frame/export.lua",
+        .message = "syntax error",
+        .frames = &valid_frame,
+        .frame_count = 1U,
+    };
+    tp_format_compile_proto_result result = {
+        .candidate_index = 0U,
+        .status = TP_STATUS_INVALID_ARGUMENT,
+        .available = false,
+    };
+
+    const tp_format_diagnostic_frame invalid_frames[] = {
+        {.text = "frame", .line = 0U},
+        {.text = "", .line = 7U},
+    };
+    for (size_t i = 0U; i < sizeof invalid_frames / sizeof invalid_frames[0];
+         ++i) {
+        tp_format_diagnostic_report *invalid_report = NULL;
+        TEST_ASSERT_EQUAL_INT(
+            TP_STATUS_OK,
+            tp_format_diagnostic_report_create_internal(&invalid_report,
+                                                        &error));
+        diagnostic.frames = &invalid_frames[i];
+        TEST_ASSERT_EQUAL_INT(
+            TP_STATUS_OK,
+            tp_format_diagnostic_report_append_internal(
+                invalid_report, &diagnostic, &error));
+        result.diagnostics = invalid_report;
+        uint8_t *invalid_encoded = NULL;
+        size_t invalid_length = 0U;
+        TEST_ASSERT_EQUAL_INT(
+            TP_STATUS_INVALID_ARGUMENT,
+            tp_format_compile_proto_encode_result(
+                &result, &invalid_encoded, &invalid_length, &error));
+        TEST_ASSERT_NULL(invalid_encoded);
+        tp_format_diagnostic_report_destroy(invalid_report);
+    }
+
+    tp_format_diagnostic_report *report = NULL;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_format_diagnostic_report_create_internal(&report, &error));
+    diagnostic.frames = &valid_frame;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_format_diagnostic_report_append_internal(report, &diagnostic,
+                                                    &error));
+    result.diagnostics = report;
+    uint8_t *encoded = NULL;
+    size_t encoded_length = 0U;
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_format_compile_proto_encode_result(
+            &result, &encoded, &encoded_length, &error),
+        error.msg);
+    const size_t diagnostic_offset =
+        TP_FORMAT_COMPILE_PROTO_HEADER_BYTES +
+        TP_FORMAT_COMPILE_PROTO_RESULT_FIXED_BYTES;
+    const size_t frame_offset =
+        diagnostic_offset + TP_FORMAT_COMPILE_PROTO_DIAGNOSTIC_FIXED_BYTES +
+        strlen(diagnostic.format_id) + strlen(diagnostic.package_path) +
+        strlen(diagnostic.message);
+    tp_format_compile_proto_message decoded = {0};
+    write_u32le(encoded + frame_offset, 0U);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_INVALID_ARGUMENT,
+        tp_format_compile_proto_decode_response_message(
+            encoded, encoded_length, &decoded, &error));
+
+    write_u32le(encoded + frame_offset, valid_frame.line);
+    write_u32le(encoded + frame_offset + 4U, 0U);
+    const size_t shortened_length = encoded_length - strlen(valid_frame.text);
+    write_u32le(encoded + 8U,
+                read_u32le(encoded + 8U) -
+                    (uint32_t)strlen(valid_frame.text));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_INVALID_ARGUMENT,
+        tp_format_compile_proto_decode_response_message(
+            encoded, shortened_length, &decoded, &error));
+    free(encoded);
+    tp_format_diagnostic_report_destroy(report);
+}
+
 void test_compile_protocol_rejects_bad_headers_caps_and_trailing_bytes(void) {
     uint8_t header[TP_FORMAT_COMPILE_PROTO_HEADER_BYTES] = {0};
     write_u32le(header, TP_FORMAT_COMPILE_PROTO_REQUEST_MAGIC);
@@ -1026,6 +1118,7 @@ int main(int argc, char **argv) {
     RUN_TEST(
         test_compile_protocol_rejects_nonfinal_framed_attributed_and_wrong_message_markers);
     RUN_TEST(test_compile_protocol_rejects_hostile_diagnostic_semantics);
+    RUN_TEST(test_compile_protocol_rejects_zero_line_and_empty_frames);
     RUN_TEST(test_compile_protocol_rejects_bad_headers_caps_and_trailing_bytes);
     RUN_TEST(
         test_compile_attempt_global_budgets_accept_boundary_and_reject_plus_one);
