@@ -5,6 +5,7 @@ format.json text eol=lf
 *.lua text eol=lf
 *.patch text eol=lf
 *.sh text eol=lf
+packer/deps/lua/src/* text eol=lf
 *.png binary
 
 # U-01 owner-scale bench assets (real Kenney CC0 sprites). Stored in Git LFS so
