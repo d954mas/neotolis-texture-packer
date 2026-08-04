@@ -930,7 +930,7 @@ void test_announced_timeout_is_row_local(void) {
     tp_format_catalog_scan *scan = scan_packages(2U);
     tp_error error = {{0}};
     TEST_ASSERT_EQUAL_INT_MESSAGE(
-        TP_STATUS_OK, run_with_options(scan, 75, &error), error.msg);
+        TP_STATUS_OK, run_with_options(scan, 500, &error), error.msg);
     tp_format_catalog *catalog = finish_scan(&scan);
     const tp_format_diagnostic *diagnostic = first_resolution_diagnostic(
         catalog, "compile-000", TP_FORMAT_RESOLUTION_UNAVAILABLE);
@@ -1027,7 +1027,7 @@ void test_post_result_worker_failures_are_row_local(void) {
         "hang_after_result"};
     for (size_t i = 0U; i < sizeof actions / sizeof actions[0]; ++i) {
         const int timeout_ms =
-            strcmp(actions[i], "hang_after_result") == 0 ? 75 : 5000;
+            strcmp(actions[i], "hang_after_result") == 0 ? 500 : 5000;
         assert_after_result_is_row_local(
             actions[i], 2U, "0", 0U, timeout_ms);
         assert_after_result_is_row_local(

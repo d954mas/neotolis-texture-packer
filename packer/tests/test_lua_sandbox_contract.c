@@ -364,8 +364,10 @@ static int run_child(void) {
     if (result.document_count == 1U && result.documents[0].byte_count <=
                                                 sizeof reply.document) {
         reply.document_length = (uint32_t)result.documents[0].byte_count;
-        memcpy(reply.document, result.documents[0].bytes,
-               result.documents[0].byte_count);
+        if (result.documents[0].byte_count > 0U) {
+            memcpy(reply.document, result.documents[0].bytes,
+                   result.documents[0].byte_count);
+        }
     }
     reply.notice_count = result.notice_count <= UINT32_MAX
                              ? (uint32_t)result.notice_count

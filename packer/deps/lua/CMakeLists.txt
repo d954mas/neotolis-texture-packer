@@ -38,6 +38,12 @@ target_compile_definitions(tp_lua_vendor PRIVATE
     _CRT_SECURE_NO_WARNINGS)
 target_compile_features(tp_lua_vendor PRIVATE c_std_17)
 
+# Lua's numeric VM uses the platform math library. Keep it on the vendor
+# target so every static-library consumer receives the dependency.
+if(UNIX AND NOT APPLE)
+    target_link_libraries(tp_lua_vendor PUBLIC m)
+endif()
+
 # Vendored third-party code is exempt from first-party warning-as-error policy.
 if(MSVC)
     target_compile_options(tp_lua_vendor PRIVATE /w)

@@ -34,6 +34,8 @@
 #define TP_PROC_TEST_SLOW_STDIN_ARG "__proc-job-transport-slow-stdin"
 #define TP_PROC_TEST_ANNOUNCE_STDIN_ARG \
     "__proc-job-transport-announce-stdin"
+#define TP_PROC_TEST_DELAYED_EXIT_ARG "__proc-job-transport-delayed-exit"
+#define TP_PROC_TEST_EXACT_OUTPUT_ARG "__proc-job-transport-exact-output"
 #define TP_PROC_TEST_PROGRESS_BYTES (256U * 1024U)
 #define TP_PROC_TEST_TREE_MARKER "tp_proc_tree_survived.tmp"
 #define TP_PROC_TEST_TREE_READY_MARKER "tp_proc_tree_ready.tmp"
@@ -310,6 +312,21 @@ static int run_announce_stdin_child(void) {
                : 3;
 }
 
+static int run_delayed_exit_child(void) {
+    sleep_ms(25U);
+    return 0;
+}
+
+static int run_exact_output_child(void) {
+    static const char reply[] = "exact";
+    if (fwrite(reply, 1U, sizeof reply - 1U, stdout) != sizeof reply - 1U ||
+        fflush(stdout) != 0) {
+        return 3;
+    }
+    sleep_ms(25U);
+    return 0;
+}
+
 static bool wait_finished(tp_proc *proc, tp_proc_result *out) {
     bool finished = false;
     for (int i = 0; i < 2000 && !finished; i++) {
@@ -548,6 +565,45 @@ void test_nonblocking_stdin_pump_reports_backpressure_and_completes(void) {
     TEST_ASSERT_EQUAL_size_t(7U, reply_len);
     TEST_ASSERT_EQUAL_MEMORY("written", reply, reply_len);
     free(request);
+    tp_proc_destroy(proc);
+}
+
+void test_wait_slice_reports_a_child_that_exits_during_the_slice(void) {
+    char self[4096];
+    TEST_ASSERT_TRUE(tp_proc_self_path(self, sizeof self));
+    tp_proc *proc = tp_proc_spawn(self, TP_PROC_TEST_DELAYED_EXIT_ARG, NULL);
+    TEST_ASSERT_NOT_NULL(proc);
+    TEST_ASSERT_TRUE(tp_proc_write_stdin(proc, NULL, 0U));
+
+    bool finished = false;
+    tp_proc_result result = {0};
+    TEST_ASSERT_TRUE(tp_proc_wait_slice(proc, 1000, &result, &finished));
+    TEST_ASSERT_TRUE(finished);
+    TEST_ASSERT_EQUAL_INT(TP_PROC_END_EXITED, result.how);
+    TEST_ASSERT_EQUAL_INT(0, result.code);
+    tp_proc_destroy(proc);
+}
+
+void test_blocking_exact_capacity_read_waits_for_real_eof(void) {
+    char self[4096];
+    TEST_ASSERT_TRUE(tp_proc_self_path(self, sizeof self));
+    tp_proc *proc = tp_proc_spawn(self, TP_PROC_TEST_EXACT_OUTPUT_ARG, NULL);
+    TEST_ASSERT_NOT_NULL(proc);
+    TEST_ASSERT_TRUE(tp_proc_write_stdin(proc, NULL, 0U));
+
+    unsigned char reply[5] = {0};
+    size_t reply_length = 0U;
+    bool eof = false;
+    TEST_ASSERT_TRUE(tp_proc_read_stdout(
+        proc, reply, sizeof reply, &reply_length, &eof));
+    TEST_ASSERT_TRUE(eof);
+    TEST_ASSERT_EQUAL_size_t(sizeof reply, reply_length);
+    TEST_ASSERT_EQUAL_MEMORY("exact", reply, sizeof reply);
+
+    tp_proc_result result = {0};
+    TEST_ASSERT_TRUE(wait_finished(proc, &result));
+    TEST_ASSERT_EQUAL_INT(TP_PROC_END_EXITED, result.how);
+    TEST_ASSERT_EQUAL_INT(0, result.code);
     tp_proc_destroy(proc);
 }
 
@@ -999,8 +1055,16 @@ int main(int argc, char **argv) {
     if (argc >= 2 && strcmp(argv[1], TP_PROC_TEST_ANNOUNCE_STDIN_ARG) == 0) {
         return run_announce_stdin_child();
     }
+    if (argc >= 2 && strcmp(argv[1], TP_PROC_TEST_DELAYED_EXIT_ARG) == 0) {
+        return run_delayed_exit_child();
+    }
+    if (argc >= 2 && strcmp(argv[1], TP_PROC_TEST_EXACT_OUTPUT_ARG) == 0) {
+        return run_exact_output_child();
+    }
 
     UNITY_BEGIN();
+    RUN_TEST(test_wait_slice_reports_a_child_that_exits_during_the_slice);
+    RUN_TEST(test_blocking_exact_capacity_read_waits_for_real_eof);
     RUN_TEST(test_keep_open_allows_later_cancel_signal);
     RUN_TEST(test_explicit_close_is_observed_without_blocking);
     RUN_TEST(test_build_worker_write_closes_stdin_after_request);
