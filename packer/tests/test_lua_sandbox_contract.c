@@ -159,6 +159,35 @@ static int run_child(void) {
     (void)_setmode(_fileno(stdout), _O_BINARY);
 #endif
     const int scenario = fgetc(stdin);
+    if (scenario == 'Q') {
+        tp_format_diagnostic_report *report = NULL;
+        tp_error error = {{0}};
+        const tp_status empty_status = tp_lua_compile_validate(
+            NULL, 0U, "sandbox-test", "formats/sandbox-test/export.lua",
+            &report, &error);
+        const bool empty_valid = empty_status == TP_STATUS_OK && !report;
+        const tp_status bad_compile_status = tp_lua_compile_validate(
+            NULL, 1U, "sandbox-test", "formats/sandbox-test/export.lua",
+            &report, &error);
+        const bool bad_compile_rejected =
+            bad_compile_status == TP_STATUS_INVALID_ARGUMENT && !report;
+        tp_lua_runtime_input input = fixture_input(NULL, false);
+        input.source_byte_count = 1U;
+        tp_lua_runtime_result result = {0};
+        const tp_status bad_runtime_status =
+            tp_lua_runtime_serialize(&input, &result, &error);
+        tp_lua_runtime_result_destroy(&result);
+        const child_reply reply = {
+            .status = empty_valid && bad_compile_rejected &&
+                              bad_runtime_status == TP_STATUS_INVALID_ARGUMENT
+                          ? TP_STATUS_OK
+                          : TP_STATUS_BUILDER_FAILED,
+        };
+        const bool wrote =
+            fwrite(&reply, 1U, sizeof reply, stdout) == sizeof reply &&
+            fflush(stdout) == 0;
+        return wrote ? 0 : 3;
+    }
     static const char allowed[] =
         "return function(atlas, host, ...)\n"
         "  assert(select('#', ...) == 0 and type(host) == 'userdata')\n"
@@ -281,6 +310,10 @@ static int run_child(void) {
     static const char escaped_writer_argument[] =
         "return function(atlas, host) local w=host:document('meta'); "
         "w:write_json_string('\\n\\n'); w:finish() end\n";
+    static const char json_escape_vocabulary[] =
+        "return function(atlas, host) local w=host:document('meta'); "
+        "w:write_json_string(string.char(34,92,8,12,10,13,9,1,195,169)); "
+        "w:finish() end\n";
     static const char positive_f32_overflow[] =
         "return function(atlas, host) local w=host:document('meta'); "
         "w:write_f32(1e300) end\n";
@@ -314,6 +347,7 @@ static int run_child(void) {
         case 'R': source = handler_return; break;
         case 'W': source = retained_writer; break;
         case 'J': source = escaped_writer_argument; break;
+        case 'K': source = json_escape_vocabulary; break;
         case 'P': source = positive_f32_overflow; break;
         case 'M': source = negative_f32_overflow; break;
         case 'O': source = notices; break;
@@ -462,30 +496,8 @@ static void test_canonical_null_empty_source_is_handler_contract(void) {
 }
 
 static void test_null_source_shape_is_validated_on_compile_and_runtime_paths(void) {
-    tp_format_diagnostic_report *report = NULL;
-    tp_error error = {{0}};
-    TEST_ASSERT_EQUAL_INT_MESSAGE(
-        TP_STATUS_OK,
-        tp_lua_compile_validate(NULL, 0U, "sandbox-test",
-                                "formats/sandbox-test/export.lua", &report,
-                                &error),
-        error.msg);
-    TEST_ASSERT_NULL(report);
-
-    TEST_ASSERT_EQUAL_INT(
-        TP_STATUS_INVALID_ARGUMENT,
-        tp_lua_compile_validate(NULL, 1U, "sandbox-test",
-                                "formats/sandbox-test/export.lua", &report,
-                                &error));
-    TEST_ASSERT_NULL(report);
-
-    tp_lua_runtime_input input = fixture_input(NULL, false);
-    input.source_byte_count = 1U;
-    tp_lua_runtime_result result = {0};
-    TEST_ASSERT_EQUAL_INT(
-        TP_STATUS_INVALID_ARGUMENT,
-        tp_lua_runtime_serialize(&input, &result, &error));
-    tp_lua_runtime_result_destroy(&result);
+    const child_reply reply = invoke('Q');
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, reply.status);
 }
 
 static void test_retained_writer_cannot_write_after_finish(void) {
@@ -499,6 +511,15 @@ static void test_json_writer_argument_limit_applies_before_escaping(void) {
     TEST_ASSERT_EQUAL_UINT32(6U, reply.document_length);
     TEST_ASSERT_EQUAL_MEMORY("\"\\n\\n\"", reply.document,
                              reply.document_length);
+}
+
+static void test_json_writer_uses_common_core_escape_vocabulary(void) {
+    static const unsigned char expected[] =
+        "\"\\\"\\\\\\b\\f\\n\\r\\t\\u0001\xc3\xa9\"";
+    const child_reply reply = invoke('K');
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, reply.status);
+    TEST_ASSERT_EQUAL_UINT32(sizeof expected - 1U, reply.document_length);
+    TEST_ASSERT_EQUAL_MEMORY(expected, reply.document, sizeof expected - 1U);
 }
 
 static void test_f32_writer_rejects_values_outside_binary32_range(void) {
@@ -558,6 +579,7 @@ int main(int argc, char **argv) {
         test_null_source_shape_is_validated_on_compile_and_runtime_paths);
     RUN_TEST(test_retained_writer_cannot_write_after_finish);
     RUN_TEST(test_json_writer_argument_limit_applies_before_escaping);
+    RUN_TEST(test_json_writer_uses_common_core_escape_vocabulary);
     RUN_TEST(test_f32_writer_rejects_values_outside_binary32_range);
     RUN_TEST(test_notices_preserve_deterministic_order);
     RUN_TEST(test_invalid_lua_error_text_uses_fixed_fallback);

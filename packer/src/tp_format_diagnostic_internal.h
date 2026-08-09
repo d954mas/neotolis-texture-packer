@@ -11,6 +11,8 @@
  * allocation-free marker shape used by owned reports and wire protocols. */
 bool tp_format_diagnostic_semantics_valid_internal(
     const tp_format_diagnostic *diagnostic);
+bool tp_format_diagnostic_normal_phase_internal(
+    tp_format_diagnostic_code code, tp_format_diagnostic_phase *out_phase);
 bool tp_format_diagnostic_truncation_marker_canonical_internal(
     const tp_format_diagnostic *diagnostic);
 
@@ -45,6 +47,13 @@ tp_status tp_format_diagnostic_report_clone_internal(
 tp_status tp_format_diagnostic_report_merge_internal(
     tp_format_diagnostic_report *destination,
     const tp_format_diagnostic_report *source, tp_error *err);
+
+/* Rebuilds an exact public diagnostic slice through the report owner. This is
+ * the only validator for whether a serialized slice fits the report's count,
+ * storage, and canonical final-marker rules. */
+tp_status tp_format_diagnostic_report_materialize_internal(
+    const tp_format_diagnostic *diagnostics, size_t count,
+    tp_format_diagnostic_report **out, tp_error *err);
 
 /* Exact heap bytes currently owned by this report, including the opaque report
  * object, vector capacity, and per-diagnostic storage blocks. Catalog/job

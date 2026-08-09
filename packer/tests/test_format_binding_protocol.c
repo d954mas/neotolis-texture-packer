@@ -940,63 +940,16 @@ void test_unavailable_slice_byte_cap_is_enforced_on_encode_and_decode(void) {
     free(bytes);
 }
 
-void test_unavailable_slice_frame_terminators_are_counted_on_encode_and_decode(
-    void) {
+void test_unavailable_slice_follows_diagnostic_owner_materialization(void) {
     enum {
         DIAGNOSTIC_COUNT = TP_FORMAT_DIAGNOSTIC_MAX - 1U,
         FRAMES_PER_DIAGNOSTIC = TP_FORMAT_DIAGNOSTIC_FRAME_MAX,
         TOTAL_FRAME_COUNT = DIAGNOSTIC_COUNT * FRAMES_PER_DIAGNOSTIC,
     };
     tp_error error = {{0}};
-    tp_format_diagnostic_report *report = NULL;
-    TEST_ASSERT_EQUAL_INT_MESSAGE(
-        TP_STATUS_OK,
-        tp_format_diagnostic_report_create_internal(&report, &error),
-        error.msg);
-    const size_t report_base_bytes =
-        tp_format_diagnostic_report_dynamic_bytes_internal(report);
-    const tp_format_diagnostic probe = {
-        .severity = TP_FORMAT_DIAGNOSTIC_ERROR,
-        .code = TP_FORMAT_DIAGNOSTIC_COMPILE_ERROR,
-        .phase = TP_FORMAT_PHASE_COMPILE,
-    };
-    TEST_ASSERT_EQUAL_INT_MESSAGE(
-        TP_STATUS_OK,
-        tp_format_diagnostic_report_append_internal(report, &probe, &error),
-        error.msg);
-    const size_t first_entry_bytes =
-        tp_format_diagnostic_report_dynamic_bytes_internal(report);
-    tp_format_diagnostic_report_destroy(report);
-    report = NULL;
-    TEST_ASSERT_GREATER_THAN_size_t(report_base_bytes, first_entry_bytes);
-    TEST_ASSERT_EQUAL_size_t(0U,
-                             (first_entry_bytes - report_base_bytes) % 8U);
-    const size_t report_entry_bytes =
-        (first_entry_bytes - report_base_bytes) / 8U;
-    const size_t vector_bytes =
-        DIAGNOSTIC_COUNT * report_entry_bytes;
-    TEST_ASSERT_GREATER_THAN_size_t(
-        report_base_bytes + vector_bytes,
-        TP_FORMAT_DIAGNOSTIC_DYNAMIC_BYTES_MAX);
-    const size_t storage_budget =
-        TP_FORMAT_DIAGNOSTIC_DYNAMIC_BYTES_MAX - report_base_bytes -
-        vector_bytes;
-    const size_t frame_array_bytes =
-        TOTAL_FRAME_COUNT * sizeof(tp_format_diagnostic_frame);
-    TEST_ASSERT_GREATER_THAN_size_t(frame_array_bytes, storage_budget);
-    const size_t text_budget = storage_budget - frame_array_bytes;
-    const size_t short_length = text_budget / TOTAL_FRAME_COUNT;
-    const size_t long_frame_count = text_budget % TOTAL_FRAME_COUNT;
-    TEST_ASSERT_GREATER_THAN_size_t(0U, short_length);
-    TEST_ASSERT_TRUE(short_length + (long_frame_count > 0U ? 1U : 0U) <=
-                     TP_FORMAT_DIAGNOSTIC_FRAME_MAX_BYTES);
-
-    char short_text[TP_FORMAT_DIAGNOSTIC_FRAME_MAX_BYTES + 1U];
-    char long_text[TP_FORMAT_DIAGNOSTIC_FRAME_MAX_BYTES + 1U];
-    memset(short_text, 's', short_length);
-    short_text[short_length] = '\0';
-    memset(long_text, 'l', short_length + 1U);
-    long_text[short_length + 1U] = '\0';
+    char frame_text[TP_FORMAT_DIAGNOSTIC_FRAME_MAX_BYTES + 1U];
+    memset(frame_text, 'f', TP_FORMAT_DIAGNOSTIC_FRAME_MAX_BYTES);
+    frame_text[TP_FORMAT_DIAGNOSTIC_FRAME_MAX_BYTES] = '\0';
     tp_format_diagnostic *diagnostics =
         (tp_format_diagnostic *)calloc(DIAGNOSTIC_COUNT,
                                        sizeof *diagnostics);
@@ -1006,7 +959,7 @@ void test_unavailable_slice_frame_terminators_are_counted_on_encode_and_decode(
     TEST_ASSERT_NOT_NULL(diagnostics);
     TEST_ASSERT_NOT_NULL(frames);
     for (size_t i = 0U; i < TOTAL_FRAME_COUNT; ++i) {
-        frames[i].text = i < long_frame_count ? long_text : short_text;
+        frames[i].text = frame_text;
         frames[i].line = 1U;
     }
     for (size_t i = 0U; i < DIAGNOSTIC_COUNT; ++i) {
@@ -1019,27 +972,18 @@ void test_unavailable_slice_frame_terminators_are_counted_on_encode_and_decode(
         };
     }
 
-    const size_t old_accounted_bytes =
-        report_base_bytes + vector_bytes + frame_array_bytes + text_budget;
-    TEST_ASSERT_EQUAL_size_t(TP_FORMAT_DIAGNOSTIC_DYNAMIC_BYTES_MAX,
-                             old_accounted_bytes);
-    TEST_ASSERT_GREATER_THAN_size_t(
-        TP_FORMAT_DIAGNOSTIC_DYNAMIC_BYTES_MAX,
-        old_accounted_bytes + TOTAL_FRAME_COUNT);
+    tp_format_diagnostic_report *report = NULL;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OUT_OF_BOUNDS,
+        tp_format_diagnostic_report_materialize_internal(
+            diagnostics, DIAGNOSTIC_COUNT, &report, &error));
+    TEST_ASSERT_NULL(report);
 
     TEST_ASSERT_EQUAL_INT_MESSAGE(
         TP_STATUS_OK,
-        tp_format_diagnostic_report_create_internal(&report, &error),
+        tp_format_diagnostic_report_materialize_internal(
+            diagnostics, 1U, &report, &error),
         error.msg);
-    for (size_t i = 0U; i < DIAGNOSTIC_COUNT; ++i) {
-        TEST_ASSERT_EQUAL_INT_MESSAGE(
-            TP_STATUS_OK,
-            tp_format_diagnostic_report_append_internal(report,
-                                                        &diagnostics[i],
-                                                        &error),
-            error.msg);
-    }
-    TEST_ASSERT_TRUE(tp_format_diagnostic_report_truncated(report));
     tp_format_diagnostic_report_destroy(report);
 
     tp_format_binding_proto_value value = {
@@ -1240,8 +1184,7 @@ int main(void) {
         test_unavailable_slice_count_cap_is_enforced_on_encode_and_decode);
     RUN_TEST(
         test_unavailable_slice_byte_cap_is_enforced_on_encode_and_decode);
-    RUN_TEST(
-        test_unavailable_slice_frame_terminators_are_counted_on_encode_and_decode);
+    RUN_TEST(test_unavailable_slice_follows_diagnostic_owner_materialization);
     RUN_TEST(
         test_unavailable_truncation_marker_must_be_canonical_and_final);
     RUN_TEST(test_frame_cap_is_the_checked_frozen_component_derivation);

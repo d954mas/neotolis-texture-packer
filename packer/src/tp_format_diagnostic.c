@@ -138,8 +138,8 @@ static bool diagnostic_severity_valid(
     return false;
 }
 
-static bool diagnostic_normal_phase(tp_format_diagnostic_code code,
-                                    tp_format_diagnostic_phase *out_phase) {
+bool tp_format_diagnostic_normal_phase_internal(
+    tp_format_diagnostic_code code, tp_format_diagnostic_phase *out_phase) {
     switch (code) {
         case TP_FORMAT_DIAGNOSTIC_CATALOG_LIMIT:
         case TP_FORMAT_DIAGNOSTIC_ROOT_NOT_DIRECTORY:
@@ -213,7 +213,8 @@ bool tp_format_diagnostic_semantics_valid_internal(
         return diagnostic->severity == TP_FORMAT_DIAGNOSTIC_WARNING;
     }
     tp_format_diagnostic_phase normal_phase = TP_FORMAT_PHASE_DISCOVERY;
-    return diagnostic_normal_phase(diagnostic->code, &normal_phase) &&
+    return tp_format_diagnostic_normal_phase_internal(diagnostic->code,
+                                                       &normal_phase) &&
            diagnostic->severity == TP_FORMAT_DIAGNOSTIC_ERROR &&
            diagnostic->phase == normal_phase;
 }
@@ -330,11 +331,9 @@ static tp_status validate_append_input(
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
                             "diagnostic report and diagnostic are required");
     }
-    if (!diagnostic_severity_valid(diagnostic->severity) ||
-        !diagnostic_code_valid(diagnostic->code) ||
-        !diagnostic_phase_valid(diagnostic->phase)) {
+    if (!tp_format_diagnostic_semantics_valid_internal(diagnostic)) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
-                            "diagnostic has invalid severity, code, or phase");
+                            "diagnostic has invalid code, phase, or severity semantics");
     }
     if (diagnostic->code == TP_FORMAT_DIAGNOSTIC_DIAGNOSTICS_TRUNCATED) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
@@ -471,6 +470,61 @@ tp_status tp_format_diagnostic_report_append_internal(
     if (field_truncated) {
         mark_truncated(report, diagnostic->phase);
     }
+    return TP_STATUS_OK;
+}
+
+tp_status tp_format_diagnostic_report_materialize_internal(
+    const tp_format_diagnostic *diagnostics, size_t count,
+    tp_format_diagnostic_report **out, tp_error *err) {
+    if (!out || (count > 0U && !diagnostics)) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "diagnostic materialization requires input and output");
+    }
+    *out = NULL;
+    if (count > TP_FORMAT_DIAGNOSTIC_MAX) {
+        return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
+                            "diagnostic slice exceeds report count limit");
+    }
+    tp_format_diagnostic_report *report = NULL;
+    tp_status status =
+        tp_format_diagnostic_report_create_internal(&report, err);
+    if (status != TP_STATUS_OK) {
+        return status;
+    }
+    size_t ordinary_count = 0U;
+    for (size_t i = 0U; i < count; ++i) {
+        const tp_format_diagnostic *diagnostic = &diagnostics[i];
+        if (diagnostic->code ==
+            TP_FORMAT_DIAGNOSTIC_DIAGNOSTICS_TRUNCATED) {
+            if (i + 1U != count ||
+                !tp_format_diagnostic_truncation_marker_canonical_internal(
+                    diagnostic)) {
+                status = tp_error_set(
+                    err, TP_STATUS_INVALID_ARGUMENT,
+                    "diagnostic slice has a noncanonical truncation marker");
+                break;
+            }
+            mark_truncated(report, diagnostic->phase);
+            continue;
+        }
+        status = tp_format_diagnostic_report_append_internal(report,
+                                                              diagnostic, err);
+        if (status != TP_STATUS_OK) {
+            break;
+        }
+        ordinary_count++;
+        if (report->truncated || report->diagnostic_count != ordinary_count) {
+            status = tp_error_set(
+                err, TP_STATUS_OUT_OF_BOUNDS,
+                "diagnostic slice cannot materialize within report limits");
+            break;
+        }
+    }
+    if (status != TP_STATUS_OK) {
+        tp_format_diagnostic_report_destroy(report);
+        return status;
+    }
+    *out = report;
     return TP_STATUS_OK;
 }
 

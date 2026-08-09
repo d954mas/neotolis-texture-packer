@@ -6,11 +6,10 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "tp_core/tp_id.h"
+#include "core/nt_assert.h"
 #include "tp_format_diagnostic_internal.h"
 #include "tp_format_discovery_internal.h"
-#include "tp_hex.h"
-#include "tp_utf8_internal.h"
+#include "tp_format_package_internal.h"
 
 struct tp_format_catalog_scan {
     char *root;
@@ -51,19 +50,6 @@ void tp_format_catalog_scan_destroy(tp_format_catalog_scan *scan) {
     free(scan);
 }
 
-static tp_format_diagnostic_phase diagnostic_phase_for_code(
-    tp_format_diagnostic_code code) {
-    if (code >= TP_FORMAT_DIAGNOSTIC_DESCRIPTOR_INVALID_UTF8 &&
-        code <= TP_FORMAT_DIAGNOSTIC_DUPLICATE_FORMAT_ID) {
-        return TP_FORMAT_PHASE_DESCRIPTOR;
-    }
-    if (code >= TP_FORMAT_DIAGNOSTIC_SOURCE_INVALID_UTF8 &&
-        code <= TP_FORMAT_DIAGNOSTIC_COMPILE_BUDGET) {
-        return TP_FORMAT_PHASE_COMPILE;
-    }
-    return TP_FORMAT_PHASE_DISCOVERY;
-}
-
 static tp_status report_one(tp_format_diagnostic_report **report,
                             tp_format_diagnostic_code code,
                             const char *format_id, const char *package_path,
@@ -76,12 +62,12 @@ static tp_status report_one(tp_format_diagnostic_report **report,
             return status;
         }
     }
+    tp_format_diagnostic_phase phase = TP_FORMAT_PHASE_DISCOVERY;
+    NT_ASSERT(tp_format_diagnostic_normal_phase_internal(code, &phase));
     const tp_format_diagnostic diagnostic = {
-        .severity = code == TP_FORMAT_DIAGNOSTIC_DIAGNOSTICS_TRUNCATED
-                        ? TP_FORMAT_DIAGNOSTIC_WARNING
-                        : TP_FORMAT_DIAGNOSTIC_ERROR,
+        .severity = TP_FORMAT_DIAGNOSTIC_ERROR,
         .code = code,
-        .phase = diagnostic_phase_for_code(code),
+        .phase = phase,
         .format_id = format_id,
         .package_path = package_path,
         .line = line,
@@ -132,70 +118,6 @@ static void best_effort_failure_report(
     } else {
         tp_format_diagnostic_report_destroy(report);
     }
-}
-
-static void write_u32le(unsigned char out[4], uint32_t value) {
-    out[0] = (unsigned char)value;
-    out[1] = (unsigned char)(value >> 8U);
-    out[2] = (unsigned char)(value >> 16U);
-    out[3] = (unsigned char)(value >> 24U);
-}
-
-static void write_u64le(unsigned char out[8], uint64_t value) {
-    for (unsigned shift = 0U; shift < 64U; shift += 8U) {
-        out[shift / 8U] = (unsigned char)(value >> shift);
-    }
-}
-
-static void package_fingerprint(const tp_format_catalog_owned_row *row,
-                                char out[33]) {
-    static const unsigned char tag[] = "ntpacker-format-package-v1";
-    unsigned char api[4];
-    unsigned char descriptor_size[8];
-    unsigned char source_size[8];
-    const tp_format_descriptor *descriptor =
-        tp_format_owned_descriptor_view(row->owned_descriptor);
-    write_u32le(api, descriptor->api_version);
-    write_u64le(descriptor_size, (uint64_t)row->descriptor_byte_count);
-    write_u64le(source_size, (uint64_t)row->source_byte_count);
-    tp_hasher hasher = tp_hasher_init();
-    tp_hasher_update(&hasher, tag, sizeof tag);
-    tp_hasher_update(&hasher, api, sizeof api);
-    tp_hasher_update(&hasher, descriptor_size, sizeof descriptor_size);
-    tp_hasher_update(&hasher, row->descriptor_bytes,
-                     row->descriptor_byte_count);
-    tp_hasher_update(&hasher, source_size, sizeof source_size);
-    tp_hasher_update(&hasher, row->source_bytes, row->source_byte_count);
-    const tp_id128 value = tp_hasher_final(hasher);
-    tp_hex_encode_lower(value.bytes, sizeof value.bytes, out);
-}
-
-static tp_format_diagnostic_code source_admission(
-    const unsigned char *bytes, size_t byte_count, char *message,
-    size_t message_capacity) {
-    if (byte_count >= 3U && bytes[0] == 0xefU && bytes[1] == 0xbbU &&
-        bytes[2] == 0xbfU) {
-        (void)snprintf(message, message_capacity,
-                       "export.lua must not contain a UTF-8 BOM");
-        return TP_FORMAT_DIAGNOSTIC_SOURCE_INVALID_UTF8;
-    }
-    if ((byte_count > 0U && bytes[0] == 0x1bU) ||
-        memchr(bytes, 0, byte_count)) {
-        (void)snprintf(message, message_capacity,
-                       "export.lua must be text source without binary chunks or NUL");
-        return TP_FORMAT_DIAGNOSTIC_SOURCE_BINARY;
-    }
-    tp_error validation = {{0}};
-    if (tp_utf8_validate_bytes((const char *)bytes, byte_count,
-                               TP_STATUS_INVALID_UTF8, "export.lua",
-                               &validation) != TP_STATUS_OK) {
-        (void)snprintf(message, message_capacity, "%s",
-                       validation.msg[0] ? validation.msg
-                                         : "export.lua is not strict UTF-8");
-        tp_error_trim_partial_utf8(message);
-        return TP_FORMAT_DIAGNOSTIC_SOURCE_INVALID_UTF8;
-    }
-    return (tp_format_diagnostic_code)0;
 }
 
 static int scan_row_compile_compare(const void *left_value,
@@ -402,9 +324,10 @@ static tp_format_discovery_visit_result scan_visit_candidate(
     row->owned_descriptor = parsed.owned_descriptor;
 
     char source_message[TP_FORMAT_DIAGNOSTIC_MESSAGE_MAX_BYTES + 1U] = {0};
-    const tp_format_diagnostic_code source_code = source_admission(
-        row->source_bytes, row->source_byte_count, source_message,
-        sizeof source_message);
+    const tp_format_diagnostic_code source_code =
+        tp_format_package_v1_source_admission_internal(
+            row->source_bytes, row->source_byte_count, source_message,
+            sizeof source_message);
     if (source_code != 0) {
         char diagnostic_path[TP_FORMAT_DIAGNOSTIC_PATH_MAX_BYTES + 1U];
         const char *logical_path = NULL;
@@ -440,7 +363,12 @@ static tp_format_discovery_visit_result scan_visit_candidate(
     }
     scan->admitted_bytes +=
         row->descriptor_byte_count + row->source_byte_count;
-    package_fingerprint(row, row->fingerprint);
+    const tp_format_descriptor *descriptor =
+        tp_format_owned_descriptor_view(row->owned_descriptor);
+    tp_format_package_fingerprint_internal(
+        descriptor->api_version, row->descriptor_bytes,
+        row->descriptor_byte_count, row->source_bytes, row->source_byte_count,
+        row->fingerprint);
     row->pending_compile = true;
     return scan_visit_result(TP_FORMAT_DISCOVERY_VISIT_CONTINUE,
                              TP_STATUS_OK);
@@ -635,12 +563,7 @@ tp_status tp_format_catalog_scan_complete_compile_internal(
                 break;
             }
         }
-        if (!result) {
-            /* Unreachable after the exact count/unique/range validation. */
-            scan->compile_state = TP_FORMAT_COMPILE_BATCH_INELIGIBLE;
-            return tp_error_set(error, TP_STATUS_INVALID_ARGUMENT,
-                                "compile batch lost a validated row result");
-        }
+        NT_ASSERT(result); /* Proven by exact count/unique/range validation. */
         tp_format_diagnostic_report_destroy(row->diagnostics);
         row->diagnostics = result->diagnostics;
         result->diagnostics = NULL;

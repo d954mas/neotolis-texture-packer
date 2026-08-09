@@ -11,7 +11,7 @@
 #endif
 
 #include "tp_lua_host_internal.h"
-#include "tp_lua_host_private.h"
+#include "tp_lua_host_private_internal.h"
 #include "tp_proc_internal.h"
 #include "unity.h"
 

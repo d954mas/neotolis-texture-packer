@@ -157,11 +157,12 @@ static inline void tp_sb_num(tp_sb *sb, double v) {
  * fires on validated data. The persisted .ntpacker_project writer is the
  * deliberate exception -- its names are validated upstream and NT_ASSERTed at
  * its own emit wrapper, so corruption is never laundered into the user's file. */
-static inline void tp_sb_json_string(tp_sb *sb, const char *s) {
+static inline void tp_sb_json_string_span(tp_sb *sb, const char *s,
+                                          size_t length) {
     if (!s) {
         s = "";
+        length = 0U;
     }
-    const size_t length = strlen(s);
     tp_sb_char(sb, '"');
     for (size_t offset = 0U;
          offset < length && !sb->oom && !sb->limit_exceeded;) {
@@ -199,6 +200,10 @@ static inline void tp_sb_json_string(tp_sb *sb, const char *s) {
         offset++;
     }
     tp_sb_char(sb, '"');
+}
+
+static inline void tp_sb_json_string(tp_sb *sb, const char *s) {
+    tp_sb_json_string_span(sb, s, s ? strlen(s) : 0U);
 }
 
 /* Opens the next "key": slot at `keydepth`, handling the leading comma. */

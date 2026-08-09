@@ -565,24 +565,18 @@ void test_compile_protocol_rejects_hostile_diagnostic_semantics(void) {
         .message = "hostile",
     };
     TEST_ASSERT_EQUAL_INT(
-        TP_STATUS_OK,
+        TP_STATUS_INVALID_ARGUMENT,
         tp_format_diagnostic_report_append_internal(report, &diagnostic,
                                                     &error));
+    tp_format_diagnostic_report_destroy(report);
+
     tp_format_compile_proto_result result = {
         .candidate_index = 0U,
         .status = TP_STATUS_INVALID_ARGUMENT,
         .available = false,
-        .diagnostics = report,
     };
     uint8_t *encoded = NULL;
     size_t encoded_length = 0U;
-    TEST_ASSERT_EQUAL_INT(
-        TP_STATUS_INVALID_ARGUMENT,
-        tp_format_compile_proto_encode_result(
-            &result, &encoded, &encoded_length, &error));
-    TEST_ASSERT_NULL(encoded);
-    tp_format_diagnostic_report_destroy(report);
-
     report = NULL;
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
@@ -957,41 +951,6 @@ static void assert_action_invalidates(const char *action, size_t count,
     TEST_ASSERT_TRUE(set_env_value(TEST_INDEX_ENV, NULL));
 }
 
-static void assert_after_result_is_row_local(
-    const char *action, size_t count, const char *index_text,
-    size_t failed_index, int timeout_ms) {
-    TEST_ASSERT_TRUE(prepare_packages(count, SIZE_MAX));
-    TEST_ASSERT_TRUE(set_env_value(TEST_ACTION_ENV, action));
-    TEST_ASSERT_TRUE(set_env_value(TEST_INDEX_ENV, index_text));
-    tp_format_catalog_scan *scan = scan_packages(count);
-    tp_error error = {{0}};
-    TEST_ASSERT_EQUAL_INT_MESSAGE(
-        TP_STATUS_OK, run_with_options(scan, timeout_ms, &error), error.msg);
-    TEST_ASSERT_EQUAL_INT(TP_FORMAT_COMPILE_BATCH_COMPLETE,
-                          tp_format_catalog_scan_compile_state_internal(scan));
-    tp_format_catalog *catalog = finish_scan(&scan);
-    for (size_t i = 0U; i < count; ++i) {
-        char format_id[32];
-        (void)snprintf(format_id, sizeof format_id, "compile-%03u",
-                       (unsigned int)i);
-        if (i == failed_index) {
-            const tp_format_diagnostic *diagnostic =
-                first_resolution_diagnostic(
-                    catalog, format_id, TP_FORMAT_RESOLUTION_UNAVAILABLE);
-            TEST_ASSERT_EQUAL_INT(
-                TP_FORMAT_DIAGNOSTIC_COMPILE_WORKER_FAILED,
-                diagnostic->code);
-            TEST_ASSERT_EQUAL_STRING(format_id, diagnostic->format_id);
-        } else {
-            (void)first_resolution_diagnostic(
-                catalog, format_id, TP_FORMAT_RESOLUTION_AVAILABLE);
-        }
-    }
-    tp_format_catalog_release(catalog);
-    TEST_ASSERT_TRUE(set_env_value(TEST_ACTION_ENV, NULL));
-    TEST_ASSERT_TRUE(set_env_value(TEST_INDEX_ENV, NULL));
-}
-
 static void assert_hostile_diagnostic_invalidates(const char *action) {
     TEST_ASSERT_TRUE(prepare_packages(1U, 0U));
     TEST_ASSERT_TRUE(set_env_value(TEST_ACTION_ENV, action));
@@ -1021,17 +980,13 @@ void test_unannounced_and_unattributed_exits_invalidate_batch(void) {
     assert_action_invalidates("clean_exit_after_announce", 1U, "0");
 }
 
-void test_post_result_worker_failures_are_row_local(void) {
+void test_post_result_worker_failures_invalidate_batch(void) {
     static const char *actions[] = {
         "crash_after_result", "clean_exit_after_result",
         "hang_after_result"};
     for (size_t i = 0U; i < sizeof actions / sizeof actions[0]; ++i) {
-        const int timeout_ms =
-            strcmp(actions[i], "hang_after_result") == 0 ? 500 : 5000;
-        assert_after_result_is_row_local(
-            actions[i], 2U, "0", 0U, timeout_ms);
-        assert_after_result_is_row_local(
-            actions[i], 2U, "1", 1U, timeout_ms);
+        assert_action_invalidates(actions[i], 2U, "0");
+        assert_action_invalidates(actions[i], 2U, "1");
     }
 }
 
@@ -1127,7 +1082,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_announced_crash_is_row_local_and_later_row_compiles);
     RUN_TEST(test_announced_timeout_is_row_local);
     RUN_TEST(test_unannounced_and_unattributed_exits_invalidate_batch);
-    RUN_TEST(test_post_result_worker_failures_are_row_local);
+    RUN_TEST(test_post_result_worker_failures_invalidate_batch);
     RUN_TEST(test_unannounced_worker_oom_is_a_global_oom);
     RUN_TEST(test_subsequent_request_frame_oom_is_a_global_oom);
     RUN_TEST(test_malformed_wrong_duplicate_and_partial_frames_invalidate_batch);

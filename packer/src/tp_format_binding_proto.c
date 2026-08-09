@@ -5,10 +5,11 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "core/nt_assert.h"
 #include "tp_export_internal.h"
 #include "tp_format_descriptor_internal.h"
 #include "tp_format_diagnostic_internal.h"
-#include "tp_hex.h"
+#include "tp_format_package_internal.h"
 #include "tp_utf8_internal.h"
 
 enum {
@@ -258,47 +259,19 @@ static tp_status diagnostic_measure(const tp_format_diagnostic *diagnostic,
     return TP_STATUS_OK;
 }
 
-static void fingerprint_package(uint32_t api_version,
-                                const unsigned char *descriptor_bytes,
-                                size_t descriptor_byte_count,
-                                const unsigned char *source_bytes,
-                                size_t source_byte_count, char out[33]) {
-    static const unsigned char tag[] = "ntpacker-format-package-v1";
-    uint8_t api[4];
-    uint8_t descriptor_size[8];
-    uint8_t source_size[8];
-    for (unsigned int i = 0U; i < 4U; ++i) {
-        api[i] = (uint8_t)(api_version >> (i * 8U));
-    }
-    for (unsigned int i = 0U; i < 8U; ++i) {
-        descriptor_size[i] =
-            (uint8_t)((uint64_t)descriptor_byte_count >> (i * 8U));
-        source_size[i] = (uint8_t)((uint64_t)source_byte_count >> (i * 8U));
-    }
-    tp_hasher hasher = tp_hasher_init();
-    tp_hasher_update(&hasher, tag, sizeof tag);
-    tp_hasher_update(&hasher, api, sizeof api);
-    tp_hasher_update(&hasher, descriptor_size, sizeof descriptor_size);
-    tp_hasher_update(&hasher, descriptor_bytes, descriptor_byte_count);
-    tp_hasher_update(&hasher, source_size, sizeof source_size);
-    tp_hasher_update(&hasher, source_bytes, source_byte_count);
-    const tp_id128 fingerprint = tp_hasher_final(hasher);
-    tp_hex_encode_lower(fingerprint.bytes, sizeof fingerprint.bytes, out);
-}
-
 static tp_status source_validate(const unsigned char *bytes, size_t length,
                                  tp_error *error) {
-    static const unsigned char empty[] = "";
-    if ((length > 0U && !bytes) || length > TP_FORMAT_SOURCE_MAX_BYTES ||
-        (length >= 3U && bytes[0] == 0xefU && bytes[1] == 0xbbU &&
-         bytes[2] == 0xbfU) ||
-        (length > 0U && bytes[0] == 0x1bU) ||
-        (length > 0U && memchr(bytes, 0, length))) {
+    if ((length > 0U && !bytes) || length > TP_FORMAT_SOURCE_MAX_BYTES) {
         return tp_error_set(error, TP_STATUS_INVALID_ARGUMENT,
                             "tp_format_binding_proto: invalid Lua source bytes");
     }
-    return tp_utf8_validate_text_field(bytes ? bytes : empty, length,
-                                       "Lua source", error);
+    char message[TP_FORMAT_DIAGNOSTIC_MESSAGE_MAX_BYTES + 1U];
+    if (tp_format_package_v1_source_admission_internal(
+            bytes, length, message, sizeof message) != 0) {
+        return tp_error_set(error, TP_STATUS_INVALID_ARGUMENT,
+                            "tp_format_binding_proto: %s", message);
+    }
+    return TP_STATUS_OK;
 }
 
 static tp_status lua_binding_validate(
@@ -334,9 +307,10 @@ static tp_status lua_binding_validate(
         return status;
     }
     char expected[33];
-    fingerprint_package(binding->api_version, binding->descriptor_bytes,
-                        binding->descriptor_byte_count, binding->source_bytes,
-                        binding->source_byte_count, expected);
+    tp_format_package_fingerprint_internal(
+        binding->api_version, binding->descriptor_bytes,
+        binding->descriptor_byte_count, binding->source_bytes,
+        binding->source_byte_count, expected);
     if (memcmp(expected, binding->fingerprint, sizeof expected) != 0) {
         tp_format_owned_descriptor_destroy(parsed.owned_descriptor);
         return tp_error_set(error, TP_STATUS_INVALID_ARGUMENT,
@@ -502,102 +476,20 @@ static tp_status resolution_validate(
                         "tp_format_binding_proto: invalid resolution");
 }
 
-static size_t report_vector_capacity(size_t ordinary_count) {
-    size_t capacity = 0U;
-    while (capacity < ordinary_count) {
-        capacity = capacity > 0U ? capacity * 2U : 8U;
-        if (capacity > TP_FORMAT_DIAGNOSTIC_MAX - 1U) {
-            capacity = TP_FORMAT_DIAGNOSTIC_MAX - 1U;
-        }
-    }
-    return capacity;
-}
-
-static tp_status report_layout_measure(size_t *out_base_bytes,
-                                       size_t *out_entry_bytes,
-                                       tp_error *error) {
-    tp_format_diagnostic_report *report = NULL;
-    tp_status status =
-        tp_format_diagnostic_report_create_internal(&report, error);
-    if (status != TP_STATUS_OK) {
-        return status;
-    }
-    const size_t base_bytes =
-        tp_format_diagnostic_report_dynamic_bytes_internal(report);
-    const tp_format_diagnostic probe = {
-        .severity = TP_FORMAT_DIAGNOSTIC_ERROR,
-        .code = TP_FORMAT_DIAGNOSTIC_COMPILE_ERROR,
-        .phase = TP_FORMAT_PHASE_COMPILE,
-    };
-    status = tp_format_diagnostic_report_append_internal(report, &probe,
-                                                          error);
-    const size_t first_entry_bytes =
-        tp_format_diagnostic_report_dynamic_bytes_internal(report);
-    tp_format_diagnostic_report_destroy(report);
-    if (status != TP_STATUS_OK) {
-        return status;
-    }
-    if (first_entry_bytes <= base_bytes ||
-        (first_entry_bytes - base_bytes) % 8U != 0U) {
-        return tp_error_set(
-            error, TP_STATUS_INVALID_ARGUMENT,
-            "tp_format_binding_proto: diagnostic report layout is invalid");
-    }
-    *out_base_bytes = base_bytes;
-    *out_entry_bytes = (first_entry_bytes - base_bytes) / 8U;
-    return TP_STATUS_OK;
-}
-
 static tp_status unavailable_slice_validate(
     const tp_format_binding_proto_resolution *resolution,
-    const tp_format_diagnostic *diagnostics,
-    const size_t *owned_storage_prefix, const size_t *marker_prefix,
-    size_t report_base_bytes, size_t report_entry_bytes, tp_error *error) {
+    const tp_format_diagnostic *diagnostics, tp_error *error) {
     if (resolution->kind != TP_FORMAT_BINDING_RESOLUTION_UNAVAILABLE) {
         return TP_STATUS_OK;
     }
     const size_t offset = resolution->diagnostic_offset;
     const size_t count = resolution->diagnostic_count;
-    if (count > TP_FORMAT_DIAGNOSTIC_MAX) {
-        return tp_error_set(
-            error, TP_STATUS_OUT_OF_BOUNDS,
-            "tp_format_binding_proto: unavailable diagnostic count exceeds report cap");
-    }
-    const size_t end = offset + count;
-    const size_t marker_count = marker_prefix[end] - marker_prefix[offset];
-    const bool has_marker = marker_count != 0U;
-    if (marker_count > 1U ||
-        (has_marker &&
-         (diagnostics[end - 1U].code !=
-              TP_FORMAT_DIAGNOSTIC_DIAGNOSTICS_TRUNCATED ||
-          !tp_format_diagnostic_truncation_marker_canonical_internal(
-              &diagnostics[end - 1U])))) {
-        return tp_error_set(
-            error, TP_STATUS_INVALID_ARGUMENT,
-            "tp_format_binding_proto: unavailable truncation marker is invalid");
-    }
-    const size_t ordinary_count = count - (has_marker ? 1U : 0U);
-    if (ordinary_count > TP_FORMAT_DIAGNOSTIC_MAX - 1U) {
-        return tp_error_set(
-            error, TP_STATUS_OUT_OF_BOUNDS,
-            "tp_format_binding_proto: unavailable diagnostics cannot materialize");
-    }
-    const size_t ordinary_end = end - (has_marker ? 1U : 0U);
-    const size_t storage_bytes =
-        owned_storage_prefix[ordinary_end] - owned_storage_prefix[offset];
-    const size_t capacity = report_vector_capacity(ordinary_count);
-    if (report_base_bytes > TP_FORMAT_DIAGNOSTIC_DYNAMIC_BYTES_MAX ||
-        capacity >
-            (TP_FORMAT_DIAGNOSTIC_DYNAMIC_BYTES_MAX - report_base_bytes) /
-                report_entry_bytes ||
-        storage_bytes >
-            TP_FORMAT_DIAGNOSTIC_DYNAMIC_BYTES_MAX - report_base_bytes -
-                capacity * report_entry_bytes) {
-        return tp_error_set(
-            error, TP_STATUS_OUT_OF_BOUNDS,
-            "tp_format_binding_proto: unavailable diagnostic bytes exceed report cap");
-    }
-    return TP_STATUS_OK;
+    tp_format_diagnostic_report *report = NULL;
+    const tp_status status =
+        tp_format_diagnostic_report_materialize_internal(
+            diagnostics + offset, count, &report, error);
+    tp_format_diagnostic_report_destroy(report);
+    return status;
 }
 
 static tp_status unavailable_slices_validate(
@@ -612,58 +504,23 @@ static tp_status unavailable_slices_validate(
         return TP_STATUS_OK;
     }
 
-    size_t *owned_storage_prefix = (size_t *)calloc(
-        value->diagnostic_count + 1U, sizeof *owned_storage_prefix);
-    size_t *marker_prefix = (size_t *)calloc(value->diagnostic_count + 1U,
-                                             sizeof *marker_prefix);
-    if (!owned_storage_prefix || !marker_prefix) {
-        free(owned_storage_prefix);
-        free(marker_prefix);
-        return tp_error_set(
-            error, TP_STATUS_OOM,
-            "tp_format_binding_proto: diagnostic slice allocation failed");
-    }
     tp_status status = TP_STATUS_OK;
     for (size_t i = 0U; i < value->diagnostic_count; ++i) {
         diagnostic_shape shape;
         status = diagnostic_measure(&value->diagnostics[i], &shape, error);
-        if (status != TP_STATUS_OK ||
-            owned_storage_prefix[i] > SIZE_MAX - shape.owned_storage_bytes) {
-            if (status == TP_STATUS_OK) {
-                status = tp_error_set(
-                    error, TP_STATUS_OUT_OF_BOUNDS,
-                    "tp_format_binding_proto: diagnostic owned bytes overflow");
-            }
+        if (status != TP_STATUS_OK) {
             break;
         }
-        owned_storage_prefix[i + 1U] =
-            owned_storage_prefix[i] + shape.owned_storage_bytes;
-        marker_prefix[i + 1U] =
-            marker_prefix[i] +
-            (value->diagnostics[i].code ==
-                     TP_FORMAT_DIAGNOSTIC_DIAGNOSTICS_TRUNCATED
-                 ? 1U
-                 : 0U);
-    }
-    size_t report_base_bytes = 0U, report_entry_bytes = 0U;
-    if (status == TP_STATUS_OK) {
-        status = report_layout_measure(&report_base_bytes,
-                                       &report_entry_bytes, error);
     }
     if (status == TP_STATUS_OK) {
         status = unavailable_slice_validate(
-            &value->preview, value->diagnostics, owned_storage_prefix,
-            marker_prefix, report_base_bytes, report_entry_bytes, error);
+            &value->preview, value->diagnostics, error);
     }
     for (size_t i = 0U; status == TP_STATUS_OK && i < value->target_count;
          ++i) {
         status = unavailable_slice_validate(
-            &value->targets[i].resolution, value->diagnostics,
-            owned_storage_prefix, marker_prefix, report_base_bytes,
-            report_entry_bytes, error);
+            &value->targets[i].resolution, value->diagnostics, error);
     }
-    free(owned_storage_prefix);
-    free(marker_prefix);
     return status;
 }
 
@@ -952,11 +809,7 @@ tp_status tp_format_binding_proto_encode(
         write_diagnostic(&writer, &value->diagnostics[i], &shapes[i]);
     }
     free(shapes);
-    if (writer.offset != total) {
-        free(bytes);
-        return tp_error_set(error, TP_STATUS_INVALID_ARGUMENT,
-                            "tp_format_binding_proto: internal frame size mismatch");
-    }
+    NT_ASSERT(writer.offset == total);
     *out_bytes = bytes;
     *out_length = total;
     return TP_STATUS_OK;

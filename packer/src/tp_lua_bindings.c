@@ -1,4 +1,4 @@
-#include "tp_lua_host_private.h"
+#include "tp_lua_host_private_internal.h"
 
 #include <float.h>
 #include <inttypes.h>
@@ -10,6 +10,7 @@
 #include "lauxlib.h"
 #include "lualib.h"
 
+#include "tp_format_package_internal.h"
 #include "tp_utf8_internal.h"
 
 #define TP_LUA_MT_ATLAS "ntpacker.lua.atlas.v1"
@@ -18,11 +19,6 @@
 #define TP_LUA_MT_ANIMATION "ntpacker.lua.animation.v1"
 #define TP_LUA_MT_HOST "ntpacker.lua.host.v1"
 #define TP_LUA_MT_WRITER "ntpacker.lua.writer.v1"
-
-static const char *const g_transform_names[8] = {
-    "identity",       "flip_h",       "flip_v",       "rotate_180",
-    "transpose",      "rotate_90_cw", "rotate_90_ccw", "anti_transpose",
-};
 
 static const char *metatable_for_kind(tp_lua_view_kind kind) {
     switch (kind) {
@@ -297,8 +293,8 @@ static int sprite_transform(lua_State *state) {
     tp_lua_view *sprite = view(state, 1, TP_LUA_VIEW_SPRITE);
     if (!exact_args(state, 1) || !sprite)
         return contract(state, "sprite:transform expects a sprite");
-    lua_pushstring(
-        state, g_transform_names[sprite_value(sprite)->data.transform & 7U]);
+    lua_pushstring(state, tp_format_transform_token_internal(
+                              sprite_value(sprite)->data.transform));
     return 1;
 }
 
@@ -683,23 +679,6 @@ static int writer_write(lua_State *state) {
                            true);
 }
 
-static size_t json_escaped_length(const unsigned char *text, size_t length) {
-    size_t total = 2U;
-    for (size_t i = 0U; i < length; ++i) {
-        const unsigned char value = text[i];
-        size_t add = 1U;
-        if (value == '"' || value == '\\' || value == '\b' || value == '\f' ||
-            value == '\n' || value == '\r' || value == '\t') {
-            add = 2U;
-        } else if (value < 0x20U) {
-            add = 6U;
-        }
-        if (total > SIZE_MAX - add) return SIZE_MAX;
-        total += add;
-    }
-    return total;
-}
-
 static int writer_write_json_string(lua_State *state) {
     require_gate(state, true);
     tp_lua_view *writer = NULL;
@@ -711,42 +690,32 @@ static int writer_write_json_string(lua_State *state) {
         return contract(state,
                         "writer:write_json_string expects valid UTF-8 text");
     }
-    const size_t escaped =
-        json_escaped_length((const unsigned char *)text, length);
-    if (length > writer->context->limits.writer_argument_bytes ||
-        escaped == SIZE_MAX ||
-        escaped > writer->context->limits.document_bytes -
-                      document->bytes.len ||
-        escaped > writer->context->limits.document_total_bytes -
-                      writer->context->document_total_bytes) {
+    if (length > writer->context->limits.writer_argument_bytes) {
         return tp_lua_raise(state, TP_FORMAT_DIAGNOSTIC_OUTPUT_LIMIT,
                             TP_FORMAT_PHASE_LIMIT,
                             "Lua document output exceeded a fixed limit");
     }
-    tp_sb scratch = {.limit = escaped};
-    tp_sb_char(&scratch, '"');
-    for (size_t i = 0U; i < length; ++i) {
-        const unsigned char value = (unsigned char)text[i];
-        switch (value) {
-            case '"': tp_sb_str(&scratch, "\\\""); break;
-            case '\\': tp_sb_str(&scratch, "\\\\"); break;
-            case '\b': tp_sb_str(&scratch, "\\b"); break;
-            case '\f': tp_sb_str(&scratch, "\\f"); break;
-            case '\n': tp_sb_str(&scratch, "\\n"); break;
-            case '\r': tp_sb_str(&scratch, "\\r"); break;
-            case '\t': tp_sb_str(&scratch, "\\t"); break;
-            default:
-                if (value < 0x20U) {
-                    char escape[7];
-                    (void)snprintf(escape, sizeof escape, "\\u%04x", value);
-                    tp_sb_str(&scratch, escape);
-                } else {
-                    tp_sb_char(&scratch, (char)value);
-                }
-                break;
-        }
+    const size_t document_available =
+        writer->context->limits.document_bytes - document->bytes.len;
+    const size_t total_available =
+        writer->context->limits.document_total_bytes -
+        writer->context->document_total_bytes;
+    const size_t output_available = document_available < total_available
+                                        ? document_available
+                                        : total_available;
+    if (output_available < 2U) {
+        return tp_lua_raise(state, TP_FORMAT_DIAGNOSTIC_OUTPUT_LIMIT,
+                            TP_FORMAT_PHASE_LIMIT,
+                            "Lua document output exceeded a fixed limit");
     }
-    tp_sb_char(&scratch, '"');
+    tp_sb scratch = {.limit = output_available};
+    tp_sb_json_string_span(&scratch, text, length);
+    if (scratch.limit_exceeded) {
+        tp_sb_free(&scratch);
+        return tp_lua_raise(state, TP_FORMAT_DIAGNOSTIC_OUTPUT_LIMIT,
+                            TP_FORMAT_PHASE_LIMIT,
+                            "Lua document output exceeded a fixed limit");
+    }
     if (scratch.oom) {
         tp_sb_free(&scratch);
         writer->context->allocator.host_oom = true;

@@ -1,5 +1,5 @@
-#ifndef TP_BUILD_SRC_TP_LUA_HOST_PRIVATE_H
-#define TP_BUILD_SRC_TP_LUA_HOST_PRIVATE_H
+#ifndef TP_BUILD_SRC_TP_LUA_HOST_PRIVATE_INTERNAL_H
+#define TP_BUILD_SRC_TP_LUA_HOST_PRIVATE_INTERNAL_H
 
 #include "tp_lua_host_internal.h"
 
@@ -110,4 +110,4 @@ tp_status tp_lua_bindings_install(lua_State *state,
 void tp_lua_push_atlas(lua_State *state, tp_lua_runtime_context *context);
 void tp_lua_push_host(lua_State *state, tp_lua_runtime_context *context);
 
-#endif /* TP_BUILD_SRC_TP_LUA_HOST_PRIVATE_H */
+#endif /* TP_BUILD_SRC_TP_LUA_HOST_PRIVATE_INTERNAL_H */

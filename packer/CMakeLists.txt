@@ -23,7 +23,7 @@ add_library(tp_core STATIC
     # executable-relative runtime root. Discovery's OS backend is selected below.
     src/tp_format_catalog.c src/tp_format_catalog_scan.c
     src/tp_format_binding_proto.c
-    src/tp_format_descriptor.c src/tp_format_diagnostic.c
+    src/tp_format_descriptor.c src/tp_format_diagnostic.c src/tp_format_package.c
     src/tp_format_discovery.c src/tp_runtime_path.c
     # Project identity, canonical paths, leases, source plans, and recovery.
     src/tp_id.c src/tp_identity.c src/tp_identity_session.c src/tp_source_path_text.c src/tp_source_plan.c
@@ -118,7 +118,8 @@ add_library(tp_build STATIC src/tp_pack.c src/tp_build_driver.c src/tp_build_pro
     # Dormant Packet 2 worker-only Lua kernel. Client/catalog activation is a
     # later packet; Lua headers and state ownership never enter tp_core.
     src/tp_lua_bindings.c src/tp_lua_host.c
-    src/tp_format_compile_proto.c src/tp_format_compile_worker.c)
+    src/tp_format_compile_proto.c src/tp_format_compile_service.c
+    src/tp_format_compile_worker.c)
 if(WIN32)
     target_sources(tp_build PRIVATE src/tp_proc_win32.c)
 else()

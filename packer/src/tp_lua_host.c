@@ -1,4 +1,4 @@
-#include "tp_lua_host_private.h"
+#include "tp_lua_host_private_internal.h"
 #include "tp_format_diagnostic_internal.h"
 
 #include <float.h>
@@ -8,8 +8,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "core/nt_assert.h"
 #include "lauxlib.h"
 
+#include "tp_format_package_internal.h"
 #include "tp_utf8_internal.h"
 
 _Static_assert(sizeof(lua_Integer) == 8U,
@@ -101,13 +103,11 @@ static void allocator_record_failure(tp_lua_allocator *allocator,
 void *tp_lua_allocator_fn(void *userdata, void *pointer, size_t old_size,
                           size_t new_size) {
     tp_lua_allocator *allocator = (tp_lua_allocator *)userdata;
-    if (!allocator) return NULL;
+    NT_ASSERT(allocator);
     if (new_size == 0U) {
         if (pointer) {
-            allocator->live_bytes =
-                old_size <= allocator->live_bytes
-                    ? allocator->live_bytes - old_size
-                    : 0U;
+            NT_ASSERT(old_size <= allocator->live_bytes);
+            allocator->live_bytes -= old_size;
         }
         free(pointer);
         return NULL;
@@ -121,8 +121,8 @@ void *tp_lua_allocator_fn(void *userdata, void *pointer, size_t old_size,
         return NULL;
     }
     const size_t retained = pointer ? old_size : 0U;
-    if (retained > allocator->live_bytes ||
-        new_size > SIZE_MAX - (allocator->live_bytes - retained) ||
+    NT_ASSERT(retained <= allocator->live_bytes);
+    if (new_size > SIZE_MAX - (allocator->live_bytes - retained) ||
         allocator->live_bytes - retained + new_size > allocator->limit) {
         allocator_record_failure(allocator, pointer, old_size, new_size,
                                  true);
@@ -337,35 +337,6 @@ static tp_status append_report(
     return TP_STATUS_OK;
 }
 
-static tp_format_diagnostic_code source_admission(
-    const unsigned char *source, size_t source_byte_count,
-    char *message, size_t message_capacity) {
-    if (!source) source = (const unsigned char *)"";
-    if (source_byte_count >= 3U && source[0] == 0xefU &&
-        source[1] == 0xbbU && source[2] == 0xbfU) {
-        (void)snprintf(message, message_capacity,
-                       "export.lua must not contain a UTF-8 BOM");
-        return TP_FORMAT_DIAGNOSTIC_SOURCE_INVALID_UTF8;
-    }
-    if ((source_byte_count > 0U && source[0] == 0x1bU) ||
-        memchr(source, '\0', source_byte_count)) {
-        (void)snprintf(message, message_capacity,
-                       "export.lua must be text source without binary chunks or NUL");
-        return TP_FORMAT_DIAGNOSTIC_SOURCE_BINARY;
-    }
-    tp_error validation = {{0}};
-    if (tp_utf8_validate_bytes((const char *)source, source_byte_count,
-                               TP_STATUS_INVALID_UTF8, "export.lua",
-                               &validation) != TP_STATUS_OK) {
-        (void)snprintf(message, message_capacity, "%s",
-                       validation.msg[0] ? validation.msg
-                                         : "export.lua is not strict UTF-8");
-        tp_error_trim_partial_utf8(message);
-        return TP_FORMAT_DIAGNOSTIC_SOURCE_INVALID_UTF8;
-    }
-    return (tp_format_diagnostic_code)0;
-}
-
 static uint32_t compile_error_line(const char *message) {
     if (!message) return 0U;
     const char *cursor = strchr(message, ':');
@@ -428,7 +399,8 @@ tp_status tp_lua_compile_validate(
     }
     char message[TP_FORMAT_DIAGNOSTIC_MESSAGE_MAX_BYTES + 1U];
     const tp_format_diagnostic_code admission =
-        source_admission(source, source_byte_count, message, sizeof message);
+        tp_format_package_v1_source_admission_internal(
+            source, source_byte_count, message, sizeof message);
     if (admission != 0) {
         const tp_status report_status = append_report(
             out_report, admission, TP_FORMAT_PHASE_COMPILE, format_id,
@@ -557,8 +529,9 @@ static tp_status validate_runtime_input(const tp_lua_runtime_input *input,
         }
     }
     char admission_message[128];
-    if (source_admission(input->source, input->source_byte_count,
-                         admission_message, sizeof admission_message) != 0) {
+    if (tp_format_package_v1_source_admission_internal(
+            input->source, input->source_byte_count, admission_message,
+            sizeof admission_message) != 0) {
         return tp_error_set(error, TP_STATUS_INVALID_ARGUMENT, "%s",
                             admission_message);
     }

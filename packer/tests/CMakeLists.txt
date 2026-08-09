@@ -639,12 +639,12 @@ tp_add_test(NAME lua_limits_faults
     TIMEOUT 30)
 tp_add_test(NAME lua_determinism LIBS tp_build unity PRIVATE_SRC TIMEOUT 30)
 
-# Persistent compile-validation FSM. Recompile only the controller/service TU
-# with fenced fault actions; the shipped tp_build copy has no environment fault
-# controls. The executable is also its own hidden __build-worker child.
+# Persistent compile-validation FSM. Recompile the separate controller and
+# child-service TUs with fenced fault actions; the shipped tp_build copies have
+# no environment fault controls. The executable is its own hidden worker child.
 tp_add_test(NAME format_compile_worker
     SOURCES test_format_compile_worker.c
-        ../src/tp_format_compile_worker.c
+        ../src/tp_format_compile_worker.c ../src/tp_format_compile_service.c
     LIBS tp_build unity PRIVATE_SRC SEAMS
     DEFINES
         TP_FORMAT_COMPILE_TEST_DIR="${CMAKE_CURRENT_BINARY_DIR}/format_compile_worker_root"

@@ -9,6 +9,7 @@
 
 #include "cJSON.h"
 #include "tp_core/tp_export.h"
+#include "tp_format_package_internal.h"
 #include "tp_json_internal.h"
 #include "tp_utf8_internal.h"
 
@@ -662,19 +663,6 @@ static bool parse_api_integer_token(const char *start, const char *end,
     return true;
 }
 
-static int transform_token_value(const char *token) {
-    static const char *const tokens[] = {
-        "identity", "flip_h", "flip_v", "rotate_180", "transpose",
-        "rotate_90_cw", "rotate_90_ccw", "anti_transpose",
-    };
-    for (int i = 0; i < (int)(sizeof tokens / sizeof tokens[0]); ++i) {
-        if (strcmp(token, tokens[i]) == 0) {
-            return i;
-        }
-    }
-    return -1;
-}
-
 static bool parse_capabilities(const cJSON *object, tp_export_caps *out) {
     static const char *const keys[] = {
         "transforms", "polygons", "pivot", "slice9", "multipage",
@@ -698,7 +686,8 @@ static bool parse_capabilities(const cJSON *object, tp_export_caps *out) {
         if (!cJSON_IsString(item) || !item->valuestring) {
             return false;
         }
-        const int value = transform_token_value(item->valuestring);
+        const int value =
+            tp_format_transform_token_value_internal(item->valuestring);
         if (value < 0 || value <= previous || (i == 0 && value != 0)) {
             return false;
         }
