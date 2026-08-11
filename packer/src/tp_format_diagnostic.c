@@ -138,6 +138,101 @@ static bool diagnostic_severity_valid(
     return false;
 }
 
+bool tp_format_diagnostic_normal_phase_internal(
+    tp_format_diagnostic_code code, tp_format_diagnostic_phase *out_phase) {
+    switch (code) {
+        case TP_FORMAT_DIAGNOSTIC_CATALOG_LIMIT:
+        case TP_FORMAT_DIAGNOSTIC_ROOT_NOT_DIRECTORY:
+        case TP_FORMAT_DIAGNOSTIC_ROOT_REPARSE:
+        case TP_FORMAT_DIAGNOSTIC_ROOT_IO:
+        case TP_FORMAT_DIAGNOSTIC_PACKAGE_NAME_INVALID:
+        case TP_FORMAT_DIAGNOSTIC_PACKAGE_REPARSE:
+        case TP_FORMAT_DIAGNOSTIC_PACKAGE_EXTRA_ENTRY:
+        case TP_FORMAT_DIAGNOSTIC_DESCRIPTOR_MISSING:
+        case TP_FORMAT_DIAGNOSTIC_SOURCE_MISSING:
+        case TP_FORMAT_DIAGNOSTIC_PACKAGE_FILE_TYPE:
+        case TP_FORMAT_DIAGNOSTIC_PACKAGE_FILE_REPARSE:
+        case TP_FORMAT_DIAGNOSTIC_PACKAGE_FILE_TOO_LARGE:
+        case TP_FORMAT_DIAGNOSTIC_PACKAGE_READ_FAILED:
+            *out_phase = TP_FORMAT_PHASE_DISCOVERY;
+            return true;
+        case TP_FORMAT_DIAGNOSTIC_DESCRIPTOR_INVALID_UTF8:
+        case TP_FORMAT_DIAGNOSTIC_DESCRIPTOR_INVALID_JSON:
+        case TP_FORMAT_DIAGNOSTIC_DESCRIPTOR_SCHEMA:
+        case TP_FORMAT_DIAGNOSTIC_API_UNSUPPORTED:
+        case TP_FORMAT_DIAGNOSTIC_FORMAT_ID_INVALID:
+        case TP_FORMAT_DIAGNOSTIC_FORMAT_ID_RESERVED:
+        case TP_FORMAT_DIAGNOSTIC_OUTPUT_INVALID:
+        case TP_FORMAT_DIAGNOSTIC_OUTPUT_CONFLICT:
+        case TP_FORMAT_DIAGNOSTIC_HOST_FACT_INVALID:
+        case TP_FORMAT_DIAGNOSTIC_DUPLICATE_FORMAT_ID:
+            *out_phase = TP_FORMAT_PHASE_DESCRIPTOR;
+            return true;
+        case TP_FORMAT_DIAGNOSTIC_SOURCE_INVALID_UTF8:
+        case TP_FORMAT_DIAGNOSTIC_SOURCE_BINARY:
+        case TP_FORMAT_DIAGNOSTIC_COMPILE_ERROR:
+        case TP_FORMAT_DIAGNOSTIC_COMPILE_WORKER_FAILED:
+        case TP_FORMAT_DIAGNOSTIC_COMPILE_PROTOCOL:
+        case TP_FORMAT_DIAGNOSTIC_COMPILE_BUDGET:
+            *out_phase = TP_FORMAT_PHASE_COMPILE;
+            return true;
+        case TP_FORMAT_DIAGNOSTIC_HANDLER_CONTRACT:
+        case TP_FORMAT_DIAGNOSTIC_HANDLER_FAILED:
+        case TP_FORMAT_DIAGNOSTIC_HANDLER_PANIC:
+            *out_phase = TP_FORMAT_PHASE_RUNTIME;
+            return true;
+        case TP_FORMAT_DIAGNOSTIC_MEMORY_LIMIT:
+        case TP_FORMAT_DIAGNOSTIC_INSTRUCTION_LIMIT:
+        case TP_FORMAT_DIAGNOSTIC_HOST_CALL_LIMIT:
+        case TP_FORMAT_DIAGNOSTIC_OUTPUT_LIMIT:
+        case TP_FORMAT_DIAGNOSTIC_NOTICE_LIMIT:
+            *out_phase = TP_FORMAT_PHASE_LIMIT;
+            return true;
+        case TP_FORMAT_DIAGNOSTIC_DOCUMENT_UNKNOWN:
+        case TP_FORMAT_DIAGNOSTIC_DOCUMENT_DUPLICATE:
+        case TP_FORMAT_DIAGNOSTIC_DOCUMENT_UNFINISHED:
+        case TP_FORMAT_DIAGNOSTIC_DOCUMENT_MISSING:
+        case TP_FORMAT_DIAGNOSTIC_DOCUMENT_WRITE_AFTER_FINISH:
+        case TP_FORMAT_DIAGNOSTIC_DOCUMENT_INVALID_UTF8:
+        case TP_FORMAT_DIAGNOSTIC_DOCUMENT_CONTAINS_NUL:
+            *out_phase = TP_FORMAT_PHASE_OUTPUT;
+            return true;
+        case TP_FORMAT_DIAGNOSTIC_DIAGNOSTICS_TRUNCATED: return false;
+    }
+    return false;
+}
+
+bool tp_format_diagnostic_semantics_valid_internal(
+    const tp_format_diagnostic *diagnostic) {
+    if (!diagnostic || !diagnostic_code_valid(diagnostic->code) ||
+        !diagnostic_phase_valid(diagnostic->phase) ||
+        !diagnostic_severity_valid(diagnostic->severity)) {
+        return false;
+    }
+    if (diagnostic->code == TP_FORMAT_DIAGNOSTIC_DIAGNOSTICS_TRUNCATED) {
+        return diagnostic->severity == TP_FORMAT_DIAGNOSTIC_WARNING;
+    }
+    tp_format_diagnostic_phase normal_phase = TP_FORMAT_PHASE_DISCOVERY;
+    return tp_format_diagnostic_normal_phase_internal(diagnostic->code,
+                                                       &normal_phase) &&
+           diagnostic->severity == TP_FORMAT_DIAGNOSTIC_ERROR &&
+           diagnostic->phase == normal_phase;
+}
+
+bool tp_format_diagnostic_truncation_marker_canonical_internal(
+    const tp_format_diagnostic *diagnostic) {
+    static const char marker_message[] =
+        "diagnostic report truncated by a hard limit";
+    return tp_format_diagnostic_semantics_valid_internal(diagnostic) &&
+           diagnostic->code ==
+               TP_FORMAT_DIAGNOSTIC_DIAGNOSTICS_TRUNCATED &&
+           !diagnostic->format_id && !diagnostic->package_path &&
+           diagnostic->line == 0U && diagnostic->column == 0U &&
+           diagnostic->message &&
+           strcmp(diagnostic->message, marker_message) == 0 &&
+           !diagnostic->frames && diagnostic->frame_count == 0U;
+}
+
 static bool size_add(size_t *value, size_t increment) {
     if (*value > SIZE_MAX - increment) {
         return false;
@@ -236,11 +331,9 @@ static tp_status validate_append_input(
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
                             "diagnostic report and diagnostic are required");
     }
-    if (!diagnostic_severity_valid(diagnostic->severity) ||
-        !diagnostic_code_valid(diagnostic->code) ||
-        !diagnostic_phase_valid(diagnostic->phase)) {
+    if (!tp_format_diagnostic_semantics_valid_internal(diagnostic)) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
-                            "diagnostic has invalid severity, code, or phase");
+                            "diagnostic has invalid code, phase, or severity semantics");
     }
     if (diagnostic->code == TP_FORMAT_DIAGNOSTIC_DIAGNOSTICS_TRUNCATED) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
@@ -377,6 +470,61 @@ tp_status tp_format_diagnostic_report_append_internal(
     if (field_truncated) {
         mark_truncated(report, diagnostic->phase);
     }
+    return TP_STATUS_OK;
+}
+
+tp_status tp_format_diagnostic_report_materialize_internal(
+    const tp_format_diagnostic *diagnostics, size_t count,
+    tp_format_diagnostic_report **out, tp_error *err) {
+    if (!out || (count > 0U && !diagnostics)) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "diagnostic materialization requires input and output");
+    }
+    *out = NULL;
+    if (count > TP_FORMAT_DIAGNOSTIC_MAX) {
+        return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
+                            "diagnostic slice exceeds report count limit");
+    }
+    tp_format_diagnostic_report *report = NULL;
+    tp_status status =
+        tp_format_diagnostic_report_create_internal(&report, err);
+    if (status != TP_STATUS_OK) {
+        return status;
+    }
+    size_t ordinary_count = 0U;
+    for (size_t i = 0U; i < count; ++i) {
+        const tp_format_diagnostic *diagnostic = &diagnostics[i];
+        if (diagnostic->code ==
+            TP_FORMAT_DIAGNOSTIC_DIAGNOSTICS_TRUNCATED) {
+            if (i + 1U != count ||
+                !tp_format_diagnostic_truncation_marker_canonical_internal(
+                    diagnostic)) {
+                status = tp_error_set(
+                    err, TP_STATUS_INVALID_ARGUMENT,
+                    "diagnostic slice has a noncanonical truncation marker");
+                break;
+            }
+            mark_truncated(report, diagnostic->phase);
+            continue;
+        }
+        status = tp_format_diagnostic_report_append_internal(report,
+                                                              diagnostic, err);
+        if (status != TP_STATUS_OK) {
+            break;
+        }
+        ordinary_count++;
+        if (report->truncated || report->diagnostic_count != ordinary_count) {
+            status = tp_error_set(
+                err, TP_STATUS_OUT_OF_BOUNDS,
+                "diagnostic slice cannot materialize within report limits");
+            break;
+        }
+    }
+    if (status != TP_STATUS_OK) {
+        tp_format_diagnostic_report_destroy(report);
+        return status;
+    }
+    *out = report;
     return TP_STATUS_OK;
 }
 

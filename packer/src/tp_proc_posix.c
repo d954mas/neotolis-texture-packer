@@ -279,6 +279,17 @@ bool tp_proc_try_write_stdin(tp_proc *proc, const void *data, size_t size,
     return true;
 }
 
+bool tp_proc_poll_pending_stdin_write(tp_proc *proc, size_t *out_consumed,
+                                      bool *out_pending) {
+    if (out_consumed) {
+        *out_consumed = 0U;
+    }
+    if (out_pending) {
+        *out_pending = false;
+    }
+    return proc && proc->stdin_w >= 0;
+}
+
 bool tp_proc_send_cancel(tp_proc *proc) {
     const unsigned char signal = TP_PROC_CANCEL_BYTE;
     return tp_proc_write_stdin_keep_open(proc, &signal, sizeof signal);
@@ -354,6 +365,23 @@ bool tp_proc_read_stdout(tp_proc *proc, void *buf, size_t cap, size_t *out_len,
             ssize_t extra = read(proc->stdout_r, &probe, 1U);
             if (extra < 0 && errno == EINTR) {
                 continue;
+            }
+            if (extra < 0 &&
+                (errno == EAGAIN || errno == EWOULDBLOCK)) {
+                struct pollfd fd = {
+                    .fd = proc->stdout_r,
+                    .events = POLLIN | POLLHUP,
+                    .revents = 0
+                };
+                int ready;
+                do {
+                    ready = poll(&fd, 1U, -1);
+                } while (ready < 0 && errno == EINTR);
+                if (ready > 0 &&
+                    (fd.revents & (POLLERR | POLLNVAL)) == 0) {
+                    continue;
+                }
+                return false;
             }
             if (out_len) {
                 *out_len = total;
@@ -494,76 +522,108 @@ bool tp_proc_wait_slice(tp_proc *proc, int slice_ms, tp_proc_result *out, bool *
         }
         return true;
     }
-    int status = 0;
-    bool exited = false;
-    if (proc->pgid > 0) {
-        /* Observe the leader's terminal state without reaping it. While the
-         * zombie still owns pid == pgid, that group identity cannot be reused,
-         * so it is safe to terminate any descendant that outlived the leader.
-         * Reap only after the group is contained. */
-        siginfo_t info;
-        memset(&info, 0, sizeof info);
-        int observed;
-        do {
-            observed = waitid(
-                P_PID, (id_t)proc->pid, &info,
-                WEXITED | WNOHANG | WNOWAIT);
-        } while (observed < 0 && errno == EINTR);
-        if (observed < 0) {
+    uint64_t deadline_ns = 0U;
+    if (slice_ms > 0) {
+        struct timespec now;
+        if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) {
             return false;
         }
-        if (info.si_pid != 0) {
-            (void)kill(-proc->pgid, SIGKILL);
-            pid_t reaped;
+        deadline_ns = (uint64_t)now.tv_sec * UINT64_C(1000000000) +
+                      (uint64_t)now.tv_nsec +
+                      (uint64_t)slice_ms * UINT64_C(1000000);
+    }
+    for (;;) {
+        int status = 0;
+        bool exited = false;
+        if (proc->pgid > 0) {
+            /* Observe the leader's terminal state without reaping it. While the
+             * zombie still owns pid == pgid, that group identity cannot be reused,
+             * so it is safe to terminate any descendant that outlived the leader.
+             * Reap only after the group is contained. */
+            siginfo_t info;
+            memset(&info, 0, sizeof info);
+            int observed;
             do {
-                reaped = waitpid(proc->pid, &status, 0);
-            } while (reaped < 0 && errno == EINTR);
-            if (reaped != proc->pid) {
+                observed = waitid(
+                    P_PID, (id_t)proc->pid, &info,
+                    WEXITED | WNOHANG | WNOWAIT);
+            } while (observed < 0 && errno == EINTR);
+            if (observed < 0) {
                 return false;
             }
-            exited = true;
+            if (info.si_pid != 0) {
+                (void)kill(-proc->pgid, SIGKILL);
+                pid_t reaped;
+                do {
+                    reaped = waitpid(proc->pid, &status, 0);
+                } while (reaped < 0 && errno == EINTR);
+                if (reaped != proc->pid) {
+                    return false;
+                }
+                exited = true;
+            }
+        } else {
+            pid_t reaped;
+            do {
+                reaped = waitpid(proc->pid, &status, WNOHANG);
+            } while (reaped < 0 && errno == EINTR);
+            if (reaped < 0) {
+                return false;
+            }
+            exited = reaped == proc->pid;
         }
-    } else {
-        pid_t reaped;
-        do {
-            reaped = waitpid(proc->pid, &status, WNOHANG);
-        } while (reaped < 0 && errno == EINTR);
-        if (reaped < 0) {
+        if (exited) {
+            if (WIFEXITED(status)) {
+                proc->result.how = TP_PROC_END_EXITED;
+                proc->result.code = WEXITSTATUS(status);
+            } else if (WIFSIGNALED(status)) {
+                proc->result.how = TP_PROC_END_ABNORMAL;
+                proc->result.code = WTERMSIG(status);
+            } else {
+                proc->result.how = TP_PROC_END_ABNORMAL;
+                proc->result.code = -1;
+            }
+            proc->reaped = true;
+            /* A process-group id may be reused as soon as its leader has been
+             * reaped. The handle no longer has a safe OS identity with which to
+             * signal that group, even if a former descendant is still running. */
+            proc->pgid = -1;
+            if (finished) {
+                *finished = true;
+            }
+            if (out) {
+                *out = proc->result;
+            }
+            return true;
+        }
+        if (slice_ms <= 0) {
+            return true;
+        }
+
+        /* Poll at a short cadence until the deadline so a child that exits
+         * inside a long slice is reported promptly. A child commonly exits
+         * between pipe EOF and its wait status becoming observable. */
+        struct timespec now;
+        if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) {
             return false;
         }
-        exited = reaped == proc->pid;
-    }
-    if (!exited) {
-        /* Still running: sleep out the slice so the caller polls at a bounded
-         * cadence rather than spinning. */
-        if (slice_ms > 0) {
-            struct timespec ts = {slice_ms / 1000, (long)(slice_ms % 1000) * 1000000L};
-            (void)nanosleep(&ts, NULL);
+        const uint64_t now_ns =
+            (uint64_t)now.tv_sec * UINT64_C(1000000000) +
+            (uint64_t)now.tv_nsec;
+        if (now_ns >= deadline_ns) {
+            return true;
         }
-        return true;
+        uint64_t delay_ns = deadline_ns - now_ns;
+        if (delay_ns > UINT64_C(1000000)) {
+            delay_ns = UINT64_C(1000000);
+        }
+        struct timespec delay = {
+            .tv_sec = 0,
+            .tv_nsec = (long)delay_ns
+        };
+        while (nanosleep(&delay, &delay) < 0 && errno == EINTR) {
+        }
     }
-    if (WIFEXITED(status)) {
-        proc->result.how = TP_PROC_END_EXITED;
-        proc->result.code = WEXITSTATUS(status);
-    } else if (WIFSIGNALED(status)) {
-        proc->result.how = TP_PROC_END_ABNORMAL;
-        proc->result.code = WTERMSIG(status);
-    } else {
-        proc->result.how = TP_PROC_END_ABNORMAL;
-        proc->result.code = -1;
-    }
-    proc->reaped = true;
-    /* A process-group id may be reused as soon as its leader has been reaped.
-     * The handle no longer has a safe OS identity with which to signal that
-     * group, even if a former descendant is still running. */
-    proc->pgid = -1;
-    if (finished) {
-        *finished = true;
-    }
-    if (out) {
-        *out = proc->result;
-    }
-    return true;
 }
 
 void tp_proc_kill(tp_proc *proc) {

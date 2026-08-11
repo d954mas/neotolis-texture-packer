@@ -85,6 +85,13 @@ tp_proc *tp_proc_spawn_owned_tree(const char *exe_utf8, const char *arg1,
 bool tp_proc_try_write_stdin(tp_proc *proc, const void *data, size_t size,
                              size_t *out_consumed, bool *out_would_block);
 
+/* Poll only an already-submitted asynchronous stdin write. Never starts a new
+ * write. On completion, reports the submitted prefix through out_consumed; if
+ * it is still in flight, reports out_pending=true. POSIX writes are accounted
+ * synchronously, so that backend always reports no pending write. */
+bool tp_proc_poll_pending_stdin_write(tp_proc *proc, size_t *out_consumed,
+                                      bool *out_pending);
+
 /* Write all `size` bytes to the child's stdin and leave it open for cooperative
  * control bytes. This blocking convenience API is for small bounded frames; the
  * frame-bounded job pump uses tp_proc_try_write_stdin instead. Returns false on

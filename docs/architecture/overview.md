@@ -87,10 +87,13 @@ Export IR v1 and the common artifact planner/publisher. Format discovery now
 builds an explicit immutable owned catalog from the executable-relative
 `formats/` root, with strict API-v1 descriptor parsing, deterministic
 unavailable rows, fingerprints, and bounded owned diagnostics. A valid Lua
-candidate remains pending isolated compilation and cannot become available in
-the current implementation. There is no production runtime C registration
-surface, Lua execution, or Reload Formats operation. Import and linked-atlas
-ingestion remain outside this slice.
+candidate still remains pending from every production client and cannot become
+available to Pack or Export. The repository now contains a dormant worker-only
+Lua 5.5 kernel, isolated compile-validation transport, atomic catalog
+finalization seam, and standalone package-binding codec, exercised only by
+contract tests. Clients do not call those seams yet; there is no production
+runtime C registration surface, user-visible Lua execution, or Reload Formats
+operation. Import and linked-atlas ingestion remain outside this slice.
 The future export-handler contract is documented in
 [`../spec/format-ecosystem.md`](../spec/format-ecosystem.md).
 

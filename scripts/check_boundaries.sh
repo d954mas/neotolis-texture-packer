@@ -565,15 +565,19 @@ tp_op_internal          tp_op_catalog|tp_op_validate|tp_op_validate_atlas|tp_op_
 tp_op_validate_family_internal tp_op_validate|tp_op_validate_atlas|tp_op_validate_source_sprite|tp_op_validate_animation|tp_op_validate_target
 tp_encode_internal      tp_op_encode|tp_txn_encode|tp_txn_apply
 tp_fs_internal          tp_fs_io|tp_fs_win32|tp_fs_posix|tp_build_worker|tp_job_worker_main|tp_job|tp_export_defold|tp_export_json_neotolis|tp_export_png|tp_file_lease|tp_identity|tp_image|tp_journal_io|tp_pack_hash|tp_pack_read|tp_project_parse|tp_project_save|tp_project_lease|tp_recovery|tp_recovery_backend_win32|tp_recovery_scan|tp_recovery_store|tp_scan|tp_format_discovery_win32|tp_runtime_path_win32
-tp_format_catalog_internal tp_format_catalog|tp_format_catalog_scan|tp_export_run
-tp_format_descriptor_internal tp_format_catalog_internal|tp_format_descriptor|tp_format_discovery_posix|tp_format_discovery_win32
-tp_format_diagnostic_internal tp_format_catalog_scan|tp_format_diagnostic
+tp_format_binding_proto_internal tp_format_binding_proto
+tp_format_catalog_internal tp_format_catalog|tp_format_catalog_scan|tp_format_compile_worker|tp_export_run
+tp_format_compile_proto_internal tp_build_worker_main|tp_format_compile_proto|tp_format_compile_service|tp_format_compile_worker
+tp_format_compile_worker_internal tp_build_worker_main|tp_format_compile_service|tp_format_compile_worker
+tp_format_descriptor_internal tp_format_binding_proto|tp_format_catalog_internal|tp_format_compile_proto|tp_format_compile_service|tp_format_descriptor|tp_format_discovery_posix|tp_format_discovery_win32
+tp_format_diagnostic_internal tp_format_binding_proto|tp_format_catalog_scan|tp_format_compile_proto|tp_format_compile_service|tp_format_compile_worker|tp_format_diagnostic|tp_lua_host
 tp_format_discovery_internal tp_format_catalog_scan|tp_format_discovery|tp_format_discovery_posix|tp_format_discovery_win32
+tp_format_package_internal tp_format_binding_proto|tp_format_catalog_scan|tp_format_descriptor|tp_format_package|tp_lua_bindings|tp_lua_host
 tp_pack_constraints_internal tp_pack_constraints|tp_op_validate_atlas|tp_op_validate_source_sprite|tp_pack|tp_project_identity|tp_project_parse|tp_validate_target_settings
 tp_history_codec_internal tp_history|tp_history_codec|tp_history_codec_read|tp_model_journal|tp_txn_apply
 tp_journal_internal     tp_journal|tp_journal_io|tp_journal_read|tp_journal_wire|tp_history|tp_model|tp_model_journal|tp_txn_apply|tp_recovery_backend_posix|tp_recovery_backend_win32|tp_recovery_claim|tp_recovery_scan|tp_recovery_store
 tp_json_internal        tp_json_internal|tp_project_parse|tp_txn_parse|tp_format_descriptor
-tp_utf8_internal        tp_utf8|tp_build_proto|tp_fs_io|tp_image|tp_job_worker_proto|tp_json_internal|tp_op_validate|tp_project_identity|tp_source_path_text|tp_format_catalog_scan|tp_format_descriptor
+tp_utf8_internal        tp_utf8|tp_build_proto|tp_format_binding_proto|tp_format_catalog_scan|tp_format_compile_proto|tp_format_descriptor|tp_format_package|tp_fs_io|tp_image|tp_job_worker_proto|tp_json_internal|tp_lua_bindings|tp_lua_host|tp_op_validate|tp_project_identity|tp_source_path_text
 tp_idset_internal       tp_idset|tp_txn_idset|tp_journal|tp_journal_internal|tp_journal_read|tp_model_journal
 tp_project_internal     tp_project|tp_project_identity|tp_project_parse|tp_project_parse_internal|tp_project_save|tp_project_write_internal|tp_project_write|tp_history|tp_job|tp_model_journal|tp_session
 tp_project_path_internal tp_project|tp_project_parse|tp_project_path|tp_project_save|tp_project_write
@@ -609,9 +613,11 @@ tp_build_proto_internal tp_build_proto|tp_build_worker|tp_build_worker_main
 tp_build_worker_internal tp_build_worker|tp_pack|tp_job_worker_main
 tp_job_worker_internal  tp_build_worker_main|tp_job_worker_main|tp_job_worker_process_internal|tp_job_worker_proto
 tp_job_worker_process_internal tp_job|tp_job_worker
-tp_export_internal     tp_export|tp_export_defold|tp_export_json_neotolis|tp_export_png|tp_export_run|tp_format_catalog
+tp_export_internal     tp_export|tp_export_defold|tp_export_json_neotolis|tp_export_png|tp_export_run|tp_format_binding_proto|tp_format_catalog
 tp_export_job_internal tp_export_run|tp_job_worker_main
-tp_proc_internal        tp_proc_win32|tp_proc_posix|tp_build_worker|tp_job_worker|tp_job_worker_main
+tp_proc_internal        tp_proc_win32|tp_proc_posix|tp_build_worker|tp_format_compile_worker|tp_job_worker|tp_job_worker_main
+tp_lua_host_internal    tp_format_compile_service|tp_lua_host_private_internal
+tp_lua_host_private_internal tp_lua_bindings|tp_lua_host
 EOF
 }
 
@@ -1381,6 +1387,22 @@ fi
 if ! printf '#include "test_gui_action_trace_fixture.h"\nstatic bool second_driver(void) { return gui_project_test_new(); }\n' |
     grep -qE "$_gui_test_fixture_include"; then
     hit "R25-selftest" "R25 failed to catch a seeded transitive GUI test fixture"
+fi
+
+# 26. Raw Lua state ownership is confined to the kernel implementation. The
+#     compile service may call the typed host contract, but controllers and all
+#     other shipping modules cannot include Lua headers or name lua_State.
+_lua_kernel_surface='lua_State|#[[:space:]]*include[[:space:]]*[<"](lua|lauxlib|lualib)[.]h[>"]|#[[:space:]]*include[[:space:]]*"tp_lua_host_private_internal[.]h"'
+r26=$(find packer/src -maxdepth 1 -type f \( -name '*.c' -o -name '*.h' \) \
+    ! -name 'tp_lua_host.c' \
+    ! -name 'tp_lua_bindings.c' \
+    ! -name 'tp_lua_host_private_internal.h' |
+    xargs grep -nE "$_lua_kernel_surface" 2>/dev/null)
+[ -n "$r26" ] && hit "R26 raw Lua state escaped its kernel" "$r26"
+
+if ! printf '#include "lua.h"\nlua_State *state;\n' |
+    grep -qE "$_lua_kernel_surface"; then
+    hit "R26-selftest" "R26 failed to catch a seeded raw Lua dependency"
 fi
 
 if [ "$fail" -eq 0 ]; then

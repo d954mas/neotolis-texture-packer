@@ -7,6 +7,7 @@
 # the static-CRT builder; tp_core stays default-CRT for the render runtime).
 # Vendored utf8proc supplies Unicode NFC and case-folding to source keys.
 add_subdirectory(deps/utf8proc)
+add_subdirectory(deps/lua)
 find_package(Threads REQUIRED)
 
 add_library(tp_core STATIC
@@ -21,7 +22,8 @@ add_library(tp_core STATIC
     # Owned immutable format catalog, strict package descriptor admission, and
     # executable-relative runtime root. Discovery's OS backend is selected below.
     src/tp_format_catalog.c src/tp_format_catalog_scan.c
-    src/tp_format_descriptor.c src/tp_format_diagnostic.c
+    src/tp_format_binding_proto.c
+    src/tp_format_descriptor.c src/tp_format_diagnostic.c src/tp_format_package.c
     src/tp_format_discovery.c src/tp_runtime_path.c
     # Project identity, canonical paths, leases, source plans, and recovery.
     src/tp_id.c src/tp_identity.c src/tp_identity_session.c src/tp_source_path_text.c src/tp_source_plan.c
@@ -112,7 +114,12 @@ nt_set_sanitizer_flags(tp_core)
 add_library(tp_build STATIC src/tp_pack.c src/tp_build_driver.c src/tp_build_proto.c
     src/tp_build_worker.c src/tp_build_worker_main.c src/tp_export_run.c
     src/tp_job.c src/tp_refresh_job.c src/tp_job_worker.c src/tp_job_worker_main.c
-    src/tp_job_worker_proto.c)
+    src/tp_job_worker_proto.c
+    # Dormant Packet 2 worker-only Lua kernel. Client/catalog activation is a
+    # later packet; Lua headers and state ownership never enter tp_core.
+    src/tp_lua_bindings.c src/tp_lua_host.c
+    src/tp_format_compile_proto.c src/tp_format_compile_service.c
+    src/tp_format_compile_worker.c)
 if(WIN32)
     target_sources(tp_build PRIVATE src/tp_proc_win32.c)
 else()
@@ -123,7 +130,8 @@ endif()
 # flattened to ...libnt_log.a...libnt_builder.a and the Linux release link
 # failed (lld/ld64 don't care about order). nt_log repeated after nt_builder
 # as belt-and-suspenders against future reordering.
-target_link_libraries(tp_build PUBLIC nt_builder tp_core nt_log)
+target_link_libraries(tp_build PUBLIC nt_builder tp_core nt_log
+    PRIVATE tp_lua_vendor)
 if(NOT WIN32)
     target_link_libraries(tp_build PRIVATE tinycthread)
 endif()

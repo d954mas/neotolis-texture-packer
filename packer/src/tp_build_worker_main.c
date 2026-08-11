@@ -18,6 +18,8 @@
 
 #include "tp_build_driver_internal.h"
 #include "tp_build_proto_internal.h"
+#include "tp_format_compile_proto_internal.h"
+#include "tp_format_compile_worker_internal.h"
 #include "tp_job_worker_internal.h"
 
 /* The child reads at most one request frame: header(12) + payload. The proto
@@ -139,10 +141,15 @@ static uint32_t read_le_u32(const uint8_t *bytes) {
            ((uint32_t)bytes[3] << 24U);
 }
 
-static tp_status read_dispatched_request(uint8_t **out_bytes,
-                                         size_t *out_len,
-                                         bool *out_job,
-                                         tp_error *err) {
+typedef enum tp_worker_dispatch_kind {
+    TP_WORKER_DISPATCH_BUILD = 0,
+    TP_WORKER_DISPATCH_JOB,
+    TP_WORKER_DISPATCH_FORMAT_COMPILE,
+} tp_worker_dispatch_kind;
+
+static tp_status read_dispatched_request(
+    uint8_t **out_bytes, size_t *out_len,
+    tp_worker_dispatch_kind *out_kind, tp_error *err) {
     uint8_t header[TP_WORKER_FRAME_HEADER_BYTES];
     tp_status status = read_exact(header, sizeof header, err);
     if (status != TP_STATUS_OK) {
@@ -175,25 +182,33 @@ static tp_status read_dispatched_request(uint8_t **out_bytes,
         free(tail);
         *out_bytes = request;
         *out_len = sizeof header + tail_length;
-        *out_job = false;
+        *out_kind = TP_WORKER_DISPATCH_BUILD;
         return TP_STATUS_OK;
     }
-    if (magic != TP_JOB_WORKER_PROTO_REQUEST_MAGIC) {
+    const bool is_job = magic == TP_JOB_WORKER_PROTO_REQUEST_MAGIC;
+    const bool is_compile =
+        magic == TP_FORMAT_COMPILE_PROTO_REQUEST_MAGIC;
+    if (!is_job && !is_compile) {
         return tp_error_set(err, TP_STATUS_BAD_MAGIC,
                             "worker: unknown request magic");
     }
+    *out_kind = is_job ? TP_WORKER_DISPATCH_JOB
+                       : TP_WORKER_DISPATCH_FORMAT_COMPILE;
     const size_t payload_length =
         (size_t)read_le_u32(header + 8U);
-    if (payload_length > TP_JOB_WORKER_PROTO_MAX_FRAME_BYTES ||
+    const size_t payload_cap =
+        is_job ? TP_JOB_WORKER_PROTO_MAX_FRAME_BYTES
+               : TP_FORMAT_COMPILE_PROTO_MAX_REQUEST_PAYLOAD_BYTES;
+    if (payload_length > payload_cap ||
         payload_length > SIZE_MAX - sizeof header) {
         return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
-                            "job worker: request exceeds the frame cap");
+                            "worker: request exceeds the frame cap");
     }
     const size_t total = sizeof header + payload_length;
     uint8_t *request = malloc(total);
     if (!request) {
         return tp_error_set(err, TP_STATUS_OOM,
-                            "job worker: request buffer allocation failed");
+                            "worker: request buffer allocation failed");
     }
     memcpy(request, header, sizeof header);
     status = read_exact(request + sizeof header, payload_length, err);
@@ -203,7 +218,6 @@ static tp_status read_dispatched_request(uint8_t **out_bytes,
     }
     *out_bytes = request;
     *out_len = total;
-    *out_job = true;
     return TP_STATUS_OK;
 }
 
@@ -293,17 +307,28 @@ int tp_build_worker_main(void) {
     tp_error err = {{0}};
     uint8_t *req_bytes = NULL;
     size_t req_len = 0U;
-    bool is_job = false;
+    tp_worker_dispatch_kind kind = TP_WORKER_DISPATCH_BUILD;
     tp_status st = read_dispatched_request(
-        &req_bytes, &req_len, &is_job, &err);
+        &req_bytes, &req_len, &kind, &err);
     if (st != TP_STATUS_OK) {
+        if (kind == TP_WORKER_DISPATCH_FORMAT_COMPILE &&
+            st == TP_STATUS_OOM) {
+            free(req_bytes);
+            return TP_FORMAT_COMPILE_WORKER_EXIT_OOM;
+        }
         (void)write_response(st, "", err.msg);
         free(req_bytes);
         return 0; /* a reply was emitted; the parent maps it (BUILDER_FAILED) */
     }
-    if (is_job) {
+    if (kind == TP_WORKER_DISPATCH_JOB) {
         const int result =
             tp_job_worker_main_request(req_bytes, req_len);
+        free(req_bytes);
+        return result;
+    }
+    if (kind == TP_WORKER_DISPATCH_FORMAT_COMPILE) {
+        const int result =
+            tp_format_compile_worker_main_request(req_bytes, req_len);
         free(req_bytes);
         return result;
     }

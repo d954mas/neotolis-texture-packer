@@ -23,7 +23,8 @@ through a shared core rather than separate GUI and automation models.
   common publication with destination ownership for handled failures;
 - an explicit immutable format catalog with executable-relative strict package
   discovery, deterministic unavailable rows, fingerprints, and bounded owned
-  diagnostics; runtime package compilation/execution is not implemented yet;
+  diagnostics; dormant isolated Lua compile/runtime infrastructure exists, but
+  no client activates runtime packages for Pack or Export;
 - semantic revision, dirty state, Undo/Redo, durable Save, and best-effort
   recovery;
 - worker-process containment for fallible builder work;

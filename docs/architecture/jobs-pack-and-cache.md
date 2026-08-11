@@ -23,8 +23,9 @@ Preview admission resolves its exporter ID through the session's retained
 format catalog. The in-process immutable Export snapshot job also retains and
 uses the snapshot's exact catalog generation for target admission and
 capability policy. The outer worker protocol still carries only the two native
-handlers; runtime package bindings and their diagnostics are the next protocol
-layer and no Lua row can become available before that layer exists.
+handlers. A dormant standalone binding codec now defines the bounded snapshot
+needed by a later protocol layer, but it is not part of the active job request
+or response and no Lua row is admitted by current clients.
 
 Later model/source-generation changes do not automatically reject a terminal
 receipt. Instance, request, and target identity still gate adoption. The core

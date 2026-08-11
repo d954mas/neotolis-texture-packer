@@ -467,35 +467,8 @@ bool tp_proc_try_write_stdin(tp_proc *proc, const void *data, size_t size,
         if (data != proc->stdin_pending_data || size < proc->stdin_pending_size) {
             return false;
         }
-        DWORD written = 0U;
-        if (!GetOverlappedResult(proc->stdin_w, &proc->stdin_overlapped,
-                                 &written, FALSE)) {
-            if (GetLastError() == ERROR_IO_INCOMPLETE) {
-                if (out_would_block) {
-                    *out_would_block = true;
-                }
-                return true;
-            }
-            free(proc->stdin_pending_buffer);
-            proc->stdin_pending_buffer = NULL;
-            proc->stdin_pending = false;
-            proc->stdin_pending_data = NULL;
-            proc->stdin_pending_size = 0U;
-            return false;
-        }
-        const size_t completed = proc->stdin_pending_size;
-        free(proc->stdin_pending_buffer);
-        proc->stdin_pending_buffer = NULL;
-        proc->stdin_pending = false;
-        proc->stdin_pending_data = NULL;
-        proc->stdin_pending_size = 0U;
-        if ((size_t)written != completed) {
-            return false;
-        }
-        if (out_consumed) {
-            *out_consumed = completed;
-        }
-        return true;
+        return tp_proc_poll_pending_stdin_write(
+            proc, out_consumed, out_would_block);
     }
     if (size == 0U) {
         return true;
@@ -545,6 +518,52 @@ bool tp_proc_try_write_stdin(tp_proc *proc, const void *data, size_t size,
     proc->stdin_pending_size = (size_t)chunk;
     if (out_would_block) {
         *out_would_block = true;
+    }
+    return true;
+}
+
+bool tp_proc_poll_pending_stdin_write(tp_proc *proc, size_t *out_consumed,
+                                      bool *out_pending) {
+    if (out_consumed) {
+        *out_consumed = 0U;
+    }
+    if (out_pending) {
+        *out_pending = false;
+    }
+    if (!proc || !proc->stdin_w) {
+        return false;
+    }
+    if (!proc->stdin_pending) {
+        return true;
+    }
+
+    DWORD written = 0U;
+    if (!GetOverlappedResult(proc->stdin_w, &proc->stdin_overlapped,
+                             &written, FALSE)) {
+        if (GetLastError() == ERROR_IO_INCOMPLETE) {
+            if (out_pending) {
+                *out_pending = true;
+            }
+            return true;
+        }
+        free(proc->stdin_pending_buffer);
+        proc->stdin_pending_buffer = NULL;
+        proc->stdin_pending = false;
+        proc->stdin_pending_data = NULL;
+        proc->stdin_pending_size = 0U;
+        return false;
+    }
+    const size_t completed = proc->stdin_pending_size;
+    free(proc->stdin_pending_buffer);
+    proc->stdin_pending_buffer = NULL;
+    proc->stdin_pending = false;
+    proc->stdin_pending_data = NULL;
+    proc->stdin_pending_size = 0U;
+    if ((size_t)written != completed) {
+        return false;
+    }
+    if (out_consumed) {
+        *out_consumed = completed;
     }
     return true;
 }

@@ -615,6 +615,43 @@ tp_add_test(NAME format_catalog_context
     SOURCES test_format_catalog_context.c tp_format_catalog_test_seam.c
     LIBS tp_build unity PRIVATE_SRC SEAMS)
 
+# Epic 3 Packet 2 foundation: exact offline Lua inventory/ABI and the dormant,
+# standalone package-binding snapshot codec. Neither gate activates Lua in an
+# app catalog or changes the active job protocol.
+tp_add_test(NAME lua_vendor_contract LIBS tp_lua_vendor PRIVATE_SRC)
+tp_add_test(NAME format_binding_protocol LIBS tp_core unity PRIVATE_SRC)
+
+# Worker-only runtime gates. Each executable re-enters itself as the child that
+# owns lua_State; the Unity controller performs only process I/O. The limits
+# gate recompiles the two host TUs with fenced lowered ceilings, leaving the
+# production tp_build constants immutable. These normally complete in under a
+# second; 30 seconds leaves ample slow-runner margin while bounding an
+# instruction-hook or child-process regression so it cannot wedge CI.
+tp_add_test(NAME lua_sandbox_contract
+    SOURCES test_lua_sandbox_contract.c
+        ../src/tp_lua_host.c ../src/tp_lua_bindings.c
+    LIBS tp_build tp_lua_vendor unity PRIVATE_SRC SEAMS
+    TIMEOUT 30)
+tp_add_test(NAME lua_limits_faults
+    SOURCES test_lua_limits_faults.c
+        ../src/tp_lua_host.c ../src/tp_lua_bindings.c
+    LIBS tp_build tp_lua_vendor unity PRIVATE_SRC SEAMS
+    TIMEOUT 30)
+tp_add_test(NAME lua_determinism LIBS tp_build unity PRIVATE_SRC TIMEOUT 30)
+
+# Persistent compile-validation FSM. Recompile the separate controller and
+# child-service TUs with fenced fault actions; the shipped tp_build copies have
+# no environment fault controls. The executable is its own hidden worker child.
+tp_add_test(NAME format_compile_worker
+    SOURCES test_format_compile_worker.c
+        ../src/tp_format_compile_worker.c ../src/tp_format_compile_service.c
+    LIBS tp_build unity PRIVATE_SRC SEAMS
+    DEFINES
+        TP_FORMAT_COMPILE_TEST_DIR="${CMAKE_CURRENT_BINARY_DIR}/format_compile_worker_root"
+        _CRT_SECURE_NO_WARNINGS
+    MAKE_DIRS "${CMAKE_CURRENT_BINARY_DIR}/format_compile_worker_root"
+    TIMEOUT 120)
+
 # Tests are executable boundaries, so sanitizer instrumentation must be linked
 # on each one rather than only on tp_core/tp_build. Keep this directory-wide
 # gate at the end so newly added first-party tests cannot silently miss it.

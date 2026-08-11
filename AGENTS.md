@@ -57,9 +57,16 @@ handling of invalid input.
   structured contracts. Destructive/lossy operations provide predictable
   dry-run behavior. Invalid input returns an error, never an abort.
 - Use C17 and `nt_set_warning_flags` on every first-party target.
-- Use `NT_ASSERT` and builder-boundary `NT_BUILD_ASSERT` in Debug and Release.
-  Never disable them, set `NT_ASSERT_MODE=OFF`, or substitute libc `assert()` for
-  required runtime invariants.
+- Every supported Debug, Release, CI, and shipping build keeps `NT_ASSERT` and
+  builder-boundary `NT_BUILD_ASSERT` active. `NT_ASSERT_MODE=OFF` and any other
+  configuration that disables them are unsupported; the project makes no
+  behavior, safety, recovery, or compatibility guarantees for such builds.
+- Fail early on broken internal invariants. Use `NT_ASSERT` or, at the builder
+  boundary, `NT_BUILD_ASSERT`; never translate a programmer error or corrupted
+  internal state into an ordinary `tp_status` that masks the defect. Structured
+  errors remain mandatory for invalid or untrusted external input, and hard
+  validation at trust boundaries must precede unsafe access. Never substitute
+  libc `assert()` for required runtime invariants.
 - Sources are tagged records. Path files/folders and linked atlases share one
   runtime status boundary. External refresh never changes project revision,
   dirty state, or Undo history and never starts Pack automatically.
