@@ -7,6 +7,9 @@ format.json text eol=lf
 *.sh text eol=lf
 packer/deps/lua/src/* text eol=lf
 *.png binary
+examples/runtime-formats/golden/**/*.json text eol=lf
+examples/runtime-formats/golden/**/*.tpinfo text eol=lf
+examples/runtime-formats/golden/**/*.tpatlas text eol=lf
 
 # U-01 owner-scale bench assets (real Kenney CC0 sprites). Stored in Git LFS so
 # the base clone stays lean; the deterministic manifest below is plain text.
