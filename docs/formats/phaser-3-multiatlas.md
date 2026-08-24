@@ -1,6 +1,6 @@
 # Phaser 3 Multi-Atlas export
 
-**Status:** Target export contract; not implemented by the current product.
+**Status:** Current bundled Lua export contract.
 
 The `phaser-3-multiatlas` runtime package emits one Phaser Multi-Atlas JSON Array
 document plus the common core-owned PNG pages. It targets Phaser `>=3.70 <4`;

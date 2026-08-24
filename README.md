@@ -18,11 +18,12 @@ the native GUI and saved-file CLI are thin clients over those contracts.
 - complete saved-file CLI editing, inspection, validation, Pack, Export, dry
   run, versioned JSON reports, and stable exit codes;
 - full-fidelity `json-neotolis` export;
-- Defold export with capability adaptation and structured loss notices.
+- target-neutral Export IR and one runtime format catalog shared by CLI and GUI;
+- bundled Defold and Phaser exports with capability adaptation and structured
+  loss notices.
 
 The current product does not yet ship filesystem watchers, linked foreign-atlas
-sources, Import/Export IR, unified format packages, Lua handlers, MCP, or a Dev
-API transport.
+sources, Import IR, MCP, or a Dev API transport.
 
 Start at [`docs/README.md`](docs/README.md) for current product, architecture,
 format, and explicitly labeled target contracts.

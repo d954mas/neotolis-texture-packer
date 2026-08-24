@@ -1,0 +1,30 @@
+{
+  "textures": [
+    {
+      "image": "atlas-0.png",
+      "format": "RGBA8888",
+      "size": {"w": 6, "h": 3},
+      "scale": 1,
+      "frames": [
+        {
+          "filename": "coin",
+          "frame": {"x": 1, "y": 1, "w": 1, "h": 1},
+          "rotated": false,
+          "trimmed": false,
+          "spriteSourceSize": {"x": 0, "y": 0, "w": 1, "h": 1},
+          "sourceSize": {"w": 1, "h": 1},
+          "pivot": {"x": 0.5, "y": 0.5}
+        },
+        {
+          "filename": "hero",
+          "frame": {"x": 4, "y": 1, "w": 1, "h": 1},
+          "rotated": false,
+          "trimmed": false,
+          "spriteSourceSize": {"x": 0, "y": 0, "w": 1, "h": 1},
+          "sourceSize": {"w": 1, "h": 1},
+          "pivot": {"x": 0.25, "y": 0.75}
+        }
+      ]
+    }
+  ]
+}

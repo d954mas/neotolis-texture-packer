@@ -17,7 +17,7 @@
           "out_path": "out/shared"
         },
         {
-          "exporter_id": "defold",
+          "exporter_id": "json-neotolis",
           "id": "target_00000000000000000000000000000304",
           "out_path": "out/secondary"
         }
@@ -34,7 +34,7 @@
       ],
       "targets": [
         {
-          "exporter_id": "defold",
+          "exporter_id": "json-neotolis",
           "id": "target_00000000000000000000000000000313",
           "out_path": "out/shared"
         },

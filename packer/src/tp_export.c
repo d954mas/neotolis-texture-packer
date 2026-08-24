@@ -256,39 +256,8 @@ static const tp_exporter g_json_neotolis = {
     .serialize = tp_export_json_neotolis_serialize,
 };
 
-/* Defold (extension-texturepacker .tpinfo). Caps = the FORMAT's real abilities
- * (docs/formats/defold-tpinfo.md): identity and clockwise 90-degree rotation,
- * trim, polygons, pivots (v2.0), multipage and aliases. Region-level flips and
- * 9-slice are not representable. The exact transform mask is intersected with
- * the requested pack mask before the engine is called. */
-static const tp_format_artifact_decl g_defold_artifacts[] = {
-    {.id = "tpinfo", .suffix = ".tpinfo"},
-    {.id = "tpatlas", .suffix = ".tpatlas"},
-};
-
-static const tp_format_descriptor g_defold_format = {
-    .id = "defold",
-    .display_name = "Defold (.tpinfo + .tpatlas)",
-    .caps = {.transform_mask = (uint8_t)(TP_EXPORT_TRANSFORMS_IDENTITY |
-                                         TP_EXPORT_TRANSFORM_BIT(TP_TRANSFORM_DIAGONAL |
-                                                                 TP_TRANSFORM_FLIP_H)),
-             .polygons = true,
-             .pivot = true,
-             .slice9 = false,
-             .multipage = true,
-             .aliases = true,
-             .animations = true},
-    .artifacts = g_defold_artifacts,
-    .artifact_count = 2,
-};
-
-static const tp_exporter g_defold = {
-    .format = &g_defold_format,
-    .serialize = tp_export_defold_serialize,
-};
-
-/* Built-in table: the current user-facing exporters. */
-static const tp_exporter *const g_builtins[] = {&g_json_neotolis, &g_defold};
+/* Runtime packages own every non-core wire format. */
+static const tp_exporter *const g_builtins[] = {&g_json_neotolis};
 #define TP_BUILTIN_COUNT ((int)(sizeof g_builtins / sizeof g_builtins[0]))
 
 tp_status tp_exporter_id_validate(const char *id, tp_error *err) {

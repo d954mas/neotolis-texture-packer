@@ -793,7 +793,7 @@ void test_preview_pack_admits_with_sources_and_pending_refresh_runs_later(void) 
     char error[256] = {0};
     TEST_ASSERT_TRUE_MESSAGE(
         gui_pack_preview_async_start(
-            atlas_id, "defold", error,
+            atlas_id, "json-neotolis", error,
             sizeof error),
         error);
     admit_queued_job();
@@ -835,7 +835,7 @@ void test_preview_pack_compacts_receipt_before_long_lived_pin(void) {
     char error[256] = {0};
     TEST_ASSERT_TRUE_MESSAGE(
         gui_pack_preview_blocking(
-            atlas_id, "defold", error,
+            atlas_id, "json-neotolis", error,
             sizeof error),
         error);
 
@@ -879,7 +879,7 @@ void test_preview_after_native_pack_uses_observed_runtime_generation(void) {
         TP_STATUS_OK,
         gui_project_job_enqueue_pack(
             atlas->id, TP_GUI_IDENTITY_TEST_DIR,
-            "defold", &job_error));
+            "json-neotolis", &job_error));
     gui_pack_result_info info = {0};
     gui_pack_done done = GUI_PACK_DONE_NONE;
     for (int attempt = 0;

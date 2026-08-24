@@ -272,6 +272,131 @@ static gui_pack_done drain_current_job(
     return done;
 }
 
+typedef struct gui_test_file {
+    unsigned char *bytes;
+    size_t size;
+} gui_test_file;
+
+static gui_test_file read_gui_test_file(const char *path) {
+    gui_test_file result = {0};
+    FILE *file = fopen(path, "rb");
+    TEST_ASSERT_NOT_NULL_MESSAGE(file, path);
+    TEST_ASSERT_EQUAL_INT(0, fseek(file, 0, SEEK_END));
+    const long length = ftell(file);
+    TEST_ASSERT_TRUE(length >= 0);
+    TEST_ASSERT_EQUAL_INT(0, fseek(file, 0, SEEK_SET));
+    result.size = (size_t)length;
+    result.bytes = malloc(result.size + 1U);
+    TEST_ASSERT_NOT_NULL(result.bytes);
+    TEST_ASSERT_EQUAL_size_t(
+        result.size, fread(result.bytes, 1, result.size, file));
+    result.bytes[result.size] = '\0';
+    TEST_ASSERT_EQUAL_INT(0, fclose(file));
+    return result;
+}
+
+static gui_pack_result_info run_gui_defold_export(void) {
+    TEST_ASSERT_TRUE(gui_pack_init(TP_GUI_TRACE_TEST_DIR));
+    char error_text[256] = {0};
+    TEST_ASSERT_TRUE_MESSAGE(
+        gui_pack_export_async_start(error_text, sizeof error_text),
+        error_text);
+    gui_pack_result_info result = {0};
+    TEST_ASSERT_EQUAL_INT(
+        GUI_PACK_DONE_EXPORT_OK, drain_current_job(&result));
+    return result;
+}
+
+static void install_bundled_catalog_and_start_new_project(void) {
+    app_format_catalog startup = {0};
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        app_format_catalog_open_startup_at_root(
+            TP_FORMAT_BUNDLED_ROOT, &startup, &error),
+        error.msg);
+    TEST_ASSERT_TRUE(gui_project__test_set_format_catalog(startup.catalog));
+    app_format_catalog_close(&startup);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK, gui_project_lifecycle_begin_new(&error), error.msg);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        gui_project_test_finish(GUI_PROJECT_LIFECYCLE_NEW, &error),
+        error.msg);
+}
+
+void test_gui_bundled_defold_runs_through_workers(void) {
+    install_bundled_catalog_and_start_new_project();
+    tp_error error = {{0}};
+    const tp_format_catalog *catalog =
+        tp_session_format_catalog(gui_project__test_session());
+    TEST_ASSERT_NOT_NULL(
+        tp_format_catalog_find_available(catalog, "defold-tpinfo-2"));
+
+    const tp_session_snapshot *snapshot = gui_project_snapshot();
+    const tp_snapshot_atlas *atlas =
+        tp_session_snapshot_atlas_at(snapshot, 0);
+    TEST_ASSERT_NOT_NULL(atlas);
+    char source_path[TP_IDENTITY_PATH_MAX];
+    TEST_ASSERT_TRUE(snprintf(
+        source_path, sizeof source_path,
+        "%s/apps/cli/testdata/sprites/hero.png",
+        TP_TEST_SOURCE_DIR) > 0);
+    TEST_ASSERT_EQUAL_INT(
+        GUI_ADD_ADDED,
+        gui_project_add_source_kind(
+            atlas->id, tp_session_snapshot_revision(snapshot),
+            source_path, TP_SOURCE_KIND_FILE));
+    settle_project_job();
+
+    gui_target_ref target = {0};
+    TEST_ASSERT_TRUE(trace_target_ref_at(0, 0, &target));
+    char output_base[TP_IDENTITY_PATH_MAX];
+    TEST_ASSERT_TRUE(snprintf(
+        output_base, sizeof output_base,
+        "%s/defold-gui-parity", TP_GUI_TRACE_TEST_DIR) > 0);
+    const gui_text_ref out_ref = {
+        .atlas_id = target.atlas_id,
+        .entity_id = target.target_id,
+        .expected_revision = target.expected_revision,
+    };
+    gui_project_operation_submit_terminal terminal = {0};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        gui_project_submit_text(
+            TP_OP_TARGET_SET, &out_ref, output_base,
+            (gui_project_operation_submit_identity){0},
+            "d401d401d401d401d401d401d401d401",
+            &terminal, &error),
+        error.msg);
+    TEST_ASSERT_TRUE(terminal.committed);
+    publish_project_frame();
+
+    char tpinfo_path[TP_IDENTITY_PATH_MAX];
+    char tpatlas_path[TP_IDENTITY_PATH_MAX];
+    TEST_ASSERT_TRUE(snprintf(
+        tpinfo_path, sizeof tpinfo_path, "%s.tpinfo", output_base) > 0);
+    TEST_ASSERT_TRUE(snprintf(
+        tpatlas_path, sizeof tpatlas_path, "%s.tpatlas", output_base) > 0);
+    TEST_ASSERT_TRUE(trace_target_ref_at(0, 0, &target));
+    gui_edit_target_exporter(&target, "defold-tpinfo-2");
+    pump_action_frame();
+    pump_action_frame();
+    gui_pack_result_info lua_result = run_gui_defold_export();
+    TEST_ASSERT_EQUAL_INT(2, lua_result.notices);
+    TEST_ASSERT_EQUAL_INT(3, lua_result.files);
+    TEST_ASSERT_EQUAL_INT(0, lua_result.format_errors);
+
+    const gui_test_file lua_tpinfo = read_gui_test_file(tpinfo_path);
+    const gui_test_file lua_tpatlas = read_gui_test_file(tpatlas_path);
+    TEST_ASSERT_NOT_NULL(strstr((const char *)lua_tpinfo.bytes, "version: \"2.0\""));
+    TEST_ASSERT_NOT_NULL(strstr((const char *)lua_tpinfo.bytes, "name: \"hero\""));
+    TEST_ASSERT_NOT_NULL(strstr((const char *)lua_tpatlas.bytes, "file: \"defold-gui-parity.tpinfo\""));
+
+    free(lua_tpatlas.bytes);
+    free(lua_tpinfo.bytes);
+}
+
 void test_gui_live_export_uses_injected_compiled_lua_catalog(void) {
     app_format_catalog startup = {0};
     tp_error error = {{0}};
@@ -1166,6 +1291,7 @@ void test_sequential_drafts_and_dependent_intent_advance_exactly(void) {
 }
 
 void test_same_cut_target_edits_rebase_without_caller_sequencing(void) {
+    install_bundled_catalog_and_start_new_project();
     const tp_session_snapshot *snapshot =
         gui_project_snapshot();
     gui_target_ref target = {0};
@@ -1178,9 +1304,9 @@ void test_same_cut_target_edits_rebase_without_caller_sequencing(void) {
     TEST_ASSERT_NOT_NULL(before);
     const bool enabled = !before->enabled;
     const char *exporter =
-        strcmp(before->exporter_id, "defold") == 0
+        strcmp(before->exporter_id, "defold-tpinfo-2") == 0
             ? "json-neotolis"
-            : "defold";
+            : "defold-tpinfo-2";
     const int64_t revision =
         tp_session_snapshot_revision(snapshot);
 
@@ -1209,6 +1335,7 @@ void test_same_cut_target_edits_rebase_without_caller_sequencing(void) {
 }
 
 void test_save_as_waits_for_draft_and_all_same_cut_edits(void) {
+    install_bundled_catalog_and_start_new_project();
     const tp_session_snapshot *snapshot =
         gui_project_snapshot();
     const tp_snapshot_atlas *atlas =
@@ -1230,9 +1357,9 @@ void test_save_as_waits_for_draft_and_all_same_cut_edits(void) {
         !target_before->enabled;
     const char *new_exporter =
         strcmp(target_before->exporter_id,
-               "defold") == 0
+               "defold-tpinfo-2") == 0
             ? "json-neotolis"
-            : "defold";
+            : "defold-tpinfo-2";
     gui_project_save_as_plan plan = {0};
     char error[256] = {0};
     TEST_ASSERT_EQUAL_INT(
@@ -1945,6 +2072,7 @@ int main(int argc, char **argv) {
         test_export_cancel_formatter_distinguishes_uncertain_partial_and_clean);
     RUN_TEST(test_export_failure_formatter_warns_about_uncertain_publication);
     RUN_TEST(test_gui_export_completion_summarizes_typed_format_diagnostics);
+    RUN_TEST(test_gui_bundled_defold_runs_through_workers);
     RUN_TEST(test_gui_live_export_uses_injected_compiled_lua_catalog);
     RUN_TEST(test_late_export_cancel_keeps_completed_success_outcome);
     RUN_TEST(test_owned_terminal_receipt_survives_session_cutover);

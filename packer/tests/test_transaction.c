@@ -1150,7 +1150,7 @@ void test_identity_excludes_runtime(void) {
 void test_identity_order_normalized(void) {
     tp_project *p = tp_test_base_project();
     tp_project_atlas *a = &p->atlases[0];
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_target(a, "defold", "out/b", NULL));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_target(a, "defold-tpinfo-2", "out/b", NULL));
     /* promote the new target's id so it is addressable/stable */
     uint8_t ctr = 9;
     tp_rng rng = {tp_test_det_fill, &ctr};
@@ -1555,7 +1555,7 @@ void test_json_request_encode_golden(void) {
     ops[1].kind = TP_OP_TARGET_CREATE;
     ops[1].atlas_id = tp_test_id_of(0xA1);
     ops[1].u.target_create.target_id = tp_test_id_of(0xB2);
-    ops[1].u.target_create.exporter_id = (char *)"defold";
+    ops[1].u.target_create.exporter_id = (char *)"defold-tpinfo-2";
     ops[1].u.target_create.out_path = (char *)"out/x";
     ops[1].u.target_create.enabled = true;
 
@@ -1587,7 +1587,7 @@ void test_json_request_encode_golden(void) {
         "        \"op\": \"target.create\",\n"
         "        \"atlas_id\": \"atlas_a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1\",\n"
         "        \"enabled\": true,\n"
-        "        \"exporter_id\": \"defold\",\n"
+        "        \"exporter_id\": \"defold-tpinfo-2\",\n"
         "        \"out_path\": \"out/x\",\n"
         "        \"target_id\": \"target_b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2\"\n"
         "      }\n"

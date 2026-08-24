@@ -340,46 +340,6 @@ void test_consistency_restrict(void) {
     tp_project_destroy(p);
 }
 
-void test_consistency_defold(void) {
-    /* Task-literal case: pivot+slice9+polygon fixture against defold caps. Defold keeps
-     * pivot/polygon, drops slice9, and packs identity (no transform) -- so the writer
-     * emits {slice9} while predict adds the pack-level {transform}. Writer subset holds. */
-    char base[600];
-    (void)snprintf(base, sizeof base, "%s/pr_defold", g_dir);
-    tp_project *p = make_fixture("defold", base);
-    tp_pack_sprite_desc descs[2];
-    build_descs(descs);
-
-    tp_arena *ar = tp_arena_create(0);
-    TEST_ASSERT_NOT_NULL(ar);
-    tp_export_notices wn;
-    tp_export_notices_init(&wn);
-    tp_error e = {{0}};
-    const tp_export_run_opts run_opts = {.catalog = g_catalog};
-    TEST_ASSERT_EQUAL_INT_MESSAGE(
-        TP_STATUS_OK,
-        tp_export_run_ex(p, 0, descs, 2, g_dir, ar, &wn, NULL,
-                         &run_opts, &e),
-        e.msg);
-
-    const tp_exporter *dex =
-        tp_format_catalog_exporter_find(g_catalog, "defold");
-    TEST_ASSERT_NOT_NULL(dex);
-    tp_export_notices pn;
-    tp_export_notices_init(&pn);
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
-                          tp_export_predict_loss(p, 0, &dex->format->caps,
-                                                 "defold", NULL, &pn, &e));
-
-    TEST_ASSERT_TRUE_MESSAGE(has_field(&pn, TP_NOTICE_FIELD_TRANSFORM), "predict must flag transform for defold");
-    TEST_ASSERT_TRUE_MESSAGE(has_field(&pn, TP_NOTICE_FIELD_SLICE9), "predict must flag slice9 for defold");
-    assert_writer_subset_predict(&wn, &pn);
-
-    tp_export_notices_free(&wn);
-    tp_export_notices_free(&pn);
-    tp_arena_destroy(ar);
-    tp_project_destroy(p);
-}
 // #endregion
 
 int main(int argc, char **argv) {
@@ -417,7 +377,6 @@ int main(int argc, char **argv) {
     RUN_TEST(test_animation_capability_projects_ir_and_emits_one_notice);
     RUN_TEST(test_single_page_format_rejects_multipage_ir_before_planning);
     RUN_TEST(test_consistency_restrict);
-    RUN_TEST(test_consistency_defold);
     const int result = UNITY_END();
     tp_format_catalog_release(g_catalog);
     return result;

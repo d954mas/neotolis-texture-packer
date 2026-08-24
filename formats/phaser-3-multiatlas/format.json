@@ -1,0 +1,17 @@
+{
+  "api_version": 1,
+  "id": "phaser-3-multiatlas",
+  "display_name": "Phaser 3 Multi-Atlas",
+  "capabilities": {
+    "transforms": ["identity", "rotate_90_cw"],
+    "polygons": false,
+    "pivot": true,
+    "slice9": true,
+    "multipage": true,
+    "aliases": true,
+    "animations": false
+  },
+  "outputs": [
+    {"id": "multiatlas", "suffix": ".json"}
+  ]
+}

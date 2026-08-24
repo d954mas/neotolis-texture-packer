@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Regenerate the demo's ntpacker exports (the *_nt.* files in examples/<name>/).
 
-Runs the `tp_demo_export` driver over defold-demo.ntpacker_project (defold +
-json-neotolis targets for every atlas). The Defold exporter now emits the
+Runs the `tp_demo_export` driver over defold-demo.ntpacker_project (bundled
+Defold + json-neotolis targets for every atlas). The Defold package emits the
 `.tpatlas` `file:` field as a project-absolute Defold resource path directly (it
 walks up for `game.project`, found at this demo's root), so NO post-hoc rewrite
-is needed -- the previous shim was removed once tp_export_defold.c was fixed.
+is needed; the shared project-resource host fact owns path resolution.
 
 Usage:
   python regen_exports.py [path/to/tp_demo_export(.exe)] [work_dir]

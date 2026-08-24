@@ -1,0 +1,13 @@
+{
+  "name": "ntpacker-runtime-formats-example",
+  "private": true,
+  "scripts": {
+    "dev": "vite"
+  },
+  "dependencies": {
+    "phaser": "3.90.0"
+  },
+  "devDependencies": {
+    "vite": "7.3.6"
+  }
+}

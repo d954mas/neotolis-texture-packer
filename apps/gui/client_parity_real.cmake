@@ -209,9 +209,9 @@ file(MAKE_DIRECTORY "${WORK}/notice")
 configure_file("${WORK}/source/cli.ntpacker_project"
     "${WORK}/notice/project.ntpacker_project" COPYONLY)
 run_ok("${NTPACKER}" target add "${WORK}/notice/project.ntpacker_project"
-    atlas1 defold out/notice)
+    atlas1 defold-tpinfo-2 out/notice)
 run_capture(0 notice_json "${NTPACKER}" pack
-    "${WORK}/notice/project.ntpacker_project" --target defold --dry-run
+    "${WORK}/notice/project.ntpacker_project" --target defold-tpinfo-2 --dry-run
     --json --out-dir "${WORK}/notice/out")
 if(NOT "${notice_json}" MATCHES "\"field\": \"transform\"" OR
    NOT "${notice_json}" MATCHES "\"reason\": \"caps_unsupported\"")
@@ -309,8 +309,8 @@ compare_family(animation_remove)
 file(MAKE_DIRECTORY "${WORK}/target")
 configure_file("${BASE}" "${WORK}/target/base.ntpacker_project" COPYONLY)
 configure_file("${BASE}" "${WORK}/target/cli.ntpacker_project" COPYONLY)
-run_ok("${NTPACKER}" target add "${WORK}/target/cli.ntpacker_project" atlas1 defold out/d)
-run_ok("${NTPACKER}" target set "${WORK}/target/cli.ntpacker_project" atlas1 defold
+run_ok("${NTPACKER}" target add "${WORK}/target/cli.ntpacker_project" atlas1 defold-tpinfo-2 out/d)
+run_ok("${NTPACKER}" target set "${WORK}/target/cli.ntpacker_project" atlas1 defold-tpinfo-2
     out=out/d2 enabled=0)
 run_ok("${REPLAY}" replay target "${WORK}/target/base.ntpacker_project"
     "${WORK}/target/cli.ntpacker_project" "${WORK}/target/gui.ntpacker_project")
@@ -321,7 +321,7 @@ configure_file("${WORK}/target/cli.ntpacker_project"
     "${WORK}/target_remove/base.ntpacker_project" COPYONLY)
 configure_file("${WORK}/target/cli.ntpacker_project"
     "${WORK}/target_remove/cli.ntpacker_project" COPYONLY)
-run_ok("${NTPACKER}" target remove "${WORK}/target_remove/cli.ntpacker_project" atlas1 defold)
+run_ok("${NTPACKER}" target remove "${WORK}/target_remove/cli.ntpacker_project" atlas1 defold-tpinfo-2)
 run_ok("${REPLAY}" replay target_remove
     "${WORK}/target_remove/base.ntpacker_project"
     "${WORK}/target_remove/cli.ntpacker_project"

@@ -434,6 +434,36 @@ void test_ir_validator_rejects_unbounded_animation_tables(void) {
     tp_arena_destroy(arena);
 }
 
+void test_ir_builder_rejects_invalid_animation_playback(void) {
+    tp_arena *arena = tp_arena_create(0);
+    tp_sprite sprite = mk("hero.png", -1);
+    tp_result result = mk_result(&sprite, 1);
+    const tp_id128 source = {{5}};
+    const tp_export_frame_ref frame = {source, "hero.png"};
+    const tp_export_sprite_ref_in sprite_ref = {
+        "hero.png", source, "hero.png"};
+    const tp_export_anim_in animation = {
+        .id = "walk",
+        .frames = &frame,
+        .frame_count = 1,
+        .fps = 12.0F,
+        .playback = 99,
+    };
+    tp_export_ir_opts opts;
+    tp_export_ir_opts_defaults(&opts);
+    opts.animations = &animation;
+    opts.animation_count = 1;
+    opts.sprite_refs = &sprite_ref;
+    opts.sprite_ref_count = 1;
+    tp_export_ir ir;
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OUT_OF_RANGE,
+        tp_export_ir_build(&result, &opts, arena, &ir, &error));
+    TEST_ASSERT_NOT_NULL(strstr(error.msg, "playback"));
+    tp_arena_destroy(arena);
+}
+
 void test_invalid_source_result_is_rejected_before_copy(void) {
     tp_arena *arena = tp_arena_create(0);
     tp_error error = {{0}};
@@ -518,6 +548,7 @@ int main(void) {
     RUN_TEST(test_ir_validator_rejects_frame_outside_page);
     RUN_TEST(test_ir_validator_uses_d4_swapped_page_footprint);
     RUN_TEST(test_ir_validator_rejects_unbounded_animation_tables);
+    RUN_TEST(test_ir_builder_rejects_invalid_animation_playback);
     RUN_TEST(test_final_name_sort);
     RUN_TEST(test_explicit_animation);
     RUN_TEST(test_frame_follows_rename);

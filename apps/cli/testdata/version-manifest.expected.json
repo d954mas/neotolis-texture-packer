@@ -44,8 +44,7 @@
     "version": 2
   },
   "formats": {
-    "json-neotolis": 1,
-    "defold-tpinfo": "2.0"
+    "json-neotolis": 1
   },
   "exporters": [
     {
@@ -65,7 +64,7 @@
       }
     },
     {
-      "id": "defold",
+      "id": "defold-tpinfo-2",
       "name": "Defold (.tpinfo + .tpatlas)",
       "ext": "tpinfo",
       "caps": {
@@ -78,6 +77,22 @@
         "multipage": true,
         "aliases": true,
         "animations": true
+      }
+    },
+    {
+      "id": "phaser-3-multiatlas",
+      "name": "Phaser 3 Multi-Atlas",
+      "ext": "json",
+      "caps": {
+        "transform_mask": 33,
+        "rotate90": true,
+        "flips": false,
+        "polygons": false,
+        "pivot": true,
+        "slice9": true,
+        "multipage": true,
+        "aliases": true,
+        "animations": false
       }
     }
   ]

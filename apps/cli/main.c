@@ -76,10 +76,10 @@ static void emit_caps(tp_sb *sb, int depth, const tp_export_caps *c) {
 }
 
 /* The `version --json` schema manifest (plan "CLI v1 contract"): app version,
- * on-disk project schema, each JSON-emitting verb's payload schema, known export
- * formats + versions, and the invocation-owned format catalog. Every
- * number/id is sourced from a core constant or the catalog -- no hand-copied
- * values, no exporter-id literals (boundary gate R2). */
+ * on-disk project schema, each JSON-emitting verb's payload schema, native wire
+ * formats + versions, and the invocation-owned format catalog. Every native
+ * number/id is sourced from a core constant; runtime rows come from `catalog`.
+ */
 static void build_manifest(tp_sb *sb, const tp_format_catalog *catalog) {
     tp_sb_str(sb, "{\n");
     indent(sb, 1);
@@ -159,9 +159,8 @@ static void build_manifest(tp_sb *sb, const tp_format_catalog *catalog) {
     indent(sb, 1);
     tp_sb_str(sb, "},\n");
 
-    /* formats: export FORMAT -> format-schema version. json-neotolis key comes
-     * from the shared exporter-id constant (never a literal); its value is the
-     * public json schema constant; defold-tpinfo carries the tpinfo version. */
+    /* formats: native export FORMAT -> format-schema version. Runtime package
+     * identity and API version are catalog-owned and appear in `exporters`. */
     indent(sb, 1);
     tp_sb_json_string(sb, "formats");
     tp_sb_str(sb, ": {\n");
@@ -169,11 +168,6 @@ static void build_manifest(tp_sb *sb, const tp_format_catalog *catalog) {
     tp_sb_json_string(sb, TP_EXPORTER_ID_JSON_NEOTOLIS);
     tp_sb_str(sb, ": ");
     tp_sb_int(sb, TP_JSON_NEOTOLIS_SCHEMA_VERSION);
-    tp_sb_str(sb, ",\n");
-    indent(sb, 2);
-    tp_sb_json_string(sb, "defold-tpinfo");
-    tp_sb_str(sb, ": ");
-    tp_sb_json_string(sb, TP_DEFOLD_TPINFO_VERSION);
     tp_sb_str(sb, "\n");
     indent(sb, 1);
     tp_sb_str(sb, "},\n");

@@ -153,7 +153,7 @@ static inline bool tp_project_anim_playback_valid(int value) {
  * defaults true (sparse: only written when false). */
 typedef struct tp_project_target {
     tp_id128 id;       /* persistent structural ID; fresh private entities start nil */
-    char *exporter_id; /* exporter kind, e.g. "json-neotolis", "defold" (NOT the structural id) */
+    char *exporter_id; /* exporter kind, e.g. "json-neotolis", "defold-tpinfo-2" (NOT the structural id) */
     char *out_path;    /* project-relative output path/prefix */
     bool enabled;
 } tp_project_target;

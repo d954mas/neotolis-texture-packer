@@ -91,8 +91,8 @@ static tp_job_worker_proto_request sample_request(tp_session_job_kind kind) {
       kind == TP_SESSION_JOB_PACK ? sample_id(10U) : (tp_id128){{0}};
   request.project_dir = "C:/absolute/project";
   request.work_dir = "C:/absolute/work";
-  request.preview_exporter_id = kind == TP_SESSION_JOB_PACK ? "defold" : "";
-  request.target_exporter_id = kind == TP_SESSION_JOB_EXPORT ? "defold" : "";
+  request.preview_exporter_id = kind == TP_SESSION_JOB_PACK ? "defold-tpinfo-2" : "";
+  request.target_exporter_id = kind == TP_SESSION_JOB_EXPORT ? "defold-tpinfo-2" : "";
   request.out_dir = kind == TP_SESSION_JOB_EXPORT ? "C:/absolute/output" : "";
   request.dry_run = kind == TP_SESSION_JOB_EXPORT;
   request.input_token.model_generation = 101U;
@@ -123,7 +123,8 @@ static tp_job_worker_proto_response sample_pack_response(void) {
   response.pack.freshness = TP_PACK_FRESHNESS_CURRENT;
   response.pack.freshness_reason = TP_PACK_FRESHNESS_MATCH;
   response.pack.freshness_status = TP_STATUS_OK;
-  memcpy(response.pack.preview_exporter_id, "defold", 7U);
+  memcpy(response.pack.preview_exporter_id, "defold-tpinfo-2",
+         sizeof "defold-tpinfo-2");
   response.pack.names = names;
   response.pack.name_count = 2U;
   response.pack.artifact_path = "C:/work/req-0000002a-0000000000000001/atlas.ntpack";

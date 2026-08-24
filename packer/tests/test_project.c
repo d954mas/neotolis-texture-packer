@@ -407,7 +407,7 @@ static tp_project *build_rich(void) {
 
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_target(hero, "json-neotolis", "out/hero.json", NULL));
     tp_project_target *t2 = NULL;
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_target(hero, "defold", "out/hero.tpinfo", &t2));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_target(hero, "defold-tpinfo-2", "out/hero.tpinfo", &t2));
     t2->enabled = false;
 
     /* atlas 1: "ui" -- non-default knobs */
@@ -1560,13 +1560,13 @@ void test_set_target(void) {
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_target(a, "json-neotolis", "out/a.json", &t));
     TEST_ASSERT_TRUE(t->enabled);
 
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_set_target(a, 0, "defold", "out/a.tpinfo", false));
-    TEST_ASSERT_EQUAL_STRING("defold", a->targets[0].exporter_id);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_set_target(a, 0, "defold-tpinfo-2", "out/a.tpinfo", false));
+    TEST_ASSERT_EQUAL_STRING("defold-tpinfo-2", a->targets[0].exporter_id);
     TEST_ASSERT_EQUAL_STRING("out/a.tpinfo", a->targets[0].out_path);
     TEST_ASSERT_FALSE(a->targets[0].enabled);
 
     /* bounds + arg validation */
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OUT_OF_BOUNDS, tp_project_atlas_set_target(a, 3, "defold", "x", true));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OUT_OF_BOUNDS, tp_project_atlas_set_target(a, 3, "defold-tpinfo-2", "x", true));
     TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_ARGUMENT, tp_project_atlas_set_target(a, 0, "", "x", true));
     tp_project_destroy(p);
 }
@@ -1578,16 +1578,16 @@ void test_out_path_shared(void) {
     tp_project *p = tp_project_create();
     /* atlas 0 (default "atlas1"): a target at out/x + one at a unique path. */
     tp_project_atlas *a0 = tp_project_get_atlas(p, 0);
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_target(a0, "defold", "out/x", NULL));       /* [0] */
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_target(a0, "defold-tpinfo-2", "out/x", NULL));       /* [0] */
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_target(a0, "json-neotolis", "out/uniq", NULL)); /* [1] */
     /* a SECOND atlas: a target REUSING out/x (cross-atlas collision), a unique out/y, and a target that
      * ALSO writes out/uniq but is DISABLED below (must NOT make out/uniq collide -- the exporter skips it). */
     int a1i = -1;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_add_atlas(p, "atlas2", &a1i));
     tp_project_atlas *a1 = tp_project_get_atlas(p, a1i);
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_target(a1, "defold", "out/x", NULL));       /* [0] */
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_target(a1, "defold-tpinfo-2", "out/x", NULL));       /* [0] */
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_target(a1, "json-neotolis", "out/y", NULL)); /* [1] */
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_target(a1, "defold", "out/uniq", NULL));    /* [2] disabled */
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_target(a1, "defold-tpinfo-2", "out/uniq", NULL));    /* [2] disabled */
 
     /* IDs stay nil, proving the detector excludes `self` by pointer identity (review finding
      * on the nil-id self-match), not by id. */

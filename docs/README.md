@@ -17,6 +17,8 @@ Start with the smallest document that owns the question.
   — source identity, Refresh, scanning, and image ingress.
 - [`architecture/engine-and-client-boundaries.md`](architecture/engine-and-client-boundaries.md)
   — engine, exporter, GUI, CLI, and live-headless boundaries.
+- [`spec/format-ecosystem.md`](spec/format-ecosystem.md) — current Lua runtime
+  and bundled Defold/Phaser packages; Reload Formats remains target behavior.
 
 ## Wire and file formats
 
@@ -27,6 +29,8 @@ Start with the smallest document that owns the question.
 - [`formats/ntpack-binary.md`](formats/ntpack-binary.md)
 - [`formats/lua-package-v1.md`](formats/lua-package-v1.md) — current package,
   Lua sandbox, diagnostics, and fixed-limit contract.
+- [`formats/phaser-3-multiatlas.md`](formats/phaser-3-multiatlas.md) — exact
+  current Phaser consumer wire contract.
 
 ## Approved target contracts
 
@@ -34,10 +38,6 @@ These describe intended future behavior and are not claims about current
 availability:
 
 - [`spec/automation.md`](spec/automation.md) — Dev API and MCP.
-- [`spec/format-ecosystem.md`](spec/format-ecosystem.md) —
-  target bundled Defold and Phaser packages over the current Lua runtime.
-- [`formats/phaser-3-multiatlas.md`](formats/phaser-3-multiatlas.md) — exact
-  target wire contract for the first non-Defold runtime consumer.
 - [`spec/ux.md`](spec/ux.md) — two-level canvas and future workspace model.
 
 Repository-wide working rules remain in [`../AGENTS.md`](../AGENTS.md).

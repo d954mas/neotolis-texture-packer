@@ -89,7 +89,7 @@ static void free_loaded_images(tp_image_rgba8 *images, int count) {
  * regular file before we accept and publish the pack. Reject a reparse point: on
  * Windows a *file* symlink/reparse classifies as REGULAR (POSIX lstat already
  * rejects it as OTHER), and publishing it would republish an attacker-chosen link
- * target. Matches the tp_export_defold "real regular file" probe. */
+ * target. Matches the shared project-resource host-fact probe. */
 static bool staged_artifact_ok(const char *staged_path) {
     tp_fs_info info;
     return tp_fs_stat(staged_path, &info) && info.kind == TP_FS_KIND_REGULAR &&

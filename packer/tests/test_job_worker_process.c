@@ -662,6 +662,21 @@ static const tp_job_worker_proto_response *pump_to_terminal(
     return response;
 }
 
+static void pump_to_phase(tp_job_worker_process *process,
+                          tp_job_worker_progress_phase phase,
+                          int limit_ms) {
+    for (int elapsed = 0;
+         elapsed < limit_ms &&
+         tp_job_worker_process_progress(process).phase != phase &&
+         !tp_job_worker_process_terminal(process);
+         ++elapsed) {
+        tp_job_worker_process_pump(process);
+        sleep_ms(1U);
+    }
+    TEST_ASSERT_EQUAL_INT(
+        phase, tp_job_worker_process_progress(process).phase);
+}
+
 static tp_export_command_report *take_finalized_export_report(
     tp_job_worker_process *process,
     const tp_job_worker_proto_response *response) {
@@ -869,9 +884,12 @@ void test_target_fragment_requires_target_complete_phase(void) {
 }
 
 static const tp_job_worker_proto_response *timeout_in_phase(
-    const char *mode, tp_job_worker_process **out_process) {
-    tp_job_worker__test_set_timeout_ms(30);
+    const char *mode, tp_job_worker_progress_phase phase,
+    tp_job_worker_process **out_process) {
+    tp_job_worker__test_set_timeout_ms(2000);
     tp_job_worker_process *process = start_process(mode);
+    pump_to_phase(process, phase, 1000);
+    tp_job_worker__test_set_timeout_ms(1);
     const tp_job_worker_proto_response *response =
         pump_to_terminal(process, 2000);
     *out_process = process;
@@ -881,7 +899,9 @@ static const tp_job_worker_proto_response *timeout_in_phase(
 void test_worker_death_is_attributed_to_publication_window(void) {
     tp_job_worker_process *process = NULL;
     const tp_job_worker_proto_response *response =
-        timeout_in_phase("block-serialize", &process);
+        timeout_in_phase("block-serialize",
+                         TP_JOB_WORKER_PHASE_EXPORT_SERIALIZE,
+                         &process);
     TEST_ASSERT_EQUAL_INT(TP_SESSION_JOB_FAILED, response->state);
     tp_export_command_report *report =
         take_finalized_export_report(process, response);
@@ -892,7 +912,10 @@ void test_worker_death_is_attributed_to_publication_window(void) {
     free(report);
     tp_job_worker_process_destroy(process);
 
-    response = timeout_in_phase("block-publication", &process);
+    response = timeout_in_phase(
+        "block-publication",
+        TP_JOB_WORKER_PHASE_EXPORT_PUBLICATION_BEGIN,
+        &process);
     TEST_ASSERT_EQUAL_INT(TP_SESSION_JOB_FAILED, response->state);
     report = take_finalized_export_report(process, response);
     TEST_ASSERT_NOT_NULL(report);
@@ -911,9 +934,13 @@ void test_worker_death_is_attributed_to_publication_window(void) {
 }
 
 void test_take_export_report_only_transfers_report_ownership(void) {
-    tp_job_worker__test_set_timeout_ms(30);
+    tp_job_worker__test_set_timeout_ms(2000);
     tp_job_worker_process *process = start_process_with_report(
         "block-publication", sample_export_report_with_targets(false, 2));
+    pump_to_phase(process,
+                  TP_JOB_WORKER_PHASE_EXPORT_PUBLICATION_BEGIN,
+                  1000);
+    tp_job_worker__test_set_timeout_ms(1);
     const tp_job_worker_proto_response *response =
         pump_to_terminal(process, 2000);
     TEST_ASSERT_EQUAL_INT(TP_SESSION_JOB_FAILED, response->state);

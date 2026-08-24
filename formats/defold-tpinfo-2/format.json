@@ -1,0 +1,27 @@
+{
+  "api_version": 1,
+  "id": "defold-tpinfo-2",
+  "display_name": "Defold (.tpinfo + .tpatlas)",
+  "capabilities": {
+    "transforms": ["identity", "rotate_90_cw"],
+    "polygons": true,
+    "pivot": true,
+    "slice9": false,
+    "multipage": true,
+    "aliases": true,
+    "animations": true
+  },
+  "outputs": [
+    {"id": "tpinfo", "suffix": ".tpinfo"},
+    {"id": "tpatlas", "suffix": ".tpatlas"}
+  ],
+  "host_facts": [
+    {
+      "id": "tpinfo_resource",
+      "kind": "project_resource",
+      "output": "tpinfo",
+      "root_marker": "game.project",
+      "missing": "basename_notice"
+    }
+  ]
+}

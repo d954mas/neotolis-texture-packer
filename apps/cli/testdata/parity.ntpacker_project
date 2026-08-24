@@ -61,7 +61,7 @@
           "out_path": "out/nested/deep_json"
         },
         {
-          "exporter_id": "defold",
+          "exporter_id": "defold-tpinfo-2",
           "id": "target_00000000000000000000000000000606",
           "out_path": "out/parity_def"
         }

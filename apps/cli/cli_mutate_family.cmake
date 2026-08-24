@@ -345,16 +345,16 @@ elseif(FAMILY STREQUAL "anim")
 elseif(FAMILY STREQUAL "target")
     run(0 new "${PROJ}")                                        # seeds 1 json-neotolis target
     run_match(3 "file_exists" new "${PROJ}" --json)
-    run(0 target add "${PROJ}" atlas1 defold out/atlas1_def)
-    assert_contains("\"exporter_id\": \"defold\"")
+    run(0 target add "${PROJ}" atlas1 defold-tpinfo-2 out/atlas1_def)
+    assert_contains("\"exporter_id\": \"defold-tpinfo-2\"")
     run(2 target add "${PROJ}" atlas1 not-an-exporter out/x)    # unknown exporter -> usage
     run(0 target set "${PROJ}" atlas1 1 enabled=0 out=out/def2)
     assert_contains("\"out_path\": \"out/def2\"")
     assert_contains("\"enabled\": false")
     run(2 target set "${PROJ}" atlas1 1 exporter=nope)          # unknown exporter -> usage
     run(3 target set "${PROJ}" atlas1 9 enabled=1)              # bad index -> project
-    run(0 target remove "${PROJ}" atlas1 defold)               # by id
-    assert_absent("\"exporter_id\": \"defold\"")
+    run(0 target remove "${PROJ}" atlas1 defold-tpinfo-2)               # by id
+    assert_absent("\"exporter_id\": \"defold-tpinfo-2\"")
     run(3 target remove "${PROJ}" atlas1 5)                    # bad index -> project
     run(0 target add "${PROJ}" atlas1 json-neotolis out/other)
     run_match(3 "ambiguous_selector" target remove "${PROJ}" atlas1 json-neotolis --json)
@@ -383,7 +383,7 @@ elseif(FAMILY STREQUAL "stable")
     run(0 set "${PROJ}" atlas1 max_size=512 padding=2)
     run(0 sprite set "${PROJ}" atlas1 s origin=0.1,0.2)
     run(0 anim create "${PROJ}" atlas1 a s s)
-    run(0 target add "${PROJ}" atlas1 defold out/d)
+    run(0 target add "${PROJ}" atlas1 defold-tpinfo-2 out/d)
     configure_file("${PROJ}" "${WORK}/before.bak" COPYONLY)
     run(0 atlas add "${PROJ}" _tmp_)
     run(0 atlas remove "${PROJ}" _tmp_)

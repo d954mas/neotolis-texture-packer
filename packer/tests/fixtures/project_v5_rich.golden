@@ -66,7 +66,7 @@
         },
         {
           "enabled": false,
-          "exporter_id": "defold",
+          "exporter_id": "defold-tpinfo-2",
           "id": "target_00000000000000000000000000000042",
           "out_path": "out/hero.atlas"
         }

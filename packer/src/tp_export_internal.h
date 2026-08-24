@@ -113,10 +113,6 @@ tp_status tp_export_json_neotolis_serialize(const tp_export_serialize_ctx *ctx,
                                             tp_export_document *documents,
                                             int document_count,
                                             tp_error *err);
-tp_status tp_export_defold_serialize(const tp_export_serialize_ctx *ctx,
-                                     tp_export_document *documents,
-                                     int document_count,
-                                     tp_error *err);
 
 #ifdef TP_ENABLE_TEST_SEAMS
 void tp_export_notices__test_fail_next_reserve(void);

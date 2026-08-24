@@ -1,12 +1,12 @@
 # Sandboxed Lua export formats
 
-**Status:** Mixed contract. The generic sandboxed Lua runtime is current; the
-bundled Defold and Phaser packages in this document remain target behavior.
+**Status:** Mixed contract. The sandboxed Lua runtime and bundled Defold and
+Phaser packages are current; Reload Formats remains target behavior.
 
 The current product runs strict API-v1 Lua packages through the native Export
 IR, capability projection, artifact planner, PNG writer, and rollback-backed
-publisher without format-specific packing or publication branches. The target
-work here adds the first bundled packages.
+publisher without format-specific packing or publication branches. The first
+two bundled packages ship beside both executables.
 
 The exact package and script contract is
 [`../formats/lua-package-v1.md`](../formats/lua-package-v1.md). The first
@@ -159,17 +159,17 @@ rows and reports without duplicating parsing or policy.
 
 ## First formats and proof
 
-`defold-tpinfo-2` is implemented first. The current native `defold` serializer
-remains a transition oracle until Lua matches its full byte and notice matrix in
-the isolated worker and real CLI/GUI flows. The native row, old ID, symbols, and
-fallback are then removed; unchanged goldens continue as Lua-only tests.
+`defold-tpinfo-2` replaced the former native `defold` serializer after matching
+its full byte and notice matrix in the isolated worker and real CLI/GUI flows.
+The native row, old ID, symbols, and fallback are removed; frozen native hashes
+and unchanged wire goldens remain independent Lua-only tests.
 
 `phaser-3-multiatlas` targets Phaser `>=3.70 <4`, with the example pinned to
 3.90.0. It supports identity and clockwise 90-degree rotation, pivots, 9-slice,
 multipage, and aliases. Polygons and format-level animations are unsupported and
 are visibly diagnosed rather than emulated.
 
-One canonical public project produces committed PNG and metadata goldens for
+[`examples/runtime-formats`](../../examples/runtime-formats/) produces committed PNG and metadata goldens for
 native, Defold, and Phaser consumers using the same art and scenario. Ordinary
 CI validates exporters, bytes, paths, and consumer structure without launching
 Defold, Bob, Node, a browser, or a graphical viewer.

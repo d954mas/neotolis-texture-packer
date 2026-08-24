@@ -9,7 +9,7 @@
  *   (d) caps/repack -- tp_export_run over an allow_transform atlas repacks the
  *                  Defold target IDENTITY-only (no rotated:true) and drops 9-slice
  *                  with a notice, while json-neotolis keeps the rotation;
- *   (e) animations -- playback enum table (all 7 ids + out-of-range), fps/flip
+ *   (e) animations -- playback enum table (all 7 valid ids), fps/flip
  *                  mapping, and every sprite name present so bob can auto-promote
  *                  it to a 1-frame animation;
  *   (f) demo     -- the exporter runs clean over the three real defold-demo
@@ -32,6 +32,7 @@
 #endif
 
 #include "stb_image.h"
+#include "core/nt_assert.h"
 
 #include "tp_core/tp_arena.h"
 #include "tp_core/tp_export.h"
@@ -44,6 +45,10 @@
 #include "tp_core/tp_build_worker.h"
 #include "tp_export_internal.h"
 #include "tp_export_job_internal.h"
+#include "tp_format_binding_proto_internal.h"
+#include "tp_format_catalog_internal.h"
+#include "tp_format_descriptor_internal.h"
+#include "tp_lua_export_adapter_internal.h"
 #include "tp_project_mutation_internal.h"
 #include "unity.h"
 
@@ -52,6 +57,29 @@
 
 static const char *g_dir;      /* scratch output dir (argv[1]) */
 static const char *g_demo_dir; /* defold-demo asset dir (argv[2] or compile def) */
+static tp_format_catalog *g_defold_catalog;
+
+static tp_format_catalog *open_bundled_catalog(void) {
+    tp_format_catalog_scan *scan = NULL;
+    tp_format_diagnostic_report *diagnostics = NULL;
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_format_catalog_scan_root(TP_FORMAT_BUNDLED_ROOT, &scan,
+                                    &diagnostics, &error),
+        error.msg);
+    TEST_ASSERT_NULL(diagnostics);
+    TEST_ASSERT_NOT_NULL(scan);
+
+    tp_format_catalog *catalog = NULL;
+    const tp_status status = tp_format_catalog_scan_compile_count(scan) > 0U
+        ? tp_build_format_catalog_compile(&scan, &catalog, &error)
+        : tp_format_catalog_scan_finish_without_compile(
+              &scan, &catalog, &error);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_OK, status, error.msg);
+    TEST_ASSERT_NOT_NULL(catalog);
+    return catalog;
+}
 
 void setUp(void) {}
 void tearDown(void) {}
@@ -83,6 +111,68 @@ static char *read_whole_file(const char *path, size_t *out_size) {
     return b;
 }
 
+static tp_format_catalog *open_bundled_worker_catalog(void) {
+    char descriptor_path[TP_IDENTITY_PATH_MAX];
+    char source_path[TP_IDENTITY_PATH_MAX];
+    TEST_ASSERT_TRUE(snprintf(
+        descriptor_path, sizeof descriptor_path,
+        "%s/defold-tpinfo-2/format.json", TP_FORMAT_BUNDLED_ROOT) > 0);
+    TEST_ASSERT_TRUE(snprintf(
+        source_path, sizeof source_path,
+        "%s/defold-tpinfo-2/export.lua", TP_FORMAT_BUNDLED_ROOT) > 0);
+    size_t descriptor_size = 0U;
+    size_t source_size = 0U;
+    char *descriptor_bytes = read_whole_file(
+        descriptor_path, &descriptor_size);
+    char *source_bytes = read_whole_file(source_path, &source_size);
+    TEST_ASSERT_NOT_NULL(descriptor_bytes);
+    TEST_ASSERT_NOT_NULL(source_bytes);
+
+    tp_format_descriptor_parse_result parsed = {0};
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_format_descriptor_v1_parse(
+            (const unsigned char *)descriptor_bytes, descriptor_size,
+            &parsed, &error),
+        error.msg);
+    TEST_ASSERT_EQUAL_INT(
+        TP_FORMAT_DESCRIPTOR_ADMITTED, parsed.outcome);
+
+    char *package_path = malloc(sizeof "formats/defold-tpinfo-2");
+    TEST_ASSERT_NOT_NULL(package_path);
+    memcpy(package_path, "formats/defold-tpinfo-2",
+           sizeof "formats/defold-tpinfo-2");
+    tp_format_binding_proto_binding binding = {
+        .implementation = TP_FORMAT_IMPLEMENTATION_LUA,
+        .descriptor = tp_format_owned_descriptor_view(
+            parsed.owned_descriptor),
+        .owned_descriptor = parsed.owned_descriptor,
+        .api_version = TP_FORMAT_API_VERSION,
+        .package_path = package_path,
+        .descriptor_bytes = (const unsigned char *)descriptor_bytes,
+        .descriptor_byte_count = descriptor_size,
+        .source_bytes = (const unsigned char *)source_bytes,
+        .source_byte_count = source_size,
+    };
+    memset(binding.fingerprint, '1', 32U);
+    binding.fingerprint[32] = '\0';
+    tp_format_binding_proto_value value = {
+        .bindings = &binding,
+        .binding_count = 1U,
+        .preview = {.kind = TP_FORMAT_BINDING_RESOLUTION_BINDING,
+                    .binding_index = 0U},
+    };
+    tp_format_catalog *catalog = NULL;
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_lua_export_catalog_create_worker(
+            &value, NULL, "defold-tpinfo-2", &catalog, &error),
+        error.msg);
+    TEST_ASSERT_NOT_NULL(catalog);
+    return catalog;
+}
+
 static int count_occurrences(const char *hay, const char *needle) {
     int n = 0;
     size_t nl = strlen(needle);
@@ -93,33 +183,83 @@ static int count_occurrences(const char *hay, const char *needle) {
 }
 
 static const tp_export_caps *defold_caps(void) {
-    const tp_exporter *e = tp_native_exporter_find("defold");
+    const tp_exporter *e = tp_format_catalog_exporter_find(
+        g_defold_catalog, "defold-tpinfo-2");
     return e ? &e->format->caps : NULL;
+}
+
+void test_bundled_defold_package_is_admitted(void) {
+    tp_format_catalog *catalog = open_bundled_catalog();
+    const tp_format_descriptor *format =
+        tp_format_catalog_find_available(catalog, "defold-tpinfo-2");
+    TEST_ASSERT_NOT_NULL(format);
+    TEST_ASSERT_EQUAL_INT(TP_FORMAT_API_VERSION, format->api_version);
+    TEST_ASSERT_EQUAL_STRING("defold-tpinfo-2", format->id);
+    TEST_ASSERT_EQUAL_INT(2, format->artifact_count);
+    TEST_ASSERT_EQUAL_INT(1, format->host_fact_count);
+    tp_format_catalog_release(catalog);
 }
 
 static tp_status publish_defold(const tp_result *result,
                                 const tp_export_ir *ir,
-                                const tp_export_caps *caps, const char *base,
+                                const char *base,
                                 tp_export_notices *notices, tp_arena *arena,
                                 tp_error *err) {
-    static const tp_format_artifact_decl artifacts[] = {
-        {.id = "tpinfo", .suffix = ".tpinfo"},
-        {.id = "tpatlas", .suffix = ".tpatlas"},
-    };
-    const tp_format_descriptor format = {
-        .id = "defold-test", .display_name = "Defold test", .caps = *caps,
-        .artifacts = artifacts, .artifact_count = 2,
-    };
-    const tp_exporter exporter = {
-        .format = &format, .serialize = tp_export_defold_serialize,
-    };
+    const tp_exporter *exporter = tp_format_catalog_exporter_find(
+        g_defold_catalog, "defold-tpinfo-2");
+    NT_ASSERT(exporter);
     tp_export_artifact_plan plan;
-    tp_status st = tp_export_artifact_plan_build(exporter.format, ir, base, arena,
+    tp_status st = tp_export_artifact_plan_build(exporter->format, ir, base, arena,
                                                   &plan, err);
     return st == TP_STATUS_OK
-               ? tp_export_publish(&exporter, ir, result, &plan, notices, NULL,
+               ? tp_export_publish(exporter, ir, result, &plan, notices, NULL,
                                    NULL, err)
                : st;
+}
+
+static void assert_bundled_defold_golden(
+    const tp_export_ir *ir, const char *base,
+    const char *expected_tpinfo, const char *expected_tpatlas) {
+    const tp_exporter *exporter =
+        tp_format_catalog_exporter_find(g_defold_catalog, "defold-tpinfo-2");
+    TEST_ASSERT_NOT_NULL(exporter);
+
+    tp_arena *arena = tp_arena_create(0);
+    TEST_ASSERT_NOT_NULL(arena);
+    tp_export_artifact_plan plan = {0};
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_export_artifact_plan_build(
+            exporter->format, ir, base, arena, &plan, &error),
+        error.msg);
+    tp_export_notices notices;
+    tp_export_notices_init(&notices);
+    tp_export_document_batch batch = {0};
+    bool serializer_ran = false;
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_export_serialize_and_validate_documents(
+            exporter, ir, &plan, &notices, NULL, &batch,
+            &serializer_ran, NULL, &error),
+        error.msg);
+    TEST_ASSERT_TRUE(serializer_ran);
+    TEST_ASSERT_EQUAL_INT(0, notices.count);
+    TEST_ASSERT_EQUAL_INT(2, batch.document_count);
+    TEST_ASSERT_EQUAL_UINT64(
+        strlen(expected_tpinfo), batch.documents[0].size);
+    TEST_ASSERT_EQUAL_MEMORY(
+        expected_tpinfo, batch.documents[0].data,
+        batch.documents[0].size);
+    TEST_ASSERT_EQUAL_UINT64(
+        strlen(expected_tpatlas), batch.documents[1].size);
+    TEST_ASSERT_EQUAL_MEMORY(
+        expected_tpatlas, batch.documents[1].data,
+        batch.documents[1].size);
+
+    tp_export_document_batch_destroy(&batch);
+    tp_export_notices_free(&notices);
+    tp_arena_destroy(arena);
 }
 
 static void ensure_dir(const char *path) {
@@ -480,7 +620,7 @@ void test_golden_bytes(void) {
     char base[1088];
     (void)snprintf(base, sizeof base, "%s/defold_golden", proj);
     TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_OK,
-                                  publish_defold(&r, &prep, defold_caps(), base,
+                                  publish_defold(&r, &prep, base,
                                                  &notices, ar, &e), e.msg);
     TEST_ASSERT_EQUAL_INT_MESSAGE(0, notices.count, "full-fidelity golden must raise zero notices");
     tp_export_notices_free(&notices);
@@ -498,6 +638,9 @@ void test_golden_bytes(void) {
     TEST_ASSERT_NOT_NULL_MESSAGE(got, "golden .tpatlas readable");
     TEST_ASSERT_EQUAL_STRING_MESSAGE(EXPECTED_TPATLAS, got, ".tpatlas bytes must match golden");
     free(got);
+
+    assert_bundled_defold_golden(
+        &prep, base, EXPECTED_TPINFO, EXPECTED_TPATLAS);
 
     tp_arena_destroy(ar);
 }
@@ -563,7 +706,7 @@ void test_rotated_geometry(void) {
     char base[1088];
     (void)snprintf(base, sizeof base, "%s/defold_rot", proj);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
-                          publish_defold(&r, &prep, defold_caps(), base,
+                          publish_defold(&r, &prep, base,
                                          &notices, ar, &e));
     TEST_ASSERT_EQUAL_INT_MESSAGE(0, notices.count, "representable rotation raises no notice");
     tp_export_notices_free(&notices);
@@ -648,7 +791,7 @@ void test_hull_untrimmed_space(void) {
     char base[1024];
     (void)snprintf(base, sizeof base, "%s/defold_hull", g_dir);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
-                          publish_defold(&r, &prep, defold_caps(), base,
+                          publish_defold(&r, &prep, base,
                                          &notices, ar, &e));
     tp_export_notices_free(&notices);
 
@@ -723,8 +866,7 @@ static bool export_trivial(const char *base, tp_arena *ar, tp_export_notices *no
     if (tp_export_ir_build(&r, NULL, ar, &prep, &e) != TP_STATUS_OK) {
         return false;
     }
-    return publish_defold(&r, &prep, defold_caps(), base, notices, ar, &e) ==
-           TP_STATUS_OK;
+    return publish_defold(&r, &prep, base, notices, ar, &e) == TP_STATUS_OK;
 }
 
 void test_tpatlas_file_ref(void) {
@@ -825,7 +967,7 @@ void test_tpatlas_referential_integrity(void) {
     char base[1024];
     (void)snprintf(base, sizeof base, "%s/defold_refint", g_dir);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
-                          publish_defold(&r, &prep, defold_caps(), base,
+                          publish_defold(&r, &prep, base,
                                          &notices, ar, &e));
     tp_export_notices_free(&notices);
 
@@ -869,7 +1011,7 @@ static bool export_fixture(const char *case_name, const char *base, tp_arena *ar
     }
     tp_export_notices notices;
     tp_export_notices_init(&notices);
-    tp_status st = publish_defold(results[0], &prep, defold_caps(), base,
+    tp_status st = publish_defold(results[0], &prep, base,
                                   &notices, ar, e);
     tp_export_notices_free(&notices);
     return st == TP_STATUS_OK;
@@ -972,7 +1114,10 @@ void test_caps_repack_identity_and_slice9_notice(void) {
     (void)snprintf(json_base, sizeof json_base, "%s/caps_json", g_dir);
     (void)snprintf(defold_base, sizeof defold_base, "%s/caps_defold", g_dir);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_target(a, "json-neotolis", json_base, NULL));
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_target(a, "defold", defold_base, NULL));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_atlas_add_target(
+            a, "defold-tpinfo-2", defold_base, NULL));
 
     tp_pack_sprite_desc sprites[3];
     memset(sprites, 0, sizeof sprites);
@@ -987,7 +1132,9 @@ void test_caps_repack_identity_and_slice9_notice(void) {
     tp_export_notices_init(&notices);
     int pack_runs = 0;
     tp_error e = {{0}};
-    tp_status st = tp_export_run(proj, 0, sprites, 3, g_dir, ar, &notices, &pack_runs, &e);
+    const tp_export_run_opts opts = {.catalog = g_defold_catalog};
+    tp_status st = tp_export_run_ex(
+        proj, 0, sprites, 3, g_dir, ar, &notices, &pack_runs, &opts, &e);
     TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_OK, st, e.msg);
 
     /* json (full D4) and Defold (identity + rotate90) have distinct exact masks. */
@@ -1069,8 +1216,8 @@ void test_playback_enum_and_flags(void) {
     const tp_id128 source = {{3}};
     const tp_export_frame_ref frame_a[1] = {{source, "a"}};
     const tp_export_sprite_ref_in sprite_refs[1] = {{"a", source, "a"}};
-    tp_export_anim_in in[8];
-    for (int i = 0; i < 8; i++) {
+    tp_export_anim_in in[7];
+    for (int i = 0; i < 7; i++) {
         memset(&in[i], 0, sizeof in[i]);
         in[i].frames = frame_a;
         in[i].frame_count = 1;
@@ -1082,15 +1229,14 @@ void test_playback_enum_and_flags(void) {
     in[3].id = "p3"; in[3].playback = 3;
     in[4].id = "p4"; in[4].playback = 4;
     in[5].id = "p5"; in[5].playback = 5;
-    in[6].id = "p6"; in[6].playback = 6;
-    in[7].id = "pX"; in[7].playback = 99; in[7].flip_h = true; in[7].flip_v = true;
+    in[6].id = "p6"; in[6].playback = 6; in[6].flip_h = true; in[6].flip_v = true;
 
     tp_export_ir_opts opts;
     tp_export_ir_opts_defaults(&opts);
     opts.animations = in;
     opts.sprite_refs = sprite_refs;
     opts.sprite_ref_count = 1;
-    opts.animation_count = 8;
+    opts.animation_count = 7;
 
     tp_export_ir prep;
     tp_error e = {{0}};
@@ -1100,7 +1246,7 @@ void test_playback_enum_and_flags(void) {
     char base[1024];
     (void)snprintf(base, sizeof base, "%s/defold_anims", g_dir);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
-                          publish_defold(&r, &prep, defold_caps(), base,
+                          publish_defold(&r, &prep, base,
                                          &notices, ar, &e));
 
     char path[1088];
@@ -1114,20 +1260,11 @@ void test_playback_enum_and_flags(void) {
     TEST_ASSERT_TRUE(strstr(tpa, "playback: PLAYBACK_ONCE_PINGPONG") != NULL);
     TEST_ASSERT_TRUE(strstr(tpa, "playback: PLAYBACK_LOOP_PINGPONG") != NULL);
     TEST_ASSERT_TRUE(strstr(tpa, "playback: PLAYBACK_NONE") != NULL);
-    /* out-of-range playback -> ONCE_FORWARD + a notice; flips map to 1. */
+    /* Flips map to integer booleans in Defold's protobuf text. */
     TEST_ASSERT_TRUE(strstr(tpa, "flip_horizontal: 1") != NULL);
     TEST_ASSERT_TRUE(strstr(tpa, "flip_vertical: 1") != NULL);
-    /* PLAYBACK_ONCE_FORWARD appears twice (p0 + pX fallback). */
-    TEST_ASSERT_EQUAL_INT(2, count_occurrences(tpa, "playback: PLAYBACK_ONCE_FORWARD"));
+    TEST_ASSERT_EQUAL_INT(1, count_occurrences(tpa, "playback: PLAYBACK_ONCE_FORWARD"));
     free(tpa);
-
-    bool unknown_notice = false;
-    for (int i = 0; i < notices.count; i++) {
-        if (strstr(notices.items[i].msg, "unknown playback")) {
-            unknown_notice = true;
-        }
-    }
-    TEST_ASSERT_TRUE_MESSAGE(unknown_notice, "out-of-range playback raises a notice");
     tp_export_notices_free(&notices);
 
     /* implicit 1-frame anims: the sprite name must appear in the .tpinfo so bob
@@ -1137,6 +1274,7 @@ void test_playback_enum_and_flags(void) {
     TEST_ASSERT_NOT_NULL(tpi);
     TEST_ASSERT_TRUE_MESSAGE(strstr(tpi, "name: \"a\"") != NULL, "sprite name present for implicit 1-frame animation");
     free(tpi);
+
 
     tp_arena_destroy(ar);
 }
@@ -1255,7 +1393,7 @@ static bool pack_demo_atlas(const demo_atlas *da, tp_arena *ar) {
             (void)snprintf(b, sizeof b, "%s/demo_%s", g_dir, da->atlas);
             tp_export_notices notices;
             tp_export_notices_init(&notices);
-            ok = publish_defold(res, &prep, defold_caps(), b, &notices, ar,
+            ok = publish_defold(res, &prep, b, &notices, ar,
                                 &e) == TP_STATUS_OK;
             tp_export_notices_free(&notices);
             if (!ok) {
@@ -1405,7 +1543,10 @@ void test_defold_output_listing_rejects_suffix_overflow_atomically(void) {
 
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OUT_OF_BOUNDS,
-        tp_export_artifact_plan_build(tp_native_exporter_find("defold")->format, &prep, base,
+        tp_export_artifact_plan_build(
+            tp_format_catalog_exporter_find(
+                g_defold_catalog, "defold-tpinfo-2")->format,
+            &prep, base,
                                       arena, &plan, &err));
     TEST_ASSERT_TRUE(strlen(err.msg) > 0U);
     tp_arena_destroy(arena);
@@ -1442,7 +1583,10 @@ void test_artifact_plan_rejects_unsupported_transform(void) {
     prep.sprite_count = 1;
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_INVALID_ARGUMENT,
-        tp_export_artifact_plan_build(tp_native_exporter_find("defold")->format, &prep,
+        tp_export_artifact_plan_build(
+            tp_format_catalog_exporter_find(
+                g_defold_catalog, "defold-tpinfo-2")->format,
+            &prep,
                                       "plan-boundary", arena, &plan, &error));
     tp_arena_destroy(arena);
 }
@@ -1457,7 +1601,6 @@ void test_defold_metadata_path_above_legacy_limit_reaches_the_filesystem_boundar
     tp_arena *arena = tp_arena_create(0);
     TEST_ASSERT_NOT_NULL(arena);
     tp_export_ir prep;
-    tp_export_caps caps = tp_export_caps_full();
     char base[1200];
     const int prefix = snprintf(base, sizeof base, "%s/missing-long-path/", g_dir);
     TEST_ASSERT_TRUE(prefix > 0 && prefix < 1100);
@@ -1469,7 +1612,7 @@ void test_defold_metadata_path_above_legacy_limit_reaches_the_filesystem_boundar
 
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_PATH_RESOLVE_FAILED,
-        publish_defold(&result, &prep, &caps, base, NULL, arena, &err));
+        publish_defold(&result, &prep, base, NULL, arena, &err));
     TEST_ASSERT_TRUE(strlen(err.msg) > 0U);
     tp_arena_destroy(arena);
 }
@@ -1486,7 +1629,10 @@ int main(int argc, char **argv) {
         g_demo_dir = TP_DEFOLD_DEMO_DIR;
     }
 #endif
+    g_defold_catalog = open_bundled_worker_catalog();
+    NT_ASSERT(g_defold_catalog);
     UNITY_BEGIN();
+    RUN_TEST(test_bundled_defold_package_is_admitted);
     RUN_TEST(test_golden_bytes);
     RUN_TEST(test_rotated_geometry);
     RUN_TEST(test_hull_untrimmed_space);
@@ -1499,5 +1645,8 @@ int main(int argc, char **argv) {
     RUN_TEST(test_defold_output_listing_rejects_suffix_overflow_atomically);
     RUN_TEST(test_artifact_plan_rejects_unsupported_transform);
     RUN_TEST(test_defold_metadata_path_above_legacy_limit_reaches_the_filesystem_boundary);
-    return UNITY_END();
+    const int result = UNITY_END();
+    tp_format_catalog_release(g_defold_catalog);
+    g_defold_catalog = NULL;
+    return result;
 }

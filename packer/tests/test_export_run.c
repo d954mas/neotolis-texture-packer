@@ -215,24 +215,6 @@ static cJSON *anim_by_id(cJSON *root, const char *id) {
     return NULL;
 }
 
-static char *read_text_file(const char *path) {
-    FILE *f = fopen(path, "rb");
-    if (!f) {
-        return NULL;
-    }
-    (void)fseek(f, 0, SEEK_END);
-    long sz = ftell(f);
-    rewind(f);
-    char *buf = (sz >= 0) ? (char *)malloc((size_t)sz + 1) : NULL;
-    size_t rd = buf ? fread(buf, 1, (size_t)sz, f) : 0;
-    (void)fclose(f);
-    if (!buf) {
-        return NULL;
-    }
-    buf[rd] = '\0';
-    return buf;
-}
-
 // #region tests
 void test_shared_run_count(void) {
     /* json-neotolis and test-nopivot have identical effective settings (both
@@ -364,8 +346,8 @@ void test_capability_notice_allocation_failure_is_fatal(void) {
 
 void test_rename_and_anim_through_run(void) {
     /* A4 end-to-end through tp_export_run (L-3/L-4): a renamed sprite that an
-     * animation references. Both json and defold outputs must carry the rename
-     * into the sprite name AND the animation frame (frames follow the rename). */
+     * animation references. Canonical JSON carries the rename into the sprite
+     * name and animation frame; runtime mapping is covered separately. */
     static uint8_t hero[32 * 32 * 4];
     static uint8_t gem[24 * 24 * 4];
     fill(hero, 32 * 32, 10, 20, 30);
@@ -403,11 +385,8 @@ void test_rename_and_anim_through_run(void) {
         tp_project_anim_add_frame(an, source_id, "gem.png"));
 
     char jbase[1024];
-    char dbase[1024];
     (void)snprintf(jbase, sizeof jbase, "%s/rn_json", g_dir);
-    (void)snprintf(dbase, sizeof dbase, "%s/rn_defold", g_dir);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_target(a, "json-neotolis", jbase, NULL));
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_target(a, "defold", dbase, NULL));
 
     tp_pack_sprite_desc sprites[2];
     memset(sprites, 0, sizeof sprites);
@@ -436,20 +415,6 @@ void test_rename_and_anim_through_run(void) {
     TEST_ASSERT_EQUAL_STRING("champion", cJSON_GetArrayItem(frames, 0)->valuestring); /* follows rename */
     TEST_ASSERT_EQUAL_STRING("gem", cJSON_GetArrayItem(frames, 1)->valuestring);
     cJSON_Delete(root);
-
-    /* --- defold: rename lands in the sprite (.tpinfo) and the frame (.tpatlas) --- */
-    char path[1088];
-    (void)snprintf(path, sizeof path, "%s.tpinfo", dbase);
-    char *tpi = read_text_file(path);
-    TEST_ASSERT_NOT_NULL(tpi);
-    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(tpi, "name: \"champion\""), "defold .tpinfo carries the rename");
-    TEST_ASSERT_NULL_MESSAGE(strstr(tpi, "name: \"hero\""), "old name gone from .tpinfo");
-    free(tpi);
-    (void)snprintf(path, sizeof path, "%s.tpatlas", dbase);
-    char *tpa = read_text_file(path);
-    TEST_ASSERT_NOT_NULL(tpa);
-    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(tpa, "images: \"champion\""), "defold anim frame follows the rename");
-    free(tpa);
 
     tp_arena_destroy(ar);
     tp_project_destroy(proj);

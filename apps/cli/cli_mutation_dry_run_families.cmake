@@ -141,7 +141,7 @@ run_error_parity("animation selector miss" 3
     anim remove "${PROJ}" clean missing)
 
 run_preview("target create dry-run" "target" 1
-    target add "${PROJ}" clean defold out/preview)
+    target add "${PROJ}" clean defold-tpinfo-2 out/preview)
 run_preview("target remove dry-run" "target" 0
     target remove "${PROJ}" clean json-neotolis)
 run_error_parity("target selector miss" 3

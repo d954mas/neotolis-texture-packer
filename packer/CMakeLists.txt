@@ -18,7 +18,6 @@ add_library(tp_core STATIC
     # the S28 compressed cold tier).
     src/tp_pack_hash.c src/tp_pack_result_cache.c
     src/tp_export.c src/tp_normalize.c src/tp_export_png.c src/tp_export_json_neotolis.c
-    src/tp_export_defold.c
     # Owned immutable format catalog, strict package descriptor admission, and
     # executable-relative runtime root. Discovery's OS backend is selected below.
     src/tp_format_catalog.c src/tp_format_catalog_scan.c

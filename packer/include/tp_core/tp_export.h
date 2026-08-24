@@ -324,11 +324,6 @@ tp_status tp_export_artifact_plan_build(const tp_format_descriptor *format,
 /* json-neotolis schema version emitted in the "version" field. */
 #define TP_JSON_NEOTOLIS_SCHEMA_VERSION 1
 
-/* defold-tpinfo format version emitted in the .tpinfo "version" field (contract:
- * docs/formats/defold-tpinfo.md). Public so the CLI version manifest can report
- * it from one source instead of a duplicated literal. */
-#define TP_DEFOLD_TPINFO_VERSION "2.0"
-
 #ifdef __cplusplus
 }
 #endif

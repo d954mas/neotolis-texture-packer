@@ -3634,7 +3634,7 @@ void selftest_pre_frame(void) {
             int defold_idx = -1;
             for (int i = 0; i < gui_project_format_count(); i++) {
                 const tp_format_descriptor *e = gui_project_format_at(i);
-                if (e && strcmp(e->id, "defold") == 0) {
+                if (e && strcmp(e->id, "defold-tpinfo-2") == 0) {
                     defold_idx = i;
                     break;
                 }
@@ -3642,7 +3642,7 @@ void selftest_pre_frame(void) {
             NT_ASSERT(defold_idx >= 0 && "SELFTEST preview: defold exporter registered");
 
             char pverr[256] = {0};
-            const bool okp = gui_pack_preview_blocking(0, "defold", pverr, sizeof pverr);
+            const bool okp = gui_pack_preview_blocking(0, "defold-tpinfo-2", pverr, sizeof pverr);
             const tp_result *pv = gui_pack_preview_result(0);
             nt_log_info("SELFTEST: preview defold pack -> %d sprites=%d %s", (int)okp, pv ? pv->sprite_count : -1,
                         okp ? "" : pverr);
@@ -3685,11 +3685,11 @@ void selftest_pre_frame(void) {
             char chip[96] = {0};
             char tip[224] = {0};
             gui_pack_preview_diff_work_reset();
-            const int nd = gui_pack_preview_diff(0, "defold", chip, sizeof chip, tip, sizeof tip);
+            const int nd = gui_pack_preview_diff(0, "defold-tpinfo-2", chip, sizeof chip, tip, sizeof tip);
             char chip_again[96] = {0};
             char tip_again[224] = {0};
             const int nd_again = gui_pack_preview_diff(
-                0, "defold", chip_again, sizeof chip_again, tip_again,
+                0, "defold-tpinfo-2", chip_again, sizeof chip_again, tip_again,
                 sizeof tip_again);
             nt_log_info("SELFTEST: preview defold degradation nd=%d chip='%s'", nd, chip);
             NT_ASSERT(nd > 0 && chip[0] != '\0' && "SELFTEST preview: defold degradation summary non-empty");
@@ -3699,7 +3699,7 @@ void selftest_pre_frame(void) {
                       "SELFTEST preview: unchanged degradation diff is cached");
             NT_ASSERT(selftest_set_atlas_name_at(0, "preview-cache-refresh") &&
                       "SELFTEST preview: cache invalidation edit commits");
-            (void)gui_pack_preview_diff(0, "defold", chip_again,
+            (void)gui_pack_preview_diff(0, "defold-tpinfo-2", chip_again,
                                         sizeof chip_again, tip_again,
                                         sizeof tip_again);
             NT_ASSERT(gui_pack_preview_diff_rebuilds() == 2U &&

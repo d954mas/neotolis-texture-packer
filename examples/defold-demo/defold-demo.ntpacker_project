@@ -36,7 +36,7 @@
           "out_path": "examples/basic/basic_nt_json"
         },
         {
-          "exporter_id": "defold",
+          "exporter_id": "defold-tpinfo-2",
           "id": "target_20000000000000000000000000000005",
           "out_path": "examples/basic/basic_nt"
         }
@@ -71,7 +71,7 @@
           "out_path": "examples/rotate/rotate_nt_json"
         },
         {
-          "exporter_id": "defold",
+          "exporter_id": "defold-tpinfo-2",
           "id": "target_20000000000000000000000000000016",
           "out_path": "examples/rotate/rotate_nt"
         }
@@ -114,7 +114,7 @@
           "out_path": "examples/anim_trim/anim_trim_nt_json"
         },
         {
-          "exporter_id": "defold",
+          "exporter_id": "defold-tpinfo-2",
           "id": "target_20000000000000000000000000000025",
           "out_path": "examples/anim_trim/anim_trim_nt"
         }

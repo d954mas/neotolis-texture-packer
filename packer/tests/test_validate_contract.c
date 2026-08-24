@@ -65,9 +65,9 @@ void test_multi_atlas_duplicate_groups_have_exact_order_and_context(void) {
     static const expected_finding expected[] = {
         {"a1", "atlas_00000000000000000000000000000301", "json-neotolis",
          "target_00000000000000000000000000000303", "out/shared"},
-        {"a1", "atlas_00000000000000000000000000000301", "defold",
+        {"a1", "atlas_00000000000000000000000000000301", "json-neotolis",
          "target_00000000000000000000000000000304", "out/secondary"},
-        {"a2", "atlas_00000000000000000000000000000311", "defold",
+        {"a2", "atlas_00000000000000000000000000000311", "json-neotolis",
          "target_00000000000000000000000000000313", "out/shared"},
         {"a2", "atlas_00000000000000000000000000000311", "json-neotolis",
          "target_00000000000000000000000000000314", "out/secondary"},

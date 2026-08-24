@@ -21,6 +21,7 @@
 #include "tinycthread.h"
 
 #include "core/nt_assert.h"
+#include "app_format_catalog.h"
 #include "tp_core/tp_build_worker.h"
 #include "tp_core/tp_job.h"
 #include "tp_core/tp_scan.h"
@@ -31,8 +32,16 @@ static int run_live_export(const char *project_path, const char *work_dir,
     tp_rng rng = tp_rng_os();
     tp_session *session = NULL;
     tp_error error = {{0}};
-    tp_status status =
-        tp_session_open(project_path, &rng, &session, &error);
+    app_format_catalog formats = {0};
+    tp_status status = app_format_catalog_open_startup(&formats, &error);
+    if (status != TP_STATUS_OK || !formats.catalog) {
+        (void)fprintf(stderr, "cannot open format catalog: %s (%s)\n",
+                      tp_status_str(status), error.msg);
+        return 1;
+    }
+    status = tp_session_open_with_catalog(
+        project_path, formats.catalog, &rng, &session, &error);
+    app_format_catalog_close(&formats);
     if (status != TP_STATUS_OK) {
         (void)fprintf(
             stderr, "cannot open project '%s': %s (%s)\n",

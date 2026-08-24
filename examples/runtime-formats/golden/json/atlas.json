@@ -1,0 +1,58 @@
+{
+  "version": 1,
+  "atlas": "runtime-formats",
+  "pages": [
+    {
+      "file": "atlas-0.png",
+      "h": 3,
+      "premultiplied": false,
+      "w": 6
+    }
+  ],
+  "pixels_per_unit": 1,
+  "sprites": [
+    {
+      "alias_of": null,
+      "frame": {
+        "h": 1,
+        "w": 1,
+        "x": 1,
+        "y": 1
+      },
+      "name": "coin",
+      "page": 0,
+      "sourceSize": {
+        "h": 1,
+        "w": 1
+      },
+      "spriteSourceSize": {
+        "h": 1,
+        "w": 1,
+        "x": 0,
+        "y": 0
+      }
+    },
+    {
+      "alias_of": null,
+      "frame": {
+        "h": 1,
+        "w": 1,
+        "x": 4,
+        "y": 1
+      },
+      "name": "hero",
+      "page": 0,
+      "pivot": [0.25, 0.75],
+      "sourceSize": {
+        "h": 1,
+        "w": 1
+      },
+      "spriteSourceSize": {
+        "h": 1,
+        "w": 1,
+        "x": 0,
+        "y": 0
+      }
+    }
+  ]
+}

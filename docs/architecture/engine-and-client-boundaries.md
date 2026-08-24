@@ -70,10 +70,10 @@ distinct effective pack result and reused by every compatible target. The format
 descriptor is bound separately into the artifact plan, which is the sole
 authority for concrete filenames. Serializers consume the IR and plan and return
 memory documents; they do not write files or enumerate outputs.
-The bundled Defold serializer retains one explicit exception: a bounded,
-read-only upward probe for `game.project` used to form its resource reference.
-That trusted built-in environment lookup is not a general handler capability and
-does not grant future Lua drivers filesystem access.
+Common host-fact preparation may perform a bounded, read-only upward probe for
+`game.project` when a descriptor declares the Defold project-resource fact. Lua
+receives only the final normalized resource string, never filesystem or path
+access.
 
 After full preflight, the serializer produces and validates the complete owned
 document batch without publication side effects. Wet execution then acquires
@@ -98,8 +98,9 @@ analyze the same effective settings and IR. A descriptor that declares
 single-page output rejects a multi-page IR before its serializer runs;
 serializers do not reimplement capability policy.
 
-`json-neotolis` and `defold` both use this path. The production catalog has no
-generic native registration API; test binaries may build a private immutable
+Native `json-neotolis` and the bundled `defold-tpinfo-2` and
+`phaser-3-multiatlas` Lua packages all use this path. The production catalog has
+no generic native registration API; test binaries may build a private immutable
 catalog for capability and failure coverage.
 
 ## Client shapes
@@ -145,7 +146,8 @@ report; clients do not reconstruct or discard that policy independently. A
 complete compile batch is installed atomically; a global scan/compile failure
 uses the immortal native baseline. Build staging recreates the
 executable-relative root for both apps from one explicit production package
-manifest; that manifest is currently empty. Package changes require restart.
+manifest; it currently stages the bundled Defold and Phaser packages. Package
+changes require restart.
 
 Lua source and the Lua C API are reachable only from the re-executed outer
 worker. Admission captures exact descriptor/source bytes plus package identity

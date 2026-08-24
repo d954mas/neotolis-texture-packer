@@ -302,6 +302,7 @@ foreach(_trace_area draft refresh job)
         DEFINES
             TP_GUI_TRACE_TEST_DIR="${CMAKE_CURRENT_BINARY_DIR}/tp_gui_trace_${_trace_area}_tmp"
             TP_FORMAT_FIXTURE_ROOT="${CMAKE_SOURCE_DIR}/packer/tests/fixtures/format-packages"
+            TP_FORMAT_BUNDLED_ROOT="${CMAKE_SOURCE_DIR}/formats"
             TP_TEST_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
             _CRT_SECURE_NO_WARNINGS
             ${_tp_gui_introspect_defines})
@@ -314,9 +315,12 @@ tp_add_gui_test(NAME client_parity_replay TARGET tp_client_parity_replay
     SOURCES
         client_parity_replay.c
         gui_project_operations.c
+        "${CMAKE_SOURCE_DIR}/apps/common/app_format_catalog.c"
     LIBS tp_build
+    INCLUDE_DIRS "${CMAKE_SOURCE_DIR}/apps/common"
     SEAMS
     NO_CTEST)
+tp_stage_format_packages(tp_client_parity_replay)
 
 add_test(NAME tp_client_parity_real COMMAND ${CMAKE_COMMAND}
     -DNTPACKER=$<TARGET_FILE:ntpacker>

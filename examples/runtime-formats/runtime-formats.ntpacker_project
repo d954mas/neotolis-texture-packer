@@ -1,0 +1,44 @@
+{
+  "version": 5,
+  "atlases": [
+    {
+      "allow_transform": false,
+      "id": "atlas_0000000000000000000000000000e401",
+      "max_size": 64,
+      "name": "runtime-formats",
+      "padding": 1,
+      "power_of_two": false,
+      "shape": 0,
+      "sources": [
+        {
+          "id": "source_0000000000000000000000000000e402",
+          "path": "sprites"
+        }
+      ],
+      "sprites": [
+        {
+          "key": "hero.png",
+          "origin": [0.25, 0.75],
+          "source": "source_0000000000000000000000000000e402"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_0000000000000000000000000000e403",
+          "out_path": "golden/json/atlas"
+        },
+        {
+          "exporter_id": "defold-tpinfo-2",
+          "id": "target_0000000000000000000000000000e404",
+          "out_path": "golden/defold/atlas"
+        },
+        {
+          "exporter_id": "phaser-3-multiatlas",
+          "id": "target_0000000000000000000000000000e405",
+          "out_path": "golden/phaser/atlas"
+        }
+      ]
+    }
+  ]
+}

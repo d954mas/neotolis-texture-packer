@@ -16,7 +16,7 @@ through a shared core rather than separate GUI and automation models.
 - native preview-oriented GUI;
 - complete saved-file CLI editing, inspect, validate, Pack, Export, and dry run;
 - full-fidelity `json-neotolis` export;
-- Defold export with explicit capability adaptation and loss notices;
+- bundled `defold-tpinfo-2` and `phaser-3-multiatlas` runtime exports;
 - target-capability adaptation with structured loss notices;
 - target-neutral versioned immutable Export IR reused per effective pack result,
   native format descriptors, deterministic artifact plans, and rollback-backed
@@ -31,9 +31,9 @@ through a shared core rather than separate GUI and automation models.
 - GUI-owned semantic Pack-result preview caching.
 
 The current product does not provide filesystem watchers, linked foreign-atlas
-sources, Import IR, bundled runtime format packages, MCP, or a Dev API transport.
-Runtime package refresh is restart-only; the production package manifest is
-currently empty.
+sources, Import IR, MCP, or a Dev API transport. Runtime package refresh is
+restart-only; the production manifest ships the bundled Defold and Phaser
+packages.
 
 ## Shared behavior
 

@@ -1426,7 +1426,7 @@ void test_preview_request_is_deferred_and_selection_reset_stops_it(void) {
     gui_rows_select_primary(&selected_row);
     TEST_ASSERT_TRUE(gui_rows_primary_is_set());
     TEST_ASSERT_TRUE(gui_preview_target_make_format(
-        "defold", &s_preview_target));
+        "defold-tpinfo-2", &s_preview_target));
     reset_selection();
     TEST_ASSERT_FALSE(gui_rows_primary_is_set());
     TEST_ASSERT_EQUAL_INT(

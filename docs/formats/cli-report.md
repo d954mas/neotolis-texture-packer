@@ -47,8 +47,11 @@ stable tokens. File I/O errors may also include `phase`, `path`, and
 ## Schema manifest
 
 `version --json` uses manifest schema 2 and advertises the project format,
-export formats, and every CLI payload schema. Query verbs map directly to a
-number. Mutation families advertise separate variants:
+native export wire formats, and every CLI payload schema. Runtime package
+identity, package API version, and capabilities come from the invocation-owned
+catalog in `exporters` and the `formats --json` report; they are not duplicated
+in the static `formats` object. Query verbs map directly to a number. Mutation
+families advertise separate variants:
 
 ```json
 { "apply": 1, "dry_run": 2 }

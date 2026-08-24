@@ -1,8 +1,8 @@
 # Defold export format
 
-**Status:** Current built-in export contract.
+**Status:** Current bundled Lua export contract.
 
-The `defold` target writes inputs for Defold's TexturePacker extension:
+The `defold-tpinfo-2` target writes inputs for Defold's TexturePacker extension:
 
 - `<base>.tpinfo`: protobuf-text packed layout, format version `"2.0"`;
 - `<base>.tpatlas`: protobuf-text wrapper and explicit animations;
@@ -33,7 +33,7 @@ the basename and a notice because Defold may not resolve it.
 | Full D4 transforms | Unsupported. |
 | 90-degree rotation | D4 value 5 is packed and emitted as `rotated: true`. |
 
-The native descriptor declares the exact transform-value mask
+The bundled package descriptor declares the exact transform-value mask
 `identity + rotate90`. The shared export layer intersects that mask with the
 requested atlas mask before pack grouping and passes it unchanged to the engine.
 Flips and the opposite rotations therefore cannot enter a Defold result, while
@@ -92,13 +92,14 @@ integer field. Playback mapping is:
 | 5 | `PLAYBACK_LOOP_PINGPONG` |
 | 6 | `PLAYBACK_NONE` |
 
-An unknown playback ID falls back to once-forward with a notice.
+Playback IDs outside this table are invalid external input and are rejected at
+the common Export IR boundary before the Lua handler runs.
 
 ## Notices
 
 Capability loss and path fallback are informational, not hard exporter errors.
 Stable situations include dropped 9-slice data, guarded unsupported transforms,
-unknown playback fallback, and inability to locate `game.project`.
+and inability to locate `game.project`.
 
 The executable integration example is
 [`examples/defold-demo`](../../examples/defold-demo/).

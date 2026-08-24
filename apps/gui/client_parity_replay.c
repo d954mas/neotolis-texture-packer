@@ -1,10 +1,12 @@
 #include "gui_project_operations.h"
+#include "app_format_catalog.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "tp_core/tp_export.h"
+#include "tp_core/tp_build_worker.h"
 #include "tp_core/tp_session.h"
 #include "tp_core/tp_transaction.h"
 
@@ -65,6 +67,7 @@ static const replay_family_contract s_family_contracts[] = {
 
 static bool s_observed_kinds[TP_OP_KIND_COUNT];
 static bool s_observed_invalid_kind;
+static app_format_catalog s_formats;
 
 static const replay_family_contract *find_family_contract(
     const char *name) {
@@ -365,7 +368,7 @@ static int harvest(const char *family, const char *path, harvest_ids *out) {
     } else if (strcmp(family, "target") == 0 ||
                strcmp(family, "atlas") == 0) {
         const char *exporter = strcmp(family, "target") == 0
-                                   ? "defold"
+                                   ? "defold-tpinfo-2"
                                    : "json-neotolis";
         const tp_snapshot_target *target = find_target(snapshot, atlas, exporter);
         if (!target) {
@@ -388,7 +391,8 @@ static int harvest(const char *family, const char *path, harvest_ids *out) {
 static int open_base(const char *path, tp_session **out, tp_error *err) {
     uint8_t seed = 0x91U;
     const tp_rng rng = {deterministic_fill, &seed};
-    const tp_status status = tp_session_open(path, &rng, out, err);
+    const tp_status status = tp_session_open_with_catalog(
+        path, s_formats.catalog, &rng, out, err);
     return status == TP_STATUS_OK ? 0 : fail("base open", status, err);
 }
 
@@ -614,7 +618,8 @@ static int outcome_notice(const char *path) {
         return fail("notice snapshot", status, &err);
     }
     const tp_format_descriptor *exporter =
-        tp_format_catalog_find_available(tp_format_catalog_native(), "defold");
+        tp_format_catalog_find_available(
+            s_formats.catalog, "defold-tpinfo-2");
     tp_export_notices notices;
     tp_export_notices_init(&notices);
     status = exporter
@@ -889,7 +894,7 @@ static int replay_target(tp_session *session, const harvest_ids *ids,
     if (base_atlas(session, &atlas_id, err) != 0) return 1;
     tp_status status = gui_project_operation_create_target(
         s_replay_client, atlas_id, ids->target_id,
-        revision_of(session, err), "defold", "out/d", true, NULL, err);
+        revision_of(session, err), "defold-tpinfo-2", "out/d", true, NULL, err);
     if (status != TP_STATUS_OK) return fail("target create", status, err);
     const char *transaction_id = next_txn();
     gui_project_operation_submit_terminal terminal = {0};
@@ -946,7 +951,8 @@ static int replay_remove(tp_session *session, const char *family,
                                                err);
     } else {
         const tp_snapshot_atlas *atlas = find_atlas(snapshot, "atlas1");
-        const tp_snapshot_target *target = find_target(snapshot, atlas, "defold");
+        const tp_snapshot_target *target = find_target(
+            snapshot, atlas, "defold-tpinfo-2");
         if (!target) { tp_session_snapshot_destroy(snapshot); return 1; }
         const tp_id128 id = target->id;
         tp_session_snapshot_destroy(snapshot);
@@ -1004,20 +1010,31 @@ static int replay(const char *family, const char *base_path,
 }
 
 int main(int argc, char **argv) {
+    if (tp_build_is_worker_invocation(argc, argv)) {
+        return tp_build_worker_main();
+    }
     if (verify_operation_coverage() != 0) {
         return 1;
     }
+    tp_error error = {{0}};
+    const tp_status format_status =
+        app_format_catalog_open_startup(&s_formats, &error);
+    if (format_status != TP_STATUS_OK ||
+        !s_formats.catalog) {
+        return fail("format catalog", format_status, &error);
+    }
+    int result = 2;
     if (argc == 3 && strcmp(argv[1], "seed") == 0) {
-        return seed_project(argv[2]);
+        result = seed_project(argv[2]);
+    } else if (argc == 6 && strcmp(argv[1], "replay") == 0) {
+        result = replay(argv[2], argv[3], argv[4], argv[5]);
+    } else if (argc == 4 && strcmp(argv[1], "outcome") == 0) {
+        result = outcome(argv[2], argv[3]);
+    } else {
+        (void)fprintf(stderr,
+                      "usage: client_parity_replay seed PATH | replay FAMILY BASE "
+                      "HARVEST OUT | outcome NAME PROJECT\n");
     }
-    if (argc == 6 && strcmp(argv[1], "replay") == 0) {
-        return replay(argv[2], argv[3], argv[4], argv[5]);
-    }
-    if (argc == 4 && strcmp(argv[1], "outcome") == 0) {
-        return outcome(argv[2], argv[3]);
-    }
-    (void)fprintf(stderr,
-                  "usage: client_parity_replay seed PATH | replay FAMILY BASE "
-                  "HARVEST OUT | outcome NAME PROJECT\n");
-    return 2;
+    app_format_catalog_close(&s_formats);
+    return result;
 }

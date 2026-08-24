@@ -434,7 +434,7 @@ add_test(NAME cli_pack_clean COMMAND ${CMAKE_COMMAND}
 # hard-fail on a preview-only project), zero targets in the report.
 add_test(NAME cli_pack_target_none COMMAND ${CMAKE_COMMAND}
     -DEXE=$<TARGET_FILE:ntpacker> -DEXPECT=0
-    "-DARGS=pack ${_td}/clean.ntpacker_project --json --target defold --out-dir ${CMAKE_CURRENT_BINARY_DIR}/cli_pack_out2"
+    "-DARGS=pack ${_td}/clean.ntpacker_project --json --target defold-tpinfo-2 --out-dir ${CMAKE_CURRENT_BINARY_DIR}/cli_pack_out2"
     -DCHECKER=$<TARGET_FILE:cli_json_check>
     "-DCHECK_ARGS=pack targets_ok=0 targets_failed=0 notice=no_enabled_targets"
     -DOUTFILE=${CMAKE_CURRENT_BINARY_DIR}/cli_pack_none.json
@@ -444,7 +444,7 @@ add_test(NAME cli_pack_target_none COMMAND ${CMAKE_COMMAND}
 # irrelevant when no target remains enabled.
 add_test(NAME cli_pack_target_none_missing_source COMMAND ${CMAKE_COMMAND}
     -DEXE=$<TARGET_FILE:ntpacker> -DEXPECT=0
-    "-DARGS=pack ${_td}/missing-source.ntpacker_project --json --target defold --out-dir ${CMAKE_CURRENT_BINARY_DIR}/cli_pack_none_missing"
+    "-DARGS=pack ${_td}/missing-source.ntpacker_project --json --target defold-tpinfo-2 --out-dir ${CMAKE_CURRENT_BINARY_DIR}/cli_pack_none_missing"
     -DCHECKER=$<TARGET_FILE:cli_json_check>
     "-DCHECK_ARGS=pack targets_ok=0 targets_failed=0 notice=no_enabled_targets"
     -DOUTFILE=${CMAKE_CURRENT_BINARY_DIR}/cli_pack_none_missing.json
@@ -533,6 +533,23 @@ foreach(_lua_mode dry wet)
         -DDRY_RUN=${_lua_dry_run}
         -P "${CMAKE_CURRENT_SOURCE_DIR}/cli_lua_export.cmake")
 endforeach()
+
+# The bundled Defold package must be indistinguishable from the legacy native
+# producer when both cross the real CLI -> outer job worker (Lua) -> inner
+# builder worker path.
+add_test(NAME tp_defold_cli_lua_parity COMMAND ${CMAKE_COMMAND}
+    -DEXE=$<TARGET_FILE:ntpacker>
+    -DSOURCE=${CMAKE_SOURCE_DIR}
+    -DWORK=${CMAKE_CURRENT_BINARY_DIR}/tp_defold_cli_lua_parity
+    -P "${CMAKE_CURRENT_SOURCE_DIR}/defold_lua_parity.cmake")
+set_tests_properties(tp_defold_cli_lua_parity PROPERTIES TIMEOUT 180)
+
+add_test(NAME tp_runtime_formats_example_contract COMMAND ${CMAKE_COMMAND}
+    -DEXE=$<TARGET_FILE:ntpacker>
+    -DEXAMPLE=${CMAKE_SOURCE_DIR}/examples/runtime-formats
+    -DWORK=${CMAKE_CURRENT_BINARY_DIR}/tp_runtime_formats_example_contract
+    -P "${CMAKE_CURRENT_SOURCE_DIR}/runtime_formats_example_contract.cmake")
+set_tests_properties(tp_runtime_formats_example_contract PROPERTIES TIMEOUT 180)
 
 # The checked-in 100-atlas project is not only schema-openable: drive one atlas
 # through real image decode + pack/predict without creating output files.

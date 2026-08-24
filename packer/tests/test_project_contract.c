@@ -130,7 +130,7 @@ static tp_project *build_expected_project(void) {
     tp_project_target *defold_target = NULL;
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK, tp_project_atlas_add_target(
-                          hero, "defold", "out/hero.atlas", &defold_target));
+                          hero, "defold-tpinfo-2", "out/hero.atlas", &defold_target));
     defold_target->id = fixed_id(0x42U);
     defold_target->enabled = false;
 
@@ -237,7 +237,7 @@ void test_loader_maps_checked_in_bytes_to_expected_model(void) {
     TEST_ASSERT_EQUAL_STRING("out/герой.json", hero->targets[0].out_path);
     TEST_ASSERT_TRUE(hero->targets[0].enabled);
     assert_id(0x42U, hero->targets[1].id);
-    TEST_ASSERT_EQUAL_STRING("defold", hero->targets[1].exporter_id);
+    TEST_ASSERT_EQUAL_STRING("defold-tpinfo-2", hero->targets[1].exporter_id);
     TEST_ASSERT_EQUAL_STRING("out/hero.atlas", hero->targets[1].out_path);
     TEST_ASSERT_FALSE(hero->targets[1].enabled);
 

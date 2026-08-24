@@ -5,9 +5,10 @@
 Standalone native texture/atlas packer built on neotolis-engine. The current
 baseline has one shared packing/export core, typed operation/session ownership,
 stable structural IDs, canonical-v5 tagged sources, semantic history/recovery,
-and thin CLI and native GUI clients. Approved target work adds the unified
-runtime Export format registry and capability-equivalent MCP and Dev API
-clients. Import requires its own separately approved target contract.
+thin CLI and native GUI clients, and a unified runtime Export format registry
+with bundled Defold and Phaser packages. Approved target work adds
+capability-equivalent MCP and Dev API clients. Import requires its own separately
+approved target contract.
 
 `docs/spec/product.md` is the current product contract. Approved future behavior
 is explicitly labeled `Target contract` under `docs/spec/`. Current ownership

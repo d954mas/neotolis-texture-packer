@@ -258,6 +258,18 @@ tp_add_test(NAME input
 # header from src/ directly -- no public API pollution.
 tp_add_test(NAME transform_decode LIBS tp_core unity PRIVATE_SRC)
 
+# Independent Phaser consumer oracle. One binary owns the shared fixture and
+# parser; the three public gates select disjoint contract responsibilities.
+tp_add_test(NAME phaser_oracle TARGET tp_phaser_oracle
+    SOURCES test_export_phaser.c
+    LIBS tp_build unity cjson PRIVATE_SRC
+    DEFINES TP_FORMAT_BUNDLED_ROOT="${CMAKE_SOURCE_DIR}/formats"
+    NO_CTEST)
+foreach(_phaser_gate export_contract capability_matrix consumer_validate)
+    add_test(NAME tp_phaser_${_phaser_gate}
+        COMMAND tp_phaser_oracle ${_phaser_gate})
+endforeach()
+
 # Fixture-driven golden round-trip: builds every fixture case (tp_fixtures) via
 # nt_builder (transitive through tp_core) then parses it back. Needs a scratch
 # dir for the temp .ntpack files. tp_build: fixtures pack via nt_builder.
@@ -467,7 +479,9 @@ tp_add_test(NAME predict
 tp_add_test(NAME export_defold
     SOURCES test_export_defold.c tp_fixtures.c
     LIBS tp_build unity stb_image PRIVATE_SRC
-    DEFINES TP_DEFOLD_DEMO_DIR="${CMAKE_SOURCE_DIR}/examples/defold-demo"
+    DEFINES
+        TP_DEFOLD_DEMO_DIR="${CMAKE_SOURCE_DIR}/examples/defold-demo"
+        TP_FORMAT_BUNDLED_ROOT="${CMAKE_SOURCE_DIR}/formats"
     MAKE_DIRS "${CMAKE_BINARY_DIR}/tp_export_defold_test"
     ARGS "${CMAKE_BINARY_DIR}/tp_export_defold_test"
          "${CMAKE_SOURCE_DIR}/examples/defold-demo")
@@ -488,7 +502,9 @@ tp_add_test(NAME raw_ownership LIBS tp_build unity PRIVATE_SRC
 #   tp_demo_export <project.ntpacker_project> [work_dir]
 tp_add_test(NAME demo_export TARGET tp_demo_export
     SOURCES tp_demo_export.c
+        "${CMAKE_SOURCE_DIR}/apps/common/app_format_catalog.c"
     LIBS tp_build
+    INCLUDE_DIRS "${CMAKE_SOURCE_DIR}/apps/common"
     NO_CTEST)
 
 # M0 production-path baseline. The superseded component clone, full-snapshot-as-
@@ -590,6 +606,14 @@ add_test(NAME tp_format_package_staging_contract COMMAND "${CMAKE_COMMAND}"
 set_tests_properties(tp_format_package_staging_contract
     PROPERTIES TIMEOUT 30)
 
+add_test(NAME tp_bundled_format_staging_contract COMMAND "${CMAKE_COMMAND}"
+    "-DTP_STAGE_SCRIPT=${CMAKE_SOURCE_DIR}/cmake/tp_stage_format_packages_run.cmake"
+    "-DTP_SOURCE_ROOT=${CMAKE_SOURCE_DIR}/formats"
+    "-DTP_MANIFEST=${CMAKE_SOURCE_DIR}/formats/manifest.cmake"
+    "-DTP_TEST_ROOT=${CMAKE_BINARY_DIR}/tp_bundled_format_staging_contract_test"
+    -P "${CMAKE_CURRENT_SOURCE_DIR}/bundled_format_staging_contract.cmake")
+set_tests_properties(tp_bundled_format_staging_contract PROPERTIES TIMEOUT 30)
+
 tp_add_test(NAME format_catalog_contract LIBS tp_core unity PRIVATE_SRC
     DEFINES
         TP_FORMAT_FIXTURE_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/format-packages"
@@ -661,3 +685,4 @@ get_property(_tp_test_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
 foreach(_tp_test_target IN LISTS _tp_test_targets)
     nt_set_sanitizer_flags(${_tp_test_target})
 endforeach()
+tp_stage_format_packages(tp_demo_export)

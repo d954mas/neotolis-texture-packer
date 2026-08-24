@@ -7,6 +7,7 @@
 
 #include "tp_core/tp_arena.h"
 #include "tp_core/tp_names.h"
+#include "tp_core/tp_project.h"
 
 /* ======================================================================== */
 /* options + final-name munging                                             */
@@ -572,6 +573,13 @@ tp_status tp_export_ir_validate(const tp_export_ir *ir, tp_error *err) {
             !isfinite(anim->fps)) {
             return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
                                 "tp_export_ir_validate: invalid animation %d", i);
+        }
+        if (!tp_project_anim_playback_valid(anim->playback)) {
+            return tp_error_set(
+                err, TP_STATUS_OUT_OF_RANGE,
+                "tp_export_ir_validate: animation '%s' playback = %d is out of range [%d..%d]",
+                anim->id, anim->playback, TP_PROJECT_ANIM_PLAYBACK_MIN,
+                TP_PROJECT_ANIM_PLAYBACK_MAX);
         }
         if (i > 0 && strcmp(ir->animations[i - 1].id, anim->id) >= 0) {
             return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,

@@ -16,7 +16,7 @@
       "message": "two or more targets export to 'out/secondary' (they overwrite each other)",
       "atlas": "a1",
       "atlas_id": "atlas_00000000000000000000000000000301",
-      "target": "defold",
+      "target": "json-neotolis",
       "target_id": "target_00000000000000000000000000000304"
     },
     {
@@ -25,7 +25,7 @@
       "message": "two or more targets export to 'out/shared' (they overwrite each other)",
       "atlas": "a2",
       "atlas_id": "atlas_00000000000000000000000000000311",
-      "target": "defold",
+      "target": "json-neotolis",
       "target_id": "target_00000000000000000000000000000313"
     },
     {
