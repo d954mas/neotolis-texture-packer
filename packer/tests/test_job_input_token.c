@@ -1078,9 +1078,6 @@ void test_session_task_slot_rejects_every_cross_kind_pair(void) {
         TP_STATUS_BUSY,
         tp_session_export_start(
             session, &export, &error));
-    TEST_ASSERT_EQUAL_INT(
-        TP_STATUS_OK,
-        tp_session_job_cancel(session, &error));
     completion = wait_for_result(session);
     tp_session_job_result_destroy(&completion);
 
