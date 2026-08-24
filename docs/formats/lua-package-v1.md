@@ -1,7 +1,6 @@
 # Sandboxed Lua export package v1
 
-**Status:** Target wire/runtime contract; not implemented by the current
-product.
+**Status:** Current wire/runtime contract.
 
 This document freezes package API version 1. It owns the exact `format.json`
 wire shape, Lua-visible Export IR projection, sandbox surface, diagnostic
@@ -545,6 +544,5 @@ tp_format_compile_worker
 tp_format_binding_protocol
 ```
 
-The checked-in skeleton corpus under
-`packer/tests/fixtures/format-packages/` is data only until the production
-descriptor/parser and Lua host consume it in Packets 1 and 2.
+The checked-in corpus under `packer/tests/fixtures/format-packages/` exercises
+the production descriptor parser, compiler, sandbox, and runtime host.

@@ -6,6 +6,7 @@
 #include <stdint.h>
 
 #include "tp_core/tp_error.h"
+#include "tp_core/tp_format.h"
 #include "tp_core/tp_id.h"
 #include "tp_core/tp_sb.h"
 
@@ -19,6 +20,10 @@ struct tp_txn_result;
 
 /* Writes sb's bytes to stdout followed by one trailing newline. */
 void cli_out_stdout(const tp_sb *sb);
+
+/* Appends the CLI JSON representation of one format diagnostic report. */
+void cli_out_append_format_diagnostics(
+    tp_sb *sb, int depth, const tp_format_diagnostic_report *report);
 
 #if defined(__GNUC__) || defined(__clang__)
 #define CLI_PRINTF_ATTR(f, a) __attribute__((format(printf, f, a)))

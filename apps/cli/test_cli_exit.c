@@ -1,6 +1,10 @@
 #include "cli_exit.h"
+#include "tp_core/tp_job.h"
 
 int main(void) {
+    const tp_export_command_report successful_report = {
+        .targets_ok = 1,
+    };
     if (CLI_EXIT_OK != 0 || CLI_EXIT_INTERNAL != 1 || CLI_EXIT_USAGE != 2 ||
         CLI_EXIT_PROJECT != 3 || CLI_EXIT_PACK != 4 || CLI_EXIT_EXPORT != 5 ||
         CLI_EXIT_PARTIAL != 6 || CLI_EXIT_VALIDATE != 7 ||
@@ -14,7 +18,19 @@ int main(void) {
         cli_exit_for_rejected_status(TP_STATUS_HASH_COLLISION) != CLI_EXIT_USAGE ||
         cli_exit_for_save_status(TP_STATUS_FILE_IO_FAILED) != CLI_EXIT_FILE_IO ||
         cli_exit_for_save_status(TP_STATUS_OOM) != CLI_EXIT_INTERNAL ||
-        cli_exit_for_save_status(TP_STATUS_BAD_PROJECT) != CLI_EXIT_PROJECT) {
+        cli_exit_for_save_status(TP_STATUS_BAD_PROJECT) != CLI_EXIT_PROJECT ||
+        cli_exit_for_export_result(
+            TP_SESSION_JOB_SUCCEEDED, TP_STATUS_OK,
+            &successful_report) != CLI_EXIT_OK ||
+        cli_exit_for_export_result(
+            TP_SESSION_JOB_FAILED, TP_STATUS_BUILDER_CRASHED,
+            &successful_report) != CLI_EXIT_PARTIAL ||
+        cli_exit_for_export_result(
+            TP_SESSION_JOB_FAILED, TP_STATUS_OOM,
+            &successful_report) != CLI_EXIT_PARTIAL ||
+        cli_exit_for_export_result(
+            TP_SESSION_JOB_FAILED, TP_STATUS_OOM,
+            NULL) != CLI_EXIT_INTERNAL) {
         return 1;
     }
     return 0;

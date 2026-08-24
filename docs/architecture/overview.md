@@ -82,19 +82,16 @@ in-process live-headless session capability shape. MCP and Dev API transports
 are not implemented. Their target contract is in
 [`../spec/automation.md`](../spec/automation.md).
 
-Current format execution remains two fixed built-in native exporters over
-Export IR v1 and the common artifact planner/publisher. Format discovery now
-builds an explicit immutable owned catalog from the executable-relative
-`formats/` root, with strict API-v1 descriptor parsing, deterministic
-unavailable rows, fingerprints, and bounded owned diagnostics. A valid Lua
-candidate still remains pending from every production client and cannot become
-available to Pack or Export. The repository now contains a dormant worker-only
-Lua 5.5 kernel, isolated compile-validation transport, atomic catalog
-finalization seam, and standalone package-binding codec, exercised only by
-contract tests. Clients do not call those seams yet; there is no production
-runtime C registration surface, user-visible Lua execution, or Reload Formats
-operation. Import and linked-atlas ingestion remain outside this slice.
-The future export-handler contract is documented in
+Current format execution combines the fixed built-in native exporters with
+strict API-v1 Lua packages over Export IR v1 and one common artifact
+planner/publisher. Startup builds an immutable owned catalog from the
+executable-relative `formats/` root, validates Lua candidates in an isolated
+compiler, and atomically installs the complete eligible generation or the
+native fallback. Admission captures exact package bytes for the outer worker;
+only that worker reaches the Lua 5.5 kernel. There is no production runtime C
+registration surface or Reload Formats operation. Package changes therefore
+require restart. Import and linked-atlas ingestion remain outside this slice.
+The current runtime and target bundled-format contract is documented in
 [`../spec/format-ecosystem.md`](../spec/format-ecosystem.md).
 
 ## Primary durable contracts

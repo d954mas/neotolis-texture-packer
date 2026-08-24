@@ -6,7 +6,9 @@
  * keeps the worker dispatch. */
 
 #include "test_gui_action_trace_fixture.h"
+#include "app_format_catalog.h"
 #include "gui_actions_dev.h"
+#include "tp_format_diagnostic_internal.h"
 
 #include <stdlib.h>
 
@@ -22,6 +24,44 @@ static void set_job_worker_env(
             : unsetenv(name);
     TEST_ASSERT_EQUAL_INT(0, status);
 #endif
+}
+
+void test_gui_export_completion_summarizes_typed_format_diagnostics(void) {
+    tp_format_diagnostic_report *diagnostics = NULL;
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_format_diagnostic_report_create_internal(&diagnostics, &error));
+    const tp_format_diagnostic diagnostic = {
+        .severity = TP_FORMAT_DIAGNOSTIC_ERROR,
+        .code = TP_FORMAT_DIAGNOSTIC_HANDLER_FAILED,
+        .phase = TP_FORMAT_PHASE_RUNTIME,
+        .format_id = "fixture-worker",
+        .message = "handler failed",
+    };
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_format_diagnostic_report_append_internal(
+            diagnostics, &diagnostic, &error));
+    tp_export_report_target target = {
+        .format_diagnostics = diagnostics,
+        .completed = true,
+    };
+    tp_export_command_atlas_report atlas = {
+        .name = "main",
+        .report_present = true,
+        .report = {.targets = &target, .target_count = 1},
+    };
+    const tp_export_command_report report = {
+        .atlases = &atlas,
+        .atlas_count = 1,
+    };
+    gui_pack_result_info info = {0};
+    gui_pack__test_summarize_export_report(&report, &info);
+    TEST_ASSERT_EQUAL_INT(1, info.format_errors);
+    TEST_ASSERT_EQUAL_INT(0, info.format_warnings);
+    TEST_ASSERT_EQUAL_STRING("handler failed", info.format_diagnostic);
+    tp_format_diagnostic_report_destroy(diagnostics);
 }
 
 void test_lifecycle_apply_mine_resolves_conflict_before_continuing(void) {
@@ -230,6 +270,68 @@ static gui_pack_done drain_current_job(
     TEST_ASSERT_NOT_EQUAL(
         GUI_PACK_DONE_NONE, done);
     return done;
+}
+
+void test_gui_live_export_uses_injected_compiled_lua_catalog(void) {
+    app_format_catalog startup = {0};
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        app_format_catalog_open_startup_at_root(
+            TP_FORMAT_FIXTURE_ROOT, &startup, &error),
+        error.msg);
+    TEST_ASSERT_EQUAL_INT(APP_FORMAT_CATALOG_ACTIVE, startup.state);
+    TEST_ASSERT_NOT_NULL(
+        tp_format_catalog_find_available(startup.catalog, "fixture-full"));
+    TEST_ASSERT_TRUE(
+        gui_project__test_set_format_catalog(startup.catalog));
+    app_format_catalog_close(&startup);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK, gui_project_lifecycle_begin_new(&error), error.msg);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        gui_project_test_finish(GUI_PROJECT_LIFECYCLE_NEW, &error),
+        error.msg);
+
+    const tp_session_snapshot *snapshot = gui_project_snapshot();
+    const tp_snapshot_atlas *atlas =
+        tp_session_snapshot_atlas_at(snapshot, 0);
+    TEST_ASSERT_NOT_NULL(atlas);
+    char source_path[TP_IDENTITY_PATH_MAX];
+    const int source_length = snprintf(
+        source_path, sizeof source_path,
+        "%s/apps/cli/testdata/sprites/hero.png", TP_TEST_SOURCE_DIR);
+    TEST_ASSERT_TRUE(source_length > 0 &&
+                     (size_t)source_length < sizeof source_path);
+    TEST_ASSERT_EQUAL_INT(
+        GUI_ADD_ADDED,
+        gui_project_add_source_kind(
+            atlas->id, tp_session_snapshot_revision(snapshot),
+            source_path, TP_SOURCE_KIND_FILE));
+    settle_project_job();
+
+    gui_target_ref target = {0};
+    TEST_ASSERT_TRUE(trace_target_ref_at(0, 0, &target));
+    gui_edit_target_exporter(&target, "fixture-full");
+    pump_action_frame();
+    pump_action_frame();
+    const tp_snapshot_target *updated =
+        tp_session_snapshot_target_by_id(
+            gui_project_snapshot(), target.atlas_id, target.target_id);
+    TEST_ASSERT_NOT_NULL(updated);
+    TEST_ASSERT_EQUAL_STRING("fixture-full", updated->exporter_id);
+
+    TEST_ASSERT_TRUE(gui_pack_init(TP_GUI_TRACE_TEST_DIR));
+    char error_text[256] = {0};
+    TEST_ASSERT_TRUE_MESSAGE(
+        gui_pack_export_async_start(error_text, sizeof error_text),
+        error_text);
+    gui_pack_result_info result = {0};
+    TEST_ASSERT_EQUAL_INT(
+        GUI_PACK_DONE_EXPORT_OK, drain_current_job(&result));
+    TEST_ASSERT_EQUAL_INT(1, result.targets);
+    TEST_ASSERT_EQUAL_INT(3, result.files);
+    TEST_ASSERT_EQUAL_INT(0, result.format_errors);
 }
 
 static void admit_and_drain_pending_refresh(
@@ -1345,6 +1447,19 @@ void test_export_failure_formatter_warns_about_uncertain_publication(void) {
     TEST_ASSERT_NOT_NULL(strstr(status, "1 target"));
     TEST_ASSERT_NOT_NULL(strstr(status, "1 atlas"));
 
+    const gui_pack_result_info partial = {
+        .targets = 2,
+        .files = 5,
+        .atlases_fail = 1,
+        .partial_publication = true,
+        .err = "worker crashed",
+    };
+    TEST_ASSERT_TRUE(
+        gui_pack_format_export_failed(&partial, status, sizeof status));
+    TEST_ASSERT_NOT_NULL(strstr(status, "after publishing"));
+    TEST_ASSERT_NOT_NULL(strstr(status, "2 target"));
+    TEST_ASSERT_NOT_NULL(strstr(status, "5 file"));
+
     const gui_pack_result_info certain = {0};
     TEST_ASSERT_FALSE(
         gui_pack_format_export_failed(&certain, status, sizeof status));
@@ -1829,6 +1944,8 @@ int main(int argc, char **argv) {
     RUN_TEST(
         test_export_cancel_formatter_distinguishes_uncertain_partial_and_clean);
     RUN_TEST(test_export_failure_formatter_warns_about_uncertain_publication);
+    RUN_TEST(test_gui_export_completion_summarizes_typed_format_diagnostics);
+    RUN_TEST(test_gui_live_export_uses_injected_compiled_lua_catalog);
     RUN_TEST(test_late_export_cancel_keeps_completed_success_outcome);
     RUN_TEST(test_owned_terminal_receipt_survives_session_cutover);
     RUN_TEST(

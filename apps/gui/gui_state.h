@@ -78,7 +78,7 @@ extern nt_font_t s_font;
 extern bool s_font_bound;
 
 /* --- UI ids (resolved once in ensure_ids) --- */
-extern uint32_t s_id_btn_pack, s_id_btn_export, s_id_btn_refresh, s_id_vlist, s_id_modal, s_id_about;
+extern uint32_t s_id_btn_pack, s_id_btn_export, s_id_btn_refresh, s_id_vlist, s_id_modal, s_id_about, s_id_formats;
 extern uint32_t s_id_canvas;      /* the atlas-page custom element (bbox drives zoom/pan/hit input) */
 extern uint32_t s_id_rename;      /* the single inline rename input (one edit active at a time) */
 extern uint32_t s_id_right_panel; /* settings-panel container (bbox: press-outside blurs focused inputs) */
@@ -148,6 +148,7 @@ extern bool s_sec_anim_open;  /* the "Animation" section disclosure */
  * auto-quit frames render them, and closes them before the pixel probe), so they can never be
  * view-local. gui_view_chrome owns their declares. */
 extern bool s_about_open;
+extern bool s_formats_open;
 extern bool s_export_open;
 
 /* Right-click context menu: one cursor-anchored menu whose items depend on the row a right-click armed

@@ -5,6 +5,7 @@
 
 #include "tp_core/tp_arena.h"
 #include "tp_core/tp_export.h"
+#include "tp_core/tp_export_run.h"
 #include "tp_core/tp_pack_result.h"
 #include "tp_core/tp_pack.h"
 #include "tp_core/tp_session.h"
@@ -39,6 +40,9 @@ typedef struct tp_export_command_request {
     /* Nil exports every eligible atlas. A stable non-nil ID restricts the
      * command to that atlas; frontends never pass a mutable collection index. */
     tp_id128 atlas_id;
+    const char *target_exporter_id;
+    const char *out_dir;
+    bool dry_run;
 } tp_export_command_request;
 
 typedef struct tp_refresh_job_request {
@@ -87,22 +91,43 @@ typedef struct tp_session_pack_job_result {
 } tp_session_pack_job_result;
 
 typedef struct tp_session_export_job_result {
-    /* Successfully committed target/file counts survive a cancelled command. */
-    int targets;
-    int files;
+    /* The one owned Export result. Every aggregate and publication fact lives
+     * in this immutable host-assembled value; there is no parallel summary. */
+    struct tp_export_command_report *report;
+} tp_session_export_job_result;
+
+typedef struct tp_export_command_atlas_report {
+    tp_id128 id;
+    const char *name;
+    int sprite_count;
+    int missing_sources;
+    const char *skip_notice_id;
+    const char *note;
+    tp_status status;
+    tp_error error;
+    bool outcome_received;
+    bool report_present;
+    tp_export_report report;
+    tp_export_notices notices;
+} tp_export_command_atlas_report;
+
+typedef struct tp_export_command_report {
+    bool dry_run;
+    tp_export_command_atlas_report *atlases;
+    int atlas_count;
+    int targets_ok;
+    int targets_failed;
+    int files_written;
     int notices;
     int atlases_ok;
     int atlases_failed;
-    char first_error[256];
-    /* Selected atlases with enabled targets but no usable input images. */
     int atlases_skipped;
-    /* True when terminal failure/cancellation happened after at least one
-     * target committed. */
+    char first_error[256];
     bool partial_publication;
-    /* True when a direct writer failed and its API cannot prove that it left no
-     * partially published artifacts, regardless of terminal cancellation. */
     bool publication_uncertain;
-} tp_session_export_job_result;
+    bool had_pack_failure;
+    bool had_export_failure;
+} tp_export_command_report;
 
 typedef struct tp_session_refresh_job_result {
     int added;
@@ -139,6 +164,14 @@ tp_status tp_session_pack_job_start(tp_session *session,
 tp_status tp_session_export_start(tp_session *session,
                                   const tp_export_command_request *request,
                                   tp_error *err);
+/* Synchronous saved-file facade over the same immutable request builder,
+ * worker controller, and report assembler used by live session jobs. It clones
+ * the supplied read-only snapshot into a detached session and therefore never
+ * acquires the project writer lease. */
+tp_status tp_export_command_run_snapshot(
+    const struct tp_session_snapshot *snapshot,
+    const tp_export_command_request *request,
+    tp_session_job_result *out, tp_error *err);
 tp_status tp_session_refresh_start(tp_session *session,
                                    const tp_refresh_job_request *request,
                                    tp_error *err);
@@ -150,19 +183,10 @@ bool tp_session_job_active(const tp_session *session);
  * repeated requests and requests after admission are rejected. */
 tp_status tp_session_job_cancel(tp_session *session, tp_error *err);
 void tp_session_job_result_destroy(tp_session_job_result *result);
-/* Shrinks a TAKEN result's receipt to what it actually has to retain: the
- * arena behind `pack.result`. Frees the request-side buffers the live job was
- * still holding (the serialized project JSON, request/work-dir paths, preview
- * exporter id) and destroys the exited worker process handle, which retains a
- * second encoded copy of that JSON plus OS handles. Every value field of
- * `result` -- including pack.result and its pages, and the tp_error/file_io
- * context, which is value-owned precisely so destroying the response frame
- * cannot dangle it -- stays valid, and
- * tp_session_job_result_destroy remains the single, exactly-once release.
- * Only a result returned by tp_session_update may be compacted (an
- * owner-less result is a no-op); a caller that keeps the receipt alive long
- * term (e.g. pinning it in a result cache) MUST compact first, or the pin
- * silently retains the whole request. Idempotent. */
+/* Releases request and process storage retained by a taken result while
+ * preserving its result data. Only a result returned by tp_session_update can
+ * be compacted; owner-less calls are no-ops. Long-lived receipts should be
+ * compacted before storage. Idempotent. */
 void tp_session_job_result_compact(tp_session_job_result *result);
 
 /* Returns the typed core freshness verdict for a completed Pack result. A live

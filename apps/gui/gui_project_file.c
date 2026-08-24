@@ -251,15 +251,7 @@ static tp_status create_startup_format_catalog(tp_error *error) {
     const tp_status status =
         app_format_catalog_open_startup(&candidate, error);
     NT_ASSERT(status == TP_STATUS_OK);
-    NT_ASSERT(status != TP_STATUS_OK || candidate.catalog != NULL);
-    if (status != TP_STATUS_OK || !candidate.catalog) {
-        app_format_catalog_close(&candidate);
-        return status != TP_STATUS_OK
-                   ? status
-                   : tp_error_set(
-                         error, TP_STATUS_INVALID_ARGUMENT,
-                         "format catalog startup returned no catalog");
-    }
+    NT_ASSERT(candidate.catalog != NULL);
     const tp_status install_status =
         gui_project__install_format_catalog(&candidate, error);
     app_format_catalog_close(&candidate);

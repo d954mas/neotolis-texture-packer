@@ -234,7 +234,7 @@ static void handle_canvas_input(void) {
      * the blur-request block before nt_ui_begin). */
     const bool transient_owner =
         gui_canvas_get_mode(&s_canvas) != GUI_CANVAS_ATLAS ||
-        !gui_canvas_has_atlas(&s_canvas) || gui_actions_lifecycle_active() || s_about_open ||
+        !gui_canvas_has_atlas(&s_canvas) || gui_actions_lifecycle_active() || s_about_open || s_formats_open ||
         s_export_open || gui_actions_recovery_active() ||
         gui_draft_phase() != GUI_EDIT_IDLE;
     if (gui_canvas_input_blocked(&s_canvas_input,
@@ -330,7 +330,7 @@ static void handle_canvas_input(void) {
 static void handle_canvas_double_click(void) {
     const bool transient_owner =
         gui_canvas_get_mode(&s_canvas) != GUI_CANVAS_ATLAS ||
-        !gui_canvas_has_atlas(&s_canvas) || gui_actions_lifecycle_active() || s_about_open ||
+        !gui_canvas_has_atlas(&s_canvas) || gui_actions_lifecycle_active() || s_about_open || s_formats_open ||
         s_export_open || gui_actions_recovery_active() ||
         gui_draft_phase() != GUI_EDIT_IDLE;
     if (gui_canvas_input_blocked(&s_canvas_input,
@@ -386,7 +386,7 @@ static void handle_shortcuts(void) {
         return; /* headless capture/probe: the user's live typing must not trigger hotkeys mid-run */
     }
     if (nt_ui_input_any_focused(s_ctx) || gui_view_chrome_any_menu_open() ||
-        gui_actions_lifecycle_active() || s_about_open || s_export_open || gui_actions_recovery_active()) {
+        gui_actions_lifecycle_active() || s_about_open || s_formats_open || s_export_open || gui_actions_recovery_active()) {
         return;
     }
     /* Preview + editor accelerators (each also a button; §3.3e). */
@@ -451,7 +451,7 @@ static void handle_list_nav(void) {
         return;
     }
     if (nt_ui_input_any_focused(s_ctx) || gui_view_chrome_any_menu_open() ||
-        gui_actions_lifecycle_active() || s_about_open || s_export_open || gui_actions_recovery_active() ||
+        gui_actions_lifecycle_active() || s_about_open || s_formats_open || s_export_open || gui_actions_recovery_active() ||
         gui_draft_phase() != GUI_EDIT_IDLE) {
         return;
     }
@@ -609,6 +609,8 @@ static void frame(void) {
             set_status("Edit discarded.");
         } else if (s_export_open) {
             s_export_open = false;
+        } else if (s_formats_open) {
+            s_formats_open = false;
         } else if (s_about_open) {
             s_about_open = false;
         } else if (gui_actions_recovery_active()) {
@@ -851,6 +853,7 @@ static void frame(void) {
         declare_confirm_modal(s_ctx);
         declare_recovery_modal(s_ctx);
         declare_about_modal(s_ctx);
+        declare_formats_modal(s_ctx);
         declare_export_modal(s_ctx);
 
         nt_ui_end(s_ctx);

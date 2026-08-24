@@ -5,7 +5,8 @@
   "verbs": {
     "inspect": 4,
     "validate": 2,
-    "pack": 1,
+    "pack": 2,
+    "formats": 1,
     "new": {
       "apply": 1,
       "dry_run": 2

@@ -94,6 +94,7 @@ static tp_format_binding_proto_binding lua_binding(
         .implementation = TP_FORMAT_IMPLEMENTATION_LUA,
         .descriptor = descriptor,
         .api_version = TP_FORMAT_API_VERSION,
+        .package_path = "formats/fixture-dir/export.lua",
         .descriptor_bytes = g_descriptor,
         .descriptor_byte_count = sizeof g_descriptor - 1U,
         .source_bytes = g_source,
@@ -1101,7 +1102,8 @@ void test_frame_cap_is_the_checked_frozen_component_derivation(void) {
         61U, TP_FORMAT_BINDING_PROTO_LUA_BINDINGS_FOR_PACKAGE_MAX);
     TEST_ASSERT_EQUAL_UINT64(
         TP_FORMAT_BINDING_PROTO_MAX_PACKAGE_BYTES +
-            61U * TP_FORMAT_BINDING_PROTO_LUA_BINDING_FIXED_BYTES +
+            61U * (TP_FORMAT_BINDING_PROTO_LUA_BINDING_FIXED_BYTES +
+                   TP_FORMAT_DIAGNOSTIC_PATH_MAX_BYTES) +
             (TP_FORMAT_BINDING_PROTO_MAX_BINDINGS - 61U) *
                 TP_FORMAT_BINDING_PROTO_NATIVE_BINDING_MAX_BYTES,
         TP_FORMAT_BINDING_PROTO_BINDING_TABLE_MAX_BYTES);
@@ -1152,7 +1154,8 @@ void test_reachable_frames_match_the_fixed_wire_derivation(void) {
     TEST_ASSERT_EQUAL_size_t(
         12U + TP_FORMAT_BINDING_PROTO_FIXED_PAYLOAD_BYTES +
             TP_FORMAT_BINDING_PROTO_LUA_BINDING_FIXED_BYTES +
-            sizeof g_descriptor - 1U + sizeof g_source - 1U,
+            strlen(lua.package_path) + sizeof g_descriptor - 1U +
+            sizeof g_source - 1U,
         length);
     free(bytes);
     tp_format_owned_descriptor_destroy(owned);

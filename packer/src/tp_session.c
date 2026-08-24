@@ -363,6 +363,12 @@ tp_status tp_session_adopt_owned(tp_project *project, const tp_rng *rng,
                                err);
 }
 
+tp_status tp_session_adopt_owned_with_catalog(
+    tp_project *project, tp_format_catalog *catalog, const tp_rng *rng,
+    tp_session **out, tp_error *err) {
+    return session_adopt_owned(project, catalog, rng, out, err);
+}
+
 tp_status tp_session_create_with_catalog(tp_format_catalog *catalog,
                                          const tp_rng *rng, tp_session **out,
                                          tp_error *err) {

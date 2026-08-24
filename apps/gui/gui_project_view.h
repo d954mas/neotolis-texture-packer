@@ -83,6 +83,9 @@ const tp_session_snapshot *gui_project_snapshot(void);
 /* Borrowed installed immutable format generation plus its pre-materialized
  * available-row projection. These passive helpers never allocate. */
 const tp_format_catalog *gui_project_format_catalog(void);
+bool gui_project_format_fallback(
+    tp_status *status, tp_error *reason,
+    const tp_format_diagnostic_report **diagnostics);
 int gui_project_format_count(void);
 const tp_format_descriptor *gui_project_format_at(int index);
 const tp_format_descriptor *gui_project_format_find(const char *id);

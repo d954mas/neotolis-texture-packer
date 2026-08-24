@@ -373,6 +373,25 @@ const tp_format_catalog *gui_project_format_catalog(void) {
     return s_project.formats.catalog;
 }
 
+bool gui_project_format_fallback(
+    tp_status *status, tp_error *reason,
+    const tp_format_diagnostic_report **diagnostics) {
+    NT_ASSERT(format_projection_is_coherent());
+    if (s_project.formats.state != APP_FORMAT_CATALOG_NATIVE_FALLBACK) {
+        return false;
+    }
+    if (status) {
+        *status = s_project.formats.reason_status;
+    }
+    if (reason) {
+        *reason = s_project.formats.reason;
+    }
+    if (diagnostics) {
+        *diagnostics = s_project.formats.failure_diagnostics;
+    }
+    return true;
+}
+
 int gui_project_format_count(void) {
     NT_ASSERT(format_projection_is_coherent());
     return s_project.formats.catalog

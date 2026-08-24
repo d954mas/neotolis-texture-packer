@@ -1,11 +1,12 @@
 # Sandboxed Lua export formats
 
-**Status:** Target contract; not implemented by the current product.
+**Status:** Mixed contract. The generic sandboxed Lua runtime is current; the
+bundled Defold and Phaser packages in this document remain target behavior.
 
-The current native Export IR, capability projection, artifact planning, PNG
-writer, and rollback-backed publisher are the foundation. This target adds one
-runtime format mechanism: bundled sandboxed Lua packages, without adding a
-format-specific branch to packing or publication.
+The current product runs strict API-v1 Lua packages through the native Export
+IR, capability projection, artifact planner, PNG writer, and rollback-backed
+publisher without format-specific packing or publication branches. The target
+work here adds the first bundled packages.
 
 The exact package and script contract is
 [`../formats/lua-package-v1.md`](../formats/lua-package-v1.md). The first
@@ -152,10 +153,9 @@ message, sanitized Lua-only frames, and truncation. Discovery errors persist on
 catalog rows; runtime failures affect only that target invocation.
 
 `ntpacker formats` and `ntpacker formats --json` are the detailed catalog
-authority. The JSON payload starts at schema 1. Pack/Export reports advance to
-schema 2 when target diagnostics and real dry-run serialization land. The GUI
-uses the same core rows and reports through a deliberately small Formats surface
-and explicit Reload action; it does not duplicate parsing or policy.
+authority. The JSON payload uses schema 1; Pack/Export reports use schema 2.
+The planned GUI Formats surface and Reload action must consume the same core
+rows and reports without duplicating parsing or policy.
 
 ## First formats and proof
 

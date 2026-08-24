@@ -20,12 +20,11 @@ result's `pack_input_hash` identifies the decoded pixels actually consumed.
 Completion sequence is result ordering state, not part of the input token.
 
 Preview admission resolves its exporter ID through the session's retained
-format catalog. The in-process immutable Export snapshot job also retains and
-uses the snapshot's exact catalog generation for target admission and
-capability policy. The outer worker protocol still carries only the two native
-handlers. A dormant standalone binding codec now defines the bounded snapshot
-needed by a later protocol layer, but it is not part of the active job request
-or response and no Lua row is admitted by current clients.
+format catalog. Export admission retains the snapshot's exact catalog
+generation for target admission and capability policy, then captures the exact
+native/Lua bindings needed by the selected targets. The outer worker request
+carries that bounded binding snapshot, so execution never reopens the startup
+format root or resolves a later package by mutable ID.
 
 Later model/source-generation changes do not automatically reject a terminal
 receipt. Instance, request, and target identity still gate adoption. The core
@@ -45,17 +44,21 @@ its task slot.
 Two process boundaries remain intentional. The outer session-job worker
 isolates the complete cancellable Pack/Export command and its filesystem
 publication. The inner builder worker contains fallible engine builder code and
-also protects direct saved-file CLI execution, which has no outer session
-worker. The boundaries defend different failure domains and must not be
-collapsed without preserving both direct-CLI builder crash containment and
-whole-job cancellation.
+is used from that outer worker while packing. Saved-file CLI drains the same
+outer worker/controller path synchronously. The boundaries defend different
+failure domains and must not be collapsed without preserving both builder
+crash containment and whole-job cancellation.
 
 The host:
 
 - serializes a bounded request;
-- streams progress and one terminal response;
+- admits progress, bounded per-atlas/per-target Export outcomes, and one
+  payload-free terminal lifecycle response;
 - validates protocol kind, instance generation, request ID, lengths, and
   filesystem outcomes;
+- owns the preseeded Export command report and derives every aggregate from the
+  outcomes it accepted; neither the worker terminal nor either client carries a
+  parallel Export summary;
 - supports cooperative cancellation followed by bounded forced termination;
 - owns cleanup of the worker process and private request directory.
 
@@ -151,9 +154,11 @@ failure reports `publication_uncertain` only when publication rollback cannot
 prove that the previous artifact set was restored. Serializer, staging,
 preflight, and ordinary writer failures leave it false. Ordinary project Save
 does not export, and Export does not silently mutate project configuration.
-Concurrent exports acquire destination-file leases after preflight and before
-serialization. Any overlap returns `export_busy` with no attempted writer or
-artifact publication; non-overlapping targets may proceed independently.
+Concurrent wet exports acquire destination-file leases after validated
+serialization and immediately before publication. Any overlap returns
+`export_busy` with no attempted publication or artifact write; non-overlapping
+targets may proceed independently. Dry Export serializes and validates without
+leases, staging, or artifact publication.
 
 Capability policy includes explicit animations. A target that declares no
 animation support receives a borrowed IR projection with zero animations and

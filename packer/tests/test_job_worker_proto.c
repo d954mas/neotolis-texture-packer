@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "tp_core/tp_utf8.h"
+#include "tp_format_diagnostic_internal.h"
 #include "tp_job_worker_internal.h"
 #include "unity.h"
 
@@ -75,6 +76,7 @@ static void assert_id_equal(tp_id128 expected, tp_id128 actual) {
 static tp_job_worker_proto_request sample_request(tp_session_job_kind kind) {
   static const uint8_t project[] =
       "{\"schema\":5,\"sources\":[{\"path\":\"C:/abs/a.png\"}]}\n";
+  static const uint8_t bindings[] = {0x54U, 0x50U, 0x46U, 0x42U, 1U, 2U, 3U};
   tp_job_worker_proto_request request;
   memset(&request, 0, sizeof request);
   request.kind = kind;
@@ -83,11 +85,16 @@ static tp_job_worker_proto_request sample_request(tp_session_job_kind kind) {
   request.host_pid = 4242U;
   request.project_json = project;
   request.project_json_len = sizeof project - 1U;
+  request.format_bindings = bindings;
+  request.format_bindings_len = sizeof bindings;
   request.atlas_id =
       kind == TP_SESSION_JOB_PACK ? sample_id(10U) : (tp_id128){{0}};
   request.project_dir = "C:/absolute/project";
   request.work_dir = "C:/absolute/work";
   request.preview_exporter_id = kind == TP_SESSION_JOB_PACK ? "defold" : "";
+  request.target_exporter_id = kind == TP_SESSION_JOB_EXPORT ? "defold" : "";
+  request.out_dir = kind == TP_SESSION_JOB_EXPORT ? "C:/absolute/output" : "";
+  request.dry_run = kind == TP_SESSION_JOB_EXPORT;
   request.input_token.model_generation = 101U;
   request.input_token.source_generation = 202U;
   return request;
@@ -163,6 +170,10 @@ void test_request_roundtrip_pack_and_export(void) {
                              (uint64_t)output.project_json_len);
     TEST_ASSERT_EQUAL_MEMORY(input.project_json, output.project_json,
                              input.project_json_len);
+    TEST_ASSERT_EQUAL_UINT64((uint64_t)input.format_bindings_len,
+                             (uint64_t)output.format_bindings_len);
+    TEST_ASSERT_EQUAL_MEMORY(input.format_bindings, output.format_bindings,
+                             input.format_bindings_len);
     assert_id_equal(input.atlas_id, output.atlas_id);
     TEST_ASSERT_EQUAL_STRING(input.project_dir, output.project_dir);
     TEST_ASSERT_EQUAL_STRING(input.work_dir, output.work_dir);
@@ -289,7 +300,7 @@ void test_multi_page_artifact_beyond_the_old_cap_roundtrips(void) {
   free(bytes);
 }
 
-void test_export_terminal_roundtrip_counts_and_flags(void) {
+void test_export_terminal_roundtrip_has_no_parallel_result_payload(void) {
   tp_job_worker_proto_response input;
   memset(&input, 0, sizeof input);
   input.kind = TP_SESSION_JOB_EXPORT;
@@ -299,15 +310,6 @@ void test_export_terminal_roundtrip_counts_and_flags(void) {
   input.status = TP_STATUS_FILE_IO_FAILED;
   input.elapsed_ms = 8.0;
   memcpy(input.error.msg, "writer failed", 14U);
-  input.export_result.targets = 3;
-  input.export_result.files = 2;
-  input.export_result.notices = 1;
-  input.export_result.atlases_ok = 1;
-  input.export_result.atlases_failed = 1;
-  input.export_result.atlases_skipped = 1;
-  input.export_result.partial_publication = true;
-  input.export_result.publication_uncertain = true;
-  memcpy(input.export_result.first_error, "disk full", 10U);
 
   uint8_t *bytes = NULL;
   size_t length = 0U;
@@ -321,12 +323,54 @@ void test_export_terminal_roundtrip_counts_and_flags(void) {
       TP_STATUS_OK,
       tp_job_worker_proto_decode_response(bytes, length, &output, &err),
       err.msg);
-  TEST_ASSERT_EQUAL_INT(3, output.export_result.targets);
-  TEST_ASSERT_EQUAL_INT(2, output.export_result.files);
-  TEST_ASSERT_TRUE(output.export_result.partial_publication);
-  TEST_ASSERT_TRUE(output.export_result.publication_uncertain);
-  TEST_ASSERT_EQUAL_STRING("disk full", output.export_result.first_error);
+  TEST_ASSERT_EQUAL_INT(TP_SESSION_JOB_EXPORT, output.kind);
+  TEST_ASSERT_EQUAL_INT(TP_STATUS_FILE_IO_FAILED, output.status);
+  TEST_ASSERT_EQUAL_STRING("writer failed", output.error.msg);
   tp_job_worker_proto_response_free(&output);
+  free(bytes);
+}
+
+void test_export_fragment_encode_rejects_invalid_target_cross_references(void) {
+  tp_export_report_target target = {
+      .exporter_id = "fixture-json",
+      .out_path = "C:/out/atlas",
+      .pack_run = -1,
+      .notice_begin = -1,
+      .notice_end = 1,
+      .writer_outcome = TP_EXPORT_WRITER_NOT_ATTEMPTED,
+      .completed = true,
+  };
+  tp_export_notice notice = {0};
+  memcpy(notice.msg, "notice", 7U);
+  tp_job_worker_proto_fragment input = {
+      .request_id = 77U,
+      .outcome = {
+          .kind = TP_EXPORT_COMMAND_OUTCOME_TARGET,
+          .atlas_index = 0,
+          .atlas_name = "main",
+          .target_index = 0,
+          .target = target,
+          .notices = {.items = &notice, .count = 1, .cap = 1},
+          .report_present = true,
+      },
+  };
+
+  uint8_t *bytes = NULL;
+  size_t length = 0U;
+  tp_error err = {{0}};
+  TEST_ASSERT_EQUAL_INT(
+      TP_STATUS_INVALID_ARGUMENT,
+      tp_job_worker_proto_encode_fragment(&input, &bytes, &length, &err));
+  free(bytes);
+
+  target.notice_begin = 0;
+  target.pack_run = 1;
+  input.outcome.target = target;
+  bytes = NULL;
+  length = 0U;
+  TEST_ASSERT_EQUAL_INT(
+      TP_STATUS_INVALID_ARGUMENT,
+      tp_job_worker_proto_encode_fragment(&input, &bytes, &length, &err));
   free(bytes);
 }
 
@@ -346,6 +390,107 @@ void test_progress_roundtrip_is_fixed_and_bounded(void) {
   TEST_ASSERT_EQUAL_INT(3, output.current);
   TEST_ASSERT_EQUAL_INT(9, output.total);
   TEST_ASSERT_EQUAL_INT(TP_JOB_WORKER_PHASE_IMAGE_DECODE, output.phase);
+  free(bytes);
+}
+
+void test_export_fragment_roundtrip_preserves_one_bounded_target_outcome(void) {
+  const tp_id128 atlas_id = {{1U, 2U, 3U, 4U}};
+  const tp_id128 target_id = {{5U, 6U, 7U, 8U}};
+  const tp_export_report_page page = {0, 64, 32, 50.0};
+  const tp_export_report_run run = {
+      .pages = (tp_export_report_page *)&page,
+      .page_count = 1,
+      .sprite_count = 2,
+  };
+  const tp_export_notice notice = {
+      .sprite = "hero",
+      .target = "fixture-json",
+      .field_id = TP_NOTICE_FIELD_PIVOT,
+      .reason_id = TP_NOTICE_REASON_CAPS_UNSUPPORTED,
+      .msg = "pivot omitted",
+  };
+  tp_export_report_target target = {
+      .id = target_id,
+      .exporter_id = "fixture-json",
+      .out_path = "C:/out/atlas",
+      .pack_run = 0,
+      .notice_begin = 0,
+      .notice_end = 1,
+      .writer_outcome = TP_EXPORT_WRITER_SUCCEEDED,
+      .ok = true,
+      .completed = true,
+  };
+  const tp_export_command_outcome outcome = {
+      .kind = TP_EXPORT_COMMAND_OUTCOME_TARGET,
+      .atlas_index = 2,
+      .atlas_id = atlas_id,
+      .atlas_name = "main",
+      .target_index = 3,
+      .target = target,
+      .notices = {.items = (tp_export_notice *)&notice, .count = 1, .cap = 1},
+      .pack_run_present = true,
+      .pack_run_index = 0,
+      .pack_run = run,
+      .report_present = true,
+      .input_outcome = TP_EXPORT_INPUT_READY,
+      .error = {
+          .msg = "atlas output failed",
+          .file_io = {
+              .phase = TP_FILE_IO_PHASE_ATOMIC_REPLACE,
+              .path = "C:/out/atlas.json",
+              .native_code = 32,
+          },
+      },
+  };
+  const tp_job_worker_proto_fragment input = {
+      .request_id = 77U,
+      .outcome = outcome,
+  };
+  uint8_t *bytes = NULL;
+  size_t length = 0U;
+  tp_error err = {{0}};
+  TEST_ASSERT_EQUAL_INT_MESSAGE(
+      TP_STATUS_OK,
+      tp_job_worker_proto_encode_fragment(&input, &bytes, &length, &err),
+      err.msg);
+
+  tp_job_worker_proto_stream stream;
+  tp_job_worker_proto_stream_init(&stream);
+  TEST_ASSERT_EQUAL_INT_MESSAGE(
+      TP_STATUS_OK,
+      tp_job_worker_proto_stream_feed(&stream, bytes, length, &err), err.msg);
+  tp_job_worker_proto_stream_message message;
+  bool ready = false;
+  TEST_ASSERT_EQUAL_INT_MESSAGE(
+      TP_STATUS_OK,
+      tp_job_worker_proto_stream_next(&stream, &message, &ready, &err),
+      err.msg);
+  TEST_ASSERT_TRUE(ready);
+  TEST_ASSERT_EQUAL_INT(TP_JOB_WORKER_STREAM_FRAGMENT, message.kind);
+  TEST_ASSERT_EQUAL_UINT64(77U, message.fragment.request_id);
+  TEST_ASSERT_EQUAL_INT(TP_EXPORT_COMMAND_OUTCOME_TARGET,
+                        message.fragment.outcome.kind);
+  TEST_ASSERT_EQUAL_INT(2, message.fragment.outcome.atlas_index);
+  TEST_ASSERT_TRUE(tp_id128_eq(atlas_id, message.fragment.outcome.atlas_id));
+  TEST_ASSERT_EQUAL_INT(3, message.fragment.outcome.target_index);
+  TEST_ASSERT_TRUE(
+      tp_id128_eq(target_id, message.fragment.outcome.target.id));
+  TEST_ASSERT_TRUE(message.fragment.outcome.target.completed);
+  TEST_ASSERT_EQUAL_INT(TP_EXPORT_WRITER_SUCCEEDED,
+                        message.fragment.outcome.target.writer_outcome);
+  TEST_ASSERT_EQUAL_INT(1, message.fragment.outcome.notices.count);
+  TEST_ASSERT_TRUE(message.fragment.outcome.pack_run_present);
+  TEST_ASSERT_EQUAL_INT(1, message.fragment.outcome.pack_run.page_count);
+  TEST_ASSERT_EQUAL_STRING("atlas output failed",
+                           message.fragment.outcome.error.msg);
+  TEST_ASSERT_EQUAL_INT(TP_FILE_IO_PHASE_ATOMIC_REPLACE,
+                        message.fragment.outcome.error.file_io.phase);
+  TEST_ASSERT_EQUAL_STRING("C:/out/atlas.json",
+                           message.fragment.outcome.error.file_io.path);
+  TEST_ASSERT_EQUAL_INT(32,
+                        message.fragment.outcome.error.file_io.native_code);
+  tp_job_worker_proto_stream_message_free(&message);
+  tp_job_worker_proto_stream_destroy(&stream);
   free(bytes);
 }
 
@@ -774,8 +919,10 @@ int main(void) {
   RUN_TEST(test_pack_terminal_roundtrip_owns_artifact_path_and_utf8_name_map);
   RUN_TEST(test_decoded_error_paths_survive_the_response_free);
   RUN_TEST(test_multi_page_artifact_beyond_the_old_cap_roundtrips);
-  RUN_TEST(test_export_terminal_roundtrip_counts_and_flags);
+  RUN_TEST(test_export_terminal_roundtrip_has_no_parallel_result_payload);
+  RUN_TEST(test_export_fragment_encode_rejects_invalid_target_cross_references);
   RUN_TEST(test_progress_roundtrip_is_fixed_and_bounded);
+  RUN_TEST(test_export_fragment_roundtrip_preserves_one_bounded_target_outcome);
   RUN_TEST(test_stream_parser_accepts_fragmented_progress_then_terminal);
   RUN_TEST(test_every_truncated_request_and_terminal_is_rejected);
   RUN_TEST(test_bad_magic_version_and_oversized_fields_fail_closed);

@@ -45,10 +45,16 @@ static char g_base[TP_IDENTITY_PATH_MAX];
 static const char *g_plan[PLAN_MAX];
 static int g_plan_count;
 static int g_write_calls;
+static bool g_empty_document;
+static char g_fact_id[64];
+static char g_fact_value[TP_EXPORT_HOST_FACT_VALUE_MAX_BYTES + 1U];
 
 static void plan_reset(void) {
     g_plan_count = 0;
     g_write_calls = 0;
+    g_empty_document = false;
+    g_fact_id[0] = '\0';
+    g_fact_value[0] = '\0';
 }
 
 static void plan_add(const char *suffix) {
@@ -67,6 +73,10 @@ static tp_status plan_serialize(const tp_export_serialize_ctx *ctx,
                             g_plan[document_count]);
     }
     for (int i = 0; i < g_plan_count; i++) {
+        if (g_empty_document) {
+            documents[i].produced = true;
+            continue;
+        }
         documents[i].data = malloc(3U);
         if (!documents[i].data) {
             return tp_error_set(err, TP_STATUS_OOM, "fixture serializer OOM");
@@ -301,10 +311,123 @@ static void test_listed_set_publishes(void) {
     (void)tp_fs_remove_file(page);
 }
 
-/* A destination lease is the publication ownership boundary: overlap is a
- * typed rejection before the serializer, while the permanent sidecar becomes
- * reusable as soon as the live handle closes. */
-static void test_live_destination_lease_blocks_before_serializer(void) {
+static tp_status fact_capture_serialize(
+    const tp_export_serialize_ctx *ctx, tp_export_document *documents,
+    int document_count, tp_error *err) {
+    if (!ctx || ctx->host_fact_count != 1 || !ctx->host_facts ||
+        document_count != 1) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "fixture host facts were not prepared");
+    }
+    (void)snprintf(g_fact_id, sizeof g_fact_id, "%s",
+                   ctx->host_facts[0].id);
+    (void)snprintf(g_fact_value, sizeof g_fact_value, "%s",
+                   ctx->host_facts[0].value);
+    documents[0].data = malloc(1U);
+    if (!documents[0].data) {
+        return tp_error_set(err, TP_STATUS_OOM, "fixture document OOM");
+    }
+    memcpy(documents[0].data, "x", 1U);
+    documents[0].size = 1U;
+    return TP_STATUS_OK;
+}
+
+static void test_finished_empty_document_is_published(void) {
+    char primary[TP_IDENTITY_PATH_MAX];
+    char page[TP_IDENTITY_PATH_MAX];
+    AT_BASE(primary, ".json");
+    AT_BASE(page, "-0.png");
+    (void)tp_fs_remove_file(primary);
+    (void)tp_fs_remove_file(page);
+
+    plan_add(".json");
+    g_empty_document = true;
+    const char *outputs[2] = {primary, page};
+    tp_error error = {{0}};
+    bool writer_ran = false;
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK, publish(outputs, 2, NULL, &writer_ran, &error),
+        error.msg);
+    TEST_ASSERT_TRUE(writer_ran);
+    TEST_ASSERT_TRUE(file_holds(primary, ""));
+
+    (void)tp_fs_remove_file(primary);
+    (void)tp_fs_remove_file(page);
+}
+
+static void test_core_prepares_project_resource_host_fact_before_serializer(void) {
+    char marker[TP_IDENTITY_PATH_MAX];
+    char base[TP_IDENTITY_PATH_MAX];
+    char document_path[TP_IDENTITY_PATH_MAX];
+    TEST_ASSERT_TRUE(snprintf(marker, sizeof marker, "%s/game.project",
+                              g_dir) > 0);
+    TEST_ASSERT_TRUE(snprintf(base, sizeof base, "%s/assets/atlas", g_dir) > 0);
+    TEST_ASSERT_TRUE(snprintf(document_path, sizeof document_path, "%s.meta",
+                              base) > 0);
+    seed(marker, "[project]");
+
+    const tp_format_artifact_decl artifact = {
+        .id = "metadata", .suffix = ".meta"};
+    const tp_format_host_fact_decl fact = {
+        .id = "metadata_resource",
+        .kind = TP_FORMAT_HOST_FACT_PROJECT_RESOURCE,
+        .output_id = "metadata",
+        .root_marker = "game.project",
+        .missing = TP_FORMAT_HOST_FACT_MISSING_BASENAME_NOTICE,
+    };
+    const tp_format_descriptor format = {
+        .id = "fact-fixture",
+        .display_name = "fact fixture",
+        .caps = {.transform_mask = TP_EXPORT_TRANSFORMS_IDENTITY,
+                 .multipage = true},
+        .artifacts = &artifact,
+        .artifact_count = 1,
+        .host_facts = &fact,
+        .host_fact_count = 1,
+    };
+    const tp_exporter exporter = {
+        .format = &format, .serialize = fact_capture_serialize};
+    tp_export_artifact planned = {
+        .kind = TP_EXPORT_ARTIFACT_DOCUMENT,
+        .id = "metadata",
+        .path = document_path,
+    };
+    const tp_export_artifact_plan plan = {
+        .format_id = "fact-fixture",
+        .out_path_base = base,
+        .artifacts = &planned,
+        .artifact_count = 1,
+        .document_count = 1,
+    };
+    const tp_export_ir ir = {
+        .version = TP_EXPORT_IR_VERSION,
+        .atlas_name = "atlas",
+        .pixels_per_unit = 1.0F,
+    };
+    tp_export_notices notices;
+    tp_export_notices_init(&notices);
+    tp_export_document_batch batch = {0};
+    tp_error error = {{0}};
+    bool serializer_ran = false;
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_export_serialize_and_validate_documents(
+            &exporter, &ir, &plan, &notices, NULL, &batch,
+            &serializer_ran, NULL, &error),
+        error.msg);
+    TEST_ASSERT_TRUE(serializer_ran);
+    TEST_ASSERT_EQUAL_STRING("metadata_resource", g_fact_id);
+    TEST_ASSERT_EQUAL_STRING("/assets/atlas.meta", g_fact_value);
+    TEST_ASSERT_EQUAL_INT(0, notices.count);
+    tp_export_document_batch_destroy(&batch);
+    tp_export_notices_free(&notices);
+    (void)tp_fs_remove_file(marker);
+}
+
+/* Serialization is pure and runs before the destination lease. A busy target
+ * rejects only publication, so one slow/busy destination cannot serialize all
+ * format handlers behind its filesystem lock. */
+static void test_live_destination_lease_blocks_only_publication(void) {
     char primary[TP_IDENTITY_PATH_MAX];
     char page[TP_IDENTITY_PATH_MAX];
     char lock_path[TP_FS_STAGE_PATH_MAX];
@@ -325,11 +448,13 @@ static void test_live_destination_lease_blocks_before_serializer(void) {
 
     plan_add(".json");
     const char *outputs[2] = {primary, page};
-    bool writer_ran = true;
+    bool writer_ran = false;
     TEST_ASSERT_EQUAL_INT_MESSAGE(
         TP_STATUS_EXPORT_BUSY,
         publish(outputs, 2, NULL, &writer_ran, &error), error.msg);
-    TEST_ASSERT_FALSE(writer_ran);
+    TEST_ASSERT_TRUE_MESSAGE(
+        writer_ran,
+        "a busy destination must be rejected after serialization runs");
     TEST_ASSERT_TRUE(file_holds(primary, "OLD-META"));
     TEST_ASSERT_TRUE(file_holds(page, "OLD-PAGE"));
     TEST_ASSERT_FALSE(any_entry_containing(".tp-stage-"));
@@ -1023,7 +1148,9 @@ int main(int argc, char **argv) {
     }
     UNITY_BEGIN();
     RUN_TEST(test_listed_set_publishes);
-    RUN_TEST(test_live_destination_lease_blocks_before_serializer);
+    RUN_TEST(test_finished_empty_document_is_published);
+    RUN_TEST(test_core_prepares_project_resource_host_fact_before_serializer);
+    RUN_TEST(test_live_destination_lease_blocks_only_publication);
     RUN_TEST(test_disjoint_destination_lease_does_not_block);
     RUN_TEST(test_page_count_shrink_preserves_files_outside_the_new_plan);
     RUN_TEST(test_publisher_rejects_a_mutated_typed_plan_before_serializer);

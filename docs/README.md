@@ -25,6 +25,8 @@ Start with the smallest document that owns the question.
 - [`formats/json-neotolis.md`](formats/json-neotolis.md)
 - [`formats/defold-tpinfo.md`](formats/defold-tpinfo.md)
 - [`formats/ntpack-binary.md`](formats/ntpack-binary.md)
+- [`formats/lua-package-v1.md`](formats/lua-package-v1.md) — current package,
+  Lua sandbox, diagnostics, and fixed-limit contract.
 
 ## Approved target contracts
 
@@ -33,9 +35,7 @@ availability:
 
 - [`spec/automation.md`](spec/automation.md) — Dev API and MCP.
 - [`spec/format-ecosystem.md`](spec/format-ecosystem.md) —
-  bundled sandboxed Lua export handlers over the native export core.
-- [`formats/lua-package-v1.md`](formats/lua-package-v1.md) — exact target
-  package descriptor, Lua API, sandbox, diagnostics, and fixed limits.
+  target bundled Defold and Phaser packages over the current Lua runtime.
 - [`formats/phaser-3-multiatlas.md`](formats/phaser-3-multiatlas.md) — exact
   target wire contract for the first non-Defold runtime consumer.
 - [`spec/ux.md`](spec/ux.md) — two-level canvas and future workspace model.

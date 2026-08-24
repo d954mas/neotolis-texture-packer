@@ -40,7 +40,7 @@ descriptor/source admission, exact-byte fingerprints, deterministic duplicate
 handling, and owned primary-plus-report diagnostics. Missing `formats/` is a
 successful native-only catalog; broken packages remain unavailable rows and a
 catalog/root limit fails closed to native-only. Candidate descriptors that need
-Lua compilation are a separate scanner handoff. The dormant compile controller
+Lua compilation are a separate scanner handoff. The compile controller
 uses the existing self-reexec worker boundary and accepts a catalog batch only
 after the exact `REQUEST -> ANNOUNCE -> RESULT` sequence for every row followed
 by `END -> COMPLETE`. Results remain separate from the scan until that terminal
@@ -52,11 +52,11 @@ Each compile or runtime attempt gets a fresh bounded state. The runtime kernel
 accepts prepared projected Export IR, prepared host facts, declared documents,
 diagnostic/notice sinks, and cancellation; it owns no filesystem probing, path
 planning, pixel access, capability policy, PNG work, or publication. A
-standalone bounded binding codec can capture exact admitted package snapshots
-and unavailable/absent references without reopening `formats/`. These are
-dormant infrastructure seams: current CLI/GUI startup does not invoke the
-compiler, does not install a Lua catalog, and does not send bindings to the live
-job protocol.
+standalone bounded binding codec captures exact admitted package snapshots and
+unavailable/absent references without reopening `formats/`. Shared CLI/GUI
+startup now invokes isolated compilation and atomically installs either the
+complete eligible catalog or the native fallback. Export admission sends those
+exact bindings through the outer job protocol; only the worker can execute Lua.
 Each built-in binds two separate pieces:
 
 - a descriptor with stable ID, display name, exact D4 transform mask, other
@@ -75,10 +75,13 @@ read-only upward probe for `game.project` used to form its resource reference.
 That trusted built-in environment lookup is not a general handler capability and
 does not grant future Lua drivers filesystem access.
 
-After full preflight, the core acquires non-blocking OS-backed leases for the
-plan's destination files in stable path order. A partially overlapping Export
-returns `export_busy` before serialization; disjoint output sets remain
-independent. Permanent `.ntpacker-export.lock` sidecars provide rendezvous names,
+After full preflight, the serializer produces and validates the complete owned
+document batch without publication side effects. Wet execution then acquires
+non-blocking OS-backed leases for the plan's destination files in stable path
+order immediately before publication. A partially overlapping Export therefore
+returns `export_busy` after serialization but before staging or artifact writes;
+disjoint output sets remain independent. Dry execution never acquires a lease.
+Permanent `.ntpacker-export.lock` sidecars provide rendezvous names,
 while ownership is the live OS handle and therefore ends automatically when a
 process exits. Sidecars are coordination infrastructure, never artifact content,
 and are not removed or inferred from later.
@@ -136,13 +139,21 @@ Each CLI invocation owns one catalog derived from
 `<real-executable-directory>/formats/`. The native GUI host likewise owns one
 startup catalog and passes it into every replacement session. Both clients use
 the same `apps/common` process-host workflow for executable-path resolution,
-scan admission, and native fallback. Its owned result keeps the active catalog,
-an explicit active/fallback/pending-compiler state, and any root-failure report;
-clients do not reconstruct or discard that policy independently. An ineligible
-catalog or one that still awaits the currently dormant isolated Lua compiler
+scan admission, isolated compilation, and native fallback. Its owned result
+keeps the active catalog, explicit active/fallback state, and any root-failure
+report; clients do not reconstruct or discard that policy independently. A
+complete compile batch is installed atomically; a global scan/compile failure
 uses the immortal native baseline. Build staging recreates the
 executable-relative root for both apps from one explicit production package
-manifest; that manifest is empty until the first runtime format ships.
+manifest; that manifest is currently empty. Package changes require restart.
+
+Lua source and the Lua C API are reachable only from the re-executed outer
+worker. Admission captures exact descriptor/source bytes plus package identity
+from one immutable catalog generation; execution never reopens the formats root
+or late-resolves a changed package. Native and Lua serializers produce the same
+owned document batch for common validation, dry discard, or rollback-backed
+publication. The GUI exposes a passive read-only Formats modal; the CLI exposes
+the schema-1 `formats` query.
 
 ## Native GUI
 

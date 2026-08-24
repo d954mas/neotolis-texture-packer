@@ -599,6 +599,74 @@ void test_cancel_racing_a_successful_pack_deletes_the_orphan(void) {
     remove_tree(work_dir);
 }
 
+static void add_atlas_without_targets(tp_session *session) {
+    tp_operation operation = {0};
+    operation.kind = TP_OP_ATLAS_CREATE;
+    operation.atlas_id = (tp_id128){{0x71U, 0x72U, 0x73U, 0x74U}};
+    operation.u.atlas_create.name = (char *)"no-targets";
+    tp_txn_request request = {0};
+    request.schema = TP_TXN_SCHEMA;
+    memcpy(request.id_hex, "71717171717171717171717171717171",
+           sizeof request.id_hex);
+    request.expected_revision = tp_session_revision(session);
+    request.ops = &operation;
+    request.op_count = 1U;
+    tp_txn_result result = {0};
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_session_apply(session, &request, &result, &error), error.msg);
+    TEST_ASSERT_TRUE(result.committed);
+    tp_txn_result_free(&result);
+}
+
+void test_accepted_export_cancel_outranks_later_worker_failure(void) {
+    tp_session *session = make_session();
+    char work_dir[1024];
+    scratch_dir(work_dir, sizeof work_dir);
+    remove_tree(work_dir);
+    tp_mkdirs(work_dir);
+    const tp_id128 atlas_id = default_atlas_id(session);
+    add_file_source(session, atlas_id, work_dir);
+    (void)add_enabled_export_target(session, atlas_id);
+
+    char blocked_work_dir[1200];
+    TEST_ASSERT_TRUE(
+        snprintf(blocked_work_dir, sizeof blocked_work_dir,
+                 "%s/not-a-directory", work_dir) > 0);
+    FILE *blocked = tp_fs_fopen(blocked_work_dir, "wb");
+    TEST_ASSERT_NOT_NULL(blocked);
+    TEST_ASSERT_EQUAL_INT(0, fclose(blocked));
+
+    const tp_export_command_request request = {
+        .work_dir = blocked_work_dir,
+        .atlas_id = atlas_id,
+    };
+    tp_error error = {{0}};
+    set_worker_env("TP_TEST_JOB_WORKER_IGNORE_CANCEL", "1");
+    tp_job__test_set_worker_cancel_grace_ms(20000);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_session_export_start(session, &request, &error),
+        error.msg);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK, tp_session_job_cancel(session, &error));
+
+    tp_session_job_result result = wait_for_result(session);
+    set_worker_env("TP_TEST_JOB_WORKER_IGNORE_CANCEL", "");
+    TEST_ASSERT_EQUAL_INT(TP_SESSION_JOB_CANCELLED, result.state);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_CANCELLED, result.status);
+    TEST_ASSERT_NOT_NULL(result.export_result.report);
+    TEST_ASSERT_NOT_NULL(result.export_result.report->atlases[0].note);
+    TEST_ASSERT_EQUAL_STRING(
+        "job worker failed before target completion",
+        result.export_result.report->atlases[0].note);
+
+    tp_session_job_result_destroy(&result);
+    tp_session_destroy(session);
+    remove_tree(work_dir);
+}
+
 /* The UTF-8 name table is load-bearing on the wire: `.ntpack` stores hash-only
  * names, so a host that rebuilt the map from the LIVE model would relabel every
  * sprite of a Pack that was renamed while it ran. Rename the atlas after the job
@@ -867,7 +935,89 @@ void test_export_target_allocation_failure_is_fail_atomic(void) {
     TEST_ASSERT_EQUAL_INT_MESSAGE(
         TP_SESSION_JOB_SUCCEEDED, result.state, result.error.msg);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, result.status);
-    TEST_ASSERT_EQUAL_INT(1, result.export_result.targets);
+    TEST_ASSERT_NOT_NULL(result.export_result.report);
+    TEST_ASSERT_EQUAL_INT(1, result.export_result.report->targets_ok);
+    tp_session_job_result_destroy(&result);
+    tp_session_destroy(session);
+    remove_tree(work_dir);
+}
+
+void test_export_empty_target_filter_selects_all_enabled_targets(void) {
+    tp_session *session = make_session();
+    char work_dir[1024];
+    scratch_dir(work_dir, sizeof work_dir);
+    remove_tree(work_dir);
+    tp_mkdirs(work_dir);
+    const tp_id128 atlas_id = default_atlas_id(session);
+    add_file_source(session, atlas_id, work_dir);
+    (void)add_enabled_export_target(session, atlas_id);
+
+    const tp_export_command_request request = {
+        .work_dir = work_dir,
+        .atlas_id = atlas_id,
+        .target_exporter_id = "",
+        .dry_run = true,
+    };
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_session_export_start(session, &request, &error), error.msg);
+    tp_session_job_result result = wait_for_result(session);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_SESSION_JOB_SUCCEEDED, result.state, result.error.msg);
+    TEST_ASSERT_EQUAL_INT(1, result.export_result.report->targets_ok);
+    TEST_ASSERT_EQUAL_INT(0, result.export_result.report->atlases_skipped);
+    tp_session_job_result_destroy(&result);
+    tp_session_destroy(session);
+    remove_tree(work_dir);
+}
+
+void test_export_unknown_atlas_is_rejected_at_admission(void) {
+    tp_session *session = make_session();
+    char work_dir[1024];
+    scratch_dir(work_dir, sizeof work_dir);
+    const tp_export_command_request request = {
+        .work_dir = work_dir,
+        .atlas_id = {{0xFFU}},
+    };
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_NOT_FOUND,
+        tp_session_export_start(session, &request, &error));
+    TEST_ASSERT_FALSE(tp_session_job_active(session));
+    TEST_ASSERT_NOT_NULL(strstr(error.msg, "not found"));
+    tp_session_destroy(session);
+}
+
+void test_no_usable_images_then_no_targets_keeps_worker_fsm_aligned(void) {
+    tp_session *session = make_session();
+    char work_dir[1024];
+    scratch_dir(work_dir, sizeof work_dir);
+    remove_tree(work_dir);
+    tp_mkdirs(work_dir);
+    const tp_id128 atlas_id = default_atlas_id(session);
+    (void)add_enabled_export_target(session, atlas_id);
+    add_atlas_without_targets(session);
+
+    const tp_export_command_request request = {
+        .work_dir = work_dir,
+        .atlas_id = {{0}},
+        .dry_run = true,
+    };
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_session_export_start(session, &request, &error), error.msg);
+    tp_session_job_result result = wait_for_result(session);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_SESSION_JOB_SUCCEEDED, result.state, result.error.msg);
+    TEST_ASSERT_EQUAL_INT(2, result.export_result.report->atlases_skipped);
+    TEST_ASSERT_EQUAL_STRING(
+        "no_usable_images",
+        result.export_result.report->atlases[0].skip_notice_id);
+    TEST_ASSERT_EQUAL_STRING(
+        "no_enabled_targets",
+        result.export_result.report->atlases[1].skip_notice_id);
     tp_session_job_result_destroy(&result);
     tp_session_destroy(session);
     remove_tree(work_dir);
@@ -958,33 +1108,34 @@ void test_session_task_slot_rejects_every_cross_kind_pair(void) {
 }
 
 void test_releasing_export_payload_preserves_terminal_metadata(void) {
+    tp_export_command_report report = {
+        .targets_ok = 3,
+        .files_written = 4,
+        .notices = 5,
+        .atlases_ok = 6,
+        .atlases_failed = 7,
+    };
+    (void)snprintf(
+        report.first_error, sizeof report.first_error,
+        "%s", "writer failed after partial publication");
     tp_session_job_result result = {
         .kind = TP_SESSION_JOB_EXPORT,
         .state = TP_SESSION_JOB_CANCELLED,
         .status = TP_STATUS_CANCELLED,
-        .export_result = {
-            .targets = 3,
-            .files = 4,
-            .notices = 5,
-            .atlases_ok = 6,
-            .atlases_failed = 7,
-        },
+        .export_result = {.report = &report},
     };
-    (void)snprintf(
-        result.export_result.first_error,
-        sizeof result.export_result.first_error,
-        "%s", "writer failed after partial publication");
 
     tp_job__test_release_export_payload(&result);
 
-    TEST_ASSERT_EQUAL_INT(3, result.export_result.targets);
-    TEST_ASSERT_EQUAL_INT(4, result.export_result.files);
-    TEST_ASSERT_EQUAL_INT(5, result.export_result.notices);
-    TEST_ASSERT_EQUAL_INT(6, result.export_result.atlases_ok);
-    TEST_ASSERT_EQUAL_INT(7, result.export_result.atlases_failed);
+    TEST_ASSERT_EQUAL_PTR(&report, result.export_result.report);
+    TEST_ASSERT_EQUAL_INT(3, result.export_result.report->targets_ok);
+    TEST_ASSERT_EQUAL_INT(4, result.export_result.report->files_written);
+    TEST_ASSERT_EQUAL_INT(5, result.export_result.report->notices);
+    TEST_ASSERT_EQUAL_INT(6, result.export_result.report->atlases_ok);
+    TEST_ASSERT_EQUAL_INT(7, result.export_result.report->atlases_failed);
     TEST_ASSERT_EQUAL_STRING(
         "writer failed after partial publication",
-        result.export_result.first_error);
+        result.export_result.report->first_error);
 }
 
 void test_export_cancel_is_rejected_after_final_writer_boundary(void) {
@@ -1150,9 +1301,9 @@ void test_export_terminal_keeps_published_truth_after_target_deletion(void) {
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK, result.status);
     TEST_ASSERT_EQUAL_INT(
-        1, result.export_result.targets);
+        1, result.export_result.report->targets_ok);
     TEST_ASSERT_TRUE(
-        result.export_result.files > 0);
+        result.export_result.report->files_written > 0);
     tp_session_job_result_destroy(&result);
     tp_session_destroy(session);
     remove_tree(work_dir);
@@ -1228,8 +1379,9 @@ void test_export_boundary_survives_a_final_atlas_without_a_writer(void) {
     TEST_ASSERT_EQUAL_INT_MESSAGE(
         TP_SESSION_JOB_SUCCEEDED, result.state, result.error.msg);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, result.status);
-    TEST_ASSERT_EQUAL_INT(1, result.export_result.targets);
-    TEST_ASSERT_EQUAL_INT(1, result.export_result.atlases_skipped);
+    TEST_ASSERT_EQUAL_INT(1, result.export_result.report->targets_ok);
+    TEST_ASSERT_EQUAL_INT(
+        1, result.export_result.report->atlases_skipped);
     tp_session_job_result_destroy(&result);
     tp_session_destroy(session);
     remove_tree(work_dir);
@@ -1310,12 +1462,16 @@ int main(int argc, char **argv) {
     RUN_TEST(test_host_cancel_owns_process_terminal_result);
     RUN_TEST(test_cancel_of_a_running_pack_leaves_no_artifact_behind);
     RUN_TEST(test_cancel_racing_a_successful_pack_deletes_the_orphan);
+    RUN_TEST(test_accepted_export_cancel_outranks_later_worker_failure);
     RUN_TEST(test_rename_during_pack_keeps_the_packed_labels);
     RUN_TEST(test_damaged_pack_artifact_is_a_structured_terminal_failure);
     RUN_TEST(test_worker_timeout_is_a_structured_terminal_failure);
     RUN_TEST(test_compacted_pack_result_keeps_pages_and_destroys_cleanly);
     RUN_TEST(test_artifact_path_allocation_failure_leaves_no_orphan);
     RUN_TEST(test_export_target_allocation_failure_is_fail_atomic);
+    RUN_TEST(test_export_empty_target_filter_selects_all_enabled_targets);
+    RUN_TEST(test_export_unknown_atlas_is_rejected_at_admission);
+    RUN_TEST(test_no_usable_images_then_no_targets_keeps_worker_fsm_aligned);
     RUN_TEST(
         test_session_task_slot_rejects_every_cross_kind_pair);
     RUN_TEST(test_releasing_export_payload_preserves_terminal_metadata);

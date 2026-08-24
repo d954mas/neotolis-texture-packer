@@ -1,5 +1,6 @@
 #include "tp_job_worker_internal.h"
 #include "tp_export_job_internal.h"
+#include "tp_export_command_report_internal.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -10,6 +11,8 @@
 #include <fcntl.h>
 #include <io.h>
 #include <windows.h>
+#else
+#include <unistd.h>
 #endif
 #if !defined(_WIN32) && defined(TP_ENABLE_TEST_SEAMS)
 #include <errno.h>
@@ -27,6 +30,8 @@
 #include "tp_build_worker_internal.h"
 #include "tp_cancel_source.h"
 #include "tp_fs_internal.h"
+#include "tp_format_binding_proto_internal.h"
+#include "tp_lua_export_adapter_internal.h"
 #include "tp_pack_priv.h"
 #include "tp_proc_internal.h"
 
@@ -215,17 +220,191 @@ typedef struct export_terminal_context {
     int current;
     int eligible;
     bool claimed;
+    bool publication_in_progress;
+    bool any_publication;
+    int atlas_report_index;
+    tp_id128 atlas_id;
+    const char *atlas_name;
+    const int *sprite_count;
+    const int *missing_sources;
+    uint8_t panic_frame[64];
+    size_t panic_frame_length;
 } export_terminal_context;
+
+static tp_status publish_export_outcome(
+    export_terminal_context *context,
+    const tp_export_command_outcome *outcome, tp_error *err) {
+    if (!context || !outcome) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "Export report fragment context is invalid");
+    }
+    const tp_job_worker_proto_fragment fragment = {
+        .request_id = context->request_id,
+        .outcome = *outcome,
+    };
+    uint8_t *bytes = NULL;
+    size_t length = 0U;
+    tp_status status = tp_job_worker_proto_encode_fragment(
+        &fragment, &bytes, &length, err);
+    if (status == TP_STATUS_OK && !write_frame(bytes, length)) {
+        status = tp_error_set(
+            err, TP_STATUS_BUILDER_FAILED,
+            "job worker could not publish Export report fragment");
+    }
+    free(bytes);
+    return status;
+}
+
+static tp_status publish_export_target_fragment(
+    void *opaque, int target_index, const tp_export_report *report,
+    const tp_export_notices *notices, tp_error *err) {
+    export_terminal_context *context = opaque;
+    if (!context || !context->atlas_name || !context->sprite_count ||
+        !context->missing_sources) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "Export target fragment context is invalid");
+    }
+    if (!report || target_index < 0 || target_index >= report->target_count) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "Export target outcome is outside its report");
+    }
+    tp_export_report_target target = report->targets[target_index];
+    if (target.notice_begin < 0 || target.notice_end < target.notice_begin ||
+        !notices || target.notice_end > notices->count) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "Export target outcome notice slice is invalid");
+    }
+    const int notice_count = target.notice_end - target.notice_begin;
+    const tp_export_notices notice_slice = {
+        .items = notice_count > 0
+                     ? notices->items + target.notice_begin
+                     : NULL,
+        .count = notice_count,
+        .cap = notice_count,
+    };
+    target.notice_begin = 0;
+    target.notice_end = notice_count;
+    const bool run_present = target.pack_run >= 0;
+    if (run_present && target.pack_run >= report->run_count) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "Export target outcome pack run is invalid");
+    }
+    const tp_export_command_outcome outcome = {
+        .kind = TP_EXPORT_COMMAND_OUTCOME_TARGET,
+        .atlas_index = context->atlas_report_index,
+        .atlas_id = context->atlas_id,
+        .atlas_name = context->atlas_name,
+        .sprite_count = *context->sprite_count,
+        .missing_sources = *context->missing_sources,
+        .status = TP_STATUS_OK,
+        .report_present = true,
+        .dry_run = report->dry_run,
+        .pack_failed = report->pack_failed,
+        .report_failed = report->report_failed,
+        .input_outcome = report->input_outcome,
+        .target_index = target_index,
+        .target = target,
+        .notices = notice_slice,
+        .pack_run_present = run_present,
+        .pack_run_index = target.pack_run,
+        .pack_run = run_present ? report->runs[target.pack_run]
+                                : (tp_export_report_run){0},
+    };
+    return publish_export_outcome(context, &outcome, err);
+}
+
+static tp_status publish_export_atlas_outcome(
+    export_terminal_context *context, const char *skip_notice_id,
+    const char *note, tp_status status, const tp_error *error,
+    const tp_export_report *report, tp_error *err) {
+    const tp_export_command_outcome outcome = {
+        .kind = TP_EXPORT_COMMAND_OUTCOME_ATLAS,
+        .atlas_index = context->atlas_report_index,
+        .atlas_id = context->atlas_id,
+        .atlas_name = context->atlas_name,
+        .sprite_count = context->sprite_count ? *context->sprite_count : 0,
+        .missing_sources = context->missing_sources
+                               ? *context->missing_sources
+                               : 0,
+        .skip_notice_id = skip_notice_id,
+        .note = note,
+        .status = status,
+        .error = error ? *error : (tp_error){{0}},
+        .report_present = report != NULL,
+        .dry_run = report ? report->dry_run : false,
+        .pack_failed = report ? report->pack_failed : false,
+        .report_failed = report ? report->report_failed : false,
+        .input_outcome = report ? report->input_outcome
+                                : TP_EXPORT_INPUT_NOT_EVALUATED,
+    };
+    return publish_export_outcome(context, &outcome, err);
+}
+
+static void release_transient_format_diagnostics(tp_export_report *report) {
+    if (!report) {
+        return;
+    }
+    for (int i = 0; i < report->target_count; ++i) {
+        tp_format_diagnostic_report_destroy(
+            report->targets[i].format_diagnostics);
+        report->targets[i].format_diagnostics = NULL;
+    }
+}
+
+static void publish_lua_panic_marker(void *opaque) {
+    export_terminal_context *context = opaque;
+    if (!context || context->panic_frame_length == 0U) {
+        return;
+    }
+    size_t offset = 0U;
+    while (offset < context->panic_frame_length) {
+#if defined(_WIN32)
+        const unsigned remaining =
+            (unsigned)(context->panic_frame_length - offset);
+        const int written = _write(_fileno(stdout),
+                                   context->panic_frame + offset, remaining);
+#else
+        const ssize_t written =
+            write(STDOUT_FILENO, context->panic_frame + offset,
+                  context->panic_frame_length - offset);
+#endif
+        if (written <= 0) {
+            return;
+        }
+        offset += (size_t)written;
+    }
+}
+
+static void prepare_lua_panic_marker(export_terminal_context *context) {
+    context->panic_frame_length = 0U;
+    const tp_job_worker_proto_progress progress = {
+        .request_id = context->request_id,
+        .current = context->current,
+        .total = context->eligible,
+        .phase = TP_JOB_WORKER_PHASE_EXPORT_HANDLER_PANIC,
+    };
+    uint8_t *bytes = NULL;
+    size_t length = 0U;
+    if (tp_job_worker_proto_encode_progress(&progress, &bytes, &length, NULL) ==
+            TP_STATUS_OK &&
+        length <= sizeof context->panic_frame) {
+        memcpy(context->panic_frame, bytes, length);
+        context->panic_frame_length = length;
+    }
+    free(bytes);
+}
 
 static bool publish_export_terminal_boundary_now(
     export_terminal_context *context) {
     if (!context || context->claimed) {
         return false;
     }
+    if (!publish_progress(context->request_id, context->current,
+                          context->eligible,
+                          TP_JOB_WORKER_PHASE_EXPORT_TERMINAL_BOUNDARY)) {
+        return false;
+    }
     context->claimed = true;
-    (void)publish_progress(
-        context->request_id, context->current, context->eligible,
-        TP_JOB_WORKER_PHASE_EXPORT_TERMINAL_BOUNDARY);
 #ifdef TP_ENABLE_TEST_SEAMS
     const char *marker =
         getenv("TP_TEST_JOB_WORKER_EXPORT_BOUNDARY_MARKER");
@@ -250,6 +429,45 @@ static bool publish_export_terminal_boundary(void *opaque) {
     return context &&
            context->current == context->eligible &&
            publish_export_terminal_boundary_now(context);
+}
+
+static bool publish_export_execution_phase(
+    void *opaque, tp_export_execution_phase phase) {
+    export_terminal_context *context = opaque;
+    if (!context) {
+        return false;
+    }
+    tp_job_worker_progress_phase worker_phase =
+        TP_JOB_WORKER_PHASE_EXPORT_SERIALIZE;
+    switch (phase) {
+        case TP_EXPORT_EXECUTION_SERIALIZING:
+            worker_phase = TP_JOB_WORKER_PHASE_EXPORT_SERIALIZE;
+            break;
+        case TP_EXPORT_EXECUTION_LUA_SERIALIZING:
+            worker_phase = TP_JOB_WORKER_PHASE_EXPORT_LUA_SERIALIZE;
+            prepare_lua_panic_marker(context);
+            break;
+        case TP_EXPORT_EXECUTION_READY:
+            worker_phase = TP_JOB_WORKER_PHASE_EXPORT_READY;
+            break;
+        case TP_EXPORT_EXECUTION_PUBLICATION_BEGIN:
+            worker_phase = TP_JOB_WORKER_PHASE_EXPORT_PUBLICATION_BEGIN;
+            break;
+        case TP_EXPORT_EXECUTION_COMPLETE:
+            worker_phase = TP_JOB_WORKER_PHASE_EXPORT_TARGET_COMPLETE;
+            break;
+    }
+    if (!publish_progress(context->request_id, context->current,
+                          context->eligible, worker_phase)) {
+        return false;
+    }
+    if (phase == TP_EXPORT_EXECUTION_PUBLICATION_BEGIN) {
+        context->publication_in_progress = true;
+    } else if (phase == TP_EXPORT_EXECUTION_COMPLETE) {
+        context->any_publication |= context->publication_in_progress;
+        context->publication_in_progress = false;
+    }
+    return true;
 }
 
 static void collect_image_hash(void *context, int sprite_index,
@@ -338,7 +556,8 @@ static void remove_request_dir_of(const char *artifact_path) {
 }
 
 static tp_status run_pack(const tp_job_worker_proto_request *request,
-                          tp_project *project, tp_cancel_source *cancel,
+                          tp_project *project, tp_format_catalog *catalog,
+                          tp_cancel_source *cancel,
                           tp_job_worker_proto_response *response,
                           tp_error *err) {
     const int atlas_index =
@@ -376,7 +595,7 @@ static tp_status run_pack(const tp_job_worker_proto_request *request,
         request->preview_exporter_id[0]) {
         const tp_format_descriptor *format =
             tp_format_catalog_find_available(
-                tp_format_catalog_native(),
+                catalog,
                 request->preview_exporter_id);
         if (!format) {
             tp_pack_input_free(&input);
@@ -610,8 +829,8 @@ static tp_status run_pack(const tp_job_worker_proto_request *request,
 }
 
 static tp_status run_export(const tp_job_worker_proto_request *request,
-                            tp_project *project, tp_cancel_source *cancel,
-                            tp_job_worker_proto_response *response,
+                            tp_project *project, tp_format_catalog *catalog,
+                            tp_cancel_source *cancel,
                             bool *out_terminal_claimed,
                             tp_error *err) {
     if (out_terminal_claimed) {
@@ -636,12 +855,19 @@ static tp_status run_export(const tp_job_worker_proto_request *request,
         .request_id = request->request_id,
     };
     const tp_export_snapshot_job_opts opts = {
+        .target_exporter_id = request->target_exporter_id[0]
+                                  ? request->target_exporter_id
+                                  : NULL,
+        .out_dir = request->out_dir[0] ? request->out_dir : NULL,
+        .dry_run = request->dry_run,
         .terminal_boundary = publish_export_terminal_boundary,
         .terminal_boundary_context = &terminal_context,
+        .execution_phase = publish_export_execution_phase,
+        .execution_phase_context = &terminal_context,
     };
     tp_export_snapshot_job *job = NULL;
     tp_status status = tp_export_project_job_create_internal(
-        project, tp_format_catalog_native(), request_dir, &opts, &job, err);
+        project, catalog, request_dir, &opts, &job, err);
     if (status != TP_STATUS_OK) {
         tp_worker_remove_dir_tree(request_dir);
         return status;
@@ -651,26 +877,23 @@ static tp_status run_export(const tp_job_worker_proto_request *request,
         tp_export_snapshot_job_atlas_count(job);
     for (int i = 0; i < atlas_count; ++i) {
         tp_export_snapshot_atlas_info info = {0};
-        if (tp_export_snapshot_job_atlas_info(
-                job, i, &info, NULL) == TP_STATUS_OK &&
+        if (tp_export_snapshot_job_atlas_info(job, i, &info, NULL) ==
+                TP_STATUS_OK &&
             (tp_id128_is_nil(request->atlas_id) ||
-             tp_id128_eq(request->atlas_id,
-                         info.atlas_id)) &&
-            info.enabled_target_count > 0) {
-            ++eligible;
+             tp_id128_eq(request->atlas_id, info.atlas_id))) {
+            eligible += info.enabled_target_count > 0 ? 1 : 0;
         }
     }
-    if (eligible == 0) {
-        tp_export_snapshot_job_destroy(job);
-        tp_worker_remove_dir_tree(request_dir);
-        return tp_error_set(err, TP_STATUS_NOT_FOUND,
-                            "nothing to export");
-    }
     terminal_context.eligible = eligible;
+    tp_export_snapshot_job_set_target_completed_internal(
+        job, publish_export_target_fragment, &terminal_context);
 
     tp_status first_status = TP_STATUS_OK;
     int current = 0;
     bool cancellation_ended_work = false;
+    int report_atlas = 0;
+    tp_lua_export_panic_marker_set_worker(publish_lua_panic_marker,
+                                          &terminal_context);
     for (int i = 0; i < atlas_count; ++i) {
         tp_export_snapshot_atlas_info info = {0};
         status = tp_export_snapshot_job_atlas_info(
@@ -685,6 +908,21 @@ static tp_status run_export(const tp_job_worker_proto_request *request,
             continue;
         }
         if (info.enabled_target_count == 0) {
+            int zero = 0;
+            terminal_context.atlas_report_index = report_atlas;
+            terminal_context.atlas_id = info.atlas_id;
+            terminal_context.atlas_name = info.name;
+            terminal_context.sprite_count = &zero;
+            terminal_context.missing_sources = &zero;
+            status = publish_export_atlas_outcome(
+                &terminal_context, "no_enabled_targets",
+                "no enabled targets (skipped)", TP_STATUS_OK, NULL, NULL,
+                err);
+            report_atlas++;
+            if (status != TP_STATUS_OK) {
+                first_status = status;
+                break;
+            }
             continue;
         }
         if (tp_cancel_source_poll(cancel)) {
@@ -702,6 +940,13 @@ static tp_status run_export(const tp_job_worker_proto_request *request,
         tp_export_notices_init(&notices);
         tp_export_report report = {0};
         int runs = 0;
+        int sprite_count = 0;
+        int missing_sources = 0;
+        terminal_context.atlas_report_index = report_atlas;
+        terminal_context.atlas_id = info.atlas_id;
+        terminal_context.atlas_name = info.name;
+        terminal_context.sprite_count = &sprite_count;
+        terminal_context.missing_sources = &missing_sources;
         if (arena) {
             (void)publish_progress(
                 request->request_id, current, eligible,
@@ -720,48 +965,57 @@ static tp_status run_export(const tp_job_worker_proto_request *request,
             status =
                 tp_export_snapshot_job_run_atlas_ex_cancellable(
                     job, i, arena, &notices, &report, &runs,
-                    NULL, NULL, &cancel_token, &atlas_error);
+                    &sprite_count, &missing_sources, &cancel_token,
+                    &atlas_error);
         } else {
             status = tp_error_set(
                 &atlas_error, TP_STATUS_OOM,
                 "job worker could not allocate Export arena");
         }
-        if (report.input_outcome ==
-            TP_EXPORT_INPUT_NO_USABLE_IMAGES) {
-            response->export_result.atlases_skipped++;
+        const char *skip_notice_id = NULL;
+        const char *note = NULL;
+        char note_buffer[384] = {0};
+        tp_status atlas_status = TP_STATUS_OK;
+        tp_error command_atlas_error = {{0}};
+        const bool report_present =
+            report.input_outcome == TP_EXPORT_INPUT_READY;
+        if (report.input_outcome == TP_EXPORT_INPUT_NO_USABLE_IMAGES) {
+            skip_notice_id = "no_usable_images";
+            note = "no usable images (skipped)";
+            status = publish_export_atlas_outcome(
+                &terminal_context, skip_notice_id, note, TP_STATUS_OK,
+                NULL, NULL, err);
+            report_atlas++;
             tp_export_notices_free(&notices);
             tp_arena_destroy(arena);
+            if (status != TP_STATUS_OK) {
+                first_status = status;
+                break;
+            }
             continue;
         }
         bool writer_failed = false;
         const char *writer_error = NULL;
+        bool pre_writer_failed = false;
+        const char *pre_writer_error = NULL;
         for (int target = 0; target < report.target_count; ++target) {
-            if (report.targets[target].ok) {
-                response->export_result.targets++;
-                response->export_result.files +=
-                    report.targets[target].written_file_count;
-            } else if (report.targets[target].writer_outcome ==
-                       TP_EXPORT_WRITER_FAILED) {
-                response->export_result.publication_uncertain |=
-                    report.targets[target].publication_uncertain;
+            if (!report.targets[target].ok &&
+                report.targets[target].writer_outcome ==
+                    TP_EXPORT_WRITER_FAILED) {
                 writer_failed = true;
                 if (!writer_error) {
                     writer_error = report.targets[target].error;
                 }
+            } else if (!report.targets[target].ok &&
+                       report.targets[target].writer_outcome ==
+                           TP_EXPORT_WRITER_NOT_ATTEMPTED) {
+                pre_writer_failed = true;
+                if (!pre_writer_error) {
+                    pre_writer_error = report.targets[target].error;
+                }
             }
         }
-        response->export_result.notices += notices.count;
         if (writer_failed) {
-            response->export_result.atlases_failed++;
-            if (response->export_result.first_error[0] == '\0') {
-                (void)snprintf(
-                    response->export_result.first_error,
-                    sizeof response->export_result.first_error,
-                    "%s: %s", info.name,
-                    writer_error && writer_error[0]
-                        ? writer_error
-                        : "Export writer failed");
-            }
             if (status != TP_STATUS_CANCELLED &&
                 first_status == TP_STATUS_OK) {
                 first_status =
@@ -778,25 +1032,73 @@ static tp_status run_export(const tp_job_worker_proto_request *request,
                             : "Export writer failed");
                 }
             }
-        } else if (status == TP_STATUS_OK) {
-            response->export_result.atlases_ok++;
-        } else if (status != TP_STATUS_CANCELLED) {
-            response->export_result.atlases_failed++;
+        } else if (status != TP_STATUS_OK &&
+                   status != TP_STATUS_CANCELLED) {
             if (first_status == TP_STATUS_OK) {
                 first_status = status;
                 *err = atlas_error;
-                (void)snprintf(
-                    response->export_result.first_error,
-                    sizeof response->export_result.first_error,
-                    "%s: %s", info.name,
-                    atlas_error.msg[0]
-                        ? atlas_error.msg
-                        : tp_status_str(status));
             }
         }
+        if (status != TP_STATUS_OK && report.report_failed) {
+            atlas_status = status;
+            command_atlas_error = atlas_error;
+            (void)snprintf(
+                note_buffer, sizeof note_buffer,
+                "targets completed, but the export report failed: %s",
+                atlas_error.msg[0] ? atlas_error.msg : tp_status_str(status));
+            note = note_buffer;
+        } else if (status != TP_STATUS_OK &&
+                   (report.pack_failed || report.target_count == 0 ||
+                    pre_writer_failed)) {
+            atlas_status = status;
+            if (report.pack_failed) {
+                command_atlas_error = atlas_error;
+                (void)snprintf(note_buffer, sizeof note_buffer,
+                               "could not pack atlas: %s",
+                               atlas_error.msg[0] ? atlas_error.msg
+                                                  : tp_status_str(status));
+            } else if (report.input_outcome == TP_EXPORT_INPUT_READY) {
+                const char *detail =
+                    status == TP_STATUS_OUT_OF_BOUNDS
+                        ? "resolved target-output path exceeds supported length"
+                        : (pre_writer_error && pre_writer_error[0]
+                               ? pre_writer_error
+                           : atlas_error.msg[0] ? atlas_error.msg
+                                                : tp_status_str(status));
+                (void)tp_error_set(
+                    &command_atlas_error, status,
+                    status == TP_STATUS_OUT_OF_BOUNDS
+                        ? "could not resolve target-output path: %s"
+                        : "export target failed before writer: %s",
+                    detail);
+                (void)snprintf(note_buffer, sizeof note_buffer, "%s",
+                               command_atlas_error.msg);
+            } else {
+                command_atlas_error = atlas_error;
+                (void)snprintf(note_buffer, sizeof note_buffer,
+                               "could not assemble sprites: %s",
+                               atlas_error.msg[0] ? atlas_error.msg
+                                                  : tp_status_str(status));
+            }
+            note = note_buffer;
+        }
+        const tp_status atlas_run_status = status;
+        tp_status outcome_status = publish_export_atlas_outcome(
+            &terminal_context, skip_notice_id, note, atlas_status,
+            &command_atlas_error, report_present ? &report : NULL, err);
+        report_atlas++;
+        if (outcome_status != TP_STATUS_OK) {
+            if (first_status == TP_STATUS_OK) {
+                first_status = outcome_status;
+            }
+        }
+        release_transient_format_diagnostics(&report);
         tp_export_notices_free(&notices);
         tp_arena_destroy(arena);
-        if (status == TP_STATUS_CANCELLED) {
+        if (outcome_status != TP_STATUS_OK) {
+            break;
+        }
+        if (atlas_run_status == TP_STATUS_CANCELLED) {
             cancellation_ended_work = true;
             break;
         }
@@ -806,10 +1108,11 @@ static tp_status run_export(const tp_job_worker_proto_request *request,
      * earlier targets and end with only skipped/pre-writer-failure work. Once
      * that tail has returned there is no future writer, so publish the same
      * boundary here rather than letting a later Cancel rewrite real output. */
+    tp_lua_export_panic_marker_set_worker(NULL, NULL);
     if (!terminal_context.claimed &&
         !cancellation_ended_work &&
-        (response->export_result.targets > 0 ||
-         response->export_result.publication_uncertain)) {
+        (terminal_context.any_publication ||
+         terminal_context.publication_in_progress)) {
         (void)publish_export_terminal_boundary_now(
             &terminal_context);
     }
@@ -824,9 +1127,6 @@ static tp_status run_export(const tp_job_worker_proto_request *request,
     if (out_terminal_claimed) {
         *out_terminal_claimed = terminal_context.claimed;
     }
-    response->export_result.partial_publication =
-        response->export_result.targets > 0 &&
-        (cancelled || first_status != TP_STATUS_OK);
     return cancelled ? TP_STATUS_CANCELLED : first_status;
 }
 
@@ -850,7 +1150,14 @@ int tp_job_worker_main_request(const uint8_t *bytes, size_t length) {
     bool export_terminal_claimed = false;
 
     tp_project *project = NULL;
+    tp_format_binding_proto_value bindings = {0};
+    tp_format_catalog *catalog = NULL;
     tp_cancel_source cancel = {.probe = child_stdin_probe};
+    if (status == TP_STATUS_OK && request.format_bindings_len > 0U) {
+        status = tp_format_binding_proto_decode(
+            request.format_bindings, request.format_bindings_len, &bindings,
+            &error);
+    }
     if (status == TP_STATUS_OK) {
         status = tp_project_load_buffer(
             (const char *)request.project_json,
@@ -870,13 +1177,20 @@ int tp_job_worker_main_request(const uint8_t *bytes, size_t length) {
             project->project_dir = project_dir;
         }
     }
+    if (status == TP_STATUS_OK && request.format_bindings_len > 0U) {
+        status = tp_lua_export_catalog_create_worker(
+            &bindings, project, request.preview_exporter_id, &catalog,
+            &error);
+    } else if (status == TP_STATUS_OK) {
+        catalog = tp_format_catalog_retain(tp_format_catalog_native());
+    }
     if (status == TP_STATUS_OK && request.kind == TP_SESSION_JOB_PACK) {
         status = run_pack(
-            &request, project, &cancel, &response, &error);
+            &request, project, catalog, &cancel, &response, &error);
     } else if (status == TP_STATUS_OK &&
                request.kind == TP_SESSION_JOB_EXPORT) {
         status = run_export(
-            &request, project, &cancel, &response,
+            &request, project, catalog, &cancel,
             &export_terminal_claimed, &error);
     } else if (status == TP_STATUS_OK) {
         status = tp_error_set(
@@ -955,6 +1269,8 @@ int tp_job_worker_main_request(const uint8_t *bytes, size_t length) {
         free((void *)response.pack.artifact_path);
     }
     tp_project_destroy(project);
+    tp_format_catalog_release(catalog);
+    tp_format_binding_proto_value_free(&bindings);
     tp_job_worker_proto_request_free(&request);
     return wrote ? 0 : 1;
 }

@@ -113,11 +113,12 @@ nt_set_sanitizer_flags(tp_core)
 # abort/alloc/codec/write failure lands in a child, not the host.
 add_library(tp_build STATIC src/tp_pack.c src/tp_build_driver.c src/tp_build_proto.c
     src/tp_build_worker.c src/tp_build_worker_main.c src/tp_export_run.c
+    src/tp_export_command_report.c src/tp_export_command_report_proto.c
     src/tp_job.c src/tp_refresh_job.c src/tp_job_worker.c src/tp_job_worker_main.c
     src/tp_job_worker_proto.c
-    # Dormant Packet 2 worker-only Lua kernel. Client/catalog activation is a
-    # later packet; Lua headers and state ownership never enter tp_core.
-    src/tp_lua_bindings.c src/tp_lua_host.c
+    # Worker-only Lua kernel and generic Export adapter. Lua headers and state
+    # ownership never enter tp_core or either client.
+    src/tp_lua_bindings.c src/tp_lua_host.c src/tp_lua_export_adapter.c
     src/tp_format_compile_proto.c src/tp_format_compile_service.c
     src/tp_format_compile_worker.c)
 if(WIN32)

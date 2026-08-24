@@ -1,4 +1,5 @@
 #include "test_gui_action_trace_fixture.h"
+#include "tp_fs_internal.h"
 
 #ifdef _WIN32
 #include <direct.h>
@@ -195,7 +196,7 @@ void setUp(void) {
                    "%s/action-trace.ntpacker_project",
                    TP_GUI_TRACE_TEST_DIR);
     (void)remove(s_save_path);
-    (void)test_rmdir(TP_GUI_TRACE_TEST_DIR);
+    tp_fs_remove_tree(TP_GUI_TRACE_TEST_DIR);
     tp_mkdirs(TP_GUI_TRACE_TEST_DIR);
 
     gui_project_init();
@@ -217,5 +218,5 @@ void tearDown(void) {
     tp_scan__test_reset_all();
     tp_job__test_reset_all();
     (void)remove(s_save_path);
-    (void)test_rmdir(TP_GUI_TRACE_TEST_DIR);
+    tp_fs_remove_tree(TP_GUI_TRACE_TEST_DIR);
 }

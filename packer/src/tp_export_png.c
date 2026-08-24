@@ -5,9 +5,12 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "core/nt_assert.h"
 #include "tp_file_lease.h"
+#include "tp_core/tp_scan.h"
 #include "tp_export_internal.h"
 #include "tp_fs_internal.h"
+#include "tp_utf8_internal.h"
 
 /* Vendored builder-only writer, linked directly into tp_core (NOT via
  * nt_builder -- no basisu, no static-CRT pin leaks; #282). */
@@ -159,7 +162,7 @@ static void publish_leases_release(publish_lease *leases, int count) {
     free(leases);
 }
 
-/* Own every destination slot before the serializer or staging writer runs.
+/* Own every destination slot before staging or publication runs.
  * Sorting gives overlapping sets one stable acquisition order. The permanent
  * sidecar is only a rendezvous name; the live OS handle is the ownership. */
 static tp_status publish_leases_acquire(const publish_entry *entries, int count,
@@ -368,49 +371,63 @@ static tp_status publish_swap(publish_entry *entries, int count,
     return TP_STATUS_OK;
 }
 
-tp_status tp_export_publish(const tp_exporter *exp,
-                            const tp_export_ir *ir,
-                            const tp_result *packed,
-                            const tp_export_artifact_plan *plan,
-                            tp_export_notices *notices,
-                            bool *out_serializer_ran,
-                            bool *out_publication_uncertain,
-                            tp_error *err) {
-    if (out_serializer_ran) {
-        *out_serializer_ran = false;
+tp_status tp_export_publication_guard_acquire(
+    const tp_export_artifact_plan *plan,
+    tp_export_publication_guard *out_guard, tp_error *err) {
+    NT_ASSERT(plan);
+    NT_ASSERT(out_guard);
+    memset(out_guard, 0, sizeof *out_guard);
+    /* Parent creation belongs to the publication stage, but file leases live
+     * inside that directory and therefore must follow it. */
+    tp_mkdirs_parent(plan->out_path_base);
+    publish_entry *entries = calloc(
+        (size_t)plan->artifact_count, sizeof *entries);
+    if (!entries) {
+        return tp_error_set(err, TP_STATUS_OOM,
+                            "export publication guard allocation failed");
     }
+    for (int i = 0; i < plan->artifact_count; ++i) {
+        entries[i].destination = plan->artifacts[i].path;
+    }
+    publish_lease *leases = NULL;
+    const tp_status status = publish_leases_acquire(
+        entries, plan->artifact_count, &leases, err);
+    free(entries);
+    if (status == TP_STATUS_OK) {
+        out_guard->leases = leases;
+        out_guard->lease_count = plan->artifact_count;
+    }
+    return status;
+}
+
+void tp_export_publication_guard_release(tp_export_publication_guard *guard) {
+    if (!guard) {
+        return;
+    }
+    publish_leases_release(
+        (publish_lease *)guard->leases, guard->lease_count);
+    memset(guard, 0, sizeof *guard);
+}
+
+tp_status tp_export_publish_documents(
+    const tp_exporter *exp, const tp_export_ir *ir, const tp_result *packed,
+    const tp_export_artifact_plan *plan,
+    const tp_export_document_batch *batch,
+    const tp_export_publication_guard *guard,
+    bool *out_publication_uncertain, tp_error *err) {
     bool ignored_publication_uncertain = false;
     if (!out_publication_uncertain) {
         out_publication_uncertain = &ignored_publication_uncertain;
     }
     *out_publication_uncertain = false;
-    if (!exp || !exp->format || !exp->format->id || !exp->serialize || !ir ||
-        !packed || !plan) {
-        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
-                            "export publish requires a matching exporter, IR, packed pages, and artifact plan");
-    }
-    tp_status validation = tp_export_format_admit(exp->format, ir, err);
-    if (validation != TP_STATUS_OK) {
-        return validation;
-    }
-    if (!plan->format_id || strcmp(plan->format_id, exp->format->id) != 0 ||
-        !plan->out_path_base || !plan->artifacts ||
-        plan->document_count < 0 ||
-        plan->artifact_count < plan->document_count ||
-        !exp->format->artifacts || exp->format->artifact_count <= 0 ||
-        plan->document_count != exp->format->artifact_count ||
-        plan->artifact_count - plan->document_count != ir->page_count ||
-        packed->page_count != ir->page_count || !packed->pages) {
-        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
-                            "export publish requires a matching exporter, IR, packed pages, and artifact plan");
-    }
-    for (int f = 0; f < plan->artifact_count; ++f) {
-        if (!plan->artifacts[f].id || !plan->artifacts[f].path) {
-            return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
-                                "export artifact plan entry %d is incomplete",
-                                f);
-        }
-    }
+    NT_ASSERT(exp);
+    NT_ASSERT(ir);
+    NT_ASSERT(packed);
+    NT_ASSERT(plan);
+    NT_ASSERT(batch);
+    NT_ASSERT(guard);
+    NT_ASSERT(guard->lease_count == plan->artifact_count);
+    NT_ASSERT(guard->lease_count == 0 || guard->leases);
     const char *out_path_base = plan->out_path_base;
     const int output_file_count = plan->artifact_count;
 
@@ -440,92 +457,15 @@ tp_status tp_export_publish(const tp_exporter *exp,
         }
     }
 
-    /* PREFLIGHT, before the writer runs and before anything is created: the
-     * declared list must describe a set this publication can actually deliver. */
+    /* The pure validator above already proved every entry is a direct child,
+     * collision-free, and consistent with the descriptor, IR, and pages. */
     for (int f = 0; f < output_file_count; f++) {
         entries[f].destination = plan->artifacts[f].path;
         entries[f].leaf = publish_direct_child_leaf(out_dir, cut,
                                                      plan->artifacts[f].path);
-        if (!entries[f].leaf) {
-            const tp_status st = tp_error_set(
-                err, TP_STATUS_INVALID_ARGUMENT,
-                "exporter '%s' declared the output '%s', which is not a direct "
-                "child of the export directory '%s'; the whole-set publication "
-                "cannot cover it, so nothing was written",
-                exp->format->id, plan->artifacts[f].path,
-                cut > 0 ? out_dir : ".");
-            free(entries);
-            return st;
-        }
-    }
-    for (int f = 0; f < output_file_count; f++) {
-        for (int g = f + 1; g < output_file_count; g++) {
-            if (!publish_leaf_collides(entries[f].leaf, entries[g].leaf)) {
-                continue;
-            }
-            const tp_status st = tp_error_set(
-                err, TP_STATUS_INVALID_ARGUMENT,
-                "exporter '%s' declared outputs %d and %d as the same file "
-                "('%s' and '%s' differ only by ASCII case, which Windows and "
-                "macOS resolve to one file); nothing was written",
-                exp->format->id, f, g, entries[f].leaf, entries[g].leaf);
-            free(entries);
-            return st;
-        }
     }
 
-    /* The plan is typed and ordered: documents match descriptor declarations;
-     * pages match IR logical ids; every concrete path is derived from the one
-     * output base. This is checked after generic path/collision diagnostics but
-     * before any filesystem mutation or serializer call. */
-    for (int d = 0; d < plan->document_count; ++d) {
-        const tp_export_artifact *artifact = &plan->artifacts[d];
-        const tp_format_artifact_decl *decl = &exp->format->artifacts[d];
-        char expected[TP_IDENTITY_PATH_MAX];
-        if (artifact->kind != TP_EXPORT_ARTIFACT_DOCUMENT ||
-            artifact->logical_id != d || !artifact->id || !decl->id ||
-            strcmp(artifact->id, decl->id) != 0 || !decl->suffix ||
-            tp_export_output_path(out_path_base, decl->suffix, expected, err) !=
-                TP_STATUS_OK ||
-            strcmp(artifact->path, expected) != 0) {
-            free(entries);
-            return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
-                                "export document plan entry %d does not match format '%s'",
-                                d, exp->format->id);
-        }
-    }
-    for (int p = 0; p < ir->page_count; ++p) {
-        const int index = plan->document_count + p;
-        const tp_export_artifact *artifact = &plan->artifacts[index];
-        char expected_path[TP_IDENTITY_PATH_MAX];
-        char expected_id[32];
-        const int id_len = snprintf(expected_id, sizeof expected_id, "page-%d",
-                                    ir->pages[p].artifact_id);
-        if (artifact->kind != TP_EXPORT_ARTIFACT_PAGE ||
-            artifact->logical_id != ir->pages[p].artifact_id ||
-            !artifact->id || id_len < 0 ||
-            (size_t)id_len >= sizeof expected_id ||
-            strcmp(artifact->id, expected_id) != 0 ||
-            tp_export_page_path(out_path_base, ir->pages[p].artifact_id,
-                                expected_path, err) != TP_STATUS_OK ||
-            strcmp(artifact->path, expected_path) != 0 ||
-            packed->pages[p].w != ir->pages[p].w ||
-            packed->pages[p].h != ir->pages[p].h ||
-            packed->pages[p].premultiplied != ir->pages[p].premultiplied) {
-            free(entries);
-            return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
-                                "export page plan entry %d does not match IR and packed page",
-                                p);
-        }
-    }
-
-    publish_lease *leases = NULL;
-    tp_status st =
-        publish_leases_acquire(entries, output_file_count, &leases, err);
-    if (st != TP_STATUS_OK) {
-        free(entries);
-        return st;
-    }
+    tp_status st = TP_STATUS_OK;
 
     char staging[TP_FS_STAGE_PATH_MAX];
     if (!tp_fs_stage_dir_create(out_dir, staging, sizeof staging)) {
@@ -534,7 +474,6 @@ tp_status tp_export_publish(const tp_exporter *exp,
             "cannot create the export staging directory under '%s' (existing "
             "outputs are untouched)",
             cut > 0 ? out_dir : ".");
-        publish_leases_release(leases, output_file_count);
         free(entries);
         return st;
     }
@@ -553,38 +492,20 @@ tp_status tp_export_publish(const tp_exporter *exp,
             "exporter '%s': the staged form of its output set exceeds the "
             "canonical path limit, so nothing was written",
             exp->format->id);
-        publish_leases_release(leases, output_file_count);
         free(entries);
         return st;
     }
 
-    tp_export_document *documents = (tp_export_document *)calloc(
-        (size_t)plan->document_count, sizeof *documents);
-    if (!documents) {
+    if (batch->document_count != plan->document_count ||
+        (batch->document_count > 0 && !batch->documents)) {
         tp_fs_remove_tree(staging);
-        publish_leases_release(leases, output_file_count);
         free(entries);
-        return tp_error_set(err, TP_STATUS_OOM,
-                            "export publish: OOM allocating serializer documents");
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "export publish requires the complete serialized document batch");
     }
-    const tp_export_serialize_ctx ctx = {
-        .ir = ir,
-        .format = exp->format,
-        .plan = plan,
-        .notices = notices,
-    };
-    if (out_serializer_ran) {
-        *out_serializer_ran = true;
-    }
-    st = exp->serialize(&ctx, documents, plan->document_count, err);
     for (int d = 0; st == TP_STATUS_OK && d < plan->document_count; ++d) {
-        if (!documents[d].data || documents[d].size == 0U) {
-            st = tp_error_set(err, TP_STATUS_BAD_PROJECT,
-                              "format '%s' did not serialize document '%s' for '%s'",
-                              exp->format->id, plan->artifacts[d].id,
-                              entries[d].destination);
-        } else if (!tp_fs_write_file(entries[d].staged, documents[d].data,
-                                     documents[d].size)) {
+        if (!tp_fs_write_file(entries[d].staged, batch->documents[d].data,
+                              batch->documents[d].size)) {
             st = tp_error_set(err, TP_STATUS_BAD_PROJECT,
                               "cannot stage export document '%s'",
                               entries[d].destination);
@@ -597,10 +518,6 @@ tp_status tp_export_publish(const tp_exporter *exp,
                                            entries[index].staged,
                                            false, err);
     }
-    for (int d = 0; d < plan->document_count; ++d) {
-        free(documents[d].data);
-    }
-    free(documents);
     if (st == TP_STATUS_OK) {
         st = publish_verify_staged_set(exp, entries, output_file_count, err);
     }
@@ -609,7 +526,353 @@ tp_status tp_export_publish(const tp_exporter *exp,
                           out_publication_uncertain, err);
     }
     tp_fs_remove_tree(staging);
-    publish_leases_release(leases, output_file_count);
     free(entries);
     return st;
+}
+
+void tp_export_document_batch_destroy(tp_export_document_batch *batch) {
+    if (!batch) {
+        return;
+    }
+    for (int i = 0; i < batch->document_count; ++i) {
+        free(batch->documents[i].data);
+    }
+    free(batch->documents);
+    memset(batch, 0, sizeof *batch);
+}
+
+tp_status tp_export_validate_publication_inputs(
+    const tp_exporter *exp, const tp_export_ir *ir, const tp_result *packed,
+    const tp_export_artifact_plan *plan, tp_error *err) {
+    if (!exp || !exp->format || !exp->format->id || !ir || !packed || !plan) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "export publication requires a matching exporter, IR, packed pages, and artifact plan");
+    }
+    tp_status status = tp_export_format_admit(exp->format, ir, err);
+    if (status != TP_STATUS_OK) {
+        return status;
+    }
+    if (!plan->format_id || strcmp(plan->format_id, exp->format->id) != 0 ||
+        !plan->out_path_base || !plan->artifacts || plan->document_count < 0 ||
+        plan->artifact_count < plan->document_count ||
+        !exp->format->artifacts || exp->format->artifact_count <= 0 ||
+        plan->document_count != exp->format->artifact_count ||
+        plan->artifact_count - plan->document_count != ir->page_count ||
+        packed->page_count != ir->page_count || !packed->pages) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "export publication requires a matching exporter, IR, packed pages, and artifact plan");
+    }
+
+    char out_dir[TP_IDENTITY_PATH_MAX];
+    size_t cut = 0U;
+    for (size_t i = 0U; plan->out_path_base[i]; ++i) {
+        if (publish_is_sep(plan->out_path_base[i])) {
+            cut = i + 1U;
+        }
+    }
+    if (cut >= sizeof out_dir) {
+        return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
+                            "export output directory exceeds the canonical path limit");
+    }
+    memcpy(out_dir, plan->out_path_base, cut);
+    out_dir[cut] = '\0';
+
+    for (int f = 0; f < plan->artifact_count; ++f) {
+        const tp_export_artifact *artifact = &plan->artifacts[f];
+        if (!artifact->id || !artifact->path) {
+            return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                                "export artifact plan entry %d is incomplete",
+                                f);
+        }
+        if (!publish_direct_child_leaf(out_dir, cut, artifact->path)) {
+            return tp_error_set(
+                err, TP_STATUS_INVALID_ARGUMENT,
+                "exporter '%s' declared the output '%s', which is not a direct "
+                "child of the export directory '%s'; the whole-set publication "
+                "cannot cover it, so nothing was written",
+                exp->format->id, artifact->path, cut > 0 ? out_dir : ".");
+        }
+        const char *leaf = publish_direct_child_leaf(out_dir, cut,
+                                                      artifact->path);
+        for (int g = 0; g < f; ++g) {
+            const char *other = publish_direct_child_leaf(
+                out_dir, cut, plan->artifacts[g].path);
+            if (other && publish_leaf_collides(leaf, other)) {
+                return tp_error_set(
+                    err, TP_STATUS_INVALID_ARGUMENT,
+                    "exporter '%s' declared outputs %d and %d as the same file "
+                    "('%s' and '%s' differ only by ASCII case, which Windows and "
+                    "macOS resolve to one file); nothing was written",
+                    exp->format->id, g, f, other, leaf);
+            }
+        }
+    }
+    for (int d = 0; d < plan->document_count; ++d) {
+        const tp_export_artifact *artifact = &plan->artifacts[d];
+        const tp_format_artifact_decl *decl = &exp->format->artifacts[d];
+        char expected[TP_IDENTITY_PATH_MAX];
+        if (artifact->kind != TP_EXPORT_ARTIFACT_DOCUMENT ||
+            artifact->logical_id != d || !decl->id ||
+            strcmp(artifact->id, decl->id) != 0 || !decl->suffix ||
+            tp_export_output_path(plan->out_path_base, decl->suffix, expected,
+                                  err) != TP_STATUS_OK ||
+            strcmp(artifact->path, expected) != 0) {
+            return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                                "export document plan entry %d does not match format '%s'",
+                                d, exp->format->id);
+        }
+    }
+    for (int p = 0; p < ir->page_count; ++p) {
+        const int index = plan->document_count + p;
+        const tp_export_artifact *artifact = &plan->artifacts[index];
+        char expected_path[TP_IDENTITY_PATH_MAX];
+        char expected_id[32];
+        const int id_len = snprintf(expected_id, sizeof expected_id, "page-%d",
+                                    ir->pages[p].artifact_id);
+        if (artifact->kind != TP_EXPORT_ARTIFACT_PAGE ||
+            artifact->logical_id != ir->pages[p].artifact_id ||
+            id_len < 0 || (size_t)id_len >= sizeof expected_id ||
+            strcmp(artifact->id, expected_id) != 0 ||
+            tp_export_page_path(plan->out_path_base, ir->pages[p].artifact_id,
+                                expected_path, err) != TP_STATUS_OK ||
+            strcmp(artifact->path, expected_path) != 0 ||
+            packed->pages[p].w != ir->pages[p].w ||
+            packed->pages[p].h != ir->pages[p].h ||
+            packed->pages[p].premultiplied != ir->pages[p].premultiplied) {
+            return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                                "export page plan entry %d does not match IR and packed page",
+                                p);
+        }
+    }
+    return TP_STATUS_OK;
+}
+
+static const char *export_path_leaf(const char *path) {
+    const char *leaf = path ? path : "";
+    for (const char *cursor = leaf; *cursor; ++cursor) {
+        if (*cursor == '/' || *cursor == '\\') {
+            leaf = cursor + 1;
+        }
+    }
+    return leaf;
+}
+
+static bool export_regular_file_exists(const char *path) {
+    tp_fs_info info;
+    return tp_fs_stat(path, &info) && info.kind == TP_FS_KIND_REGULAR &&
+           !info.reparse;
+}
+
+static bool export_project_resource_fact(
+    const char *document_path, const char *root_marker, char *out,
+    size_t out_size) {
+    char normalized[TP_IDENTITY_PATH_MAX];
+    const int copied = snprintf(normalized, sizeof normalized, "%s",
+                                document_path ? document_path : "");
+    if (copied <= 0 || (size_t)copied >= sizeof normalized) {
+        return false;
+    }
+    for (char *cursor = normalized; *cursor; ++cursor) {
+        if (*cursor == '\\') {
+            *cursor = '/';
+        }
+    }
+    const char *slash = strrchr(normalized, '/');
+    if (!slash) {
+        return false;
+    }
+    size_t directory_length = (size_t)(slash - normalized);
+    for (int up = 0; up <= 10; ++up) {
+        char marker[TP_IDENTITY_PATH_MAX];
+        const int marker_length = snprintf(
+            marker, sizeof marker, "%.*s/%s", (int)directory_length,
+            normalized, root_marker);
+        if (marker_length > 0 && (size_t)marker_length < sizeof marker &&
+            export_regular_file_exists(marker)) {
+            const int resource_length = snprintf(
+                out, out_size, "/%s", normalized + directory_length + 1U);
+            return resource_length > 0 &&
+                   (size_t)resource_length < out_size;
+        }
+        const char *parent = NULL;
+        for (size_t i = 0U; i < directory_length; ++i) {
+            if (normalized[i] == '/') {
+                parent = normalized + i;
+            }
+        }
+        if (!parent || parent == normalized) {
+            break;
+        }
+        directory_length = (size_t)(parent - normalized);
+    }
+    return false;
+}
+
+static tp_status export_prepare_host_facts(
+    const tp_format_descriptor *format,
+    const tp_export_artifact_plan *plan, tp_export_notices *notices,
+    tp_export_host_fact *facts,
+    char values[TP_FORMAT_HOST_FACT_MAX]
+               [TP_EXPORT_HOST_FACT_VALUE_MAX_BYTES + 1U],
+    tp_error *err) {
+    if (format->host_fact_count < 0 ||
+        (unsigned int)format->host_fact_count > TP_FORMAT_HOST_FACT_MAX) {
+        return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
+                            "export host-fact count exceeds its bound");
+    }
+    for (int f = 0; f < format->host_fact_count; ++f) {
+        const tp_format_host_fact_decl *decl = &format->host_facts[f];
+        const char *document_path = NULL;
+        for (int d = 0; d < plan->document_count; ++d) {
+            if (strcmp(format->artifacts[d].id, decl->output_id) == 0) {
+                document_path = plan->artifacts[d].path;
+                break;
+            }
+        }
+        if (!document_path) {
+            return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                                "export host fact references no document");
+        }
+        const bool resolved = export_project_resource_fact(
+            document_path, decl->root_marker, values[f], sizeof values[f]);
+        if (!resolved) {
+            const int copied = snprintf(values[f], sizeof values[f], "%s",
+                                        export_path_leaf(document_path));
+            if (copied < 0 || (size_t)copied >= sizeof values[f]) {
+                return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
+                                    "export host fact exceeds its bound");
+            }
+            if (notices && tp_export_notice_addf(
+                    notices,
+                    "could not locate %s above the output; using basename '%s'",
+                    decl->root_marker, values[f]) != TP_STATUS_OK) {
+                return tp_error_set(
+                    err, TP_STATUS_OOM,
+                    "export host-fact notice allocation failed");
+            }
+        }
+        facts[f] = (tp_export_host_fact){.id = decl->id,
+                                         .value = values[f]};
+    }
+    return TP_STATUS_OK;
+}
+
+tp_status tp_export_serialize_and_validate_documents(
+    const tp_exporter *exp, const tp_export_ir *ir,
+    const tp_export_artifact_plan *plan, tp_export_notices *notices,
+    tp_format_diagnostic_report **out_format_diagnostics,
+    tp_export_document_batch *out_batch, bool *out_serializer_ran,
+    const tp_cancel_token *cancel, tp_error *err) {
+    if (out_serializer_ran) {
+        *out_serializer_ran = false;
+    }
+    if (!out_batch) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "export serialization requires an output batch");
+    }
+    memset(out_batch, 0, sizeof *out_batch);
+    if (!exp || !exp->format || !exp->serialize || !ir || !plan ||
+        plan->document_count != exp->format->artifact_count ||
+        plan->document_count <= 0) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "export serialization requires a matching exporter, IR, and artifact plan");
+    }
+    tp_export_document *documents = calloc((size_t)plan->document_count,
+                                           sizeof *documents);
+    if (!documents) {
+        return tp_error_set(err, TP_STATUS_OOM,
+                            "export serialization: OOM allocating documents");
+    }
+    out_batch->documents = documents;
+    out_batch->document_count = plan->document_count;
+    tp_export_host_fact host_facts[TP_FORMAT_HOST_FACT_MAX] = {0};
+    char host_fact_values[TP_FORMAT_HOST_FACT_MAX]
+                         [TP_EXPORT_HOST_FACT_VALUE_MAX_BYTES + 1U] = {{0}};
+    tp_status status = export_prepare_host_facts(
+        exp->format, plan, notices, host_facts, host_fact_values, err);
+    if (status != TP_STATUS_OK) {
+        tp_export_document_batch_destroy(out_batch);
+        return status;
+    }
+    const tp_export_serialize_ctx ctx = {
+        .ir = ir,
+        .format = exp->format,
+        .plan = plan,
+        .notices = notices,
+        .format_diagnostics = out_format_diagnostics,
+        .host_facts = host_facts,
+        .host_fact_count = exp->format->host_fact_count,
+        .handler_context = exp->handler_context,
+        .cancel = cancel,
+    };
+    if (out_serializer_ran) {
+        *out_serializer_ran = true;
+    }
+    status = exp->serialize(&ctx, documents, plan->document_count, err);
+    for (int d = 0; status == TP_STATUS_OK && d < plan->document_count; ++d) {
+        const bool produced = documents[d].produced || documents[d].data;
+        if (!produced || (documents[d].size > 0U && !documents[d].data)) {
+            status = tp_error_set(
+                err, TP_STATUS_BAD_PROJECT,
+                "format '%s' did not serialize document '%s' for '%s'",
+                exp->format->id, plan->artifacts[d].id,
+                plan->artifacts[d].path);
+        } else if (documents[d].size == 0U && !documents[d].data) {
+            documents[d].data = malloc(1U);
+            if (!documents[d].data) {
+                status = tp_error_set(
+                    err, TP_STATUS_OOM,
+                    "empty export document ownership allocation failed");
+            } else {
+                documents[d].produced = true;
+            }
+        } else if (memchr(documents[d].data, '\0', documents[d].size)) {
+            status = tp_error_set(err, TP_STATUS_INVALID_UTF8,
+                                  "format '%s' produced NUL in document '%s'",
+                                  exp->format->id, plan->artifacts[d].id);
+        } else {
+            status = tp_utf8_validate_bytes(
+                (const char *)documents[d].data, documents[d].size,
+                TP_STATUS_INVALID_UTF8, "export document", err);
+        }
+    }
+    if (status != TP_STATUS_OK) {
+        tp_export_document_batch_destroy(out_batch);
+    }
+    return status;
+}
+
+tp_status tp_export_publish(const tp_exporter *exp, const tp_export_ir *ir,
+                            const tp_result *packed,
+                            const tp_export_artifact_plan *plan,
+                            tp_export_notices *notices,
+                            bool *out_serializer_ran,
+                            bool *out_publication_uncertain,
+                            tp_error *err) {
+    if (out_serializer_ran) {
+        *out_serializer_ran = false;
+    }
+    if (out_publication_uncertain) {
+        *out_publication_uncertain = false;
+    }
+    tp_status status = tp_export_validate_publication_inputs(
+        exp, ir, packed, plan, err);
+    if (status != TP_STATUS_OK) {
+        return status;
+    }
+    tp_export_document_batch batch = {0};
+    status = tp_export_serialize_and_validate_documents(
+        exp, ir, plan, notices, NULL, &batch, out_serializer_ran, NULL, err);
+    tp_export_publication_guard guard = {0};
+    if (status == TP_STATUS_OK) {
+        status = tp_export_publication_guard_acquire(plan, &guard, err);
+    }
+    if (status == TP_STATUS_OK) {
+        status = tp_export_publish_documents(
+            exp, ir, packed, plan, &batch, &guard,
+            out_publication_uncertain, err);
+    }
+    tp_export_document_batch_destroy(&batch);
+    tp_export_publication_guard_release(&guard);
+    return status;
 }

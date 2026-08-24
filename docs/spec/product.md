@@ -22,16 +22,18 @@ through a shared core rather than separate GUI and automation models.
   native format descriptors, deterministic artifact plans, and rollback-backed
   common publication with destination ownership for handled failures;
 - an explicit immutable format catalog with executable-relative strict package
-  discovery, deterministic unavailable rows, fingerprints, and bounded owned
-  diagnostics; dormant isolated Lua compile/runtime infrastructure exists, but
-  no client activates runtime packages for Pack or Export;
+  discovery, isolated Lua compile/runtime activation, deterministic unavailable
+  rows, exact admitted-byte job bindings, fingerprints, and bounded owned
+  diagnostics; CLI and GUI share the same startup catalog and outer worker;
 - semantic revision, dirty state, Undo/Redo, durable Save, and best-effort
   recovery;
 - worker-process containment for fallible builder work;
 - GUI-owned semantic Pack-result preview caching.
 
 The current product does not provide filesystem watchers, linked foreign-atlas
-sources, Import IR, runtime Lua format packages, MCP, or a Dev API transport.
+sources, Import IR, bundled runtime format packages, MCP, or a Dev API transport.
+Runtime package refresh is restart-only; the production package manifest is
+currently empty.
 
 ## Shared behavior
 

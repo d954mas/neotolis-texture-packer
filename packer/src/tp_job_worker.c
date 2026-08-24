@@ -29,6 +29,7 @@ struct tp_job_worker_process {
     tp_job_worker_proto_stream stream;
     tp_job_worker_proto_progress progress;
     tp_job_worker_proto_response response;
+    tp_export_command_report *export_report;
     tp_proc_result process_result;
     tp_session_job_kind kind;
     uint64_t session_instance_generation;
@@ -45,6 +46,12 @@ struct tp_job_worker_process {
     bool stream_incomplete;
     bool response_ready;
     bool terminal;
+    bool export_dry_run;
+    tp_job_worker_progress_phase last_export_phase;
+    bool export_target_outcome_pending;
+    bool export_atlas_complete;
+    bool export_publication_pending;
+    bool lua_panic_marked;
 };
 
 #ifdef TP_ENABLE_TEST_SEAMS
@@ -112,20 +119,129 @@ static void set_terminal_failure(tp_job_worker_process *process,
                                   : TP_SESSION_JOB_FAILED;
     process->response.status =
         process->cancel_requested ? TP_STATUS_CANCELLED : status;
+    if (!process->cancel_requested && process->lua_panic_marked) {
+        message = "Lua handler panicked in the job worker";
+        tp_error report_error = {{0}};
+        const tp_status report_status =
+            tp_export_command_report_mark_lua_panic(
+                process->export_report, &report_error);
+        if (report_status != TP_STATUS_OK) {
+            process->response.status = report_status;
+            message = report_error.msg[0]
+                          ? report_error.msg
+                          : "Lua panic target attribution failed";
+        }
+    }
     (void)tp_error_set(
         &process->response.error, process->response.status, "%s",
         message ? message : "job worker failed");
-    if (process->kind == TP_SESSION_JOB_EXPORT) {
-        process->response.export_result.publication_uncertain = true;
-        process->response.export_result.partial_publication =
-            process->cancel_requested;
-    }
     process->response_ready = true;
     if (process->proc && !process->process_finished &&
         !process->killed) {
         tp_proc_kill(process->proc);
         process->killed = true;
     }
+}
+
+static bool export_phase_is_pack_work(
+    tp_job_worker_progress_phase phase) {
+    switch (phase) {
+        case TP_JOB_WORKER_PHASE_SOURCE_TRAVERSAL:
+        case TP_JOB_WORKER_PHASE_SOURCE_READ:
+        case TP_JOB_WORKER_PHASE_IMAGE_DECODE:
+        case TP_JOB_WORKER_PHASE_PACK_INPUT:
+        case TP_JOB_WORKER_PHASE_BUILD:
+            return true;
+        default:
+            return false;
+    }
+}
+
+static bool admit_export_phase(tp_job_worker_process *process,
+                               tp_job_worker_progress_phase next) {
+    const tp_job_worker_progress_phase previous =
+        process->last_export_phase;
+    if (process->export_atlas_complete &&
+        next != TP_JOB_WORKER_PHASE_SOURCE_TRAVERSAL &&
+        next != TP_JOB_WORKER_PHASE_EXPORT_TERMINAL_BOUNDARY) {
+        return false;
+    }
+    bool valid = false;
+    switch (next) {
+        case TP_JOB_WORKER_PHASE_SOURCE_TRAVERSAL:
+            valid = previous == 0 ||
+                    process->export_atlas_complete;
+            break;
+        case TP_JOB_WORKER_PHASE_SOURCE_READ:
+        case TP_JOB_WORKER_PHASE_IMAGE_DECODE:
+        case TP_JOB_WORKER_PHASE_PACK_INPUT:
+        case TP_JOB_WORKER_PHASE_BUILD:
+            valid = previous == 0 ||
+                    export_phase_is_pack_work(previous);
+            break;
+        case TP_JOB_WORKER_PHASE_EXPORT_WRITE:
+            valid = previous == 0 ||
+                    export_phase_is_pack_work(previous);
+            break;
+        case TP_JOB_WORKER_PHASE_EXPORT_SERIALIZE:
+        case TP_JOB_WORKER_PHASE_EXPORT_LUA_SERIALIZE:
+            valid = previous == TP_JOB_WORKER_PHASE_SOURCE_TRAVERSAL ||
+                    previous == TP_JOB_WORKER_PHASE_EXPORT_WRITE ||
+                    previous == TP_JOB_WORKER_PHASE_EXPORT_TARGET_COMPLETE;
+            break;
+        case TP_JOB_WORKER_PHASE_EXPORT_READY:
+            valid = previous == TP_JOB_WORKER_PHASE_EXPORT_SERIALIZE ||
+                    previous == TP_JOB_WORKER_PHASE_EXPORT_LUA_SERIALIZE;
+            break;
+        case TP_JOB_WORKER_PHASE_EXPORT_PUBLICATION_BEGIN:
+            valid = previous == TP_JOB_WORKER_PHASE_EXPORT_READY;
+            if (valid && !process->export_dry_run) {
+                process->export_publication_pending = true;
+            }
+            break;
+        case TP_JOB_WORKER_PHASE_EXPORT_TARGET_COMPLETE:
+            valid = previous == TP_JOB_WORKER_PHASE_EXPORT_WRITE ||
+                    previous == TP_JOB_WORKER_PHASE_EXPORT_SERIALIZE ||
+                    previous == TP_JOB_WORKER_PHASE_EXPORT_LUA_SERIALIZE ||
+                    previous == TP_JOB_WORKER_PHASE_EXPORT_READY ||
+                    previous == TP_JOB_WORKER_PHASE_EXPORT_PUBLICATION_BEGIN ||
+                    /* A later admitted target can fail before serializer
+                     * entry, so two owned completions may be consecutive. */
+                    previous == TP_JOB_WORKER_PHASE_EXPORT_TARGET_COMPLETE;
+            break;
+        case TP_JOB_WORKER_PHASE_EXPORT_HANDLER_PANIC:
+            valid = previous ==
+                    TP_JOB_WORKER_PHASE_EXPORT_LUA_SERIALIZE;
+            if (valid) {
+                process->lua_panic_marked = true;
+            }
+            break;
+        case TP_JOB_WORKER_PHASE_EXPORT_TERMINAL_BOUNDARY:
+            valid = process->export_atlas_complete ||
+                    previous == TP_JOB_WORKER_PHASE_EXPORT_TARGET_COMPLETE ||
+                    previous == TP_JOB_WORKER_PHASE_SOURCE_TRAVERSAL ||
+                    previous == TP_JOB_WORKER_PHASE_SOURCE_READ ||
+                    previous == TP_JOB_WORKER_PHASE_IMAGE_DECODE ||
+                    previous == TP_JOB_WORKER_PHASE_PACK_INPUT ||
+                    previous == TP_JOB_WORKER_PHASE_BUILD ||
+                    previous == TP_JOB_WORKER_PHASE_EXPORT_WRITE;
+            break;
+        default:
+            valid = false;
+            break;
+    }
+    if (valid) {
+        process->last_export_phase = next;
+        if (next == TP_JOB_WORKER_PHASE_SOURCE_TRAVERSAL) {
+            process->export_atlas_complete = false;
+        }
+        if (next == TP_JOB_WORKER_PHASE_EXPORT_TARGET_COMPLETE) {
+            process->export_target_outcome_pending = true;
+        } else if (next != TP_JOB_WORKER_PHASE_EXPORT_TERMINAL_BOUNDARY) {
+            process->export_target_outcome_pending = false;
+        }
+    }
+    return valid;
 }
 
 static void replace_terminal_failure(tp_job_worker_process *process,
@@ -160,6 +276,7 @@ static void admit_terminal(tp_job_worker_process *process,
 
 tp_status tp_job_worker_process_start(
     const tp_job_worker_proto_request *request,
+    tp_export_command_report *export_report,
     tp_job_worker_process **out, tp_error *err) {
     if (out) {
         *out = NULL;
@@ -199,8 +316,10 @@ tp_status tp_job_worker_process_start(
     process->session_instance_generation =
         request->session_instance_generation;
     process->request_id = request->request_id;
+    process->export_dry_run = request->dry_run;
     process->started_ms = process_now_ms();
     process->cancel_byte = TP_PROC_CANCEL_BYTE;
+    process->export_report = export_report;
     *out = process;
     return TP_STATUS_OK;
 }
@@ -267,7 +386,8 @@ static void accept_stream_messages(tp_job_worker_process *process) {
             &process->stream, &message, &ready, &error);
         if (status != TP_STATUS_OK) {
             set_terminal_failure(
-                process, TP_STATUS_BUILDER_FAILED,
+                process, status == TP_STATUS_OOM ? TP_STATUS_OOM
+                                                 : TP_STATUS_BUILDER_FAILED,
                 error.msg[0] ? error.msg
                              : "job worker response is malformed");
             return;
@@ -283,7 +403,66 @@ static void accept_stream_messages(tp_job_worker_process *process) {
                     "job worker progress identity does not match the request");
                 return;
             }
+            if (process->kind == TP_SESSION_JOB_EXPORT &&
+                !admit_export_phase(process, message.progress.phase)) {
+                char transition[128];
+                (void)snprintf(
+                    transition, sizeof transition,
+                    "job worker reported an invalid Export phase transition: %d -> %d",
+                    (int)process->last_export_phase,
+                    (int)message.progress.phase);
+                set_terminal_failure(
+                    process, TP_STATUS_BUILDER_FAILED,
+                    transition);
+                return;
+            }
             process->progress = message.progress;
+        } else if (message.kind == TP_JOB_WORKER_STREAM_FRAGMENT) {
+            if (process->kind != TP_SESSION_JOB_EXPORT ||
+                message.fragment.request_id != process->request_id ||
+                !process->export_report) {
+                set_terminal_failure(
+                    process, TP_STATUS_BUILDER_FAILED,
+                    "job worker Export fragment identity does not match the request");
+                tp_job_worker_proto_stream_message_free(&message);
+                return;
+            }
+            const bool target_outcome =
+                message.fragment.outcome.kind ==
+                TP_EXPORT_COMMAND_OUTCOME_TARGET;
+            if ((target_outcome &&
+                 !process->export_target_outcome_pending) ||
+                (!target_outcome &&
+                 process->export_target_outcome_pending)) {
+                set_terminal_failure(
+                    process, TP_STATUS_BUILDER_FAILED,
+                    "job worker Export fragment does not match its lifecycle phase");
+                tp_job_worker_proto_stream_message_free(&message);
+                return;
+            }
+            tp_error adoption_error = {{0}};
+            const tp_status adoption_status =
+                tp_export_command_report_apply_outcome(
+                    process->export_report, &message.fragment.outcome,
+                    &adoption_error);
+            if (adoption_status != TP_STATUS_OK) {
+                set_terminal_failure(
+                    process,
+                    adoption_status == TP_STATUS_OOM
+                        ? TP_STATUS_OOM
+                        : TP_STATUS_BUILDER_FAILED,
+                    adoption_error.msg[0]
+                        ? adoption_error.msg
+                        : "job worker Export outcome could not be adopted");
+                tp_job_worker_proto_stream_message_free(&message);
+                return;
+            }
+            if (target_outcome) {
+                process->export_target_outcome_pending = false;
+                process->export_publication_pending = false;
+            } else {
+                process->export_atlas_complete = true;
+            }
         } else {
             admit_terminal(process, &message.terminal);
         }
@@ -421,12 +600,33 @@ const tp_job_worker_proto_response *tp_job_worker_process_response(
     return process && process->terminal ? &process->response : NULL;
 }
 
+tp_export_command_report *tp_job_worker_process_take_export_report(
+    tp_job_worker_process *process, bool *out_publication_pending) {
+    if (out_publication_pending) {
+        *out_publication_pending = false;
+    }
+    if (!process || !process->terminal ||
+        process->kind != TP_SESSION_JOB_EXPORT) {
+        return NULL;
+    }
+    tp_export_command_report *report = process->export_report;
+    process->export_report = NULL;
+    if (out_publication_pending) {
+        *out_publication_pending = process->export_publication_pending;
+    }
+    return report;
+}
+
 void tp_job_worker_process_destroy(tp_job_worker_process *process) {
     if (!process) {
         return;
     }
     tp_proc_destroy(process->proc);
     tp_job_worker_proto_response_free(&process->response);
+    if (process->export_report) {
+        tp_export_command_report_destroy(process->export_report);
+        free(process->export_report);
+    }
     tp_job_worker_proto_stream_destroy(&process->stream);
     free(process->request);
     free(process);

@@ -27,6 +27,8 @@
 #include "tp_core/tp_build_worker.h"
 #include "tp_export_internal.h"
 #include "tp_format_catalog_internal.h"
+#include "tp_format_descriptor_internal.h"
+#include "tp_lua_export_adapter_internal.h"
 #include "tp_fs_internal.h"
 #include "tp_export_job_internal.h"
 #include "tp_project_mutation_internal.h"
@@ -793,6 +795,7 @@ static void test_dry_run(void) {
     }
 
     /* --- dry run of the SAME project: no writes, identical pages, would_write set --- */
+    g_nopivot_ir = NULL;
     tp_arena *ard = tp_arena_create(0);
     TEST_ASSERT_NOT_NULL(ard);
     tp_export_notices nd;
@@ -804,6 +807,9 @@ static void test_dry_run(void) {
     st = tp_export_run_ex(proj, 0, sprites, 3, g_dir, ard, &nd, NULL, &dopts, &e);
     TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_OK, st, e.msg);
     TEST_ASSERT_TRUE_MESSAGE(rd.dry_run, "report must record dry_run");
+    TEST_ASSERT_NOT_NULL_MESSAGE(
+        g_nopivot_ir,
+        "dry-run must execute the native serializer before discarding documents");
     TEST_ASSERT_FALSE(rd.pack_failed);
     TEST_ASSERT_EQUAL_INT(1, rd.target_count);
     TEST_ASSERT_EQUAL_INT_MESSAGE(wet_run_count, rd.run_count, "dry and wet must pack the same runs");
@@ -837,6 +843,242 @@ static void test_dry_run(void) {
     tp_export_notices_free(&nd);
     tp_arena_destroy(ard);
     tp_project_destroy(proj);
+}
+
+static void test_lua_binding_serializes_the_common_owned_document_batch(void) {
+    static const unsigned char descriptor_json[] =
+        "{\"api_version\":1,\"id\":\"fixture-worker\","
+        "\"display_name\":\"Fixture Worker\",\"capabilities\":{\"transforms\":[\"identity\"],\"polygons\":false,"
+        "\"pivot\":false,\"slice9\":false,\"multipage\":true,"
+        "\"aliases\":false,\"animations\":false},\"outputs\":[{"
+        "\"id\":\"metadata\",\"suffix\":\".txt\"}]}";
+    static const unsigned char source[] =
+        "return function(atlas, host) "
+        "local out = host:document(\"metadata\") "
+        "out:write(\"atlas=\") out:write_json_string(atlas:name()) "
+        "out:write(\"\\n\") out:finish() end";
+    tp_format_descriptor_parse_result parsed = {0};
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_format_descriptor_v1_parse(
+            descriptor_json, sizeof descriptor_json - 1U, &parsed, &error),
+        error.msg);
+    TEST_ASSERT_EQUAL_INT(TP_FORMAT_DESCRIPTOR_ADMITTED, parsed.outcome);
+    tp_format_binding_proto_binding binding = {
+        .implementation = TP_FORMAT_IMPLEMENTATION_LUA,
+        .descriptor = tp_format_owned_descriptor_view(parsed.owned_descriptor),
+        .api_version = TP_FORMAT_API_VERSION,
+        .package_path = "formats/fixture-dir",
+        .descriptor_bytes = descriptor_json,
+        .descriptor_byte_count = sizeof descriptor_json - 1U,
+        .source_bytes = source,
+        .source_byte_count = sizeof source - 1U,
+    };
+    memset(binding.fingerprint, '1', 32U);
+    binding.fingerprint[32] = '\0';
+    tp_format_binding_proto_value value = {
+        .bindings = &binding,
+        .binding_count = 1U,
+        .preview = {.kind = TP_FORMAT_BINDING_RESOLUTION_BINDING,
+                    .binding_index = 0U},
+    };
+    tp_format_catalog *catalog = NULL;
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_lua_export_catalog_create_worker(
+            &value, NULL, "fixture-worker", &catalog, &error),
+        error.msg);
+    const tp_exporter *exporter =
+        tp_format_catalog_exporter_find(catalog, "fixture-worker");
+    TEST_ASSERT_NOT_NULL(exporter);
+
+    tp_export_page ir_page = {.artifact_id = 0, .w = 1, .h = 1};
+    tp_export_ir ir = {
+        .version = TP_EXPORT_IR_VERSION,
+        .atlas_name = "fixture-atlas",
+        .pixels_per_unit = 1.0F,
+        .pages = &ir_page,
+        .page_count = 1,
+    };
+    tp_arena *arena = tp_arena_create(0);
+    tp_export_artifact_plan plan = {0};
+    TEST_ASSERT_NOT_NULL(arena);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_export_artifact_plan_build(exporter->format, &ir,
+                                      "C:/fixture/out", arena, &plan,
+                                      &error),
+        error.msg);
+    tp_export_document_batch batch = {0};
+    bool serializer_ran = false;
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_export_serialize_and_validate_documents(
+            exporter, &ir, &plan, NULL, NULL, &batch, &serializer_ran,
+            NULL, &error),
+        error.msg);
+    TEST_ASSERT_TRUE(serializer_ran);
+    TEST_ASSERT_EQUAL_INT(1, batch.document_count);
+    TEST_ASSERT_EQUAL_UINT64(22U, (uint64_t)batch.documents[0].size);
+    TEST_ASSERT_EQUAL_MEMORY("atlas=\"fixture-atlas\"\n",
+                             batch.documents[0].data,
+                             batch.documents[0].size);
+
+    tp_export_document_batch_destroy(&batch);
+    tp_format_catalog_release(catalog);
+
+    static const unsigned char failing_source[] =
+        "return function() error('fixture boom') end";
+    binding.source_bytes = failing_source;
+    binding.source_byte_count = sizeof failing_source - 1U;
+    memset(binding.fingerprint, '2', 32U);
+    catalog = NULL;
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_lua_export_catalog_create_worker(
+            &value, NULL, "fixture-worker", &catalog, &error),
+        error.msg);
+    exporter = tp_format_catalog_exporter_find(catalog, "fixture-worker");
+    TEST_ASSERT_NOT_NULL(exporter);
+    tp_format_diagnostic_report *diagnostics = NULL;
+    serializer_ran = false;
+    TEST_ASSERT_NOT_EQUAL(
+        TP_STATUS_OK,
+        tp_export_serialize_and_validate_documents(
+            exporter, &ir, &plan, NULL, &diagnostics, &batch,
+            &serializer_ran, NULL, &error));
+    TEST_ASSERT_TRUE(serializer_ran);
+    TEST_ASSERT_NOT_NULL(diagnostics);
+    TEST_ASSERT_EQUAL_INT(
+        TP_FORMAT_DIAGNOSTIC_HANDLER_FAILED,
+        tp_format_diagnostic_report_at(diagnostics, 0U)->code);
+    TEST_ASSERT_EQUAL_STRING(
+        "formats/fixture-dir/export.lua",
+        tp_format_diagnostic_report_at(diagnostics, 0U)->package_path);
+    tp_format_diagnostic_report_destroy(diagnostics);
+    tp_export_document_batch_destroy(&batch);
+    tp_format_catalog_release(catalog);
+
+    static const unsigned char cancelling_source[] =
+        "return function() while true do end end";
+    binding.source_bytes = cancelling_source;
+    binding.source_byte_count = sizeof cancelling_source - 1U;
+    memset(binding.fingerprint, '3', 32U);
+    catalog = NULL;
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_lua_export_catalog_create_worker(
+            &value, NULL, "fixture-worker", &catalog, &error),
+        error.msg);
+    exporter = tp_format_catalog_exporter_find(catalog, "fixture-worker");
+    TEST_ASSERT_NOT_NULL(exporter);
+    const tp_cancel_token cancel = {cancel_export_run, NULL};
+    serializer_ran = false;
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_CANCELLED,
+        tp_export_serialize_and_validate_documents(
+            exporter, &ir, &plan, NULL, NULL, &batch, &serializer_ran,
+            &cancel, &error),
+        error.msg);
+    TEST_ASSERT_TRUE(serializer_ran);
+    tp_export_document_batch_destroy(&batch);
+    tp_format_catalog_release(catalog);
+
+    tp_arena_destroy(arena);
+    tp_format_owned_descriptor_destroy(parsed.owned_descriptor);
+}
+
+static void test_worker_catalog_rejects_target_resolution_for_wrong_stable_id(void) {
+    tp_project *project = tp_project_create();
+    TEST_ASSERT_NOT_NULL(project);
+    tp_project_atlas *atlas = tp_project_get_atlas(project, 0);
+    tp_project_target *target = NULL;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_atlas_add_target(
+            atlas, "fixture-worker", "C:/fixture/out", &target));
+    TEST_ASSERT_NOT_NULL(target);
+    atlas->id.bytes[0] = 1U;
+    target->id.bytes[0] = 2U;
+
+    tp_format_binding_proto_target_ref target_ref = {
+        .atlas_id = atlas->id,
+        .target_id = target->id,
+        .resolution = {.kind = TP_FORMAT_BINDING_RESOLUTION_ABSENT},
+    };
+    target_ref.target_id.bytes[0] ^= 0xffU;
+    tp_format_binding_proto_value value = {
+        .preview = {.kind = TP_FORMAT_BINDING_RESOLUTION_ABSENT},
+        .targets = &target_ref,
+        .target_count = 1U,
+    };
+    tp_format_catalog *catalog = NULL;
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_INVALID_ARGUMENT,
+        tp_lua_export_catalog_create_worker(
+            &value, project, NULL, &catalog, &error));
+    TEST_ASSERT_NULL(catalog);
+    tp_project_destroy(project);
+}
+
+static void test_worker_catalog_materializes_unavailable_target_diagnostics(void) {
+    tp_project *project = tp_project_create();
+    TEST_ASSERT_NOT_NULL(project);
+    tp_project_atlas *atlas = tp_project_get_atlas(project, 0);
+    tp_project_target *target = NULL;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_atlas_add_target(
+            atlas, "fixture-worker", "C:/fixture/out", &target));
+    atlas->id.bytes[0] = 1U;
+    target->id.bytes[0] = 2U;
+    const tp_format_diagnostic diagnostic = {
+        .severity = TP_FORMAT_DIAGNOSTIC_ERROR,
+        .code = TP_FORMAT_DIAGNOSTIC_COMPILE_ERROR,
+        .phase = TP_FORMAT_PHASE_COMPILE,
+        .format_id = "fixture-worker",
+        .message = "compile failed",
+    };
+    tp_format_binding_proto_target_ref target_ref = {
+        .atlas_id = atlas->id,
+        .target_id = target->id,
+        .resolution = {
+            .kind = TP_FORMAT_BINDING_RESOLUTION_UNAVAILABLE,
+            .binding_index = UINT32_MAX,
+            .diagnostic_count = 1U,
+        },
+    };
+    tp_format_binding_proto_value value = {
+        .preview = {.kind = TP_FORMAT_BINDING_RESOLUTION_ABSENT},
+        .targets = &target_ref,
+        .target_count = 1U,
+        .diagnostics = (tp_format_diagnostic *)&diagnostic,
+        .diagnostic_count = 1U,
+    };
+    tp_format_catalog *catalog = NULL;
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_lua_export_catalog_create_worker(
+            &value, project, NULL, &catalog, &error),
+        error.msg);
+    tp_format_resolution resolution = {0};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_format_catalog_resolve(
+            catalog, "fixture-worker", &resolution, &error),
+        error.msg);
+    TEST_ASSERT_EQUAL_INT(TP_FORMAT_RESOLUTION_UNAVAILABLE,
+                          resolution.state);
+    TEST_ASSERT_EQUAL_size_t(
+        1U, tp_format_diagnostic_report_count(resolution.diagnostics));
+    TEST_ASSERT_EQUAL_STRING(
+        "compile failed",
+        tp_format_diagnostic_report_at(resolution.diagnostics, 0U)->message);
+    tp_format_catalog_release(catalog);
+    tp_project_destroy(project);
 }
 
 static void test_wet_run_reports_pack_transform_adaptation(void) {
@@ -1630,13 +1872,32 @@ void test_export_run_does_not_repeat_full_ir_validation_for_projection(void) {
     tp_arena_destroy(arena);
 }
 
+typedef struct export_completion_order {
+    int terminal_calls;
+    int target_calls;
+    bool target_saw_terminal;
+} export_completion_order;
+
 static bool record_terminal_boundary(void *ctx) {
-    int *calls = ctx;
-    (*calls)++;
+    export_completion_order *order = ctx;
+    order->terminal_calls++;
     return true;
 }
 
-static void test_snapshot_wet_run_without_report_uses_retained_catalog_and_terminal_boundary(void) {
+static tp_status record_target_completion(
+    void *ctx, int target_index, const tp_export_report *report,
+    const tp_export_notices *notices, tp_error *error) {
+    (void)target_index;
+    (void)report;
+    (void)notices;
+    (void)error;
+    export_completion_order *order = ctx;
+    order->target_calls++;
+    order->target_saw_terminal = order->terminal_calls > 0;
+    return TP_STATUS_OK;
+}
+
+static void test_snapshot_wet_run_uses_retained_catalog_and_claims_terminal_before_report_transport(void) {
     char source_path[1200];
     char output_base[1200];
     char output_page[1200];
@@ -1675,10 +1936,10 @@ static void test_snapshot_wet_run_without_report_uses_retained_catalog_and_termi
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
         tp_format_catalog__test_create(exporters, 1U, &catalog, &error));
-    int terminal_calls = 0;
+    export_completion_order order = {0};
     const tp_export_snapshot_job_opts opts = {
         .terminal_boundary = record_terminal_boundary,
-        .terminal_boundary_context = &terminal_calls,
+        .terminal_boundary_context = &order,
     };
     tp_export_snapshot_job *job = NULL;
     TEST_ASSERT_EQUAL_INT(
@@ -1687,27 +1948,34 @@ static void test_snapshot_wet_run_without_report_uses_retained_catalog_and_termi
                                               &job, &error));
     tp_format_catalog_release(catalog);
     tp_project_destroy(project);
+    tp_export_snapshot_job_set_target_completed_internal(
+        job, record_target_completion, &order);
 
     tp_arena *arena = tp_arena_create(0);
     TEST_ASSERT_NOT_NULL(arena);
     tp_export_notices notices;
     tp_export_notices_init(&notices);
+    tp_export_report report = {0};
     g_capture_ir = NULL;
 
     TEST_ASSERT_EQUAL_INT_MESSAGE(
         TP_STATUS_OK,
-        tp_export_snapshot_job_run_atlas_ex(job, 0, arena, &notices, NULL,
+        tp_export_snapshot_job_run_atlas_ex(job, 0, arena, &notices, &report,
                                             NULL, NULL, NULL, &error),
         error.msg);
     TEST_ASSERT_NOT_NULL_MESSAGE(
         g_capture_ir,
-        "the no-report snapshot run must resolve its custom catalog exporter");
+        "the snapshot run must resolve its custom catalog exporter");
     TEST_ASSERT_TRUE_MESSAGE(
         tp_fs_exists(output_json),
         "the custom exporter must publish during a no-report wet run");
     TEST_ASSERT_EQUAL_INT_MESSAGE(
-        1, terminal_calls,
-        "the no-report snapshot run must preserve its terminal boundary");
+        1, order.terminal_calls,
+        "the snapshot run must preserve its terminal boundary");
+    TEST_ASSERT_EQUAL_INT(1, order.target_calls);
+    TEST_ASSERT_TRUE_MESSAGE(
+        order.target_saw_terminal,
+        "terminal ownership must be fixed before report transport runs");
 
     tp_export_notices_free(&notices);
     tp_arena_destroy(arena);
@@ -1779,36 +2047,20 @@ static void test_export_run_cancels_the_pack_worker_before_artifact_publication(
     tp_arena_destroy(arena);
 }
 
-typedef struct cancel_when_path_exists {
-    const char *path;
-} cancel_when_path_exists;
-
-static bool cancel_after_first_output_directory(void *ctx) {
-    const cancel_when_path_exists *state = ctx;
-    return tp_fs_exists(state->path);
-}
-
-static void test_snapshot_export_polls_cancel_before_each_output_directory_creation(void) {
+static void test_snapshot_export_does_not_create_output_directory_before_serialization_succeeds(void) {
     char source_path[1200];
-    char first_dir[1200];
-    char second_dir[1200];
-    char first_out[1200];
-    char second_out[1200];
+    char output_dir[1200];
+    char output_base[1200];
     char project_path[1200];
     TEST_ASSERT_TRUE(snprintf(source_path, sizeof source_path, "%s-0.png",
                               g_A) > 0);
-    TEST_ASSERT_TRUE(snprintf(first_dir, sizeof first_dir,
-                              "%s/cancel-mkdir-first", g_dir) > 0);
-    TEST_ASSERT_TRUE(snprintf(second_dir, sizeof second_dir,
-                              "%s/cancel-mkdir-second", g_dir) > 0);
-    TEST_ASSERT_TRUE(snprintf(first_out, sizeof first_out, "%s/atlas",
-                              first_dir) > 0);
-    TEST_ASSERT_TRUE(snprintf(second_out, sizeof second_out, "%s/atlas",
-                              second_dir) > 0);
+    TEST_ASSERT_TRUE(snprintf(output_dir, sizeof output_dir,
+                              "%s/serialize-failure-output", g_dir) > 0);
+    TEST_ASSERT_TRUE(snprintf(output_base, sizeof output_base, "%s/atlas",
+                              output_dir) > 0);
     TEST_ASSERT_TRUE(snprintf(project_path, sizeof project_path,
-                              "%s/cancel-mkdir.ntpacker_project", g_dir) > 0);
-    (void)tp_fs_remove_dir(first_dir);
-    (void)tp_fs_remove_dir(second_dir);
+                              "%s/serialize-failure.ntpacker_project", g_dir) > 0);
+    (void)tp_fs_remove_dir(output_dir);
     (void)remove(project_path);
 
     tp_project *project = tp_project_create();
@@ -1820,14 +2072,9 @@ static void test_snapshot_export_polls_cancel_before_each_output_directory_creat
     atlas->sources[0].id = (tp_id128){{0x62U}};
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
-        tp_project_atlas_add_target(atlas, TP_EXPORTER_ID_JSON_NEOTOLIS,
-                                    first_out, NULL));
-    TEST_ASSERT_EQUAL_INT(
-        TP_STATUS_OK,
-        tp_project_atlas_add_target(atlas, TP_EXPORTER_ID_JSON_NEOTOLIS,
-                                    second_out, NULL));
+        tp_project_atlas_add_target(atlas, "test-write-error",
+                                    output_base, NULL));
     atlas->targets[0].id = (tp_id128){{0x63U}};
-    atlas->targets[1].id = (tp_id128){{0x64U}};
 
     tp_error error = {{0}};
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
@@ -1849,28 +2096,21 @@ static void test_snapshot_export_polls_cancel_before_each_output_directory_creat
     tp_export_notices_init(&notices);
     tp_export_report report;
     memset(&report, 0, sizeof report);
-    cancel_when_path_exists cancel_state = {.path = first_dir};
-    const tp_cancel_token cancel = {
-        cancel_after_first_output_directory, &cancel_state};
-    TEST_ASSERT_EQUAL_INT(
-        TP_STATUS_CANCELLED,
+    TEST_ASSERT_NOT_EQUAL(
+        TP_STATUS_OK,
         tp_export_snapshot_job_run_atlas_ex_cancellable(
-            job, 0, arena, &notices, &report, NULL, NULL, NULL, &cancel,
+            job, 0, arena, &notices, &report, NULL, NULL, NULL, NULL,
             &error));
-    TEST_ASSERT_TRUE_MESSAGE(
-        tp_fs_exists(first_dir),
-        "the first target directory is the deterministic cancellation trigger");
-    const bool second_exists = tp_fs_exists(second_dir);
+    const bool output_dir_exists = tp_fs_exists(output_dir);
 
     tp_export_notices_free(&notices);
     tp_arena_destroy(arena);
     tp_export_snapshot_job_destroy(job);
-    (void)tp_fs_remove_dir(first_dir);
-    (void)tp_fs_remove_dir(second_dir);
+    (void)tp_fs_remove_dir(output_dir);
     (void)remove(project_path);
     TEST_ASSERT_FALSE_MESSAGE(
-        second_exists,
-        "cancellation must be polled before creating the next target directory");
+        output_dir_exists,
+        "serialization failure must not create the publication directory");
 }
 
 static void test_export_run_honors_cancel_before_safe_pack_phase(void) {
@@ -1910,6 +2150,69 @@ static void test_export_run_honors_cancel_before_safe_pack_phase(void) {
 
     tp_export_notices_free(&notices);
     tp_arena_destroy(arena);
+}
+
+static bool reject_publication_begin(void *context,
+                                     tp_export_execution_phase phase) {
+    int *publication_attempts = context;
+    if (phase == TP_EXPORT_EXECUTION_PUBLICATION_BEGIN) {
+        (*publication_attempts)++;
+        return false;
+    }
+    return true;
+}
+
+static void test_export_run_stops_before_publication_when_phase_cannot_be_reported(void) {
+    char output_base[1200];
+    char output_json[1200];
+    TEST_ASSERT_TRUE(snprintf(output_base, sizeof output_base,
+                              "%s/phase-report-rejected", g_dir) > 0);
+    TEST_ASSERT_TRUE(snprintf(output_json, sizeof output_json,
+                              "%s.json", output_base) > 0);
+    (void)remove(output_json);
+
+    tp_project *project = tp_project_create();
+    TEST_ASSERT_NOT_NULL(project);
+    tp_project_atlas *atlas = tp_project_get_atlas(project, 0);
+    atlas->shape = 0;
+    atlas->allow_transform = false;
+    atlas->power_of_two = false;
+    atlas->alpha_threshold = 1;
+    atlas->max_size = 128;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_atlas_add_target(atlas, TP_EXPORTER_ID_JSON_NEOTOLIS,
+                                    output_base, NULL));
+    tp_pack_sprite_desc sprite = {
+        .name = "phase",
+        .rgba = g_piv,
+        .w = 30,
+        .h = 20,
+        .origin_x = 0.5F,
+        .origin_y = 0.5F,
+    };
+    tp_arena *arena = tp_arena_create(0);
+    TEST_ASSERT_NOT_NULL(arena);
+    tp_export_notices notices;
+    tp_export_notices_init(&notices);
+    int publication_attempts = 0;
+    const tp_export_run_opts opts = {
+        .catalog = g_catalog,
+        .execution_phase = reject_publication_begin,
+        .execution_phase_context = &publication_attempts,
+    };
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_BUILDER_FAILED,
+        tp_export_run_ex(project, 0, &sprite, 1, g_dir, arena, &notices,
+                         NULL, &opts, &error),
+        error.msg);
+    TEST_ASSERT_EQUAL_INT(1, publication_attempts);
+    TEST_ASSERT_FALSE(tp_fs_exists(output_json));
+
+    tp_export_notices_free(&notices);
+    tp_arena_destroy(arena);
+    tp_project_destroy(project);
 }
 
 static void test_snapshot_job_rejects_relative_reroot(void) {
@@ -1979,6 +2282,9 @@ int main(int argc, char **argv) {
     RUN_TEST(test_duplicate_source_keys_export_the_canonical_animation_frame);
     RUN_TEST(test_report_ex);
     RUN_TEST(test_dry_run);
+    RUN_TEST(test_lua_binding_serializes_the_common_owned_document_batch);
+    RUN_TEST(test_worker_catalog_rejects_target_resolution_for_wrong_stable_id);
+    RUN_TEST(test_worker_catalog_materializes_unavailable_target_diagnostics);
     RUN_TEST(test_wet_run_reports_pack_transform_adaptation);
     RUN_TEST(test_dry_run_rejects_the_same_output_path_overflow_as_wet_export);
     RUN_TEST(test_custom_output_listing_failure_prevents_wet_write_and_matches_dry_run);
@@ -1993,10 +2299,12 @@ int main(int argc, char **argv) {
     RUN_TEST(test_export_set_failure_leaves_previous_outputs_byte_identical);
     RUN_TEST(test_snapshot_job_rejects_relative_reroot);
     RUN_TEST(test_snapshot_job_rejects_target_that_escapes_reroot);
-    RUN_TEST(test_snapshot_wet_run_without_report_uses_retained_catalog_and_terminal_boundary);
+    RUN_TEST(
+        test_snapshot_wet_run_uses_retained_catalog_and_claims_terminal_before_report_transport);
     RUN_TEST(test_export_run_honors_cancel_before_safe_pack_phase);
+    RUN_TEST(test_export_run_stops_before_publication_when_phase_cannot_be_reported);
     RUN_TEST(test_export_run_cancels_the_pack_worker_before_artifact_publication);
-    RUN_TEST(test_snapshot_export_polls_cancel_before_each_output_directory_creation);
+    RUN_TEST(test_snapshot_export_does_not_create_output_directory_before_serialization_succeeds);
     int rc = UNITY_END();
     tp_export_notices_free(&g_notices);
     tp_project_destroy(g_proj);

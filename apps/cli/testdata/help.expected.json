@@ -4,6 +4,7 @@
   "commands": [
     "pack",
     "export",
+    "formats",
     "inspect",
     "validate",
     "new",

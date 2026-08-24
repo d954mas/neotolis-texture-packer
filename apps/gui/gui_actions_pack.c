@@ -352,9 +352,13 @@ static gui_pack_done poll_async(
                     info.targets, info.atlases_skipped);
             } else {
                 set_statusf_ex(
-                    info.notices > 0 ? STATUS_WARNING : STATUS_SUCCESS,
+                    info.notices > 0 || info.format_warnings > 0
+                        ? STATUS_WARNING : STATUS_SUCCESS,
                     "Exported %d target(s)%s", info.targets,
-                    info.notices > 0 ? " (metadata notices raised)" : "");
+                    info.format_warnings > 0
+                        ? " (format warnings raised)"
+                        : info.notices > 0
+                            ? " (metadata notices raised)" : "");
             }
             break;
         case GUI_PACK_DONE_EXPORT_FAIL:
@@ -367,7 +371,9 @@ static gui_pack_done poll_async(
                     set_statusf_ex(
                         STATUS_ERROR,
                         "Exported %d target(s); %d atlas(es) failed -- %s",
-                        info.targets, info.atlases_fail, info.err);
+                        info.targets, info.atlases_fail,
+                        info.err[0] ? info.err
+                                    : info.format_diagnostic);
                 }
             }
             break;

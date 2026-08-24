@@ -415,6 +415,7 @@ static tp_status binding_validate(
             tp_native_exporter_find(binding->descriptor->id);
         if (!native || native->format != binding->descriptor ||
             binding->api_version != 0U || binding->fingerprint[0] != '\0' ||
+            binding->package_path ||
             binding->descriptor_bytes || binding->descriptor_byte_count != 0U ||
             binding->source_bytes || binding->source_byte_count != 0U) {
             return tp_error_set(error, TP_STATUS_INVALID_ARGUMENT,
@@ -425,6 +426,14 @@ static tp_status binding_validate(
     if (binding->implementation != TP_FORMAT_IMPLEMENTATION_LUA) {
         return tp_error_set(error, TP_STATUS_INVALID_ARGUMENT,
                             "tp_format_binding_proto: invalid binding kind");
+    }
+    uint32_t package_path_length = 0U;
+    if (!bounded_cstr(binding->package_path,
+                      TP_FORMAT_DIAGNOSTIC_PATH_MAX_BYTES,
+                      &package_path_length) ||
+        package_path_length == 0U || package_path_length == UINT32_MAX) {
+        return tp_error_set(error, TP_STATUS_INVALID_ARGUMENT,
+                            "tp_format_binding_proto: invalid Lua package path");
     }
     tp_status status = lua_binding_validate(binding, out_owned, error);
     if (status == TP_STATUS_OK) {
@@ -680,6 +689,8 @@ tp_status tp_format_binding_proto_encode(
                                     "tp_format_binding_proto: native binding bytes exceed cap");
             }
         } else {
+            const size_t package_path_length = strlen(
+                value->bindings[i].package_path);
             if (!add_size(&package_bytes,
                           value->bindings[i].descriptor_byte_count) ||
                 !add_size(&package_bytes, value->bindings[i].source_byte_count) ||
@@ -687,7 +698,8 @@ tp_status tp_format_binding_proto_encode(
                           TP_FORMAT_BINDING_PROTO_LUA_BINDING_FIXED_BYTES) ||
                 !add_size(&payload,
                           value->bindings[i].descriptor_byte_count) ||
-                !add_size(&payload, value->bindings[i].source_byte_count)) {
+                !add_size(&payload, value->bindings[i].source_byte_count) ||
+                !add_size(&payload, package_path_length)) {
                 return tp_error_set(error, TP_STATUS_OUT_OF_BOUNDS,
                                     "tp_format_binding_proto: Lua binding bytes exceed cap");
             }
@@ -791,10 +803,14 @@ tp_status tp_format_binding_proto_encode(
             wr_u32(&writer, length);
             wr_bytes(&writer, binding->descriptor->id, length);
         } else {
+            const uint32_t package_path_length =
+                (uint32_t)strlen(binding->package_path);
             wr_u32(&writer, binding->api_version);
             wr_bytes(&writer, binding->fingerprint, 32U);
             wr_u64(&writer, (uint64_t)binding->descriptor_byte_count);
             wr_u64(&writer, (uint64_t)binding->source_byte_count);
+            wr_u32(&writer, package_path_length);
+            wr_bytes(&writer, binding->package_path, package_path_length);
             wr_bytes(&writer, binding->descriptor_bytes,
                      binding->descriptor_byte_count);
             wr_bytes(&writer, binding->source_bytes, binding->source_byte_count);
@@ -824,6 +840,7 @@ void tp_format_binding_proto_value_free(tp_format_binding_proto_value *value) {
             (tp_format_owned_descriptor *)value->bindings[i].owned_descriptor);
         free((void *)value->bindings[i].descriptor_bytes);
         free((void *)value->bindings[i].source_bytes);
+        free((void *)value->bindings[i].package_path);
     }
     if (value->owned_diagnostic_blocks) {
         for (size_t i = 0U; i < value->diagnostic_count; ++i) {
@@ -1148,15 +1165,19 @@ tp_status tp_format_binding_proto_decode(
             binding->descriptor = native->format;
         } else if (binding->implementation == TP_FORMAT_IMPLEMENTATION_LUA) {
             uint64_t descriptor_size = 0U, source_size = 0U;
+            uint32_t package_path_size = 0U;
             const uint8_t *fingerprint = NULL;
             if (!rd_u32(&reader, &binding->api_version) ||
                 !rd_ref(&reader, 32U, &fingerprint) ||
                 !rd_u64(&reader, &descriptor_size) ||
                 !rd_u64(&reader, &source_size) ||
+                !rd_u32(&reader, &package_path_size) ||
                 descriptor_size == 0U ||
                 descriptor_size > TP_FORMAT_DESCRIPTOR_MAX_BYTES ||
                 source_size > TP_FORMAT_SOURCE_MAX_BYTES ||
                 descriptor_size > SIZE_MAX || source_size > SIZE_MAX ||
+                package_path_size == 0U ||
+                package_path_size > TP_FORMAT_DIAGNOSTIC_PATH_MAX_BYTES ||
                 package_bytes > TP_FORMAT_BINDING_PROTO_MAX_PACKAGE_BYTES -
                                     (size_t)descriptor_size ||
                 package_bytes + (size_t)descriptor_size >
@@ -1168,6 +1189,15 @@ tp_status tp_format_binding_proto_decode(
             }
             memcpy(binding->fingerprint, fingerprint, 32U);
             binding->fingerprint[32] = '\0';
+            size_t package_path_owned_bytes = 0U;
+            status = decode_text(&reader, package_path_size,
+                                 TP_FORMAT_DIAGNOSTIC_PATH_MAX_BYTES,
+                                 false, false, "Lua package path",
+                                 (char **)&binding->package_path,
+                                 &package_path_owned_bytes, error);
+            if (status != TP_STATUS_OK) {
+                goto fail;
+            }
             const uint8_t *descriptor_ref = NULL, *source_ref = NULL;
             if (!rd_ref(&reader, (size_t)descriptor_size, &descriptor_ref) ||
                 !rd_ref(&reader, (size_t)source_size, &source_ref)) {

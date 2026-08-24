@@ -11,6 +11,7 @@
 
 #include "tp_core/tp_cancel.h"
 #include "tp_core/tp_error.h"
+#include "tp_core/tp_format.h"
 #include "tp_core/tp_id.h"
 
 #ifdef __cplusplus
@@ -30,6 +31,16 @@ typedef struct tp_export_report tp_export_report;
  * fixes the owning command's terminal outcome. */
 typedef bool (*tp_export_terminal_boundary_fn)(void *context);
 
+typedef enum tp_export_execution_phase {
+    TP_EXPORT_EXECUTION_SERIALIZING = 1,
+    TP_EXPORT_EXECUTION_READY,
+    TP_EXPORT_EXECUTION_PUBLICATION_BEGIN,
+    TP_EXPORT_EXECUTION_COMPLETE,
+    TP_EXPORT_EXECUTION_LUA_SERIALIZING
+} tp_export_execution_phase;
+typedef bool (*tp_export_execution_phase_fn)(
+    void *context, tp_export_execution_phase phase);
+
 typedef struct tp_export_snapshot_atlas_info {
     tp_id128 atlas_id;
     const char *name;
@@ -46,6 +57,8 @@ typedef struct tp_export_snapshot_job_opts {
     bool dry_run;
     tp_export_terminal_boundary_fn terminal_boundary;
     void *terminal_boundary_context;
+    tp_export_execution_phase_fn execution_phase;
+    void *execution_phase_context;
 } tp_export_snapshot_job_opts;
 
 tp_status tp_export_snapshot_job_create(const struct tp_session_snapshot *snapshot,
@@ -80,9 +93,8 @@ tp_status tp_export_snapshot_job_run_atlas_ex_cancellable(
 
 /* --- Structured export report (optional, produced by snapshot job execution) -
  * The CLI build report (and, follow-up, GUI export stats) consume this instead of
- * re-deriving pages/occupancy/written-files by hand. Every pointer is arena-owned
- * (the arena passed to tp_export_snapshot_job_run_atlas_ex); it lives exactly as
- * long as that arena. */
+ * re-deriving pages/occupancy/written-files by hand. Report payload pointers are
+ * arena-owned, except the explicitly marked runtime diagnostic report. */
 
 /* One packed page of a shared pack run. `occupancy_pct` is the fraction of the
  * page covered by placed sprite content: sum over ORIGINAL placements (an alias
@@ -119,6 +131,7 @@ typedef enum tp_export_writer_outcome {
  * (normally an arena string, with a static fallback if copying that detail
  * fails), NULL when ok. */
 typedef struct tp_export_report_target {
+    tp_id128 id;
     const char *exporter_id;
     const char *out_path; /* resolved absolute output base (no extension) */
     const char *const *written_files;
@@ -128,6 +141,10 @@ typedef struct tp_export_report_target {
     int pack_run;
     int notice_begin;
     int notice_end;
+    /* Heap-owned by this target while present. The caller destroys it with
+     * tp_format_diagnostic_report_destroy before releasing the arena; the
+     * worker clears it after publishing its deep-cloned command outcome. */
+    tp_format_diagnostic_report *format_diagnostics;
     const char *error;
     /* Typed independently from the optional arena-owned error string. Phase-one,
      * output-listing, dry-run, and cancellation-before-write paths remain
@@ -136,6 +153,9 @@ typedef struct tp_export_report_target {
     /* True only when rollback could not prove that the previous artifact set
      * was restored. Serializer/staging failures before swap leave this false. */
     bool publication_uncertain;
+    /* Internal report assembly marker: the worker finished this exact target
+     * outcome and it may replace its admission-preseed row. */
+    bool completed;
     bool ok;
 } tp_export_report_target;
 
