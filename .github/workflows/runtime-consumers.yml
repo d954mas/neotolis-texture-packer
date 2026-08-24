@@ -1,0 +1,99 @@
+name: Runtime consumers
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/runtime-consumers.yml'
+      - 'CMakeLists.txt'
+      - 'CMakePresets.json'
+      - 'apps/cli/**'
+      - 'apps/common/**'
+      - 'cmake/**'
+      - 'examples/runtime-formats/**'
+      - 'external/neotolis-engine'
+      - 'formats/**'
+      - 'packer/**'
+  pull_request:
+    paths:
+      - '.github/workflows/runtime-consumers.yml'
+      - 'CMakeLists.txt'
+      - 'CMakePresets.json'
+      - 'apps/cli/**'
+      - 'apps/common/**'
+      - 'cmake/**'
+      - 'examples/runtime-formats/**'
+      - 'external/neotolis-engine'
+      - 'formats/**'
+      - 'packer/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: runtime-consumers-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  html5:
+    name: Defold + Phaser HTML5
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          submodules: recursive
+
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang ninja-build libx11-dev libxrandr-dev \
+            libxinerama-dev libxcursor-dev libxi-dev libwayland-dev \
+            wayland-protocols libxkbcommon-dev libgl-dev
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24.15.0
+          cache: npm
+          cache-dependency-path: examples/runtime-formats/package-lock.json
+
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
+        with:
+          distribution: temurin
+          java-version: 25.0.2
+
+      - name: Configure and build ntpacker
+        run: |
+          cmake --preset native-release
+          cmake --build --preset native-release --target ntpacker
+
+      - name: Install pinned browser dependencies
+        working-directory: examples/runtime-formats
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+
+      - name: Download pinned Defold Bob
+        run: |
+          curl --fail --location --output build/bob.jar \
+            https://github.com/defold/defold/releases/download/1.12.4/bob.jar
+          echo '54ac57d9712fcd1e9de63f405803d159d88a2fbe940b8ef058ba503aa418fa18  build/bob.jar' \
+            | sha256sum --check
+
+      - name: Verify real engine rendering
+        working-directory: examples/runtime-formats
+        run: |
+          npm run test:runtime -- \
+            --ntpacker '${{ github.workspace }}/build/apps/cli/native-release/ntpacker' \
+            --java "$JAVA_HOME/bin/java" \
+            --bob '${{ github.workspace }}/build/bob.jar'
+
+      - name: Upload visual diagnostics
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: runtime-consumer-visuals
+          path: build/runtime-consumer-artifacts/
+          if-no-files-found: ignore
+          retention-days: 7

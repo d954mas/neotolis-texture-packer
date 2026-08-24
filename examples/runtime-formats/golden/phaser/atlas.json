@@ -3,25 +3,25 @@
     {
       "image": "atlas-0.png",
       "format": "RGBA8888",
-      "size": {"w": 6, "h": 3},
+      "size": {"w": 16, "h": 32},
       "scale": 1,
       "frames": [
         {
           "filename": "coin",
-          "frame": {"x": 1, "y": 1, "w": 1, "h": 1},
+          "frame": {"x": 1, "y": 9, "w": 5, "h": 7},
           "rotated": false,
           "trimmed": false,
-          "spriteSourceSize": {"x": 0, "y": 0, "w": 1, "h": 1},
-          "sourceSize": {"w": 1, "h": 1},
+          "spriteSourceSize": {"x": 0, "y": 0, "w": 5, "h": 7},
+          "sourceSize": {"w": 5, "h": 7},
           "pivot": {"x": 0.5, "y": 0.5}
         },
         {
           "filename": "hero",
-          "frame": {"x": 4, "y": 1, "w": 1, "h": 1},
+          "frame": {"x": 1, "y": 1, "w": 8, "h": 6},
           "rotated": false,
           "trimmed": false,
-          "spriteSourceSize": {"x": 0, "y": 0, "w": 1, "h": 1},
-          "sourceSize": {"w": 1, "h": 1},
+          "spriteSourceSize": {"x": 0, "y": 0, "w": 8, "h": 6},
+          "sourceSize": {"w": 8, "h": 6},
           "pivot": {"x": 0.25, "y": 0.75}
         }
       ]

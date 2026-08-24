@@ -102,4 +102,6 @@ Stable situations include dropped 9-slice data, guarded unsupported transforms,
 and inability to locate `game.project`.
 
 The executable integration example is
-[`examples/defold-demo`](../../examples/defold-demo/).
+[`examples/defold-demo`](../../examples/defold-demo/). The unified
+[`examples/runtime-formats`](../../examples/runtime-formats/) project contains
+the shared real-engine browser proof.

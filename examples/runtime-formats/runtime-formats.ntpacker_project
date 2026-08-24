@@ -7,7 +7,7 @@
       "max_size": 64,
       "name": "runtime-formats",
       "padding": 1,
-      "power_of_two": false,
+      "power_of_two": true,
       "shape": 0,
       "sources": [
         {
