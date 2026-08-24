@@ -7,7 +7,7 @@
 #include "tp_core/tp_format.h"
 #include "tp_core/tp_id.h"
 
-#define TP_FORMAT_BINDING_PROTO_VERSION 1U
+#define TP_FORMAT_BINDING_PROTO_VERSION 2U
 #define TP_FORMAT_BINDING_PROTO_MAX_BINDINGS 256U
 #define TP_FORMAT_BINDING_PROTO_MAX_PACKAGE_BYTES 67108864U
 #define TP_FORMAT_BINDING_PROTO_MAX_TARGET_REFS 262144U
@@ -21,7 +21,7 @@
 #define TP_FORMAT_BINDING_PROTO_FIXED_PAYLOAD_BYTES 40ULL
 #define TP_FORMAT_BINDING_PROTO_NATIVE_BINDING_MAX_BYTES \
     (8ULL + TP_FORMAT_ID_MAX_BYTES)
-#define TP_FORMAT_BINDING_PROTO_LUA_BINDING_FIXED_BYTES 56ULL
+#define TP_FORMAT_BINDING_PROTO_LUA_BINDING_FIXED_BYTES 60ULL
 #define TP_FORMAT_BINDING_PROTO_LUA_PACKAGE_PER_BINDING_MAX_BYTES \
     (TP_FORMAT_DESCRIPTOR_MAX_BYTES + TP_FORMAT_SOURCE_MAX_BYTES)
 #define TP_FORMAT_BINDING_PROTO_LUA_BINDINGS_FOR_PACKAGE_MAX              \
@@ -31,7 +31,8 @@
 #define TP_FORMAT_BINDING_PROTO_BINDING_TABLE_MAX_BYTES                    \
     (TP_FORMAT_BINDING_PROTO_MAX_PACKAGE_BYTES +                           \
      TP_FORMAT_BINDING_PROTO_LUA_BINDINGS_FOR_PACKAGE_MAX *                \
-         TP_FORMAT_BINDING_PROTO_LUA_BINDING_FIXED_BYTES +                 \
+         (TP_FORMAT_BINDING_PROTO_LUA_BINDING_FIXED_BYTES +                \
+          TP_FORMAT_DIAGNOSTIC_PATH_MAX_BYTES) +                           \
      (TP_FORMAT_BINDING_PROTO_MAX_BINDINGS -                               \
       TP_FORMAT_BINDING_PROTO_LUA_BINDINGS_FOR_PACKAGE_MAX) *              \
          TP_FORMAT_BINDING_PROTO_NATIVE_BINDING_MAX_BYTES)
@@ -65,6 +66,7 @@ typedef struct tp_format_binding_proto_binding {
      * remaining fields are exact admitted package bytes/identity. */
     uint32_t api_version;
     char fingerprint[33];
+    const char *package_path;
     const unsigned char *descriptor_bytes;
     size_t descriptor_byte_count;
     const unsigned char *source_bytes;

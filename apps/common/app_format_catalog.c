@@ -1,5 +1,8 @@
 #include "app_format_catalog.h"
 
+#include "core/nt_assert.h"
+#include "tp_core/tp_build_worker.h"
+
 #include <string.h>
 
 static void install_native(app_format_catalog *out,
@@ -18,14 +21,20 @@ static tp_status open_scan(tp_format_catalog_scan *scan,
                            app_format_catalog *out) {
     const size_t compile_count = tp_format_catalog_scan_compile_count(scan);
     if (compile_count != 0U) {
+        tp_format_catalog *catalog = NULL;
         tp_error reason = {{0}};
-        (void)tp_error_set(
-            &reason, TP_STATUS_UNIMPLEMENTED,
-            "format catalog has %zu candidates awaiting isolated Lua compilation",
-            compile_count);
+        const tp_status status = tp_build_format_catalog_compile(
+            &scan, &catalog, &reason);
         tp_format_catalog_scan_destroy(scan);
-        install_native(out, APP_FORMAT_CATALOG_PENDING_COMPILER,
-                       TP_STATUS_UNIMPLEMENTED, &reason, NULL);
+        if (status != TP_STATUS_OK) {
+            install_native(out, APP_FORMAT_CATALOG_NATIVE_FALLBACK,
+                           status, &reason, NULL);
+            return TP_STATUS_OK;
+        }
+        NT_ASSERT(catalog != NULL);
+        out->state = APP_FORMAT_CATALOG_ACTIVE;
+        out->catalog = catalog;
+        out->reason_status = TP_STATUS_OK;
         return TP_STATUS_OK;
     }
 
@@ -39,13 +48,7 @@ static tp_status open_scan(tp_format_catalog_scan *scan,
                        NULL);
         return TP_STATUS_OK;
     }
-    if (!catalog) {
-        (void)tp_error_set(&reason, TP_STATUS_INVALID_ARGUMENT,
-                           "format catalog scan finished without a catalog");
-        install_native(out, APP_FORMAT_CATALOG_NATIVE_FALLBACK,
-                       TP_STATUS_INVALID_ARGUMENT, &reason, NULL);
-        return TP_STATUS_OK;
-    }
+    NT_ASSERT(catalog != NULL);
 
     out->state = APP_FORMAT_CATALOG_ACTIVE;
     out->catalog = catalog;
@@ -73,14 +76,7 @@ tp_status app_format_catalog_open_startup_at_root(const char *root,
                        &reason, failure_diagnostics);
         return TP_STATUS_OK;
     }
-    if (!scan) {
-        (void)tp_error_set(&reason, TP_STATUS_INVALID_ARGUMENT,
-                           "format catalog scan succeeded without a scan");
-        install_native(out, APP_FORMAT_CATALOG_NATIVE_FALLBACK,
-                       TP_STATUS_INVALID_ARGUMENT, &reason,
-                       failure_diagnostics);
-        return TP_STATUS_OK;
-    }
+    NT_ASSERT(scan != NULL);
     tp_format_diagnostic_report_destroy(failure_diagnostics);
     return open_scan(scan, out);
 }

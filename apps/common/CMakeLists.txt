@@ -36,7 +36,7 @@ file(MAKE_DIRECTORY "${_app_format_catalog_empty_root}")
 file(WRITE "${_app_format_catalog_file_root}" "not a directory")
 tp_add_test(NAME app_format_catalog
     SOURCES test_app_format_catalog.c app_format_catalog.c
-    LIBS tp_core unity
+    LIBS tp_build unity
     INCLUDE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}"
     DEFINES
         APP_FORMAT_CATALOG_EMPTY_ROOT="${_app_format_catalog_empty_root}"

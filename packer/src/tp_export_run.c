@@ -19,6 +19,7 @@
 #include "tp_project_mutation_internal.h"
 #include "tp_export_internal.h"
 #include "tp_format_catalog_internal.h"
+#include "tp_format_diagnostic_internal.h"
 #include "tp_export_job_internal.h"
 #include "tp_session_internal.h"
 #ifdef TP_ENABLE_TEST_SEAMS
@@ -34,7 +35,21 @@ struct tp_export_snapshot_job {
     bool dry_run;
     tp_export_terminal_boundary_fn terminal_boundary;
     void *terminal_boundary_context;
+    tp_export_execution_phase_fn execution_phase;
+    void *execution_phase_context;
+    tp_export_target_completed_fn target_completed;
+    void *target_completed_context;
 };
+
+void tp_export_snapshot_job_set_target_completed_internal(
+    tp_export_snapshot_job *job, tp_export_target_completed_fn callback,
+    void *context) {
+    if (!job) {
+        return;
+    }
+    job->target_completed = callback;
+    job->target_completed_context = context;
+}
 
 #ifdef TP_ENABLE_TEST_SEAMS
 static _Thread_local int s_report_alloc_fail = -1;
@@ -300,6 +315,30 @@ static tp_status collect_plan_files(const tp_export_artifact_plan *plan,
     return TP_STATUS_OK;
 }
 
+static tp_status report_target_completed(
+    const tp_export_run_opts *opts, tp_export_report *report,
+    const tp_export_notices *notices, int target_index, tp_error *err) {
+    if (!report || target_index < 0 || target_index >= report->target_count) {
+        return TP_STATUS_OK;
+    }
+    report->targets[target_index].completed = true;
+    return opts && opts->target_completed
+               ? opts->target_completed(opts->target_completed_context,
+                                        target_index, report, notices, err)
+               : TP_STATUS_OK;
+}
+
+static tp_status report_execution_phase(
+    const tp_export_run_opts *opts, tp_export_execution_phase phase,
+    tp_error *err) {
+    if (!opts || !opts->execution_phase ||
+        opts->execution_phase(opts->execution_phase_context, phase)) {
+        return TP_STATUS_OK;
+    }
+    return tp_error_set(err, TP_STATUS_BUILDER_FAILED,
+                        "Export execution phase could not be reported");
+}
+
 /* Both paths are absolute lexical identities. `path` must name a strict child,
  * not merely share a textual prefix with `root`; host case policy comes from
  * the identity boundary. */
@@ -387,6 +426,9 @@ tp_status tp_export_run_ex(const tp_project *project, int atlas_index, const tp_
     tp_status st = export_cancel_poll(cancel, err);
     if (st != TP_STATUS_OK) {
         return st;
+    }
+    if (report) {
+        report->input_outcome = TP_EXPORT_INPUT_READY;
     }
     const tp_project_atlas *a = &project->atlases[atlas_index];
 
@@ -491,6 +533,7 @@ tp_status tp_export_run_ex(const tp_project *project, int atlas_index, const tp_
         }
         tp_export_report_target *rt = (report && rtidx[t] >= 0) ? &report->targets[rtidx[t]] : NULL;
         if (rt) {
+            rt->id = tg->id;
             rt->exporter_id = tp_arena_strdup(arena, tg->exporter_id ? tg->exporter_id : "");
             rt->pack_run = -1;
         }
@@ -498,6 +541,12 @@ tp_status tp_export_run_ex(const tp_project *project, int atlas_index, const tp_
         const tp_exporter *exp =
             tp_format_catalog_exporter_find(catalog, tg->exporter_id);
         if (!exp) {
+            tp_format_resolution resolution = {0};
+            tp_status resolution_status = tp_format_catalog_resolve(
+                catalog, tg->exporter_id, &resolution, err);
+            if (resolution_status != TP_STATUS_OK) {
+                return resolution_status;
+            }
             tp_status ust = unknown_exporter(catalog, tg->exporter_id, err);
             if (!report) {
                 return ust;
@@ -506,6 +555,17 @@ tp_status tp_export_run_ex(const tp_project *project, int atlas_index, const tp_
                 rt->error = report_error_copy(
                     arena,
                     err && err->msg[0] ? err->msg : "unknown exporter");
+                if (resolution.state == TP_FORMAT_RESOLUTION_UNAVAILABLE &&
+                    resolution.diagnostics) {
+                    tp_status diagnostic_status =
+                        tp_format_diagnostic_report_clone_internal(
+                            resolution.diagnostics,
+                            &rt->format_diagnostics, err);
+                    if (diagnostic_status != TP_STATUS_OK) {
+                        report->report_failed = true;
+                        return diagnostic_status;
+                    }
+                }
             }
             if (first_fail == TP_STATUS_OK) {
                 first_fail = ust;
@@ -604,6 +664,47 @@ tp_status tp_export_run_ex(const tp_project *project, int atlas_index, const tp_
         }
     }
 
+    if (report) {
+        if (group_count > 0) {
+            tp_export_report_run *report_runs = report_alloc(
+                arena, (size_t)group_count * sizeof(*report->runs));
+            if (!report_runs) {
+                report->report_failed = true;
+                return tp_error_set(err, TP_STATUS_OOM,
+                                    "tp_export_run: OOM (report runs)");
+            }
+            memset(report_runs, 0,
+                   (size_t)group_count * sizeof(*report_runs));
+            for (int g = 0; g < group_count; g++) {
+                tp_status fst =
+                    fill_run_report(&report_runs[g], groups[g].result, arena);
+                if (fst != TP_STATUS_OK) {
+                    report->report_failed = true;
+                    return tp_error_set(err, fst,
+                                        "tp_export_run: OOM (report pages)");
+                }
+            }
+            report->runs = report_runs;
+        }
+        report->run_count = group_count;
+    }
+
+    for (int t = 0; t < a->target_count; ++t) {
+        if (target_group[t] == -2 && report && rtidx[t] >= 0) {
+            st = report_execution_phase(
+                opts, TP_EXPORT_EXECUTION_COMPLETE, err);
+            if (st != TP_STATUS_OK) {
+                report->report_failed = true;
+                return st;
+            }
+            st = report_target_completed(opts, report, notices, rtidx[t], err);
+            if (st != TP_STATUS_OK) {
+                report->report_failed = true;
+                return st;
+            }
+        }
+    }
+
     /* Phase 2: each ready target writes its files from its group's Export IR. */
     for (int t = 0; t < a->target_count; t++) {
         if (target_group[t] < 0) {
@@ -631,6 +732,11 @@ tp_status tp_export_run_ex(const tp_project *project, int atlas_index, const tp_
             }
             if (first_fail == TP_STATUS_OK) {
                 first_fail = st;
+            }
+            st = report_target_completed(opts, report, notices, rtidx[t], err);
+            if (st != TP_STATUS_OK) {
+                report->report_failed = true;
+                return st;
             }
             continue;
         }
@@ -666,6 +772,11 @@ tp_status tp_export_run_ex(const tp_project *project, int atlas_index, const tp_
             if (first_fail == TP_STATUS_OK) {
                 first_fail = cst;
             }
+            st = report_target_completed(opts, report, notices, rtidx[t], err);
+            if (st != TP_STATUS_OK) {
+                report->report_failed = true;
+                return st;
+            }
             continue;
         }
 
@@ -694,7 +805,76 @@ tp_status tp_export_run_ex(const tp_project *project, int atlas_index, const tp_
             if (first_fail == TP_STATUS_OK) {
                 first_fail = st;
             }
+            st = report_target_completed(opts, report, notices, rtidx[t], err);
+            if (st != TP_STATUS_OK) {
+                report->report_failed = true;
+                return st;
+            }
             continue;
+        }
+
+        st = tp_export_validate_publication_inputs(
+            exp, &projected_ir, groups[target_group[t]].result, &plan, err);
+        tp_export_document_batch documents = {0};
+        tp_export_publication_guard publication_guard = {0};
+        bool serializer_ran = false;
+        if (st == TP_STATUS_OK) {
+            st = report_execution_phase(
+                opts, exp->lua_handler
+                          ? TP_EXPORT_EXECUTION_LUA_SERIALIZING
+                          : TP_EXPORT_EXECUTION_SERIALIZING,
+                err);
+            if (st == TP_STATUS_OK) {
+                st = tp_export_serialize_and_validate_documents(
+                    exp, &projected_ir, &plan, notices,
+                    rt ? &rt->format_diagnostics : NULL, &documents,
+                    &serializer_ran, opts ? opts->cancel : NULL, err);
+            }
+        }
+        if (rt) {
+            rt->writer_outcome =
+                serializer_ran && st != TP_STATUS_OK
+                    ? TP_EXPORT_WRITER_FAILED
+                    : TP_EXPORT_WRITER_NOT_ATTEMPTED;
+            rt->notice_end = notices ? notices->count : nbefore;
+        }
+        if (st != TP_STATUS_OK) {
+            tp_export_document_batch_destroy(&documents);
+            tp_export_publication_guard_release(&publication_guard);
+            if (!report) {
+                return st;
+            }
+            if (rt) {
+                rt->ok = false;
+                rt->error = report_error_copy(
+                    arena, err && err->msg[0] ? err->msg
+                                              : "export serialization failed");
+            }
+            if (first_fail == TP_STATUS_OK) {
+                first_fail = st;
+            }
+            const tp_status phase_status = report_execution_phase(
+                opts, TP_EXPORT_EXECUTION_COMPLETE, err);
+            if (phase_status != TP_STATUS_OK) {
+                report->report_failed = true;
+                return phase_status;
+            }
+            st = report_target_completed(opts, report, notices, rtidx[t], err);
+            if (st != TP_STATUS_OK) {
+                report->report_failed = true;
+                return st;
+            }
+            continue;
+        }
+
+        st = report_execution_phase(opts, TP_EXPORT_EXECUTION_READY, err);
+        if (st != TP_STATUS_OK) {
+            tp_export_document_batch_destroy(&documents);
+            tp_export_publication_guard_release(&publication_guard);
+            if (report) {
+                report->report_failed = true;
+            }
+            return st;
         }
 
         if (dry_run) {
@@ -703,35 +883,96 @@ tp_status tp_export_run_ex(const tp_project *project, int atlas_index, const tp_
                 rt->would_write = output_files;
                 rt->would_write_count = output_file_count;
             }
+            tp_export_document_batch_destroy(&documents);
+            tp_export_publication_guard_release(&publication_guard);
+            st = report_execution_phase(
+                opts, TP_EXPORT_EXECUTION_COMPLETE, err);
+            if (st != TP_STATUS_OK) {
+                report->report_failed = true;
+                return st;
+            }
+            st = report_target_completed(opts, report, notices, rtidx[t], err);
+            if (st != TP_STATUS_OK) {
+                report->report_failed = true;
+                return st;
+            }
             continue;
         }
 
         /* Deterministic test seam at the last reversible boundary. Production is
-         * a no-op; after release, poll before staging the irreversible target. */
+         * a no-op; poll before claiming the destination and staging. */
         export_before_write_gate_wait();
         st = export_cancel_poll(cancel, err);
         if (st != TP_STATUS_OK) {
+            tp_export_document_batch_destroy(&documents);
             return st;
         }
-        bool writer_ran = false;
+        st = tp_export_publication_guard_acquire(
+            &plan, &publication_guard, err);
+        if (st != TP_STATUS_OK) {
+            tp_export_document_batch_destroy(&documents);
+            if (!report) {
+                return st;
+            }
+            if (rt) {
+                rt->ok = false;
+                rt->error = report_error_copy(
+                    arena, err && err->msg[0] ? err->msg
+                                              : "export destination is busy");
+                rt->notice_end = notices ? notices->count : nbefore;
+            }
+            if (first_fail == TP_STATUS_OK) {
+                first_fail = st;
+            }
+            const tp_status phase_status = report_execution_phase(
+                opts, TP_EXPORT_EXECUTION_COMPLETE, err);
+            if (phase_status != TP_STATUS_OK) {
+                report->report_failed = true;
+                return phase_status;
+            }
+            st = report_target_completed(
+                opts, report, notices, rtidx[t], err);
+            if (st != TP_STATUS_OK) {
+                report->report_failed = true;
+                return st;
+            }
+            continue;
+        }
         bool publication_uncertain = false;
-        st = tp_export_publish(exp, &projected_ir,
-                               groups[target_group[t]].result,
-                               &plan, notices, &writer_ran,
-                               &publication_uncertain, err);
+        st = report_execution_phase(
+            opts, TP_EXPORT_EXECUTION_PUBLICATION_BEGIN, err);
+        if (st != TP_STATUS_OK) {
+            tp_export_document_batch_destroy(&documents);
+            tp_export_publication_guard_release(&publication_guard);
+            if (report) {
+                report->report_failed = true;
+            }
+            return st;
+        }
+        st = tp_export_publish_documents(
+            exp, &projected_ir, groups[target_group[t]].result, &plan,
+            &documents, &publication_guard,
+            &publication_uncertain, err);
+        tp_export_document_batch_destroy(&documents);
+        tp_export_publication_guard_release(&publication_guard);
         if (rt) {
             rt->publication_uncertain = publication_uncertain;
             /* A rejected output list is decided BEFORE the writer runs, so it is
              * not a writer failure -- the report must not blame a writer that
              * never executed. */
-            rt->writer_outcome = !writer_ran ? TP_EXPORT_WRITER_NOT_ATTEMPTED
+            rt->writer_outcome = !serializer_ran
+                                     ? TP_EXPORT_WRITER_NOT_ATTEMPTED
                                  : st == TP_STATUS_OK
                                      ? TP_EXPORT_WRITER_SUCCEEDED
                                      : TP_EXPORT_WRITER_FAILED;
         }
-        if (t == last_writer_target && opts && opts->terminal_boundary &&
-            opts->terminal_boundary(opts->terminal_boundary_context)) {
-            export_after_terminal_boundary_gate_wait();
+        const tp_status phase_status = report_execution_phase(
+            opts, TP_EXPORT_EXECUTION_COMPLETE, err);
+        if (phase_status != TP_STATUS_OK) {
+            if (report) {
+                report->report_failed = true;
+            }
+            return phase_status;
         }
         if (rt) {
             rt->notice_end = notices ? notices->count : nbefore;
@@ -749,36 +990,24 @@ tp_status tp_export_run_ex(const tp_project *project, int atlas_index, const tp_
             if (first_fail == TP_STATUS_OK) {
                 first_fail = st;
             }
-            continue;
-        }
-        if (rt) {
+        } else if (rt) {
             rt->ok = true;
             rt->written_files = output_files;
             rt->written_file_count = output_file_count;
         }
-    }
-
-    if (report) {
-        if (group_count > 0) {
-            tp_export_report_run *report_runs = report_alloc(
-                arena, (size_t)group_count * sizeof(*report->runs));
-            if (!report_runs) {
-                report->report_failed = true;
-                return tp_error_set(err, TP_STATUS_OOM, "tp_export_run: OOM (report runs)");
-            }
-            memset(report_runs, 0,
-                   (size_t)group_count * sizeof(*report_runs));
-            for (int g = 0; g < group_count; g++) {
-                tp_status fst =
-                    fill_run_report(&report_runs[g], groups[g].result, arena);
-                if (fst != TP_STATUS_OK) {
-                    report->report_failed = true;
-                    return tp_error_set(err, fst, "tp_export_run: OOM (report pages)");
-                }
-            }
-            report->runs = report_runs;
+        if (t == last_writer_target && opts && opts->terminal_boundary &&
+            opts->terminal_boundary(opts->terminal_boundary_context)) {
+            export_after_terminal_boundary_gate_wait();
         }
-        report->run_count = group_count;
+        const tp_status completion_status = report_target_completed(
+            opts, report, notices, rtidx[t], err);
+        if (completion_status != TP_STATUS_OK) {
+            report->report_failed = true;
+            return completion_status;
+        }
+        if (st != TP_STATUS_OK) {
+            continue;
+        }
     }
 
     if (out_pack_runs) {
@@ -856,6 +1085,8 @@ tp_status tp_export_project_job_create_internal(
     job->terminal_boundary = opts ? opts->terminal_boundary : NULL;
     job->terminal_boundary_context =
         opts ? opts->terminal_boundary_context : NULL;
+    job->execution_phase = opts ? opts->execution_phase : NULL;
+    job->execution_phase_context = opts ? opts->execution_phase_context : NULL;
     for (int ai = 0; opts && (opts->target_exporter_id || opts->out_dir) &&
                      ai < job->project->atlas_count; ++ai) {
         tp_project_atlas *atlas = &job->project->atlases[ai];
@@ -986,7 +1217,6 @@ tp_status tp_export_snapshot_job_run_atlas_ex_cancellable(
     if (out_missing_sources) {
         *out_missing_sources = 0;
     }
-    const tp_project_atlas *atlas = &job->project->atlases[atlas_index];
     tp_pack_input input;
     tp_status status = tp_pack_input_build_cancellable(
         job->project, atlas_index, &input, cancel, err);
@@ -1012,34 +1242,6 @@ tp_status tp_export_snapshot_job_run_atlas_ex_cancellable(
     if (report) {
         report->input_outcome = TP_EXPORT_INPUT_READY;
     }
-    if (tp_cancel_requested(cancel)) {
-        tp_pack_input_free(&input);
-        return tp_error_set(err, TP_STATUS_CANCELLED, "export cancelled");
-    }
-    for (int ti = 0; !job->dry_run && ti < atlas->target_count; ++ti) {
-        if (!atlas->targets[ti].enabled) {
-            continue;
-        }
-        char output_path[TP_RUN_PATH_MAX];
-        status = tp_project_resolve_path(job->project,
-                                         atlas->targets[ti].out_path,
-                                         output_path,
-                                         sizeof output_path);
-        if (status != TP_STATUS_OK) {
-            tp_pack_input_free(&input);
-            return tp_error_set(err, status,
-                                "save the project first (relative output paths need a project dir)");
-        }
-        if (tp_cancel_requested(cancel)) {
-            tp_pack_input_free(&input);
-            return tp_error_set(err, TP_STATUS_CANCELLED, "export cancelled");
-        }
-        tp_mkdirs_parent(output_path);
-    }
-    if (tp_cancel_requested(cancel)) {
-        tp_pack_input_free(&input);
-        return tp_error_set(err, TP_STATUS_CANCELLED, "export cancelled");
-    }
     tp_export_run_opts run_opts = {
         .report = report,
         .catalog = job->catalog,
@@ -1047,6 +1249,10 @@ tp_status tp_export_snapshot_job_run_atlas_ex_cancellable(
         .cancel = cancel,
         .terminal_boundary = job->terminal_boundary,
         .terminal_boundary_context = job->terminal_boundary_context,
+        .execution_phase = job->execution_phase,
+        .execution_phase_context = job->execution_phase_context,
+        .target_completed = job->target_completed,
+        .target_completed_context = job->target_completed_context,
     };
     status = tp_export_run_ex(job->project, atlas_index, input.descs, input.count,
                               job->work_dir, arena, notices, out_pack_runs,

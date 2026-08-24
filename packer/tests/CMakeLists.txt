@@ -574,6 +574,8 @@ endif()
 tp_add_test(NAME job_worker_process
     SOURCES test_job_worker_process.c
         ../src/tp_job_worker.c ../src/tp_job_worker_proto.c
+        ../src/tp_export_command_report.c
+        ../src/tp_export_command_report_proto.c
         ${_tp_proc_backend}
     LIBS tp_core tinycthread unity PRIVATE_SRC SEAMS
     DEFINES _CRT_SECURE_NO_WARNINGS)

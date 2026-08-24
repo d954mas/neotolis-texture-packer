@@ -20,6 +20,7 @@
 
 #include "tinycthread.h"
 
+#include "core/nt_assert.h"
 #include "tp_core/tp_build_worker.h"
 #include "tp_core/tp_job.h"
 #include "tp_core/tp_scan.h"
@@ -80,6 +81,9 @@ static int run_live_export(const char *project_path, const char *work_dir,
             stderr, "live Export published unexpected job kind %d\n",
             (int)result.kind);
     } else {
+        const tp_export_command_report *report =
+            result.export_result.report;
+        NT_ASSERT(report != NULL);
         if (json) {
             (void)printf(
                 "{\"schema\":1,\"state\":%d,\"status\":%d,"
@@ -91,16 +95,16 @@ static int run_live_export(const char *project_path, const char *work_dir,
                 (int)result.state,
                 (int)result.status,
                 (int)result.rejection,
-                result.export_result.targets,
-                result.export_result.files,
-                result.export_result.notices,
-                result.export_result.atlases_ok,
-                result.export_result.atlases_failed,
-                result.export_result.atlases_skipped,
-                result.export_result.partial_publication
+                report->targets_ok,
+                report->files_written,
+                report->notices,
+                report->atlases_ok,
+                report->atlases_failed,
+                report->atlases_skipped,
+                report->partial_publication
                     ? "true"
                     : "false",
-                result.export_result.publication_uncertain
+                report->publication_uncertain
                     ? "true"
                     : "false");
         }
@@ -116,12 +120,12 @@ static int run_live_export(const char *project_path, const char *work_dir,
             (void)printf(
                 "live Export: %d target(s), %d file(s), %d notice(s), "
                 "%d atlas(es) ok, %d failed, %d skipped\n",
-                result.export_result.targets,
-                result.export_result.files,
-                result.export_result.notices,
-                result.export_result.atlases_ok,
-                result.export_result.atlases_failed,
-                result.export_result.atlases_skipped);
+                report->targets_ok,
+                report->files_written,
+                report->notices,
+                report->atlases_ok,
+                report->atlases_failed,
+                report->atlases_skipped);
         }
         if (result.state ==
                 TP_SESSION_JOB_SUCCEEDED &&

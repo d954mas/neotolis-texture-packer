@@ -83,6 +83,14 @@ typedef struct tp_lua_runtime_input {
     const tp_cancel_token *cancel;
 } tp_lua_runtime_input;
 
+/* Outer-worker-only panic marker. The callback must be allocation-free: it is
+ * invoked immediately before lua_atpanic terminates the process. NULL clears
+ * the current thread's marker; compile and ordinary runtime callers leave it
+ * unset. */
+typedef void (*tp_lua_panic_marker_fn)(void *context);
+void tp_lua_panic_marker_set_internal(tp_lua_panic_marker_fn marker,
+                                      void *context);
+
 /* Text-only compile admission. A successful compile returns OK with a NULL
  * report. A package/source/limit rejection returns INVALID_ARGUMENT with an
  * owned diagnostic report. Genuine allocator/report OOM returns OOM and never

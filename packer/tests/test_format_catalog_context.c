@@ -1,5 +1,6 @@
 #include <stddef.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "unity.h"
@@ -12,7 +13,9 @@
 #include "tp_core/tp_transaction.h"
 #include "tp_core/tp_validate.h"
 #include "tp_export_internal.h"
+#include "tp_format_binding_proto_internal.h"
 #include "tp_format_catalog_internal.h"
+#include "tp_format_diagnostic_internal.h"
 
 typedef struct deterministic_rng_state {
     uint8_t next;
@@ -145,6 +148,90 @@ static void assert_preview_admission(tp_session *session,
 void setUp(void) {}
 
 void tearDown(void) {}
+
+void test_descriptor_id_wins_over_another_package_key(void) {
+    const tp_exporter *const exporters[] = {&k_exporter_a, &k_exporter_b};
+    const char *const keys[] = {k_format_b.id, "package-b"};
+    tp_format_catalog *catalog = NULL;
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_format_catalog__test_create_with_keys(
+            exporters, keys, 2U, &catalog, &error),
+        error.msg);
+
+    TEST_ASSERT_EQUAL_PTR(
+        &k_exporter_b,
+        tp_format_catalog_exporter_find(catalog, k_format_b.id));
+    TEST_ASSERT_EQUAL_PTR(
+        &k_exporter_a,
+        tp_format_catalog_exporter_find(catalog, k_format_a.id));
+    TEST_ASSERT_NULL(tp_format_catalog_exporter_find(catalog, "package-b"));
+    tp_format_resolution resolution = {0};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_format_catalog_resolve(
+            catalog, "package-b", &resolution, &error));
+    TEST_ASSERT_EQUAL_INT(TP_FORMAT_RESOLUTION_ABSENT, resolution.state);
+    tp_format_catalog_release(catalog);
+}
+
+void test_unavailable_package_binding_keeps_no_binding_sentinel(void) {
+    tp_format_catalog_owned_row *rows = calloc(1U, sizeof *rows);
+    TEST_ASSERT_NOT_NULL(rows);
+    static const char key[] = "broken-package";
+    rows[0].key = malloc(sizeof key);
+    TEST_ASSERT_NOT_NULL(rows[0].key);
+    memcpy(rows[0].key, key, sizeof key);
+    rows[0].implementation = TP_FORMAT_IMPLEMENTATION_LUA;
+    rows[0].available = false;
+
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_format_diagnostic_report_create_internal(
+            &rows[0].diagnostics, &error), error.msg);
+    const tp_format_diagnostic diagnostic = {
+        .severity = TP_FORMAT_DIAGNOSTIC_ERROR,
+        .code = TP_FORMAT_DIAGNOSTIC_COMPILE_ERROR,
+        .phase = TP_FORMAT_PHASE_COMPILE,
+        .format_id = key,
+        .package_path = "formats/broken-package",
+        .message = "package compile failed",
+    };
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_format_diagnostic_report_append_internal(
+            rows[0].diagnostics, &diagnostic, &error), error.msg);
+    tp_format_catalog *catalog = tp_format_catalog_create_owned_internal(
+        NULL, rows, 1U, NULL, false, false, &error);
+    TEST_ASSERT_NOT_NULL_MESSAGE(catalog, error.msg);
+    const tp_format_binding_capture_target target = {
+        .atlas_id = id_with_byte(0x31U),
+        .target_id = id_with_byte(0x42U),
+        .format_id = key,
+    };
+    uint8_t *bytes = NULL;
+    size_t length = 0U;
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_format_catalog_encode_bindings_internal(
+            catalog, NULL, &target, 1U, &bytes, &length, &error),
+        error.msg);
+    tp_format_binding_proto_value decoded = {0};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_format_binding_proto_decode(bytes, length, &decoded, &error),
+        error.msg);
+    TEST_ASSERT_EQUAL_size_t(0U, decoded.binding_count);
+    TEST_ASSERT_EQUAL_INT(TP_FORMAT_BINDING_RESOLUTION_UNAVAILABLE,
+                          decoded.targets[0].resolution.kind);
+    TEST_ASSERT_EQUAL_UINT32(
+        UINT32_MAX, decoded.targets[0].resolution.binding_index);
+    tp_format_binding_proto_value_free(&decoded);
+    free(bytes);
+    tp_format_catalog_release(catalog);
+}
 
 void test_catalog_generation_is_threaded_through_sessions_and_snapshots(void) {
     const tp_exporter *const exporters_a[] = {&k_exporter_a};
@@ -332,6 +419,8 @@ void test_catalog_generation_is_threaded_through_sessions_and_snapshots(void) {
 
 int main(void) {
     UNITY_BEGIN();
+    RUN_TEST(test_descriptor_id_wins_over_another_package_key);
+    RUN_TEST(test_unavailable_package_binding_keeps_no_binding_sentinel);
     RUN_TEST(
         test_catalog_generation_is_threaded_through_sessions_and_snapshots);
     return UNITY_END();

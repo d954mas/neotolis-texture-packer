@@ -23,6 +23,14 @@ _Static_assert(TP_LUA_HOOK_INTERVAL > 0,
                "Lua instruction hook interval must be positive");
 
 static const unsigned char g_lua_failure_sentinel;
+static _Thread_local tp_lua_panic_marker_fn g_panic_marker;
+static _Thread_local void *g_panic_marker_context;
+
+void tp_lua_panic_marker_set_internal(tp_lua_panic_marker_fn marker,
+                                      void *context) {
+    g_panic_marker = marker;
+    g_panic_marker_context = marker ? context : NULL;
+}
 
 #ifdef TP_ENABLE_TEST_SEAMS
 static tp_lua_test_limits g_test_limits;
@@ -148,6 +156,9 @@ void *tp_lua_allocator_fn(void *userdata, void *pointer, size_t old_size,
 
 int tp_lua_panic(lua_State *state) {
     (void)state;
+    if (g_panic_marker) {
+        g_panic_marker(g_panic_marker_context);
+    }
     abort();
 }
 

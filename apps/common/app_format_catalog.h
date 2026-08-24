@@ -7,14 +7,12 @@
 extern "C" {
 #endif
 
-/* Process-host catalog bootstrap. The concrete clients own only this result;
- * discovery/admission/fallback policy stays shared here and can later grow the
- * isolated compiler without duplicating it in CLI, GUI, MCP, or Dev API code. */
+/* Process-host catalog bootstrap. Discovery, isolated compilation, admission,
+ * and fallback stay shared here instead of being duplicated by clients. */
 typedef enum app_format_catalog_state {
     APP_FORMAT_CATALOG_CLOSED = 0,
     APP_FORMAT_CATALOG_ACTIVE = 1,
     APP_FORMAT_CATALOG_NATIVE_FALLBACK,
-    APP_FORMAT_CATALOG_PENDING_COMPILER,
 } app_format_catalog_state;
 
 typedef struct app_format_catalog {

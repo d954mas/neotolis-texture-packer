@@ -14,6 +14,7 @@
 #endif
 
 #include "tp_core/tp_build_worker.h"
+#include "tp_export_command_report_internal.h"
 #include "tp_job_worker_process_internal.h"
 #include "tp_proc_internal.h"
 #include "unity.h"
@@ -127,7 +128,6 @@ static int write_terminal(const tp_job_worker_proto_request *request,
     response.state = TP_SESSION_JOB_SUCCEEDED;
     response.status = TP_STATUS_OK;
     response.elapsed_ms = 1.0;
-    response.export_result.atlases_ok = 1;
     return write_response(
         request, &response, mismatch, trailing, nonzero_exit);
 }
@@ -152,6 +152,109 @@ static bool write_progress(const tp_job_worker_proto_request *request,
     return wrote;
 }
 
+static bool write_completed_export_fragment(
+    const tp_job_worker_proto_request *request) {
+    const tp_id128 atlas_id = {{1U}};
+    const tp_id128 target_id = {{2U}};
+    const tp_job_worker_proto_fragment fragment = {
+        .request_id = request->request_id,
+        .outcome = {
+            .kind = TP_EXPORT_COMMAND_OUTCOME_TARGET,
+            .atlas_index = 0,
+            .atlas_id = atlas_id,
+            .atlas_name = "main",
+            .report_present = true,
+            .dry_run = request->dry_run,
+            .input_outcome = TP_EXPORT_INPUT_READY,
+            .target_index = 0,
+            .target = {
+                .id = target_id,
+                .exporter_id = "fixture-json",
+                .out_path = "C:/out/main",
+                .pack_run = -1,
+                .writer_outcome = TP_EXPORT_WRITER_SUCCEEDED,
+                .ok = true,
+                .completed = true,
+            },
+        },
+    };
+    uint8_t *bytes = NULL;
+    size_t length = 0U;
+    const bool encoded = tp_job_worker_proto_encode_fragment(
+                             &fragment, &bytes, &length, NULL) == TP_STATUS_OK;
+    const bool wrote = encoded &&
+                       fwrite(bytes, 1U, length, stdout) == length &&
+                       fflush(stdout) == 0;
+    free(bytes);
+    return wrote;
+}
+
+static bool write_contradictory_export_fragment(
+    const tp_job_worker_proto_request *request) {
+    const tp_id128 atlas_id = {{1U}};
+    const tp_id128 target_id = {{2U}};
+    const tp_job_worker_proto_fragment fragment = {
+        .request_id = request->request_id,
+        .outcome = {
+            .kind = TP_EXPORT_COMMAND_OUTCOME_TARGET,
+            .atlas_index = 0,
+            .atlas_id = atlas_id,
+            .atlas_name = "main",
+            .report_present = true,
+            .dry_run = request->dry_run,
+            .input_outcome = TP_EXPORT_INPUT_READY,
+            .target_index = 0,
+            .target = {
+                .id = target_id,
+                .exporter_id = "fixture-json",
+                .out_path = "C:/out/main",
+                .pack_run = -1,
+                .writer_outcome = TP_EXPORT_WRITER_FAILED,
+                .ok = true,
+                .completed = true,
+            },
+        },
+    };
+    uint8_t *bytes = NULL;
+    size_t length = 0U;
+    const bool encoded = tp_job_worker_proto_encode_fragment(
+                             &fragment, &bytes, &length, NULL) == TP_STATUS_OK;
+    const bool wrote = encoded &&
+                       fwrite(bytes, 1U, length, stdout) == length &&
+                       fflush(stdout) == 0;
+    free(bytes);
+    return wrote;
+}
+
+static bool write_export_atlas_fragment(
+    const tp_job_worker_proto_request *request, bool report_present,
+    bool dry_run) {
+    const tp_id128 atlas_id = {{1U}};
+    const tp_job_worker_proto_fragment fragment = {
+        .request_id = request->request_id,
+        .outcome = {
+            .kind = TP_EXPORT_COMMAND_OUTCOME_ATLAS,
+            .atlas_index = 0,
+            .atlas_id = atlas_id,
+            .atlas_name = "main",
+            .status = TP_STATUS_OK,
+            .report_present = report_present,
+            .dry_run = dry_run,
+            .input_outcome = report_present ? TP_EXPORT_INPUT_READY
+                                            : TP_EXPORT_INPUT_NOT_EVALUATED,
+        },
+    };
+    uint8_t *bytes = NULL;
+    size_t length = 0U;
+    const bool encoded = tp_job_worker_proto_encode_fragment(
+                             &fragment, &bytes, &length, NULL) == TP_STATUS_OK;
+    const bool wrote = encoded &&
+                       fwrite(bytes, 1U, length, stdout) == length &&
+                       fflush(stdout) == 0;
+    free(bytes);
+    return wrote;
+}
+
 static tp_job_worker_progress_phase blocked_phase(const char *mode) {
     if (strcmp(mode, "block-traversal") == 0) {
         return TP_JOB_WORKER_PHASE_SOURCE_TRAVERSAL;
@@ -171,9 +274,38 @@ static tp_job_worker_progress_phase blocked_phase(const char *mode) {
     return 0;
 }
 
-static int wait_for_cancel(
-    const tp_job_worker_proto_request *request, bool partial,
-    tp_session_job_state state) {
+static bool write_export_phase_prefix(
+    const tp_job_worker_proto_request *request,
+    tp_job_worker_progress_phase terminal_phase) {
+    const tp_job_worker_progress_phase phases[] = {
+        TP_JOB_WORKER_PHASE_SOURCE_TRAVERSAL,
+        TP_JOB_WORKER_PHASE_EXPORT_WRITE,
+        TP_JOB_WORKER_PHASE_EXPORT_SERIALIZE,
+        TP_JOB_WORKER_PHASE_EXPORT_READY,
+        TP_JOB_WORKER_PHASE_EXPORT_PUBLICATION_BEGIN,
+    };
+    for (size_t i = 0U; i < sizeof phases / sizeof phases[0]; ++i) {
+        if (!write_progress(request, 1, phases[i])) {
+            return false;
+        }
+        if (phases[i] == terminal_phase) {
+            return fflush(stdout) == 0;
+        }
+    }
+    return false;
+}
+
+static bool write_completed_export_fragment_after_phase(
+    const tp_job_worker_proto_request *request) {
+    return write_export_phase_prefix(
+               request, TP_JOB_WORKER_PHASE_EXPORT_PUBLICATION_BEGIN) &&
+           write_progress(
+               request, 1, TP_JOB_WORKER_PHASE_EXPORT_TARGET_COMPLETE) &&
+           write_completed_export_fragment(request) && fflush(stdout) == 0;
+}
+
+static int wait_for_cancel(const tp_job_worker_proto_request *request,
+                           tp_session_job_state state) {
     for (;;) {
         const tp_proc_stdin_event event = tp_proc_child_poll_stdin();
         if (event == TP_PROC_STDIN_EVENT_NONE) {
@@ -190,22 +322,6 @@ static int wait_for_cancel(
                               ? TP_STATUS_CANCELLED
                               : TP_STATUS_OK;
         response.elapsed_ms = 3.0;
-        if (!partial) {
-            if (state == TP_SESSION_JOB_SUCCEEDED) {
-                response.export_result.atlases_ok = 1;
-            }
-            return write_response(request, &response, false, false, false);
-        }
-        response.export_result.atlases_ok = 1;
-        response.export_result.atlases_failed = 1;
-        response.export_result.targets = 2;
-        response.export_result.files = 5;
-        response.export_result.partial_publication = true;
-        response.export_result.publication_uncertain = true;
-        (void)snprintf(
-            response.export_result.first_error,
-            sizeof response.export_result.first_error,
-            "atlas: writer failed");
         return write_response(
             request, &response, false, false, false);
     }
@@ -252,6 +368,43 @@ static int run_fake_worker(const char *mode) {
         result = write_terminal(&request, false, true, false);
     } else if (strcmp(mode, "nonzero") == 0) {
         result = write_terminal(&request, false, false, true);
+    } else if (strcmp(mode, "fragment-crash") == 0) {
+        result = write_completed_export_fragment_after_phase(&request) ? 7 : 4;
+    } else if (strcmp(mode, "published-fragment-crash") == 0) {
+        result = write_completed_export_fragment_after_phase(&request)
+                     ? 7
+                     : 4;
+    } else if (strcmp(mode, "premature-fragment") == 0) {
+        result = write_export_phase_prefix(
+                     &request, TP_JOB_WORKER_PHASE_EXPORT_PUBLICATION_BEGIN) &&
+                         write_completed_export_fragment(&request)
+                     ? write_terminal(&request, false, false, false)
+                     : 4;
+    } else if (strcmp(mode, "target-then-erasing-atlas") == 0) {
+        result = write_completed_export_fragment_after_phase(&request) &&
+                         write_export_atlas_fragment(
+                             &request, false, request.dry_run)
+                     ? write_terminal(&request, false, false, false)
+                     : 4;
+    } else if (strcmp(mode, "atlas-dry-mismatch") == 0) {
+        result = write_export_atlas_fragment(
+                     &request, true, !request.dry_run)
+                     ? write_terminal(&request, false, false, false)
+                     : 4;
+    } else if (strcmp(mode, "reportless-success") == 0) {
+        result = write_export_atlas_fragment(
+                     &request, false, request.dry_run)
+                     ? write_terminal(&request, false, false, false)
+                     : 4;
+    } else if (strcmp(mode, "contradictory-target") == 0) {
+        result = write_export_phase_prefix(
+                     &request, TP_JOB_WORKER_PHASE_EXPORT_PUBLICATION_BEGIN) &&
+                         write_progress(
+                             &request, 1,
+                             TP_JOB_WORKER_PHASE_EXPORT_TARGET_COMPLETE) &&
+                         write_contradictory_export_fragment(&request)
+                     ? write_terminal(&request, false, false, false)
+                     : 4;
     } else if (strcmp(mode, "malformed") == 0) {
         result = fwrite("not-a-frame", 1U, 11U, stdout) == 11U ? 0 : 4;
     } else if (strcmp(mode, "oversized") == 0) {
@@ -271,11 +424,49 @@ static int run_fake_worker(const char *mode) {
                      ? 0
                      : 4;
     } else if (strcmp(mode, "cancel-race") == 0) {
-        result = wait_for_cancel(&request, false,
-                                 TP_SESSION_JOB_CANCELLED);
+        result = wait_for_cancel(&request, TP_SESSION_JOB_CANCELLED);
     } else if (strcmp(mode, "cancel-race-success") == 0) {
-        result = wait_for_cancel(&request, false,
-                                 TP_SESSION_JOB_SUCCEEDED);
+        result = wait_for_cancel(&request, TP_SESSION_JOB_SUCCEEDED);
+    } else if (strcmp(mode, "invalid-export-transition") == 0) {
+        result = write_progress(
+                     &request, 1, TP_JOB_WORKER_PHASE_EXPORT_READY) &&
+                         fflush(stdout) == 0
+                     ? (sleep_ms(5000U), 0)
+                     : 4;
+    } else if (strcmp(mode, "block-serialize") == 0) {
+        result = write_export_phase_prefix(
+                     &request, TP_JOB_WORKER_PHASE_EXPORT_SERIALIZE)
+                     ? (sleep_ms(5000U), 0)
+                     : 4;
+    } else if (strcmp(mode, "lua-panic") == 0) {
+        result = write_progress(
+                     &request, 1, TP_JOB_WORKER_PHASE_SOURCE_TRAVERSAL) &&
+                         write_progress(
+                             &request, 1,
+                             TP_JOB_WORKER_PHASE_EXPORT_WRITE) &&
+                         write_progress(
+                             &request, 1,
+                             TP_JOB_WORKER_PHASE_EXPORT_LUA_SERIALIZE) &&
+                         write_progress(
+                             &request, 1,
+                             TP_JOB_WORKER_PHASE_EXPORT_HANDLER_PANIC) &&
+                         fflush(stdout) == 0
+                     ? 7
+                     : 4;
+    } else if (strcmp(mode, "generic-panic-marker") == 0) {
+        result = write_export_phase_prefix(
+                     &request, TP_JOB_WORKER_PHASE_EXPORT_SERIALIZE) &&
+                         write_progress(
+                             &request, 1,
+                             TP_JOB_WORKER_PHASE_EXPORT_HANDLER_PANIC) &&
+                         fflush(stdout) == 0
+                     ? (sleep_ms(5000U), 0)
+                     : 4;
+    } else if (strcmp(mode, "block-publication") == 0) {
+        result = write_export_phase_prefix(
+                     &request, TP_JOB_WORKER_PHASE_EXPORT_PUBLICATION_BEGIN)
+                     ? (sleep_ms(5000U), 0)
+                     : 4;
     } else if (blocked_phase(mode) != 0) {
         result =
             write_progress(&request, 1, blocked_phase(mode)) &&
@@ -283,8 +474,9 @@ static int run_fake_worker(const char *mode) {
                 ? (sleep_ms(5000U), 0)
                 : 4;
     } else if (strcmp(mode, "partial-cancel") == 0) {
-        result = wait_for_cancel(&request, true,
-                                 TP_SESSION_JOB_CANCELLED);
+        result = write_completed_export_fragment_after_phase(&request)
+                     ? wait_for_cancel(&request, TP_SESSION_JOB_CANCELLED)
+                     : 4;
     } else if (strcmp(mode, "timeout") == 0) {
         sleep_ms(5000U);
     } else {
@@ -317,16 +509,127 @@ static tp_job_worker_proto_request sample_request(void) {
     return request;
 }
 
-static tp_job_worker_process *start_process(const char *mode) {
+static char *test_strdup(const char *text) {
+    const size_t length = strlen(text) + 1U;
+    char *copy = malloc(length);
+    TEST_ASSERT_NOT_NULL(copy);
+    memcpy(copy, text, length);
+    return copy;
+}
+
+static tp_export_command_report *sample_export_report_with_targets(
+    bool dry_run, int target_count) {
+    tp_export_command_report *report = calloc(1U, sizeof *report);
+    TEST_ASSERT_NOT_NULL(report);
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_export_command_report_allocate(report, 1, dry_run, &error));
+    tp_export_command_atlas_report *atlas = &report->atlases[0];
+    atlas->id = (tp_id128){{1U}};
+    atlas->name = test_strdup("main");
+    atlas->status = TP_STATUS_BUILDER_FAILED;
+    atlas->note = test_strdup("not_attempted_worker_failed");
+    atlas->report_present = true;
+    atlas->report.dry_run = dry_run;
+    atlas->report.input_outcome = TP_EXPORT_INPUT_NOT_EVALUATED;
+    atlas->report.target_count = target_count;
+    atlas->report.targets = calloc(
+        (size_t)target_count, sizeof *atlas->report.targets);
+    TEST_ASSERT_NOT_NULL(atlas->report.targets);
+    for (int i = 0; i < target_count; ++i) {
+        tp_export_report_target *target = &atlas->report.targets[i];
+        target->id.bytes[0] = (uint8_t)(i + 2);
+        target->exporter_id = test_strdup("fixture-json");
+        target->out_path = test_strdup(
+            i == 0 ? "C:/out/main" : "C:/out/secondary");
+        target->pack_run = -1;
+        target->writer_outcome = TP_EXPORT_WRITER_NOT_ATTEMPTED;
+        target->error = test_strdup("not_attempted_worker_failed");
+    }
+    tp_export_command_report_recount(report);
+    return report;
+}
+
+static tp_export_command_report *sample_export_report(bool dry_run) {
+    return sample_export_report_with_targets(dry_run, 1);
+}
+
+void test_terminal_failure_belongs_to_atlas_without_final_outcome(void) {
+    tp_export_command_report *report = sample_export_report(false);
+    report->atlases[0].report.targets[0].completed = true;
+    report->atlases[0].report.targets[0].ok = true;
+    const tp_error failure = {
+        .msg = "worker crashed after its target fragment",
+    };
+    tp_export_command_report_apply_terminal_failure(
+        report, TP_STATUS_BUILDER_CRASHED, &failure);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_BUILDER_CRASHED,
+                          report->atlases[0].status);
+    TEST_ASSERT_EQUAL_STRING("worker crashed after its target fragment",
+                             report->atlases[0].error.msg);
+    TEST_ASSERT_NULL(report->atlases[0].note);
+    tp_export_command_report_destroy(report);
+    free(report);
+}
+
+void test_report_adopts_decoded_target_outcome_ownership(void) {
+    tp_export_command_report *report = sample_export_report(false);
+    tp_export_command_outcome outcome = {
+        .kind = TP_EXPORT_COMMAND_OUTCOME_TARGET,
+        .atlas_index = 0,
+        .atlas_id = {{1U}},
+        .atlas_name = test_strdup("main"),
+        .status = TP_STATUS_OK,
+        .report_present = true,
+        .input_outcome = TP_EXPORT_INPUT_READY,
+        .target_index = 0,
+        .target = {
+            .id = {{2U}},
+            .exporter_id = test_strdup("fixture-json"),
+            .out_path = test_strdup("C:/out/main"),
+            .pack_run = -1,
+            .writer_outcome = TP_EXPORT_WRITER_SUCCEEDED,
+            .ok = true,
+            .completed = true,
+        },
+    };
+    const char *owned_exporter_id = outcome.target.exporter_id;
+    const char *owned_out_path = outcome.target.out_path;
+    tp_error error = {{0}};
+
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_export_command_report_apply_outcome(report, &outcome, &error));
+    TEST_ASSERT_EQUAL_PTR(
+        owned_exporter_id, report->atlases[0].report.targets[0].exporter_id);
+    TEST_ASSERT_EQUAL_PTR(
+        owned_out_path, report->atlases[0].report.targets[0].out_path);
+    TEST_ASSERT_NULL(outcome.target.exporter_id);
+    TEST_ASSERT_NULL(outcome.target.out_path);
+
+    tp_export_command_outcome_destroy(&outcome);
+    TEST_ASSERT_EQUAL_STRING(
+        "fixture-json", report->atlases[0].report.targets[0].exporter_id);
+    tp_export_command_report_destroy(report);
+    free(report);
+}
+
+static tp_job_worker_process *start_process_with_report(
+    const char *mode, tp_export_command_report *report) {
     set_worker_mode(mode);
     const tp_job_worker_proto_request request = sample_request();
     tp_job_worker_process *process = NULL;
     tp_error error = {{0}};
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
-        tp_job_worker_process_start(&request, &process, &error));
+        tp_job_worker_process_start(&request, report, &process, &error));
     TEST_ASSERT_NOT_NULL(process);
     return process;
+}
+
+static tp_job_worker_process *start_process(const char *mode) {
+    return start_process_with_report(mode, sample_export_report(false));
 }
 
 static tp_job_worker_process *start_process_with_request(
@@ -334,9 +637,11 @@ static tp_job_worker_process *start_process_with_request(
     set_worker_mode(mode);
     tp_job_worker_process *process = NULL;
     tp_error error = {{0}};
+    tp_export_command_report *report =
+        sample_export_report(request->dry_run);
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
-        tp_job_worker_process_start(request, &process, &error));
+        tp_job_worker_process_start(request, report, &process, &error));
     TEST_ASSERT_NOT_NULL(process);
     return process;
 }
@@ -355,6 +660,18 @@ static const tp_job_worker_proto_response *pump_to_terminal(
         tp_job_worker_process_response(process);
     TEST_ASSERT_NOT_NULL(response);
     return response;
+}
+
+static tp_export_command_report *take_finalized_export_report(
+    tp_job_worker_process *process,
+    const tp_job_worker_proto_response *response) {
+    bool publication_pending = false;
+    tp_export_command_report *report =
+        tp_job_worker_process_take_export_report(
+            process, &publication_pending);
+    tp_export_command_report_finalize(
+        report, response->state, publication_pending);
+    return report;
 }
 
 void test_clean_matching_terminal_is_admitted(void) {
@@ -391,7 +708,6 @@ void test_successful_terminal_after_cancel_is_admitted_verbatim(void) {
         pump_to_terminal(process, 2000);
     TEST_ASSERT_EQUAL_INT(TP_SESSION_JOB_SUCCEEDED, response->state);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, response->status);
-    TEST_ASSERT_EQUAL_INT(1, response->export_result.atlases_ok);
     tp_job_worker_process_destroy(process);
 }
 
@@ -462,13 +778,14 @@ void test_cancel_preserves_partial_export_failure_metadata(void) {
     const tp_job_worker_proto_response *response =
         pump_to_terminal(process, 2000);
     TEST_ASSERT_EQUAL_INT(TP_SESSION_JOB_CANCELLED, response->state);
-    TEST_ASSERT_EQUAL_INT(1, response->export_result.atlases_failed);
-    TEST_ASSERT_EQUAL_INT(2, response->export_result.targets);
-    TEST_ASSERT_EQUAL_INT(5, response->export_result.files);
-    TEST_ASSERT_TRUE(response->export_result.partial_publication);
-    TEST_ASSERT_TRUE(response->export_result.publication_uncertain);
-    TEST_ASSERT_EQUAL_STRING(
-        "atlas: writer failed", response->export_result.first_error);
+    tp_export_command_report *report =
+        take_finalized_export_report(process, response);
+    TEST_ASSERT_NOT_NULL(report);
+    TEST_ASSERT_EQUAL_INT(1, report->targets_ok);
+    TEST_ASSERT_TRUE(report->atlases[0].report.targets[0].completed);
+    TEST_ASSERT_TRUE(report->partial_publication);
+    tp_export_command_report_destroy(report);
+    free(report);
     tp_job_worker_process_destroy(process);
 }
 
@@ -506,6 +823,148 @@ void test_malformed_and_oversized_output_fail_closed(void) {
     assert_worker_failure("oversized", TP_STATUS_BUILDER_FAILED);
 }
 
+void test_atlas_fragment_cannot_erase_targets_or_change_dry_run(void) {
+    tp_job_worker_process *process =
+        start_process("target-then-erasing-atlas");
+    const tp_job_worker_proto_response *response =
+        pump_to_terminal(process, 2000);
+    TEST_ASSERT_EQUAL_INT(TP_SESSION_JOB_FAILED, response->state);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_BUILDER_FAILED, response->status);
+    tp_export_command_report *report =
+        take_finalized_export_report(process, response);
+    TEST_ASSERT_NOT_NULL(report);
+    TEST_ASSERT_TRUE(report->atlases[0].report.targets[0].completed);
+    TEST_ASSERT_EQUAL_INT(1, report->targets_ok);
+    tp_export_command_report_destroy(report);
+    free(report);
+    tp_job_worker_process_destroy(process);
+
+    assert_worker_failure("atlas-dry-mismatch", TP_STATUS_BUILDER_FAILED);
+    assert_worker_failure("reportless-success", TP_STATUS_BUILDER_FAILED);
+    assert_worker_failure("contradictory-target", TP_STATUS_BUILDER_FAILED);
+}
+
+void test_invalid_export_phase_transition_fails_closed(void) {
+    assert_worker_failure("invalid-export-transition",
+                          TP_STATUS_BUILDER_FAILED);
+}
+
+void test_target_fragment_requires_target_complete_phase(void) {
+    tp_job_worker_process *process = start_process("premature-fragment");
+    const tp_job_worker_proto_response *response =
+        pump_to_terminal(process, 2000);
+    TEST_ASSERT_EQUAL_INT(TP_SESSION_JOB_FAILED, response->state);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_BUILDER_FAILED, response->status);
+    tp_export_command_report *report =
+        take_finalized_export_report(process, response);
+    TEST_ASSERT_NOT_NULL(report);
+    TEST_ASSERT_TRUE(report->atlases[0].report.targets[0].completed);
+    TEST_ASSERT_FALSE(report->atlases[0].report.targets[0].ok);
+    TEST_ASSERT_TRUE(
+        report->atlases[0].report.targets[0].publication_uncertain);
+    TEST_ASSERT_TRUE(report->publication_uncertain);
+    tp_export_command_report_destroy(report);
+    free(report);
+    tp_job_worker_process_destroy(process);
+}
+
+static const tp_job_worker_proto_response *timeout_in_phase(
+    const char *mode, tp_job_worker_process **out_process) {
+    tp_job_worker__test_set_timeout_ms(30);
+    tp_job_worker_process *process = start_process(mode);
+    const tp_job_worker_proto_response *response =
+        pump_to_terminal(process, 2000);
+    *out_process = process;
+    return response;
+}
+
+void test_worker_death_is_attributed_to_publication_window(void) {
+    tp_job_worker_process *process = NULL;
+    const tp_job_worker_proto_response *response =
+        timeout_in_phase("block-serialize", &process);
+    TEST_ASSERT_EQUAL_INT(TP_SESSION_JOB_FAILED, response->state);
+    tp_export_command_report *report =
+        take_finalized_export_report(process, response);
+    TEST_ASSERT_NOT_NULL(report);
+    TEST_ASSERT_FALSE(report->publication_uncertain);
+    TEST_ASSERT_FALSE(report->partial_publication);
+    tp_export_command_report_destroy(report);
+    free(report);
+    tp_job_worker_process_destroy(process);
+
+    response = timeout_in_phase("block-publication", &process);
+    TEST_ASSERT_EQUAL_INT(TP_SESSION_JOB_FAILED, response->state);
+    report = take_finalized_export_report(process, response);
+    TEST_ASSERT_NOT_NULL(report);
+    TEST_ASSERT_TRUE(report->publication_uncertain);
+    TEST_ASSERT_TRUE(report->partial_publication);
+    const tp_export_report_target *target =
+        &report->atlases[0].report.targets[0];
+    TEST_ASSERT_TRUE(target->completed);
+    TEST_ASSERT_FALSE(target->ok);
+    TEST_ASSERT_TRUE(target->publication_uncertain);
+    TEST_ASSERT_EQUAL_INT(TP_EXPORT_WRITER_FAILED,
+                          target->writer_outcome);
+    tp_export_command_report_destroy(report);
+    free(report);
+    tp_job_worker_process_destroy(process);
+}
+
+void test_take_export_report_only_transfers_report_ownership(void) {
+    tp_job_worker__test_set_timeout_ms(30);
+    tp_job_worker_process *process = start_process_with_report(
+        "block-publication", sample_export_report_with_targets(false, 2));
+    const tp_job_worker_proto_response *response =
+        pump_to_terminal(process, 2000);
+    TEST_ASSERT_EQUAL_INT(TP_SESSION_JOB_FAILED, response->state);
+
+    bool publication_pending = false;
+    tp_export_command_report *report =
+        tp_job_worker_process_take_export_report(
+            process, &publication_pending);
+    TEST_ASSERT_NOT_NULL(report);
+    TEST_ASSERT_TRUE(publication_pending);
+    TEST_ASSERT_FALSE(report->publication_uncertain);
+    TEST_ASSERT_FALSE(report->atlases[0].report.targets[0].completed);
+    TEST_ASSERT_FALSE(report->atlases[0].report.targets[1].completed);
+
+    tp_export_command_report_destroy(report);
+    free(report);
+    tp_job_worker_process_destroy(process);
+}
+
+void test_private_lua_panic_marker_is_not_a_generic_crash(void) {
+    tp_job_worker_process *process = start_process("lua-panic");
+    const tp_job_worker_proto_response *response =
+        pump_to_terminal(process, 2000);
+    TEST_ASSERT_EQUAL_INT(TP_SESSION_JOB_FAILED, response->state);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_BUILDER_CRASHED, response->status);
+    TEST_ASSERT_NOT_NULL(strstr(response->error.msg, "Lua handler panicked"));
+    tp_export_command_report *report =
+        take_finalized_export_report(process, response);
+    TEST_ASSERT_NOT_NULL(report);
+    TEST_ASSERT_FALSE(report->publication_uncertain);
+    const tp_export_report_target *target =
+        &report->atlases[0].report.targets[0];
+    TEST_ASSERT_TRUE(target->completed);
+    TEST_ASSERT_FALSE(target->ok);
+    TEST_ASSERT_EQUAL_INT(TP_EXPORT_WRITER_FAILED,
+                          target->writer_outcome);
+    TEST_ASSERT_NOT_NULL(strstr(target->error, "Lua handler panicked"));
+    TEST_ASSERT_EQUAL_INT(
+        TP_FORMAT_DIAGNOSTIC_HANDLER_PANIC,
+        tp_format_diagnostic_report_at(target->format_diagnostics, 0U)->code);
+    TEST_ASSERT_EQUAL_INT(1, report->targets_failed);
+    tp_export_command_report_destroy(report);
+    free(report);
+    tp_job_worker_process_destroy(process);
+}
+
+void test_lua_panic_marker_requires_known_lua_serializer(void) {
+    assert_worker_failure("generic-panic-marker",
+                          TP_STATUS_BUILDER_FAILED);
+}
+
 void test_mismatched_terminal_and_trailing_bytes_fail_closed(void) {
     assert_worker_failure("mismatch", TP_STATUS_BUILDER_FAILED);
     assert_worker_failure("trailing", TP_STATUS_BUILDER_FAILED);
@@ -513,6 +972,44 @@ void test_mismatched_terminal_and_trailing_bytes_fail_closed(void) {
 
 void test_nonzero_exit_after_terminal_is_not_admitted(void) {
     assert_worker_failure("nonzero", TP_STATUS_BUILDER_CRASHED);
+}
+
+void test_worker_crash_retains_latest_completed_export_fragment(void) {
+    tp_job_worker_process *process = start_process("fragment-crash");
+    const tp_job_worker_proto_response *response =
+        pump_to_terminal(process, 2000);
+    TEST_ASSERT_EQUAL_INT(TP_SESSION_JOB_FAILED, response->state);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_BUILDER_CRASHED, response->status);
+    tp_export_command_report *report =
+        take_finalized_export_report(process, response);
+    TEST_ASSERT_NOT_NULL(report);
+    TEST_ASSERT_EQUAL_STRING(
+        "main", report->atlases[0].name);
+    TEST_ASSERT_TRUE(report->atlases[0].report.targets[0].completed);
+    TEST_ASSERT_EQUAL_INT(1, report->targets_ok);
+    TEST_ASSERT_TRUE(report->partial_publication);
+    tp_export_command_report_destroy(report);
+    free(report);
+    tp_job_worker_process_destroy(process);
+}
+
+void test_host_report_adoption_oom_is_not_mislabeled_as_worker_corruption(void) {
+    tp_job_worker_process *process =
+        start_process("published-fragment-crash");
+    tp_export_command_report__test_fail_next_adoption();
+    const tp_job_worker_proto_response *response =
+        pump_to_terminal(process, 2000);
+    TEST_ASSERT_EQUAL_INT(TP_SESSION_JOB_FAILED, response->state);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OOM, response->status);
+    TEST_ASSERT_NOT_NULL(strstr(response->error.msg, "adoption allocation"));
+    tp_export_command_report *report =
+        take_finalized_export_report(process, response);
+    TEST_ASSERT_NOT_NULL(report);
+    TEST_ASSERT_TRUE(report->publication_uncertain);
+    TEST_ASSERT_TRUE(report->partial_publication);
+    tp_export_command_report_destroy(report);
+    free(report);
+    tp_job_worker_process_destroy(process);
 }
 
 void test_timeout_force_terminates_owned_process(void) {
@@ -573,6 +1070,7 @@ int main(int argc, char **argv) {
         return mode ? run_fake_worker(mode) : 8;
     }
     UNITY_BEGIN();
+    RUN_TEST(test_report_adopts_decoded_target_outcome_ownership);
     RUN_TEST(test_clean_matching_terminal_is_admitted);
     RUN_TEST(test_cancel_admitted_before_terminal_owns_outcome);
     RUN_TEST(test_successful_terminal_after_cancel_is_admitted_verbatim);
@@ -582,8 +1080,19 @@ int main(int argc, char **argv) {
     RUN_TEST(test_cancel_preserves_partial_export_failure_metadata);
     RUN_TEST(test_cancel_during_request_backpressure_is_bounded);
     RUN_TEST(test_malformed_and_oversized_output_fail_closed);
+    RUN_TEST(test_atlas_fragment_cannot_erase_targets_or_change_dry_run);
+    RUN_TEST(test_invalid_export_phase_transition_fails_closed);
+    RUN_TEST(test_target_fragment_requires_target_complete_phase);
+    RUN_TEST(test_worker_death_is_attributed_to_publication_window);
+    RUN_TEST(test_take_export_report_only_transfers_report_ownership);
+    RUN_TEST(test_terminal_failure_belongs_to_atlas_without_final_outcome);
+    RUN_TEST(test_private_lua_panic_marker_is_not_a_generic_crash);
+    RUN_TEST(test_lua_panic_marker_requires_known_lua_serializer);
     RUN_TEST(test_mismatched_terminal_and_trailing_bytes_fail_closed);
     RUN_TEST(test_nonzero_exit_after_terminal_is_not_admitted);
+    RUN_TEST(test_worker_crash_retains_latest_completed_export_fragment);
+    RUN_TEST(
+        test_host_report_adoption_oom_is_not_mislabeled_as_worker_corruption);
     RUN_TEST(test_timeout_force_terminates_owned_process);
     RUN_TEST(test_forced_terminal_does_not_wait_for_kill_completion);
     RUN_TEST(test_destroy_live_process_returns_without_waiting_for_child);

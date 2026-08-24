@@ -12,6 +12,8 @@
 
 #include <stdbool.h>
 
+#include "tp_core/tp_format.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -34,6 +36,15 @@ bool tp_build_is_worker_invocation(int argc, char **argv);
  * non-zero only if it cannot emit a reply at all. It takes over the process:
  * call it and return its result. Never asserts on wire bytes (fail closed). */
 int tp_build_worker_main(void);
+
+/* Complete one startup scan through the isolated compiler and atomically
+ * finalize its immutable catalog.  This is the only host-visible compile
+ * facade: callers exchange value-owned scan/catalog objects and never touch
+ * Lua or the private compiler protocol.  On success `*owned_scan` is consumed.
+ */
+tp_status tp_build_format_catalog_compile(
+    tp_format_catalog_scan **owned_scan, tp_format_catalog **out_catalog,
+    tp_error *error);
 
 #ifdef __cplusplus
 }

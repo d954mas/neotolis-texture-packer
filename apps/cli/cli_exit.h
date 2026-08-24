@@ -2,6 +2,7 @@
 #define NTPACKER_CLI_EXIT_H
 
 #include "tp_core/tp_error.h"
+#include "tp_core/tp_job.h"
 
 /* Process exit codes -- a stable contract (docs/formats/cli-report.md).
  * Agents branch on these, so the numbers are frozen; 9+ is reserved
@@ -28,5 +29,11 @@ int cli_exit_for_rejected_status(tp_status status);
 /* Save owns a distinct pre-publication I/O exit. Other save faults preserve
  * the existing internal/project split. */
 int cli_exit_for_save_status(tp_status status);
+
+/* Export terminal state is authoritative. A successful fragment prefix cannot
+ * turn a failed worker lifecycle into process success. */
+int cli_exit_for_export_result(
+    tp_session_job_state state, tp_status status,
+    const tp_export_command_report *report);
 
 #endif /* NTPACKER_CLI_EXIT_H */

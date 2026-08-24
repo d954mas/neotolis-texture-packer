@@ -58,6 +58,61 @@ static const uint8_t g_png_4x4[] = {
     0xAEU, 0x42U, 0x60U, 0x82U,
 };
 
+static char *report_strdup(const char *text) {
+    const size_t length = strlen(text) + 1U;
+    char *copy = malloc(length);
+    TEST_ASSERT_NOT_NULL(copy);
+    memcpy(copy, text, length);
+    return copy;
+}
+
+static tp_export_command_report *preseed_export_report(
+    const tp_project *project, bool dry_run) {
+    tp_export_command_report *report = calloc(1U, sizeof *report);
+    TEST_ASSERT_NOT_NULL(report);
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_export_command_report_allocate(
+            report, project->atlas_count, dry_run, &error),
+        error.msg);
+    for (int i = 0; i < project->atlas_count; ++i) {
+        const tp_project_atlas *source_atlas = &project->atlases[i];
+        tp_export_command_atlas_report *atlas = &report->atlases[i];
+        atlas->id = source_atlas->id;
+        atlas->name = report_strdup(source_atlas->name);
+        atlas->status = TP_STATUS_BUILDER_FAILED;
+        (void)tp_error_set(&atlas->error, TP_STATUS_BUILDER_FAILED,
+                           "job worker failed before target completion");
+        atlas->note = report_strdup(
+            "job worker failed before target completion");
+        atlas->report_present = true;
+        atlas->report.dry_run = dry_run;
+        atlas->report.input_outcome = TP_EXPORT_INPUT_NOT_EVALUATED;
+        atlas->report.target_count = source_atlas->target_count;
+        if (source_atlas->target_count == 0) {
+            continue;
+        }
+        atlas->report.targets = calloc(
+            (size_t)source_atlas->target_count,
+            sizeof *atlas->report.targets);
+        TEST_ASSERT_NOT_NULL(atlas->report.targets);
+        for (int t = 0; t < source_atlas->target_count; ++t) {
+            const tp_project_target *source_target =
+                &source_atlas->targets[t];
+            tp_export_report_target *target = &atlas->report.targets[t];
+            target->id = source_target->id;
+            target->exporter_id = report_strdup(source_target->exporter_id);
+            target->out_path = report_strdup(source_target->out_path);
+            target->error = report_strdup("not_attempted_worker_failed");
+            target->pack_run = -1;
+            target->writer_outcome = TP_EXPORT_WRITER_NOT_ATTEMPTED;
+        }
+    }
+    tp_export_command_report_recount(report);
+    return report;
+}
+
 void setUp(void) {}
 void tearDown(void) {}
 
@@ -723,6 +778,8 @@ void test_real_export_reports_committed_files_before_later_writer_failure(void) 
         tp_project_save_buffer(
             project, &project_json, &project_json_len, &error),
         error.msg);
+    tp_export_command_report *export_report =
+        preseed_export_report(project, false);
     tp_project_destroy(project);
 
     const tp_job_worker_proto_request request = {
@@ -739,7 +796,8 @@ void test_real_export_reports_committed_files_before_later_writer_failure(void) 
     tp_job_worker_process *process = NULL;
     TEST_ASSERT_EQUAL_INT_MESSAGE(
         TP_STATUS_OK,
-        tp_job_worker_process_start(&request, &process, &error),
+        tp_job_worker_process_start(
+            &request, export_report, &process, &error),
         error.msg);
     TEST_ASSERT_NOT_NULL(process);
     free(project_json);
@@ -758,11 +816,18 @@ void test_real_export_reports_committed_files_before_later_writer_failure(void) 
         tp_job_worker_process_response(process);
     TEST_ASSERT_NOT_NULL(response);
     TEST_ASSERT_EQUAL_INT(TP_SESSION_JOB_FAILED, response->state);
-    TEST_ASSERT_EQUAL_INT(1, response->export_result.targets);
+    bool publication_pending = false;
+    export_report = tp_job_worker_process_take_export_report(
+        process, &publication_pending);
+    tp_export_command_report_finalize(
+        export_report, response->state, publication_pending);
+    TEST_ASSERT_NOT_NULL(export_report);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        1, export_report->targets_ok, response->error.msg);
     TEST_ASSERT_GREATER_OR_EQUAL_INT(
-        2, response->export_result.files);
-    TEST_ASSERT_EQUAL_INT(1, response->export_result.atlases_failed);
-    TEST_ASSERT_TRUE(response->export_result.partial_publication);
+        2, export_report->files_written);
+    TEST_ASSERT_EQUAL_INT(1, export_report->atlases_failed);
+    TEST_ASSERT_TRUE(export_report->partial_publication);
     /* The RUN is partial -- one atlas target published and one failed -- but the
      * failed target's publication is not UNCERTAIN. Its output directory is a
      * regular file, so the staged-set publication cannot even create its private
@@ -770,11 +835,13 @@ void test_real_export_reports_committed_files_before_later_writer_failure(void) 
      * written, and the report must not suggest artifacts might be lying around.
      * publication_uncertain is now reserved for a target whose writer really did
      * run (TP_EXPORT_WRITER_FAILED). */
-    TEST_ASSERT_FALSE(response->export_result.publication_uncertain);
+    TEST_ASSERT_FALSE(export_report->publication_uncertain);
     TEST_ASSERT_NOT_EQUAL(
-        '\0', response->export_result.first_error[0]);
+        '\0', export_report->first_error[0]);
     TEST_ASSERT_TRUE(tp_fs_exists(published_json));
     TEST_ASSERT_TRUE(tp_fs_exists(published_png));
+    tp_export_command_report_destroy(export_report);
+    free(export_report);
     tp_job_worker_process_destroy(process);
     remove_tree(root);
 }
@@ -782,12 +849,14 @@ void test_real_export_reports_committed_files_before_later_writer_failure(void) 
 /* Drive one real worker request to its terminal frame. */
 static const tp_job_worker_proto_response *run_worker_request(
     const tp_job_worker_proto_request *request,
+    tp_export_command_report *export_report,
     tp_job_worker_process **out_process) {
     tp_error error = {{0}};
     tp_job_worker_process *process = NULL;
     TEST_ASSERT_EQUAL_INT_MESSAGE(
         TP_STATUS_OK,
-        tp_job_worker_process_start(request, &process, &error),
+        tp_job_worker_process_start(
+            request, export_report, &process, &error),
         error.msg);
     TEST_ASSERT_NOT_NULL(process);
     for (int elapsed = 0;
@@ -885,7 +954,7 @@ void test_real_pack_reports_current_freshness_and_input_bound_hash(void) {
     };
     tp_job_worker_process *process = NULL;
     const tp_job_worker_proto_response *response =
-        run_worker_request(&request, &process);
+        run_worker_request(&request, NULL, &process);
     TEST_ASSERT_EQUAL_INT_MESSAGE(
         TP_SESSION_JOB_SUCCEEDED, response->state, response->error.msg);
     TEST_ASSERT_EQUAL_INT(TP_PACK_FRESHNESS_CURRENT,
@@ -911,7 +980,7 @@ void test_real_pack_reports_current_freshness_and_input_bound_hash(void) {
 
     /* Same inputs, new request: same hash, a DIFFERENT private directory. */
     request.request_id = 62U;
-    response = run_worker_request(&request, &process);
+    response = run_worker_request(&request, NULL, &process);
     TEST_ASSERT_EQUAL_INT_MESSAGE(
         TP_SESSION_JOB_SUCCEEDED, response->state, response->error.msg);
     TEST_ASSERT_TRUE(
@@ -933,7 +1002,7 @@ void test_real_pack_reports_current_freshness_and_input_bound_hash(void) {
     request.project_json = (const uint8_t *)json;
     request.project_json_len = json_length;
     request.request_id = 63U;
-    response = run_worker_request(&request, &process);
+    response = run_worker_request(&request, NULL, &process);
     TEST_ASSERT_EQUAL_INT_MESSAGE(
         TP_SESSION_JOB_SUCCEEDED, response->state, response->error.msg);
     TEST_ASSERT_EQUAL_INT(TP_PACK_FRESHNESS_CURRENT,
@@ -973,7 +1042,17 @@ void test_real_export_skips_an_empty_atlas_and_still_succeeds(void) {
 
     tp_project *project = tp_project_create();
     TEST_ASSERT_NOT_NULL(project);
-    tp_project_atlas *packed = tp_project_get_atlas(project, 0);
+    tp_project_atlas *empty = tp_project_get_atlas(project, 0);
+    TEST_ASSERT_NOT_NULL(empty);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_atlas_add_target(
+            empty, TP_EXPORTER_ID_JSON_NEOTOLIS, "published/empty", NULL));
+    int packed_index = -1;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_add_atlas(project, "packed", &packed_index));
+    tp_project_atlas *packed = tp_project_get_atlas(project, packed_index);
     TEST_ASSERT_NOT_NULL(packed);
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
@@ -984,17 +1063,10 @@ void test_real_export_skips_an_empty_atlas_and_still_succeeds(void) {
         tp_project_atlas_add_target(
             packed, TP_EXPORTER_ID_JSON_NEOTOLIS, "published/packed",
             NULL));
-    int empty_index = -1;
-    TEST_ASSERT_EQUAL_INT(
-        TP_STATUS_OK,
-        tp_project_add_atlas(project, "empty", &empty_index));
-    TEST_ASSERT_EQUAL_INT(
-        TP_STATUS_OK,
-        tp_project_atlas_add_target(
-            tp_project_get_atlas(project, empty_index),
-            TP_EXPORTER_ID_JSON_NEOTOLIS, "published/empty", NULL));
     size_t json_length = 0U;
     char *json = save_project_json(project, &json_length);
+    tp_export_command_report *export_report =
+        preseed_export_report(project, false);
     tp_project_destroy(project);
 
     const tp_job_worker_proto_request request = {
@@ -1010,19 +1082,27 @@ void test_real_export_skips_an_empty_atlas_and_still_succeeds(void) {
     };
     tp_job_worker_process *process = NULL;
     const tp_job_worker_proto_response *response =
-        run_worker_request(&request, &process);
+        run_worker_request(&request, export_report, &process);
     free(json);
     TEST_ASSERT_EQUAL_INT_MESSAGE(
         TP_SESSION_JOB_SUCCEEDED, response->state, response->error.msg);
-    TEST_ASSERT_EQUAL_INT(1, response->export_result.atlases_ok);
-    TEST_ASSERT_EQUAL_INT(1, response->export_result.atlases_skipped);
-    TEST_ASSERT_EQUAL_INT(0, response->export_result.atlases_failed);
-    TEST_ASSERT_EQUAL_INT(1, response->export_result.targets);
-    TEST_ASSERT_FALSE(response->export_result.partial_publication);
+    bool publication_pending = false;
+    export_report = tp_job_worker_process_take_export_report(
+        process, &publication_pending);
+    tp_export_command_report_finalize(
+        export_report, response->state, publication_pending);
+    TEST_ASSERT_NOT_NULL(export_report);
+    TEST_ASSERT_EQUAL_INT(1, export_report->atlases_ok);
+    TEST_ASSERT_EQUAL_INT(1, export_report->atlases_skipped);
+    TEST_ASSERT_EQUAL_INT(0, export_report->atlases_failed);
+    TEST_ASSERT_EQUAL_INT(1, export_report->targets_ok);
+    TEST_ASSERT_FALSE(export_report->partial_publication);
     TEST_ASSERT_TRUE(tp_fs_exists(packed_json));
     TEST_ASSERT_FALSE_MESSAGE(
         tp_fs_exists(empty_json),
         "a skipped empty atlas must not publish an export file");
+    tp_export_command_report_destroy(export_report);
+    free(export_report);
     tp_job_worker_process_destroy(process);
     remove_tree(root);
 }

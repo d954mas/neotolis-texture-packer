@@ -43,7 +43,7 @@ enum {
     MK_NEW = 1, MK_OPEN, MK_SAVE, MK_SAVEAS, MK_EXPORT, MK_REFRESH, MK_EXIT,
     MK_UNDO, MK_REDO,
     MK_PACK, MK_ADD_ATLAS,
-    MK_ZIN, MK_ZOUT, MK_FIT, MK_ABOUT, MK_S100, MK_S125, MK_S150, MK_S200,
+    MK_ZIN, MK_ZOUT, MK_FIT, MK_FORMATS, MK_ABOUT, MK_S100, MK_S125, MK_S150, MK_S200,
     MK_OV_OUTLINE, MK_OV_FRAME, MK_OV_TRIM, MK_OV_PIVOT, MK_OV_SLICE9, MK_CTX_FIT, MK_CTX_100,
     MK_CTX_RENAME, MK_CTX_REMOVE, MK_CTX_TOGGLE, MK_CTX_CREATE_ANIM, MK_CTX_PREVIEW,
     MK_CTX_COPY_NAME, MK_CTX_REVEAL
@@ -282,9 +282,129 @@ static void view_items(nt_ui_menu_ctx_t *m) {
     scale_item(m, MK_S200, "UI Scale 200%", 2.0F);
 }
 static void help_items(nt_ui_menu_ctx_t *m) {
+    if (nt_ui_menu_item(m, MK_FORMATS, "Formats\xE2\x80\xA6")) {
+        s_formats_open = true;
+    }
     if (nt_ui_menu_item(m, MK_ABOUT, "About")) {
         s_about_open = true; /* opens the real modal (F6a) */
     }
+}
+
+void declare_formats_modal(nt_ui_context_t *ctx) {
+    if (!nt_ui_modal_visible(ctx, s_id_formats, &s_modal_style,
+                             &s_formats_open)) {
+        return;
+    }
+    CLAY({.layout = {.sizing = {CLAY_SIZING_FIXED(S(560)), CLAY_SIZING_FIT(0)},
+                     .padding = {Su(24), Su(24), Su(22), Su(22)},
+                     .layoutDirection = CLAY_TOP_TO_BOTTOM,
+                     .childGap = Su(8)},
+          .backgroundColor = C_PANEL,
+          .cornerRadius = CLAY_CORNER_RADIUS(S(8)),
+          .border = {.color = C_BORDER,
+                     .width = {Su(1), Su(1), Su(1), Su(1), 0}}}) {
+        nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), "Export Formats",
+                    &g_body);
+        nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT),
+                    "Read-only startup catalog; restart to refresh packages.",
+                    &g_caption);
+        const tp_format_catalog *catalog = gui_project_format_catalog();
+        tp_status fallback_status = TP_STATUS_OK;
+        tp_error fallback_reason = {{0}};
+        const tp_format_diagnostic_report *fallback_diagnostics = NULL;
+        if (gui_project_format_fallback(
+                &fallback_status, &fallback_reason,
+                &fallback_diagnostics)) {
+            char fallback[512];
+            (void)snprintf(
+                fallback, sizeof fallback, "Native fallback: %s",
+                fallback_reason.msg[0]
+                    ? fallback_reason.msg
+                    : tp_status_str(fallback_status));
+            nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), fallback,
+                        &g_warn);
+        }
+        const tp_format_diagnostic_report *root_diagnostics =
+            tp_format_catalog_root_diagnostics(catalog);
+        if (!root_diagnostics) {
+            root_diagnostics = fallback_diagnostics;
+        }
+        const tp_format_diagnostic *root_diagnostic =
+            tp_format_diagnostic_report_at(root_diagnostics, 0U);
+        if (root_diagnostic) {
+            char detail[512];
+            (void)snprintf(
+                detail, sizeof detail, "%s: %s",
+                tp_format_diagnostic_code_id(root_diagnostic->code),
+                root_diagnostic->message
+                    ? root_diagnostic->message
+                    : "format catalog error");
+            nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), detail, &g_dim);
+        }
+        const size_t count = tp_format_catalog_row_count(catalog);
+        float list_height = S(54.0F) * (float)count + S(8.0F);
+        if (list_height > S(330.0F)) {
+            list_height = S(330.0F);
+        }
+        nt_ui_scroll_begin(
+            ctx, NULL, nt_ui_id("ntpacker/formats_scroll"), &s_panel_scroll,
+            &(Clay_ElementDeclaration){.layout = {
+                .sizing = {CLAY_SIZING_GROW(0),
+                           CLAY_SIZING_FIXED(list_height)}}});
+        CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0),
+                                    CLAY_SIZING_FIT(0)},
+                         .layoutDirection = CLAY_TOP_TO_BOTTOM,
+                         .childGap = Su(6),
+                         .padding = {0, Su(8), 0, 0}}}) {
+            for (size_t i = 0U; i < count; ++i) {
+                tp_format_catalog_row row = {0};
+                if (!tp_format_catalog_row_at(catalog, i, &row)) {
+                    continue;
+                }
+                char label[512];
+                const char *id = row.descriptor ? row.descriptor->id : row.key;
+                const size_t diagnostics =
+                    tp_format_diagnostic_report_count(row.diagnostics);
+                if (diagnostics > 0U) {
+                    (void)snprintf(label, sizeof label,
+                                   "%s  %s  %s  diagnostics=%zu",
+                                   row.available ? "Ready" : "Unavailable",
+                                   row.implementation ==
+                                           TP_FORMAT_IMPLEMENTATION_LUA
+                                       ? "Lua"
+                                       : "Native",
+                                   id ? id : "?", diagnostics);
+                } else {
+                    (void)snprintf(label, sizeof label, "%s  %s  %s",
+                                   row.available ? "Ready" : "Unavailable",
+                                   row.implementation ==
+                                           TP_FORMAT_IMPLEMENTATION_LUA
+                                       ? "Lua"
+                                       : "Native",
+                                   id ? id : "?");
+                }
+                nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), label,
+                            row.available ? &g_caption : &g_warn);
+                const tp_format_diagnostic *diagnostic =
+                    tp_format_diagnostic_report_at(row.diagnostics, 0U);
+                if (diagnostic && diagnostic->message) {
+                    char detail[512];
+                    (void)snprintf(
+                        detail, sizeof detail, "  %s: %s",
+                        tp_format_diagnostic_code_id(diagnostic->code),
+                        diagnostic->message);
+                    nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), detail,
+                                &g_dim);
+                }
+            }
+        }
+        nt_ui_scroll_end(ctx);
+        if (ui_btn(ctx, nt_ui_id("ntpacker/formats_ok"), "OK",
+                   &g_btn_primary, true, 100.0F, 34.0F, &g_onaccent)) {
+            s_formats_open = false;
+        }
+    }
+    nt_ui_modal_end(ctx);
 }
 static void menubar_entry(nt_ui_context_t *ctx, uint32_t btn_id, const char *label, nt_ui_menu_state_t *st) {
     nt_ui_button_begin(ctx, NT_UI_DATA_LAYER(LAYER_IMG), btn_id, &g_menubtn,

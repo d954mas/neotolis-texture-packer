@@ -301,6 +301,8 @@ foreach(_trace_area draft refresh job)
         SEAMS
         DEFINES
             TP_GUI_TRACE_TEST_DIR="${CMAKE_CURRENT_BINARY_DIR}/tp_gui_trace_${_trace_area}_tmp"
+            TP_FORMAT_FIXTURE_ROOT="${CMAKE_SOURCE_DIR}/packer/tests/fixtures/format-packages"
+            TP_TEST_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
             _CRT_SECURE_NO_WARNINGS
             ${_tp_gui_introspect_defines})
 endforeach()

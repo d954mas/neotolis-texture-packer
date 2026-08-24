@@ -7,6 +7,7 @@ typedef struct tp_job_worker_process tp_job_worker_process;
 
 tp_status tp_job_worker_process_start(
     const tp_job_worker_proto_request *request,
+    tp_export_command_report *export_report,
     tp_job_worker_process **out, tp_error *err);
 void tp_job_worker_process_request_cancel(tp_job_worker_process *process);
 void tp_job_worker_process_pump(tp_job_worker_process *process);
@@ -16,6 +17,8 @@ bool tp_job_worker_process_terminal(
     const tp_job_worker_process *process);
 const tp_job_worker_proto_response *tp_job_worker_process_response(
     const tp_job_worker_process *process);
+tp_export_command_report *tp_job_worker_process_take_export_report(
+    tp_job_worker_process *process, bool *out_publication_pending);
 void tp_job_worker_process_destroy(tp_job_worker_process *process);
 
 #ifdef TP_ENABLE_TEST_SEAMS

@@ -4,15 +4,16 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "tp_export_command_report_proto_internal.h"
 #include "tp_utf8_internal.h"
 
 enum {
   FRAME_HEADER_BYTES = 12,
-  REQUEST_FIXED_BYTES = 72,
+  REQUEST_FIXED_BYTES = 88,
   RESPONSE_COMMON_BYTES = 52,
   RESPONSE_PACK_BYTES = 132,
-  RESPONSE_EXPORT_BYTES = 36,
-  PROGRESS_PAYLOAD_BYTES = 24
+  PROGRESS_PAYLOAD_BYTES = 24,
+  FRAGMENT_FIXED_BYTES = 16
 };
 
 _Static_assert(TP_JOB_WORKER_PROTO_MAX_FRAME_BYTES <= UINT32_MAX,
@@ -177,7 +178,7 @@ static bool valid_file_phase(int32_t phase) {
 static bool valid_progress_phase(int32_t phase) {
   return phase >= (int32_t)TP_JOB_WORKER_PHASE_SOURCE_TRAVERSAL &&
          phase <=
-             (int32_t)TP_JOB_WORKER_PHASE_EXPORT_TERMINAL_BOUNDARY;
+             (int32_t)TP_JOB_WORKER_PHASE_EXPORT_LUA_SERIALIZE;
 }
 
 static bool valid_count(int32_t count) {
@@ -341,9 +342,12 @@ void tp_job_worker_proto_request_free(tp_job_worker_proto_request *request) {
     return;
   }
   free((void *)request->project_json);
+  free((void *)request->format_bindings);
   free((void *)request->project_dir);
   free((void *)request->work_dir);
   free((void *)request->preview_exporter_id);
+  free((void *)request->target_exporter_id);
+  free((void *)request->out_dir);
   memset(request, 0, sizeof *request);
 }
 
@@ -360,7 +364,10 @@ tp_job_worker_proto_encode_request(const tp_job_worker_proto_request *request,
   if (!request || !out_bytes || !out_len || !valid_job_kind(request->kind) ||
       request->request_id == 0U || request->host_pid == 0U ||
       !request->project_json || request->project_json_len == 0U ||
-      request->project_json_len > TP_JOB_WORKER_PROTO_MAX_PROJECT_JSON_BYTES) {
+      request->project_json_len > TP_JOB_WORKER_PROTO_MAX_PROJECT_JSON_BYTES ||
+      request->format_bindings_len >
+          (size_t)TP_JOB_WORKER_PROTO_MAX_FORMAT_BINDING_BYTES ||
+      (request->format_bindings_len > 0U && !request->format_bindings)) {
     return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
                         "tp_job_worker_proto: invalid request");
   }
@@ -372,6 +379,11 @@ tp_job_worker_proto_encode_request(const tp_job_worker_proto_request *request,
   size_t project_dir_len = 0U;
   size_t work_len = 0U;
   size_t preview_len = 0U;
+  size_t target_len = 0U;
+  size_t out_dir_len = 0U;
+  const char *target_exporter_id = request->target_exporter_id
+                                       ? request->target_exporter_id : "";
+  const char *out_dir = request->out_dir ? request->out_dir : "";
   status =
       validate_text(request->project_dir, TP_JOB_WORKER_PROTO_MAX_PATH_BYTES,
                     false, "project_dir", &project_dir_len, err);
@@ -385,6 +397,16 @@ tp_job_worker_proto_encode_request(const tp_job_worker_proto_request *request,
                            TP_JOB_WORKER_PROTO_MAX_EXPORTER_ID_BYTES, true,
                            "preview_exporter_id", &preview_len, err);
   }
+  if (status == TP_STATUS_OK) {
+    status = validate_text(target_exporter_id,
+                           TP_JOB_WORKER_PROTO_MAX_EXPORTER_ID_BYTES, true,
+                           "target_exporter_id", &target_len, err);
+  }
+  if (status == TP_STATUS_OK) {
+    status = validate_text(out_dir,
+                           TP_JOB_WORKER_PROTO_MAX_PATH_BYTES, true,
+                           "out_dir", &out_dir_len, err);
+  }
   if (status != TP_STATUS_OK) {
     return status;
   }
@@ -394,8 +416,10 @@ tp_job_worker_proto_encode_request(const tp_job_worker_proto_request *request,
   }
   size_t payload = REQUEST_FIXED_BYTES;
   if (!add_size(&payload, request->project_json_len) ||
+      !add_size(&payload, request->format_bindings_len) ||
       !add_size(&payload, project_dir_len) || !add_size(&payload, work_len) ||
-      !add_size(&payload, preview_len)) {
+      !add_size(&payload, preview_len) || !add_size(&payload, target_len) ||
+      !add_size(&payload, out_dir_len)) {
     return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
                         "tp_job_worker_proto: request size overflow");
   }
@@ -409,17 +433,24 @@ tp_job_worker_proto_encode_request(const tp_job_worker_proto_request *request,
   wr_u64(&writer, request->session_instance_generation);
   wr_u64(&writer, request->request_id);
   wr_u32(&writer, (uint32_t)request->project_json_len);
+  wr_u32(&writer, (uint32_t)request->format_bindings_len);
   wr_u32(&writer, (uint32_t)project_dir_len);
   wr_u32(&writer, (uint32_t)work_len);
   wr_u32(&writer, (uint32_t)preview_len);
+  wr_u32(&writer, (uint32_t)target_len);
+  wr_u32(&writer, (uint32_t)out_dir_len);
+  wr_u32(&writer, request->dry_run ? 1U : 0U);
   wr_u32(&writer, request->host_pid);
   wr_bytes(&writer, request->atlas_id.bytes, sizeof request->atlas_id.bytes);
   wr_u64(&writer, request->input_token.model_generation);
   wr_u64(&writer, request->input_token.source_generation);
   wr_bytes(&writer, request->project_json, request->project_json_len);
+  wr_bytes(&writer, request->format_bindings, request->format_bindings_len);
   wr_bytes(&writer, request->project_dir, project_dir_len);
   wr_bytes(&writer, request->work_dir, work_len);
   wr_bytes(&writer, request->preview_exporter_id, preview_len);
+  wr_bytes(&writer, target_exporter_id, target_len);
+  wr_bytes(&writer, out_dir, out_dir_len);
   return TP_STATUS_OK;
 }
 
@@ -439,14 +470,21 @@ tp_status tp_job_worker_proto_decode_request(const uint8_t *bytes, size_t len,
   }
   uint32_t kind = 0U;
   uint32_t project_len = 0U;
+  uint32_t format_bindings_len = 0U;
   uint32_t project_dir_len = 0U;
   uint32_t work_len = 0U;
   uint32_t preview_len = 0U;
+  uint32_t target_len = 0U;
+  uint32_t out_dir_len = 0U;
+  uint32_t dry_run = 0U;
   if (reader.length < REQUEST_FIXED_BYTES || !rd_u32(&reader, &kind) ||
       !rd_u64(&reader, &out->session_instance_generation) ||
       !rd_u64(&reader, &out->request_id) || !rd_u32(&reader, &project_len) ||
+      !rd_u32(&reader, &format_bindings_len) ||
       !rd_u32(&reader, &project_dir_len) || !rd_u32(&reader, &work_len) ||
-      !rd_u32(&reader, &preview_len) || !rd_u32(&reader, &out->host_pid) ||
+      !rd_u32(&reader, &preview_len) || !rd_u32(&reader, &target_len) ||
+      !rd_u32(&reader, &out_dir_len) || !rd_u32(&reader, &dry_run) ||
+      !rd_u32(&reader, &out->host_pid) ||
       !rd_bytes(&reader, out->atlas_id.bytes, sizeof out->atlas_id.bytes) ||
       !rd_u64(&reader, &out->input_token.model_generation) ||
       !rd_u64(&reader, &out->input_token.source_generation)) {
@@ -457,10 +495,14 @@ tp_status tp_job_worker_proto_decode_request(const uint8_t *bytes, size_t len,
   if (!valid_job_kind(out->kind) || out->request_id == 0U ||
       out->host_pid == 0U || project_len == 0U ||
       (size_t)project_len > TP_JOB_WORKER_PROTO_MAX_PROJECT_JSON_BYTES ||
+      (size_t)format_bindings_len >
+          (size_t)TP_JOB_WORKER_PROTO_MAX_FORMAT_BINDING_BYTES ||
       (size_t)project_dir_len > TP_JOB_WORKER_PROTO_MAX_PATH_BYTES ||
       project_dir_len == 0U ||
       (size_t)work_len > TP_JOB_WORKER_PROTO_MAX_PATH_BYTES || work_len == 0U ||
       (size_t)preview_len > TP_JOB_WORKER_PROTO_MAX_EXPORTER_ID_BYTES ||
+      (size_t)target_len > TP_JOB_WORKER_PROTO_MAX_EXPORTER_ID_BYTES ||
+      (size_t)out_dir_len > TP_JOB_WORKER_PROTO_MAX_PATH_BYTES || dry_run > 1U ||
       (out->kind == TP_SESSION_JOB_PACK && id_is_nil(out->atlas_id))) {
     status = tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
                           "tp_job_worker_proto: invalid request fields");
@@ -488,6 +530,20 @@ tp_status tp_job_worker_proto_decode_request(const uint8_t *bytes, size_t len,
   project_copy[project_len] = '\0';
   out->project_json = project_copy;
   out->project_json_len = project_len;
+  if (format_bindings_len > 0U) {
+    uint8_t *binding_copy = (uint8_t *)malloc(format_bindings_len);
+    if (!binding_copy ||
+        !rd_bytes(&reader, binding_copy, format_bindings_len)) {
+      free(binding_copy);
+      status = tp_error_set(
+          err, binding_copy ? TP_STATUS_OUT_OF_BOUNDS : TP_STATUS_OOM,
+          binding_copy ? "tp_job_worker_proto: truncated format bindings"
+                       : "tp_job_worker_proto: format binding allocation failed");
+      goto fail;
+    }
+    out->format_bindings = binding_copy;
+    out->format_bindings_len = format_bindings_len;
+  }
   status =
       copy_text(&reader, project_dir_len, TP_JOB_WORKER_PROTO_MAX_PATH_BYTES,
                 false, "project_dir", &out->project_dir, err);
@@ -500,6 +556,17 @@ tp_status tp_job_worker_proto_decode_request(const uint8_t *bytes, size_t len,
                        TP_JOB_WORKER_PROTO_MAX_EXPORTER_ID_BYTES, true,
                        "preview_exporter_id", &out->preview_exporter_id, err);
   }
+  if (status == TP_STATUS_OK) {
+    status = copy_text(&reader, target_len,
+                       TP_JOB_WORKER_PROTO_MAX_EXPORTER_ID_BYTES, true,
+                       "target_exporter_id", &out->target_exporter_id, err);
+  }
+  if (status == TP_STATUS_OK) {
+    status = copy_text(&reader, out_dir_len,
+                       TP_JOB_WORKER_PROTO_MAX_PATH_BYTES, true,
+                       "out_dir", &out->out_dir, err);
+  }
+  out->dry_run = dry_run != 0U;
   if (status != TP_STATUS_OK) {
     goto fail;
   }
@@ -612,7 +679,6 @@ tp_status tp_job_worker_proto_encode_response(
   size_t freshness_message_len = 0U;
   size_t freshness_path_len = 0U;
   size_t artifact_path_len = 0U;
-  size_t first_error_len = 0U;
   if (!add_size(&payload, error_message_len) ||
       !add_size(&payload, error_path_len)) {
     return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
@@ -673,29 +739,6 @@ tp_status tp_job_worker_proto_encode_response(
                          "tp_job_worker_proto: name map size overflow");
       }
     }
-  } else {
-    const tp_session_export_job_result *export_result =
-        &response->export_result;
-    if (!valid_count(export_result->targets) ||
-        !valid_count(export_result->files) ||
-        !valid_count(export_result->notices) ||
-        !valid_count(export_result->atlases_ok) ||
-        !valid_count(export_result->atlases_failed) ||
-        !valid_count(export_result->atlases_skipped)) {
-      return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
-                          "tp_job_worker_proto: invalid Export counts");
-    }
-    status = validate_text(export_result->first_error,
-                           TP_JOB_WORKER_PROTO_MAX_ERROR_BYTES, true,
-                           "Export first error", &first_error_len, err);
-    if (status != TP_STATUS_OK || !add_size(&payload, RESPONSE_EXPORT_BYTES) ||
-        !add_size(&payload, first_error_len)) {
-      return status != TP_STATUS_OK
-                 ? status
-                 : tp_error_set(
-                       err, TP_STATUS_OUT_OF_BOUNDS,
-                       "tp_job_worker_proto: Export response size overflow");
-    }
   }
 
   wire_writer writer;
@@ -755,20 +798,8 @@ tp_status tp_job_worker_proto_encode_response(
     }
     wr_bytes(&writer, pack->artifact_path, artifact_path_len);
   } else {
-    const tp_session_export_job_result *export_result =
-        &response->export_result;
-    wr_i32(&writer, export_result->targets);
-    wr_i32(&writer, export_result->files);
-    wr_i32(&writer, export_result->notices);
-    wr_i32(&writer, export_result->atlases_ok);
-    wr_i32(&writer, export_result->atlases_failed);
-    wr_i32(&writer, export_result->atlases_skipped);
-    wr_u32(&writer, export_result->partial_publication ? 1U : 0U);
-    wr_u32(&writer, export_result->publication_uncertain ? 1U : 0U);
-    wr_u32(&writer, (uint32_t)first_error_len);
     write_error_bytes(&writer, &response->error, error_message_len,
                       error_path_len);
-    wr_bytes(&writer, export_result->first_error, first_error_len);
   }
   return TP_STATUS_OK;
 }
@@ -937,51 +968,8 @@ tp_status tp_job_worker_proto_decode_response(const uint8_t *bytes, size_t len,
       goto fail;
     }
   } else {
-    tp_session_export_job_result *export_result = &out->export_result;
-    int32_t targets = 0;
-    int32_t files = 0;
-    int32_t notices = 0;
-    int32_t atlases_ok = 0;
-    int32_t atlases_failed = 0;
-    int32_t atlases_skipped = 0;
-    uint32_t partial = 0U;
-    uint32_t uncertain = 0U;
-    uint32_t first_error_len = 0U;
-    if (reader.length - reader.offset < RESPONSE_EXPORT_BYTES ||
-        !rd_i32(&reader, &targets) || !rd_i32(&reader, &files) ||
-        !rd_i32(&reader, &notices) || !rd_i32(&reader, &atlases_ok) ||
-        !rd_i32(&reader, &atlases_failed) ||
-        !rd_i32(&reader, &atlases_skipped) || !rd_u32(&reader, &partial) ||
-        !rd_u32(&reader, &uncertain) || !rd_u32(&reader, &first_error_len)) {
-      status = tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
-                            "tp_job_worker_proto: truncated Export response");
-      goto fail;
-    }
-    if (!valid_count(targets) || !valid_count(files) || !valid_count(notices) ||
-        !valid_count(atlases_ok) || !valid_count(atlases_failed) ||
-        !valid_count(atlases_skipped) || partial > 1U || uncertain > 1U ||
-        first_error_len > TP_JOB_WORKER_PROTO_MAX_ERROR_BYTES) {
-      status = tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
-                            "tp_job_worker_proto: invalid Export fields");
-      goto fail;
-    }
-    export_result->targets = targets;
-    export_result->files = files;
-    export_result->notices = notices;
-    export_result->atlases_ok = atlases_ok;
-    export_result->atlases_failed = atlases_failed;
-    export_result->atlases_skipped = atlases_skipped;
-    export_result->partial_publication = partial != 0U;
-    export_result->publication_uncertain = uncertain != 0U;
     status = read_error_bytes(&reader, error_message_len, error_path_len,
                               error_phase, error_native, &out->error, err);
-    if (status != TP_STATUS_OK) {
-      goto fail;
-    }
-    status =
-        copy_fixed_text(&reader, first_error_len, export_result->first_error,
-                        sizeof export_result->first_error - 1U,
-                        "Export first error", err);
     if (status != TP_STATUS_OK) {
       goto fail;
     }
@@ -1067,6 +1055,79 @@ tp_status tp_job_worker_proto_decode_progress(const uint8_t *bytes, size_t len,
   return TP_STATUS_OK;
 }
 
+tp_status tp_job_worker_proto_encode_fragment(
+    const tp_job_worker_proto_fragment *fragment, uint8_t **out_bytes,
+    size_t *out_len, tp_error *err) {
+  if (out_bytes) *out_bytes = NULL;
+  if (out_len) *out_len = 0U;
+  if (!fragment || fragment->request_id == 0U || !out_bytes || !out_len) {
+    return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                        "tp_job_worker_proto: invalid Export fragment");
+  }
+  uint8_t *outcome_bytes = NULL;
+  size_t outcome_length = 0U;
+  tp_status status = tp_export_command_outcome_proto_encode(
+      &fragment->outcome, &outcome_bytes, &outcome_length, err);
+  if (status != TP_STATUS_OK) {
+    return status;
+  }
+  if (outcome_length > UINT32_MAX ||
+      outcome_length > TP_JOB_WORKER_PROTO_MAX_FRAME_BYTES -
+                          FRAGMENT_FIXED_BYTES) {
+    free(outcome_bytes);
+    return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
+                        "tp_job_worker_proto: Export fragment is too large");
+  }
+  wire_writer writer;
+  status = make_frame(
+      TP_JOB_WORKER_PROTO_FRAGMENT_MAGIC,
+      FRAGMENT_FIXED_BYTES + outcome_length, out_bytes, out_len, &writer, err);
+  if (status == TP_STATUS_OK) {
+    wr_u64(&writer, fragment->request_id);
+    wr_u32(&writer, (uint32_t)outcome_length);
+    wr_u32(&writer, 0U);
+    wr_bytes(&writer, outcome_bytes, outcome_length);
+  }
+  free(outcome_bytes);
+  return status;
+}
+
+tp_status tp_job_worker_proto_decode_fragment(
+    const uint8_t *bytes, size_t len, tp_job_worker_proto_fragment *out,
+    tp_error *err) {
+  if (!out) {
+    return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                        "tp_job_worker_proto: NULL Export fragment out");
+  }
+  memset(out, 0, sizeof *out);
+  wire_reader reader;
+  tp_status status = decode_frame(
+      bytes, len, TP_JOB_WORKER_PROTO_FRAGMENT_MAGIC, &reader, err);
+  uint32_t outcome_length = 0U, reserved = 0U;
+  if (status != TP_STATUS_OK) return status;
+  if (reader.length < FRAGMENT_FIXED_BYTES ||
+      !rd_u64(&reader, &out->request_id) ||
+       !rd_u32(&reader, &outcome_length) || !rd_u32(&reader, &reserved) ||
+       out->request_id == 0U || reserved != 0U || outcome_length == 0U ||
+       (size_t)outcome_length != reader.length - reader.offset) {
+    return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                        "tp_job_worker_proto: invalid Export fragment fields");
+  }
+  status = tp_export_command_outcome_proto_decode(
+       reader.bytes + reader.offset, outcome_length, &out->outcome, err);
+  if (status != TP_STATUS_OK) {
+    tp_job_worker_proto_fragment_free(out);
+  }
+  return status;
+}
+
+void tp_job_worker_proto_fragment_free(
+    tp_job_worker_proto_fragment *fragment) {
+  if (!fragment) return;
+  tp_export_command_outcome_destroy(&fragment->outcome);
+  memset(fragment, 0, sizeof *fragment);
+}
+
 void tp_job_worker_proto_stream_init(tp_job_worker_proto_stream *stream) {
   if (stream) {
     memset(stream, 0, sizeof *stream);
@@ -1143,6 +1204,7 @@ tp_job_worker_proto_stream_next(tp_job_worker_proto_stream *stream,
   (void)rd_u16(&header, &reserved);
   (void)rd_u32(&header, &payload_length);
   if (magic != TP_JOB_WORKER_PROTO_PROGRESS_MAGIC &&
+      magic != TP_JOB_WORKER_PROTO_FRAGMENT_MAGIC &&
       magic != TP_JOB_WORKER_PROTO_RESPONSE_MAGIC) {
     return tp_error_set(err, TP_STATUS_BAD_MAGIC,
                         "tp_job_worker_proto: unknown stream frame");
@@ -1176,6 +1238,15 @@ tp_job_worker_proto_stream_next(tp_job_worker_proto_stream *stream,
     if (status == TP_STATUS_OK) {
       stream->progress_frames++;
     }
+  } else if (magic == TP_JOB_WORKER_PROTO_FRAGMENT_MAGIC) {
+    if (stream->progress_frames >= TP_JOB_WORKER_PROTO_MAX_PROGRESS_FRAMES) {
+      return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
+                          "tp_job_worker_proto: nonterminal frame cap exceeded");
+    }
+    out->kind = TP_JOB_WORKER_STREAM_FRAGMENT;
+    status = tp_job_worker_proto_decode_fragment(
+        stream->bytes, frame_length, &out->fragment, err);
+    if (status == TP_STATUS_OK) stream->progress_frames++;
   } else {
     if (stream->terminal_seen || stream->length != frame_length) {
       return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
@@ -1208,6 +1279,8 @@ void tp_job_worker_proto_stream_message_free(
   }
   if (message->kind == TP_JOB_WORKER_STREAM_TERMINAL) {
     tp_job_worker_proto_response_free(&message->terminal);
+  } else if (message->kind == TP_JOB_WORKER_STREAM_FRAGMENT) {
+    tp_job_worker_proto_fragment_free(&message->fragment);
   }
   memset(message, 0, sizeof *message);
 }

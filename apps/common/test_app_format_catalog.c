@@ -1,4 +1,5 @@
 #include "app_format_catalog.h"
+#include "tp_core/tp_build_worker.h"
 
 #include "unity.h"
 
@@ -59,20 +60,26 @@ void test_non_directory_root_preserves_fallback_diagnostics(void) {
     app_format_catalog_close(&result);
 }
 
-void test_compile_candidates_have_one_explicit_pending_state(void) {
+void test_compile_candidates_install_one_complete_queryable_catalog(void) {
     app_format_catalog result = open_root(APP_FORMAT_CATALOG_FIXTURE_ROOT);
-    TEST_ASSERT_EQUAL_INT(APP_FORMAT_CATALOG_PENDING_COMPILER, result.state);
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_UNIMPLEMENTED, result.reason_status);
-    TEST_ASSERT_EQUAL_PTR(tp_format_catalog_native(), result.catalog);
-    TEST_ASSERT_NOT_EQUAL('\0', result.reason.msg[0]);
+    TEST_ASSERT_EQUAL_INT(APP_FORMAT_CATALOG_ACTIVE, result.state);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, result.reason_status);
+    TEST_ASSERT_GREATER_THAN_size_t(
+        tp_format_catalog_row_count(tp_format_catalog_native()),
+        tp_format_catalog_row_count(result.catalog));
+    TEST_ASSERT_NOT_NULL(
+        tp_format_catalog_find_available(result.catalog, "fixture-full"));
     app_format_catalog_close(&result);
 }
 
-int main(void) {
+int main(int argc, char **argv) {
+    if (tp_build_is_worker_invocation(argc, argv)) {
+        return tp_build_worker_main();
+    }
     UNITY_BEGIN();
     RUN_TEST(test_empty_root_installs_active_native_only_generation);
     RUN_TEST(test_missing_root_installs_active_missing_generation);
     RUN_TEST(test_non_directory_root_preserves_fallback_diagnostics);
-    RUN_TEST(test_compile_candidates_have_one_explicit_pending_state);
+    RUN_TEST(test_compile_candidates_install_one_complete_queryable_catalog);
     return UNITY_END();
 }

@@ -26,6 +26,9 @@ void tp_session__assert_owner_thread(const tp_session *session);
  * faults. Not available to frontend adapters. */
 tp_status tp_session_adopt_owned(tp_project *project, const tp_rng *rng,
                                  tp_session **out, tp_error *err);
+tp_status tp_session_adopt_owned_with_catalog(
+    tp_project *project, tp_format_catalog *catalog, const tp_rng *rng,
+    tp_session **out, tp_error *err);
 
 /* Recovery-store construction seam. Consumes `project` on every path and
  * binds successful save receipts to `recovery_token`; it does not attach a

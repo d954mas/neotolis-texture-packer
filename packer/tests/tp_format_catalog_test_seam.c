@@ -29,8 +29,9 @@ static void test_catalog_rows_destroy(tp_format_catalog_owned_row *rows,
     free(rows);
 }
 
-tp_status tp_format_catalog__test_create(
-    const tp_exporter *const *exporters, size_t exporter_count,
+tp_status tp_format_catalog__test_create_with_keys(
+    const tp_exporter *const *exporters, const char *const *keys,
+    size_t exporter_count,
     tp_format_catalog **out, tp_error *error) {
     if (!out || (exporter_count > 0U && !exporters) ||
         exporter_count > TP_FORMAT_PACKAGE_MAX) {
@@ -66,7 +67,8 @@ tp_status tp_format_catalog__test_create(
                              "test catalog exporter is invalid or duplicate");
         }
         for (size_t j = 0U; j < i; ++j) {
-            if (strcmp(rows[j].key, exporters[i]->format->id) == 0) {
+            if (strcmp(exporters[j]->format->id,
+                       exporters[i]->format->id) == 0) {
                 test_catalog_rows_destroy(rows, i);
                 return tp_error_set(error, TP_STATUS_INVALID_ARGUMENT,
                                     "test catalog contains duplicate exporters");
@@ -74,8 +76,9 @@ tp_status tp_format_catalog__test_create(
         }
         rows[i].implementation = TP_FORMAT_IMPLEMENTATION_NATIVE;
         rows[i].available = true;
-        rows[i].native_binding = exporters[i];
-        rows[i].key = test_catalog_strdup(exporters[i]->format->id);
+        rows[i].exporter_binding = exporters[i];
+        rows[i].key = test_catalog_strdup(
+            keys && keys[i] ? keys[i] : exporters[i]->format->id);
         if (!rows[i].key) {
             test_catalog_rows_destroy(rows, i + 1U);
             return tp_error_set(error, TP_STATUS_OOM,
@@ -90,4 +93,11 @@ tp_status tp_format_catalog__test_create(
     }
     *out = catalog;
     return TP_STATUS_OK;
+}
+
+tp_status tp_format_catalog__test_create(
+    const tp_exporter *const *exporters, size_t exporter_count,
+    tp_format_catalog **out, tp_error *error) {
+    return tp_format_catalog__test_create_with_keys(
+        exporters, NULL, exporter_count, out, error);
 }

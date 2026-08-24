@@ -51,6 +51,7 @@ void declare_recovery_modal(nt_ui_context_t *ctx);
 
 /* About modal (version / engine / repo link). */
 void declare_about_modal(nt_ui_context_t *ctx);
+void declare_formats_modal(nt_ui_context_t *ctx);
 
 /* Export dialog: every atlas's targets, toggle/browse per target, then Export. */
 void declare_export_modal(nt_ui_context_t *ctx);

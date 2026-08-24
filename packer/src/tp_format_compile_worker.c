@@ -882,3 +882,19 @@ tp_status tp_format_compile_worker_run(
     }
     return complete_scan_with_results(scan, results, result_count, error);
 }
+
+tp_status tp_build_format_catalog_compile(
+    tp_format_catalog_scan **owned_scan, tp_format_catalog **out_catalog,
+    tp_error *error) {
+    if (!owned_scan || !*owned_scan || !out_catalog) {
+        return tp_error_set(error, TP_STATUS_INVALID_ARGUMENT,
+                            "format compile requires an owned scan and output");
+    }
+    *out_catalog = NULL;
+    tp_status status = tp_format_compile_worker_run(*owned_scan, NULL, error);
+    if (status != TP_STATUS_OK) {
+        return status;
+    }
+    return tp_format_catalog_scan_finish_compiled_internal(
+        owned_scan, out_catalog, error);
+}

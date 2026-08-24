@@ -42,6 +42,7 @@
 
 #include "tp_core/tp_pack_result.h" /* tp_result */
 #include "tp_core/tp_id.h"
+#include "tp_core/tp_job.h"
 #include "tp_core/tp_session.h"
 
 #ifdef __cplusplus
@@ -219,6 +220,9 @@ typedef struct {
     int targets;        /* export: enabled targets written */
     int files;          /* export: files committed by successful targets */
     int notices;        /* export: metadata-loss notices */
+    int format_errors;  /* export: handler/package diagnostics */
+    int format_warnings;
+    bool format_diagnostics_truncated;
     int atlases_ok;     /* export: atlases exported OK */
     int atlases_fail;   /* export: atlases that failed */
     int atlases_skipped; /* export: atlases skipped for no usable input */
@@ -229,6 +233,7 @@ typedef struct {
     int changed;
     int unavailable;
     char err[256];      /* failure / first-error text */
+    char format_diagnostic[256]; /* first handler/package diagnostic */
     char note[128];     /* pack: notice text */
 } gui_pack_result_info;
 
@@ -240,6 +245,10 @@ bool gui_pack_format_export_cancelled(const gui_pack_result_info *info,
  * when the failure has no known publication risk. */
 bool gui_pack_format_export_failed(const gui_pack_result_info *info,
                                    char *out, size_t cap);
+#ifdef TP_ENABLE_TEST_SEAMS
+void gui_pack__test_summarize_export_report(
+    const tp_export_command_report *report, gui_pack_result_info *out);
+#endif
 
 /* Starts an async pack of `atlas_id`. false (fills err) if busy or the input can't assemble. */
 bool gui_pack_async_start(tp_id128 atlas_id, char *err, size_t err_cap);

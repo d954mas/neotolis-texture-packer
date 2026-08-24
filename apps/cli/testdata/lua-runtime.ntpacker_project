@@ -1,0 +1,22 @@
+{
+  "version": 5,
+  "atlases": [
+    {
+      "id": "atlas_00000000000000000000000000000121",
+      "name": "lua-runtime",
+      "sources": [
+        {
+          "id": "source_00000000000000000000000000000122",
+          "path": "sprites"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "fixture-minimal",
+          "id": "target_00000000000000000000000000000123",
+          "out_path": "out/lua-runtime"
+        }
+      ]
+    }
+  ]
+}

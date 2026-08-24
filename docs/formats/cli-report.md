@@ -63,11 +63,75 @@ Each exporter `caps` object includes the exact numeric `transform_mask`
 `rotate90` and `flips` booleans remain presentation conveniences and do not
 replace the exact mask. It also includes the exact boolean `animations`.
 
-## Pack report: schema 1
+## Formats report: schema 1
+
+`ntpacker formats --json` is a read-only startup-catalog query and exits 0 for
+an active catalog, a complete fail-closed catalog, and a native fallback. It
+accepts only the global `--json`/`--quiet` options; invalid options exit 2.
+Fields occur in the order shown by the examples and arrays preserve catalog,
+descriptor, output, host-fact, diagnostic, and frame order.
 
 ```json
 {
   "schema": 1,
+  "state": "active",
+  "root": "C:/app/formats",
+  "root_missing": false,
+  "limit_fail_closed": false,
+  "diagnostics": [],
+  "diagnostics_truncated": false,
+  "formats": [{
+    "key": "fixture-full",
+    "implementation": "lua",
+    "available": true,
+    "package_path": "formats/valid-full",
+    "fingerprint": "0123456789abcdef0123456789abcdef",
+    "descriptor": {
+      "api_version": 1,
+      "id": "fixture-full",
+      "display_name": "Fixture Full Surface",
+      "capabilities": {
+        "transforms": ["identity"],
+        "polygons": true,
+        "pivot": true,
+        "slice9": true,
+        "multipage": true,
+        "aliases": true,
+        "animations": true
+      },
+      "outputs": [{"id":"metadata","suffix":".txt"}],
+      "host_facts": []
+    },
+    "diagnostics": [],
+    "diagnostics_truncated": false
+  }]
+}
+```
+
+`root` may be omitted for `native_fallback`; clients must not infer a root from
+process paths. `state` is `active` or `native_fallback`. Fallback adds
+`fallback_reason: {"id":...,"message":...}` before diagnostics. A complete
+catalog-limit outcome remains `active`, sets `limit_fail_closed: true`, contains
+native rows only, and carries one `catalog_limit` root diagnostic. Missing roots
+are complete active native-only catalogs with `root_missing: true`.
+
+Unavailable rows omit `fingerprint` and `descriptor` when those values were not
+admitted, set `available: false`, and retain their row diagnostics. A diagnostic
+has `severity`, `code`, `phase`, optional `format_id`/`package_path`, optional
+positive `line`/`column`, `message`, and optional `frames`; a sanitized frame is
+`{"text":"@formats/pkg/export.lua:handler","line":7}`. The accompanying
+`diagnostics_truncated` boolean is always present and is never inferred from a
+synthetic message.
+
+Bounds are owned by the
+[`lua-package-v1`](lua-package-v1.md#fixed-limits) contract. Exceeding a catalog
+limit publishes no enumeration-order prefix.
+
+## Pack / `export` report: schema 2
+
+```json
+{
+  "schema": 2,
   "dry_run": false,
   "atlases": [{
     "name": "animals",
@@ -85,6 +149,8 @@ replace the exact mask. It also includes the exact boolean `animations`.
       "out_path": "C:/project/out/animals",
       "status": "ok",
       "publication_uncertain": false,
+      "format_diagnostics": [],
+      "format_diagnostics_truncated": false,
       "pack_run": 0,
       "written_files": [
         "C:/project/out/animals.json",
@@ -113,6 +179,11 @@ only when publication failed and rollback could not confirm the complete prior
 artifact set. Clients must surface that outcome and must not retry as if no
 artifact could have been published. Successful targets and dry runs report
 `false`.
+Every target also owns `format_diagnostics` and
+`format_diagnostics_truncated`. Admission, runtime, output, and worker failures
+remain target-attributed; they are never reconstructed from error prose.
+`export` is an exact alias of `pack`, including schema, options, output, and exit
+mapping.
 After all requested atlases are processed, any success combined with any
 failure exits 6. With no successful target, Pack/Export-IR failure exits 4;
 otherwise an all-export-failed run exits 5.

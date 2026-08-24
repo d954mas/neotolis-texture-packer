@@ -5,6 +5,7 @@ Usage:
 
 Commands:
   pack | export <p>  Pack + export every enabled target (== GUI "Export All")
+  formats            List the active export-format catalog and diagnostics
   inspect <project>  Dump project state (--json is the contract; text is a summary)
   validate <project> Report every project problem in one pass
   new <path>         Create a new project (seeded default target); refuses to overwrite

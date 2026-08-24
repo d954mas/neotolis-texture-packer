@@ -4,6 +4,10 @@
 #include "tp_core/tp_export_run.h"
 #include "tp_core/tp_project.h"
 
+typedef tp_status (*tp_export_target_completed_fn)(
+    void *context, int target_index, const tp_export_report *report,
+    const tp_export_notices *notices, tp_error *err);
+
 typedef struct tp_export_run_opts {
     tp_export_report *report;
     const tp_format_catalog *catalog;
@@ -11,7 +15,15 @@ typedef struct tp_export_run_opts {
     const tp_cancel_token *cancel;
     tp_export_terminal_boundary_fn terminal_boundary;
     void *terminal_boundary_context;
+    tp_export_execution_phase_fn execution_phase;
+    void *execution_phase_context;
+    tp_export_target_completed_fn target_completed;
+    void *target_completed_context;
 } tp_export_run_opts;
+
+void tp_export_snapshot_job_set_target_completed_internal(
+    tp_export_snapshot_job *job, tp_export_target_completed_fn callback,
+    void *context);
 
 tp_status tp_export_run(
     const tp_project *project, int atlas_index,

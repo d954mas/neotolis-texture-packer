@@ -1,5 +1,5 @@
 {
-  "schema": 1,
+  "schema": 2,
   "dry_run": true,
   "atlases": [
     {
@@ -22,6 +22,8 @@
           "pack_run": 0,
           "status": "ok",
           "publication_uncertain": false,
+          "format_diagnostics": [],
+          "format_diagnostics_truncated": false,
           "written_files": [],
           "would_write": [
             "<PACK_ROOT>/out/clean.json.json",

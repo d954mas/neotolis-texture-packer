@@ -33,6 +33,91 @@ void cli_out_stdout(const tp_sb *sb) {
     (void)fputc('\n', stdout);
 }
 
+void cli_out_append_format_diagnostics(
+    tp_sb *sb, int depth, const tp_format_diagnostic_report *report) {
+    const size_t count = tp_format_diagnostic_report_count(report);
+    tp_sb_char(sb, '[');
+    for (size_t i = 0U; i < count; ++i) {
+        const tp_format_diagnostic *diagnostic =
+            tp_format_diagnostic_report_at(report, i);
+        if (!diagnostic) {
+            continue;
+        }
+        tp_sb_str(sb, i == 0U ? "\n" : ",\n");
+        tp_sb_indent(sb, depth + 1);
+        tp_sb_char(sb, '{');
+        bool first = true;
+#define FORMAT_DIAGNOSTIC_TEXT(key, value)                                    \
+        do {                                                                  \
+            if (value) {                                                      \
+                if (!first) {                                                 \
+                    tp_sb_str(sb, ",\n");                                  \
+                }                                                             \
+                tp_sb_indent(sb, depth + 2);                                  \
+                tp_sb_json_string(sb, key);                                   \
+                tp_sb_str(sb, ": ");                                        \
+                tp_sb_json_string(sb, value);                                 \
+                first = false;                                                \
+            }                                                                 \
+        } while (0)
+        FORMAT_DIAGNOSTIC_TEXT(
+            "severity",
+            tp_format_diagnostic_severity_id(diagnostic->severity));
+        FORMAT_DIAGNOSTIC_TEXT(
+            "code", tp_format_diagnostic_code_id(diagnostic->code));
+        FORMAT_DIAGNOSTIC_TEXT(
+            "phase", tp_format_diagnostic_phase_id(diagnostic->phase));
+        FORMAT_DIAGNOSTIC_TEXT("format_id", diagnostic->format_id);
+        FORMAT_DIAGNOSTIC_TEXT("package_path", diagnostic->package_path);
+        if (diagnostic->line > 0U) {
+            tp_sb_str(sb, ",\n");
+            tp_sb_indent(sb, depth + 2);
+            tp_sb_json_string(sb, "line");
+            tp_sb_str(sb, ": ");
+            tp_sb_int(sb, (int)diagnostic->line);
+        }
+        if (diagnostic->column > 0U) {
+            tp_sb_str(sb, ",\n");
+            tp_sb_indent(sb, depth + 2);
+            tp_sb_json_string(sb, "column");
+            tp_sb_str(sb, ": ");
+            tp_sb_int(sb, (int)diagnostic->column);
+        }
+        FORMAT_DIAGNOSTIC_TEXT("message", diagnostic->message);
+        if (diagnostic->frame_count > 0U) {
+            tp_sb_str(sb, ",\n");
+            tp_sb_indent(sb, depth + 2);
+            tp_sb_json_string(sb, "frames");
+            tp_sb_str(sb, ": [");
+            for (size_t frame = 0U; frame < diagnostic->frame_count; ++frame) {
+                tp_sb_str(sb, frame == 0U ? "\n" : ",\n");
+                tp_sb_indent(sb, depth + 3);
+                tp_sb_char(sb, '{');
+                tp_sb_json_string(sb, "text");
+                tp_sb_str(sb, ": ");
+                tp_sb_json_string(sb, diagnostic->frames[frame].text);
+                tp_sb_str(sb, ", ");
+                tp_sb_json_string(sb, "line");
+                tp_sb_str(sb, ": ");
+                tp_sb_int(sb, (int)diagnostic->frames[frame].line);
+                tp_sb_char(sb, '}');
+            }
+            tp_sb_str(sb, "\n");
+            tp_sb_indent(sb, depth + 2);
+            tp_sb_char(sb, ']');
+        }
+        tp_sb_str(sb, "\n");
+        tp_sb_indent(sb, depth + 1);
+        tp_sb_char(sb, '}');
+#undef FORMAT_DIAGNOSTIC_TEXT
+    }
+    if (count > 0U) {
+        tp_sb_str(sb, "\n");
+        tp_sb_indent(sb, depth);
+    }
+    tp_sb_char(sb, ']');
+}
+
 /* Shared body for cli_emit_error / cli_emit_reject: formats the message once, then
  * emits. JSON mode -> {"schema":1,"error":{"id":...,"message":...[,"field":...,
  * "op_index":...]}} to STDOUT; text mode -> "ntpacker: error [id]: msg" to STDERR

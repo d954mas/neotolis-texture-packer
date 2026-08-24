@@ -59,7 +59,7 @@ nt_font_t s_font;
 bool s_font_bound;
 
 /* --- UI ids --- */
-uint32_t s_id_btn_pack, s_id_btn_export, s_id_btn_refresh, s_id_vlist, s_id_modal, s_id_about;
+uint32_t s_id_btn_pack, s_id_btn_export, s_id_btn_refresh, s_id_vlist, s_id_modal, s_id_about, s_id_formats;
 uint32_t s_id_canvas;
 uint32_t s_id_rename;
 uint32_t s_id_right_panel;
@@ -150,6 +150,7 @@ bool s_sec_anim_open = true;
 
 /* --- modal open flags (shared with the selftest) --- */
 bool s_about_open;
+bool s_formats_open;
 bool s_export_open;
 
 /* --- context-menu shared state (written by left panel/canvas/settings,

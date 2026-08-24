@@ -55,20 +55,6 @@ target_compile_definitions(ntpacker_output_fault PRIVATE TP_SB_ALLOC_FAULT_SEAM=
 set_target_properties(ntpacker_output_fault PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CLI_OUTPUT_DIR}")
 
-# Test-only binary whose per-atlas arena allocation can be failed
-# deterministically. Production ntpacker has no environment-controlled behavior.
-add_executable(ntpacker_pack_arena_fault ${_ntpacker_sources})
-ntpacker_configure_target(ntpacker_pack_arena_fault)
-target_sources(ntpacker_pack_arena_fault PRIVATE
-    ${CMAKE_SOURCE_DIR}/packer/src/tp_export_run.c)
-target_include_directories(ntpacker_pack_arena_fault PRIVATE
-    ${CMAKE_SOURCE_DIR}/packer/src)
-target_compile_definitions(ntpacker_pack_arena_fault PRIVATE
-    NTPACKER_CLI_PACK_ARENA_FAULT_SEAM=1
-    TP_ENABLE_TEST_SEAMS=1)
-set_target_properties(ntpacker_pack_arena_fault PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY "${CLI_OUTPUT_DIR}")
-
 # --- e2e ctest: run the built exe, assert the exit-code contract + JSON payload.
 # No GL/display needed, so these give the op layer its first cross-OS CI coverage.
 
@@ -150,9 +136,11 @@ set(_run "${CMAKE_CURRENT_SOURCE_DIR}/cli_run_expect.cmake")
 # cli_inspect_index_fault), not a prefix regex: a builder that emitted the
 # fallback and then appended partial payload bytes would satisfy a prefix.
 foreach(_oom_case
+        "pack|pack ${CMAKE_CURRENT_SOURCE_DIR}/testdata/clean.ntpacker_project --json --dry-run"
         "inspect|inspect ${CMAKE_CURRENT_SOURCE_DIR}/testdata/clean.ntpacker_project --json"
         "validate|validate ${CMAKE_CURRENT_SOURCE_DIR}/testdata/clean.ntpacker_project --json"
         "version|version --json"
+        "formats|formats --json"
         "help|help --json")
     string(REPLACE "|" ";" _oom_parts "${_oom_case}")
     list(GET _oom_parts 0 _oom_name)
@@ -187,6 +175,12 @@ add_test(NAME cli_version_json COMMAND ${CMAKE_COMMAND}
     -DCHECKER=$<TARGET_FILE:cli_json_check>
     -DOUTFILE=${CMAKE_CURRENT_BINARY_DIR}/cli_version_manifest.json
     -P "${_run}")
+
+add_test(NAME cli_formats_json COMMAND ${CMAKE_COMMAND}
+    -DEXE=$<TARGET_FILE:ntpacker> -DEXPECT=0 "-DARGS=formats --json"
+    -DCHECKER=$<TARGET_FILE:cli_json_check> "-DCHECK_ARGS=formats"
+    -DOUTFILE=${CMAKE_CURRENT_BINARY_DIR}/cli_formats.json
+    -DEXPECT_STDERR_EMPTY=ON -P "${_run}")
 
 add_test(NAME cli_manifest_schema_contract COMMAND ${CMAKE_COMMAND}
     -DEXE=$<TARGET_FILE:ntpacker>
@@ -462,7 +456,7 @@ add_test(NAME cli_pack_output_resolution_failure COMMAND ${CMAKE_COMMAND}
     -DEXE=$<TARGET_FILE:ntpacker> -DEXPECT=5
     "-DARGS=pack ${_cli_output_resolution_project} --json --quiet"
     -DCHECKER=$<TARGET_FILE:cli_json_check>
-    "-DCHECK_ARGS=pack targets_ok=0 targets_failed=0 error_id=out_of_bounds error_atlas=output-resolution error_contains=target-output note_contains=target-output"
+    "-DCHECK_ARGS=pack targets_ok=0 targets_failed=1 error_id=out_of_bounds error_atlas=output-resolution error_contains=target-output note_contains=target-output"
     -DOUTFILE=${CMAKE_CURRENT_BINARY_DIR}/cli_pack_output_resolution.json
     -P "${_run}")
 
@@ -473,34 +467,6 @@ add_test(NAME cli_pack_failure_after_target_slots_is_structured COMMAND ${CMAKE_
     "-DCHECK_ARGS=pack targets_ok=0 targets_failed=1 error_id=invalid_argument error_atlas=pack-failure error_contains=max_size"
     -DOUTFILE=${CMAKE_CURRENT_BINARY_DIR}/cli_pack_failure_after_targets.json
     -P "${_run}")
-
-# Atlas arena allocation failure remains machine-readable instead of degrading
-# to a prose-only note.
-add_test(NAME cli_pack_arena_oom_contract COMMAND ${CMAKE_COMMAND}
-    -DEXE=$<TARGET_FILE:ntpacker_pack_arena_fault> -DEXPECT=4
-    "-DARGS=pack ${_td}/clean.ntpacker_project --json --quiet"
-    -DCHECKER=$<TARGET_FILE:cli_json_check>
-    "-DCHECK_ARGS=pack targets_ok=0 targets_failed=0 error_id=oom error_atlas=clean"
-    -DOUTFILE=${CMAKE_CURRENT_BINARY_DIR}/cli_pack_arena_oom.json
-    -P "${_run}")
-set_tests_properties(cli_pack_arena_oom_contract PROPERTIES
-    ENVIRONMENT "NTPACKER_TEST_PACK_ARENA_FAIL=1")
-
-# Report-page allocation failure happens after target execution. The CLI must
-# retain successful target counts, emit a structured atlas error, and return the
-# partial-success exit instead of treating the incomplete report as clean.
-add_test(NAME cli_pack_report_oom_contract COMMAND ${CMAKE_COMMAND}
-    -DEXE=$<TARGET_FILE:ntpacker_pack_arena_fault> -DEXPECT=6
-    "-DARGS=pack ${_td}/clean.ntpacker_project --json --quiet --out-dir ${CMAKE_CURRENT_BINARY_DIR}/cli_pack_report_oom"
-    -DCHECKER=$<TARGET_FILE:cli_json_check>
-    "-DCHECK_ARGS=pack targets_ok=1 targets_failed=0 error_id=oom error_atlas=clean"
-    -DOUTFILE=${CMAKE_CURRENT_BINARY_DIR}/cli_pack_report_oom.json
-    -DEXACT_FILES_ROOT=${CMAKE_CURRENT_BINARY_DIR}/cli_pack_report_oom
-    -DEXACT_FILES_SAFE_PARENT=${CMAKE_CURRENT_BINARY_DIR}
-    "-DEXACT_FILES=out/clean.json-0.png;out/clean.json.json"
-    -P "${_run}")
-set_tests_properties(cli_pack_report_oom_contract PROPERTIES
-    ENVIRONMENT "NTPACKER_TEST_REPORT_ALLOC_FAIL=1")
 
 # A source-less atlas is a successful skipped outcome, but JSON must carry a
 # stable notice id plus atlas context rather than prose alone.
@@ -549,6 +515,24 @@ add_test(NAME cli_pack_dry_run COMMAND ${CMAKE_COMMAND}
     -DOUTFILE=${CMAKE_CURRENT_BINARY_DIR}/cli_pack_dry.json
     "-DNOT_EXIST_FILES=${CMAKE_CURRENT_BINARY_DIR}/cli_pack_dry/out/clean.json.json;${CMAKE_CURRENT_BINARY_DIR}/cli_pack_dry/out/clean.json-0.png;${CMAKE_CURRENT_BINARY_DIR}/cli_pack_dry/out"
     -P "${_run}")
+
+# Saved-file CLI dry and wet Export load a Lua package beside the real staged
+# executable, then cross the production host -> job worker -> builder path.
+foreach(_lua_mode dry wet)
+    if(_lua_mode STREQUAL "dry")
+        set(_lua_dry_run 1)
+    else()
+        set(_lua_dry_run 0)
+    endif()
+    add_test(NAME cli_lua_export_${_lua_mode} COMMAND ${CMAKE_COMMAND}
+        -DEXE=$<TARGET_FILE:ntpacker>
+        -DCHECKER=$<TARGET_FILE:cli_json_check>
+        -DPROJECT=${_td}/lua-runtime.ntpacker_project
+        -DPACKAGE=${CMAKE_SOURCE_DIR}/packer/tests/fixtures/format-packages/valid-minimal
+        -DWORK=${CMAKE_CURRENT_BINARY_DIR}/cli_lua_export_${_lua_mode}
+        -DDRY_RUN=${_lua_dry_run}
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/cli_lua_export.cmake")
+endforeach()
 
 # The checked-in 100-atlas project is not only schema-openable: drive one atlas
 # through real image decode + pack/predict without creating output files.

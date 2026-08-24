@@ -16,6 +16,8 @@
 #include <stdint.h>
 
 #include "tp_core/tp_job.h"
+#include "tp_export_command_report_internal.h"
+#include "tp_format_binding_proto_internal.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -23,12 +25,12 @@ extern "C" {
 
 #define TP_JOB_WORKER_PROTO_REQUEST_MAGIC 0x574A5450u  /* "PTJW" */
 #define TP_JOB_WORKER_PROTO_PROGRESS_MAGIC 0x504A5450u /* "PTJP" */
+#define TP_JOB_WORKER_PROTO_FRAGMENT_MAGIC 0x464A5450u /* "PTJF" */
 #define TP_JOB_WORKER_PROTO_RESPONSE_MAGIC 0x524A5450u /* "PTJR" */
-/* v2: the Pack terminal carries the artifact PATH + expected size instead of
- * the artifact bytes. A v1 peer is rejected with TP_STATUS_BAD_VERSION rather
- * than silently misreading the Pack payload, so parent and child must always be
- * the same binary (they are: the worker is a re-exec of this executable). */
-#define TP_JOB_WORKER_PROTO_VERSION 2u
+/* v5: Export terminal aggregates were removed. Export outcomes travel only in
+ * bounded fragment frames and the host-owned report is the sole result owner.
+ * Parent and child are one re-exec'd binary, so older peers fail by version. */
+#define TP_JOB_WORKER_PROTO_VERSION 5u
 
 /* Exact admission caps. Project JSON uses the same cap as project-file
  * identity. Paths and exporter IDs reserve one byte for the decoded NUL. */
@@ -37,6 +39,8 @@ extern "C" {
 #define TP_JOB_WORKER_PROTO_MAX_PATH_BYTES ((size_t)TP_IDENTITY_PATH_MAX - 1U)
 #define TP_JOB_WORKER_PROTO_MAX_EXPORTER_ID_BYTES                              \
   ((size_t)TP_EXPORTER_ID_MAX - 1U)
+#define TP_JOB_WORKER_PROTO_MAX_FORMAT_BINDING_BYTES                            \
+  (TP_FORMAT_BINDING_PROTO_MAX_FRAME_BYTES + 12ULL)
 #define TP_JOB_WORKER_PROTO_MAX_ERROR_BYTES 255U
 #define TP_JOB_WORKER_PROTO_MAX_RESULT_COUNT 1000000
 #define TP_JOB_WORKER_PROTO_MAX_NAME_ENTRIES 65536U
@@ -57,7 +61,9 @@ extern "C" {
  * stream cap adds one more 16 MiB window for the progress frames preceding the
  * terminal. */
 #define TP_JOB_WORKER_PROTO_MAX_FRAME_BYTES                                    \
-  (TP_JOB_WORKER_PROTO_MAX_PROJECT_JSON_BYTES + ((size_t)16U << 20))
+  (TP_JOB_WORKER_PROTO_MAX_PROJECT_JSON_BYTES +                                \
+   (size_t)TP_JOB_WORKER_PROTO_MAX_FORMAT_BINDING_BYTES +                       \
+   ((size_t)16U << 20))
 #define TP_JOB_WORKER_PROTO_MAX_STREAM_BYTES                                   \
   (TP_JOB_WORKER_PROTO_MAX_FRAME_BYTES + ((size_t)16U << 20))
 #define TP_JOB_WORKER_PROTO_MAX_PROGRESS_FRAMES 65536U
@@ -76,11 +82,18 @@ typedef struct tp_job_worker_proto_request {
    * host. Bytes need not be NUL-terminated for encode. */
   const uint8_t *project_json;
   size_t project_json_len;
+  /* Exact admission-owned binding frame. The worker decodes this snapshot and
+   * never reopens the startup formats root or resolves a later handler by ID. */
+  const uint8_t *format_bindings;
+  size_t format_bindings_len;
   tp_id128 atlas_id;
   /* Canonical project parent used to resolve relative Export out_paths. */
   const char *project_dir;
   const char *work_dir;
   const char *preview_exporter_id;
+  const char *target_exporter_id;
+  const char *out_dir;
+  bool dry_run;
   tp_session_input_token input_token;
 } tp_job_worker_proto_request;
 
@@ -127,10 +140,7 @@ typedef struct tp_job_worker_proto_response {
   tp_status status;
   tp_error error;
   double elapsed_ms;
-  union {
-    tp_job_worker_proto_pack_result pack;
-    tp_session_export_job_result export_result;
-  };
+  tp_job_worker_proto_pack_result pack;
 } tp_job_worker_proto_response;
 
 typedef enum tp_job_worker_progress_phase {
@@ -142,7 +152,17 @@ typedef enum tp_job_worker_progress_phase {
   TP_JOB_WORKER_PHASE_EXPORT_WRITE,
   /* Cross-process terminal linearization: the final eligible Export writer
    * returned and no output side effects remain. */
-  TP_JOB_WORKER_PHASE_EXPORT_TERMINAL_BOUNDARY
+  TP_JOB_WORKER_PHASE_EXPORT_TERMINAL_BOUNDARY,
+  TP_JOB_WORKER_PHASE_EXPORT_SERIALIZE,
+  TP_JOB_WORKER_PHASE_EXPORT_READY,
+  TP_JOB_WORKER_PHASE_EXPORT_PUBLICATION_BEGIN,
+  TP_JOB_WORKER_PHASE_EXPORT_TARGET_COMPLETE,
+  /* Private marker emitted only by the worker's lua_atpanic callback. It is
+   * valid solely while a Lua target is in serialization. */
+  TP_JOB_WORKER_PHASE_EXPORT_HANDLER_PANIC,
+  /* Exact worker admission identified the active serializer as Lua. Kept as a
+   * distinct wire phase so the panic marker cannot bless a generic crash. */
+  TP_JOB_WORKER_PHASE_EXPORT_LUA_SERIALIZE
 } tp_job_worker_progress_phase;
 
 typedef struct tp_job_worker_proto_progress {
@@ -152,8 +172,14 @@ typedef struct tp_job_worker_proto_progress {
   tp_job_worker_progress_phase phase;
 } tp_job_worker_proto_progress;
 
+typedef struct tp_job_worker_proto_fragment {
+  uint64_t request_id;
+  tp_export_command_outcome outcome;
+} tp_job_worker_proto_fragment;
+
 typedef enum tp_job_worker_stream_message_kind {
   TP_JOB_WORKER_STREAM_PROGRESS = 1,
+  TP_JOB_WORKER_STREAM_FRAGMENT,
   TP_JOB_WORKER_STREAM_TERMINAL
 } tp_job_worker_stream_message_kind;
 
@@ -161,6 +187,7 @@ typedef struct tp_job_worker_proto_stream_message {
   tp_job_worker_stream_message_kind kind;
   union {
     tp_job_worker_proto_progress progress;
+    tp_job_worker_proto_fragment fragment;
     tp_job_worker_proto_response terminal;
   };
 } tp_job_worker_proto_stream_message;
@@ -197,6 +224,14 @@ tp_status tp_job_worker_proto_encode_progress(
 tp_status tp_job_worker_proto_decode_progress(const uint8_t *bytes, size_t len,
                                               tp_job_worker_proto_progress *out,
                                               tp_error *err);
+tp_status tp_job_worker_proto_encode_fragment(
+    const tp_job_worker_proto_fragment *fragment, uint8_t **out_bytes,
+    size_t *out_len, tp_error *err);
+tp_status tp_job_worker_proto_decode_fragment(
+    const uint8_t *bytes, size_t len, tp_job_worker_proto_fragment *out,
+    tp_error *err);
+void tp_job_worker_proto_fragment_free(
+    tp_job_worker_proto_fragment *fragment);
 
 void tp_job_worker_proto_stream_init(tp_job_worker_proto_stream *stream);
 void tp_job_worker_proto_stream_destroy(tp_job_worker_proto_stream *stream);

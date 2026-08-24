@@ -5,8 +5,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "core/nt_assert.h"
 #include "tp_core/tp_export.h"
 #include "tp_export_internal.h"
+#include "tp_format_binding_proto_internal.h"
 
 struct tp_format_catalog {
     atomic_size_t reference_count;
@@ -28,6 +30,14 @@ static void owned_row_destroy(tp_format_catalog_owned_row *row) {
     if (!row) {
         return;
     }
+    if (row->owns_exporter_binding && row->exporter_binding) {
+        tp_exporter *binding = (tp_exporter *)row->exporter_binding;
+        if (binding->destroy) {
+            binding->destroy(binding);
+        } else {
+            free(binding);
+        }
+    }
     free(row->key);
     free(row->package_path);
     tp_format_owned_descriptor_destroy(row->owned_descriptor);
@@ -35,6 +45,14 @@ static void owned_row_destroy(tp_format_catalog_owned_row *row) {
     free(row->descriptor_bytes);
     free(row->source_bytes);
     memset(row, 0, sizeof *row);
+}
+
+void tp_format_catalog_owned_rows_destroy_internal(
+    tp_format_catalog_owned_row *rows, size_t row_count) {
+    for (size_t i = 0U; i < row_count; ++i) {
+        owned_row_destroy(&rows[i]);
+    }
+    free(rows);
 }
 
 tp_format_catalog *tp_format_catalog_native(void) {
@@ -67,10 +85,8 @@ void tp_format_catalog_release(tp_format_catalog *catalog) {
                                   memory_order_acq_rel) != 1U) {
         return;
     }
-    for (size_t i = 0U; i < catalog->row_count; ++i) {
-        owned_row_destroy(&catalog->rows[i]);
-    }
-    free(catalog->rows);
+    tp_format_catalog_owned_rows_destroy_internal(
+        catalog->rows, catalog->row_count);
     free(catalog->root);
     tp_format_diagnostic_report_destroy(catalog->root_diagnostics);
     free(catalog);
@@ -143,13 +159,13 @@ bool tp_format_catalog_row_at(const tp_format_catalog *catalog, size_t index,
         .descriptor = tp_format_owned_descriptor_view(row->owned_descriptor),
         .diagnostics = row->diagnostics,
     };
-    if (!out->descriptor && row->native_binding) {
-        out->descriptor = row->native_binding->format;
+    if (!out->descriptor && row->exporter_binding) {
+        out->descriptor = row->exporter_binding->format;
     }
     return true;
 }
 
-static const tp_format_catalog_owned_row *find_owned_row(
+static const tp_format_catalog_owned_row *find_owned_format_row(
     const tp_format_catalog *catalog, const char *id) {
     if (!catalog || !id) {
         return NULL;
@@ -158,10 +174,24 @@ static const tp_format_catalog_owned_row *find_owned_row(
         const tp_format_catalog_owned_row *row = &catalog->rows[i];
         const tp_format_descriptor *descriptor =
             tp_format_owned_descriptor_view(row->owned_descriptor);
-        if (!descriptor && row->native_binding) {
-            descriptor = row->native_binding->format;
+        if (!descriptor && row->exporter_binding) {
+            descriptor = row->exporter_binding->format;
         }
         if (descriptor && descriptor->id && strcmp(descriptor->id, id) == 0) {
+            return row;
+        }
+    }
+    return NULL;
+}
+
+static const tp_format_catalog_owned_row *find_unavailable_package_row(
+    const tp_format_catalog *catalog, const char *key) {
+    if (!catalog || !key) {
+        return NULL;
+    }
+    for (size_t i = 0U; i < catalog->row_count; ++i) {
+        const tp_format_catalog_owned_row *row = &catalog->rows[i];
+        if (!row->available && row->key && strcmp(row->key, key) == 0) {
             return row;
         }
     }
@@ -177,14 +207,15 @@ const tp_format_descriptor *tp_format_catalog_find_available(
     if (native) {
         return native->format;
     }
-    const tp_format_catalog_owned_row *row = find_owned_row(catalog, id);
+    const tp_format_catalog_owned_row *row =
+        find_owned_format_row(catalog, id);
     if (!row || !row->available) {
         return NULL;
     }
     if (row->owned_descriptor) {
         return tp_format_owned_descriptor_view(row->owned_descriptor);
     }
-    return row->native_binding ? row->native_binding->format : NULL;
+    return row->exporter_binding ? row->exporter_binding->format : NULL;
 }
 
 tp_status tp_format_catalog_resolve(const tp_format_catalog *catalog,
@@ -207,7 +238,11 @@ tp_status tp_format_catalog_resolve(const tp_format_catalog *catalog,
         out->descriptor = native->format;
         return TP_STATUS_OK;
     }
-    const tp_format_catalog_owned_row *row = find_owned_row(catalog, id);
+    const tp_format_catalog_owned_row *row =
+        find_owned_format_row(catalog, id);
+    if (!row) {
+        row = find_unavailable_package_row(catalog, id);
+    }
     if (!row) {
         out->state = TP_FORMAT_RESOLUTION_ABSENT;
         return TP_STATUS_OK;
@@ -220,7 +255,7 @@ tp_status tp_format_catalog_resolve(const tp_format_catalog *catalog,
         out->descriptor = row->owned_descriptor
                               ? tp_format_owned_descriptor_view(
                                     row->owned_descriptor)
-                              : row->native_binding->format;
+                              : row->exporter_binding->format;
     }
     return TP_STATUS_OK;
 }
@@ -251,6 +286,161 @@ const tp_exporter *tp_format_catalog_exporter_find(
     if (native) {
         return native;
     }
-    const tp_format_catalog_owned_row *row = find_owned_row(catalog, id);
-    return row && row->available ? row->native_binding : NULL;
+    const tp_format_catalog_owned_row *row =
+        find_owned_format_row(catalog, id);
+    return row && row->available ? row->exporter_binding : NULL;
+}
+
+static tp_status capture_append_diagnostics(
+    const tp_format_diagnostic_report *report,
+    tp_format_binding_proto_value *value,
+    tp_format_binding_proto_resolution *resolution, tp_error *error) {
+    const size_t count = tp_format_diagnostic_report_count(report);
+    if (count == 0U) {
+        resolution->diagnostic_offset = 0U;
+        resolution->diagnostic_count = 0U;
+        return TP_STATUS_OK;
+    }
+    if (count > TP_FORMAT_BINDING_PROTO_MAX_DIAGNOSTICS -
+                    value->diagnostic_count) {
+        return tp_error_set(error, TP_STATUS_OUT_OF_BOUNDS,
+                            "format binding diagnostic count exceeds its cap");
+    }
+    const size_t needed = value->diagnostic_count + count;
+    tp_format_diagnostic *grown = realloc(
+        value->diagnostics, needed * sizeof *grown);
+    if (!grown) {
+        return tp_error_set(error, TP_STATUS_OOM,
+                            "format binding diagnostic capture failed");
+    }
+    value->diagnostics = grown;
+    resolution->diagnostic_offset = (uint32_t)value->diagnostic_count;
+    resolution->diagnostic_count = (uint32_t)count;
+    for (size_t i = 0U; i < count; ++i) {
+        const tp_format_diagnostic *diagnostic =
+            tp_format_diagnostic_report_at(report, i);
+        NT_ASSERT(diagnostic);
+        value->diagnostics[value->diagnostic_count++] = *diagnostic;
+    }
+    return TP_STATUS_OK;
+}
+
+static tp_status capture_resolution(
+    const tp_format_catalog *catalog, const char *format_id,
+    tp_format_binding_proto_value *value,
+    tp_format_binding_proto_resolution *out, tp_error *error) {
+    memset(out, 0, sizeof *out);
+    if (!format_id || format_id[0] == '\0') {
+        out->kind = TP_FORMAT_BINDING_RESOLUTION_ABSENT;
+        return TP_STATUS_OK;
+    }
+    const tp_exporter *native = tp_native_exporter_find(format_id);
+    const tp_format_catalog_owned_row *row =
+        find_owned_format_row(catalog, format_id);
+    if (!row) {
+        row = find_unavailable_package_row(catalog, format_id);
+    }
+    const tp_format_descriptor *descriptor =
+        native ? native->format
+               : row && row->owned_descriptor
+                     ? tp_format_owned_descriptor_view(row->owned_descriptor)
+                     : row && row->exporter_binding
+                           ? row->exporter_binding->format
+                           : NULL;
+    if (!native && (!row || !row->available)) {
+        out->kind = row ? TP_FORMAT_BINDING_RESOLUTION_UNAVAILABLE
+                        : TP_FORMAT_BINDING_RESOLUTION_ABSENT;
+        out->binding_index = UINT32_MAX;
+        return row ? capture_append_diagnostics(row->diagnostics, value, out,
+                                                error)
+                   : TP_STATUS_OK;
+    }
+    NT_ASSERT(descriptor);
+    size_t binding_index = value->binding_count;
+    for (size_t i = 0U; i < value->binding_count; ++i) {
+        if (value->bindings[i].descriptor &&
+            strcmp(value->bindings[i].descriptor->id, descriptor->id) == 0 &&
+            (native || strcmp(value->bindings[i].fingerprint,
+                              row->fingerprint) == 0)) {
+            binding_index = i;
+            break;
+        }
+    }
+    if (binding_index == value->binding_count) {
+        if (value->binding_count >= TP_FORMAT_BINDING_PROTO_MAX_BINDINGS) {
+            return tp_error_set(error, TP_STATUS_OUT_OF_BOUNDS,
+                                "format binding count exceeds its cap");
+        }
+        tp_format_binding_proto_binding *grown = realloc(
+            value->bindings,
+            (value->binding_count + 1U) * sizeof *grown);
+        if (!grown) {
+            return tp_error_set(error, TP_STATUS_OOM,
+                                "format binding capture allocation failed");
+        }
+        value->bindings = grown;
+        tp_format_binding_proto_binding *binding =
+            &value->bindings[value->binding_count++];
+        memset(binding, 0, sizeof *binding);
+        binding->implementation = native
+                                      ? TP_FORMAT_IMPLEMENTATION_NATIVE
+                                      : row->implementation;
+        binding->descriptor = descriptor;
+        if (!native && row->implementation == TP_FORMAT_IMPLEMENTATION_LUA) {
+            binding->api_version = descriptor->api_version;
+            binding->package_path = row->package_path;
+            memcpy(binding->fingerprint, row->fingerprint,
+                   sizeof binding->fingerprint);
+            binding->descriptor_bytes = row->descriptor_bytes;
+            binding->descriptor_byte_count = row->descriptor_byte_count;
+            binding->source_bytes = row->source_bytes;
+            binding->source_byte_count = row->source_byte_count;
+        }
+    }
+    out->kind = TP_FORMAT_BINDING_RESOLUTION_BINDING;
+    out->binding_index = (uint32_t)binding_index;
+    return TP_STATUS_OK;
+}
+
+tp_status tp_format_catalog_encode_bindings_internal(
+    const tp_format_catalog *catalog, const char *preview_format_id,
+    const tp_format_binding_capture_target *targets, size_t target_count,
+    uint8_t **out_bytes, size_t *out_length, tp_error *error) {
+    if (out_bytes) {
+        *out_bytes = NULL;
+    }
+    if (out_length) {
+        *out_length = 0U;
+    }
+    if (!catalog || !out_bytes || !out_length ||
+        target_count > TP_FORMAT_BINDING_PROTO_MAX_TARGET_REFS ||
+        (target_count > 0U && !targets)) {
+        return tp_error_set(error, TP_STATUS_INVALID_ARGUMENT,
+                            "format binding capture requires a catalog and bounded targets");
+    }
+    tp_format_binding_proto_value value = {0};
+    tp_status status = capture_resolution(catalog, preview_format_id, &value,
+                                          &value.preview, error);
+    if (status == TP_STATUS_OK && target_count > 0U) {
+        value.targets = calloc(target_count, sizeof *value.targets);
+        if (!value.targets) {
+            status = tp_error_set(error, TP_STATUS_OOM,
+                                  "format binding target capture failed");
+        }
+    }
+    for (size_t i = 0U; status == TP_STATUS_OK && i < target_count; ++i) {
+        value.targets[i].atlas_id = targets[i].atlas_id;
+        value.targets[i].target_id = targets[i].target_id;
+        status = capture_resolution(catalog, targets[i].format_id, &value,
+                                    &value.targets[i].resolution, error);
+    }
+    value.target_count = status == TP_STATUS_OK ? target_count : 0U;
+    if (status == TP_STATUS_OK) {
+        status = tp_format_binding_proto_encode(&value, out_bytes, out_length,
+                                                error);
+    }
+    free(value.bindings);
+    free(value.targets);
+    free(value.diagnostics);
+    return status;
 }

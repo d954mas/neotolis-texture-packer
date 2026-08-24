@@ -4,7 +4,7 @@
  * stdout straight into a JSON parser.
  *
  *   cli_json_check <file> [mode] [k=v ...]
- *     mode = manifest (default) | help | inspect | validate | pack | anim | mutation
+ *     mode = manifest (default) | formats | help | inspect | validate | pack | anim | mutation
  *     inspect : sprites=N  -> atlases[0].sprites has exactly N entries
  *     validate: error=N warning=N  -> counts assertions
  *               code=NAME (repeatable) -> a finding with that code exists
@@ -69,6 +69,13 @@ static int check_manifest(const cJSON *root) {
     if (!cJSON_IsObject(verbs)) {
         return fail("missing/!object: verbs");
     }
+    const cJSON *pack_schema = cJSON_GetObjectItemCaseSensitive(verbs, "pack");
+    const cJSON *formats_schema =
+        cJSON_GetObjectItemCaseSensitive(verbs, "formats");
+    if (!cJSON_IsNumber(pack_schema) || pack_schema->valueint != 2 ||
+        !cJSON_IsNumber(formats_schema) || formats_schema->valueint != 1) {
+        return fail("manifest: pack/formats schema advertisement is invalid");
+    }
     static const char *const mutation_verbs[] = {
         "new", "add", "remove", "set", "sprite", "anim", "target", "atlas",
     };
@@ -107,6 +114,48 @@ static int check_manifest(const cJSON *root) {
             !cJSON_IsObject(caps) || !cJSON_IsNumber(transform_mask) ||
             transform_mask->valueint < 1 || transform_mask->valueint > 255) {
             return fail("an exporter entry is missing id/name/ext/caps");
+        }
+    }
+    return 0;
+}
+
+static int check_formats(const cJSON *root) {
+    const cJSON *schema = cJSON_GetObjectItemCaseSensitive(root, "schema");
+    const cJSON *state = cJSON_GetObjectItemCaseSensitive(root, "state");
+    const cJSON *rows = cJSON_GetObjectItemCaseSensitive(root, "formats");
+    if (!cJSON_IsNumber(schema) || schema->valueint != 1 ||
+        !cJSON_IsString(state) || !cJSON_IsArray(rows) ||
+        !cJSON_IsArray(cJSON_GetObjectItemCaseSensitive(root, "diagnostics")) ||
+        !cJSON_IsBool(cJSON_GetObjectItemCaseSensitive(
+            root, "diagnostics_truncated"))) {
+        return fail("formats: invalid root shape");
+    }
+    const cJSON *row = NULL;
+    cJSON_ArrayForEach(row, rows) {
+        const cJSON *descriptor =
+            cJSON_GetObjectItemCaseSensitive(row, "descriptor");
+        if (!cJSON_IsString(cJSON_GetObjectItemCaseSensitive(row, "key")) ||
+            !cJSON_IsString(cJSON_GetObjectItemCaseSensitive(
+                row, "implementation")) ||
+            !cJSON_IsBool(cJSON_GetObjectItemCaseSensitive(row, "available")) ||
+            !cJSON_IsArray(cJSON_GetObjectItemCaseSensitive(row, "diagnostics")) ||
+            !cJSON_IsBool(cJSON_GetObjectItemCaseSensitive(
+                row, "diagnostics_truncated"))) {
+            return fail("formats: invalid row shape");
+        }
+        if (descriptor) {
+            const cJSON *caps = cJSON_GetObjectItemCaseSensitive(
+                descriptor, "capabilities");
+            if (!cJSON_IsString(cJSON_GetObjectItemCaseSensitive(
+                    descriptor, "id")) ||
+                !cJSON_IsArray(cJSON_GetObjectItemCaseSensitive(
+                    caps, "transforms")) ||
+                !cJSON_IsArray(cJSON_GetObjectItemCaseSensitive(
+                    descriptor, "outputs")) ||
+                !cJSON_IsArray(cJSON_GetObjectItemCaseSensitive(
+                    descriptor, "host_facts"))) {
+                return fail("formats: invalid descriptor shape");
+            }
         }
     }
     return 0;
@@ -328,8 +377,8 @@ static int check_mutation(const cJSON *root, int argc, char **argv) {
 /* --- pack --json --- */
 static int check_pack(const cJSON *root, int argc, char **argv) {
     const cJSON *schema = cJSON_GetObjectItemCaseSensitive(root, "schema");
-    if (!cJSON_IsNumber(schema) || schema->valueint != 1) {
-        return fail("pack: schema must equal 1");
+    if (!cJSON_IsNumber(schema) || schema->valueint != 2) {
+        return fail("pack: schema must equal 2");
     }
     const cJSON *atlases = cJSON_GetObjectItemCaseSensitive(root, "atlases");
     if (!cJSON_IsArray(atlases) || cJSON_GetArraySize(atlases) == 0) {
@@ -361,9 +410,13 @@ static int check_pack(const cJSON *root, int argc, char **argv) {
         const cJSON *report_target = NULL;
         cJSON_ArrayForEach(report_target, report_targets) {
             if (!cJSON_IsBool(cJSON_GetObjectItemCaseSensitive(
-                    report_target, "publication_uncertain"))) {
+                    report_target, "publication_uncertain")) ||
+                !cJSON_IsArray(cJSON_GetObjectItemCaseSensitive(
+                    report_target, "format_diagnostics")) ||
+                !cJSON_IsBool(cJSON_GetObjectItemCaseSensitive(
+                    report_target, "format_diagnostics_truncated"))) {
                 return fail(
-                    "pack: target missing/!bool: publication_uncertain");
+                    "pack: target missing publication/format diagnostic fields");
             }
         }
     }
@@ -540,7 +593,9 @@ int main(int argc, char **argv) {
     }
 
     int rc;
-    if (strcmp(mode, "help") == 0) {
+    if (strcmp(mode, "formats") == 0) {
+        rc = check_formats(root);
+    } else if (strcmp(mode, "help") == 0) {
         rc = check_help(root);
     } else if (strcmp(mode, "inspect") == 0) {
         rc = check_inspect(root, argc, argv);

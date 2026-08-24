@@ -50,6 +50,7 @@ bool gui_pack_format_export_cancelled(const gui_pack_result_info *info,
 bool gui_pack_format_export_failed(const gui_pack_result_info *info,
                                    char *out, size_t cap) {
     const bool uncertain = info && info->publication_uncertain;
+    const bool partial = info && info->partial_publication;
     if (out && cap > 0U) {
         if (uncertain) {
             (void)snprintf(
@@ -58,11 +59,17 @@ bool gui_pack_format_export_failed(const gui_pack_result_info *info,
                 "target(s); %d atlas(es) failed%s%s",
                 info->targets, info->atlases_fail,
                 info->err[0] ? " -- " : "", info->err);
+        } else if (partial) {
+            (void)snprintf(
+                out, cap,
+                "Export failed after publishing %d target(s) / %d file(s)%s%s",
+                info->targets, info->files,
+                info->err[0] ? " -- " : "", info->err);
         } else {
             out[0] = '\0';
         }
     }
-    return uncertain;
+    return uncertain || partial;
 }
 
 static const char *job_rejection_message(
@@ -85,6 +92,55 @@ static const char *job_rejection_message(
         return "unknown job rejection";
     }
 }
+
+static void summarize_export_report(
+    const tp_export_command_report *report, gui_pack_result_info *out) {
+    if (!report || !out) {
+        return;
+    }
+    for (int atlas = 0; atlas < report->atlas_count; ++atlas) {
+        const tp_export_command_atlas_report *atlas_report =
+            &report->atlases[atlas];
+        if (!atlas_report->report_present) {
+            continue;
+        }
+        for (int target = 0;
+             target < atlas_report->report.target_count; ++target) {
+            const tp_format_diagnostic_report *diagnostics =
+                atlas_report->report.targets[target].format_diagnostics;
+            out->format_diagnostics_truncated |=
+                tp_format_diagnostic_report_truncated(diagnostics);
+            const size_t count =
+                tp_format_diagnostic_report_count(diagnostics);
+            for (size_t i = 0U; i < count; ++i) {
+                const tp_format_diagnostic *diagnostic =
+                    tp_format_diagnostic_report_at(diagnostics, i);
+                if (!diagnostic) {
+                    continue;
+                }
+                if (diagnostic->severity == TP_FORMAT_DIAGNOSTIC_ERROR) {
+                    out->format_errors++;
+                } else if (diagnostic->severity ==
+                           TP_FORMAT_DIAGNOSTIC_WARNING) {
+                    out->format_warnings++;
+                }
+                if (out->format_diagnostic[0] == '\0' &&
+                    diagnostic->message) {
+                    (void)snprintf(out->format_diagnostic,
+                                   sizeof out->format_diagnostic, "%s",
+                                   diagnostic->message);
+                }
+            }
+        }
+    }
+}
+
+#ifdef TP_ENABLE_TEST_SEAMS
+void gui_pack__test_summarize_export_report(
+    const tp_export_command_report *report, gui_pack_result_info *out) {
+    summarize_export_report(report, out);
+}
+#endif
 
 static bool report_job_start(tp_status status, const tp_error *error,
                              char *err, size_t err_cap) {
@@ -325,19 +381,21 @@ gui_pack_done gui_pack_consume_completion(
                            : GUI_PACK_DONE_PACK_FAIL;
         }
     } else if (result.kind == TP_SESSION_JOB_EXPORT) {
+        const tp_export_command_report *report =
+            result.export_result.report;
+        NT_ASSERT(report != NULL);
         if (out) {
-            out->targets = result.export_result.targets;
-            out->files = result.export_result.files;
-            out->notices = result.export_result.notices;
-            out->atlases_ok = result.export_result.atlases_ok;
-            out->atlases_fail = result.export_result.atlases_failed;
-            out->atlases_skipped = result.export_result.atlases_skipped;
-            out->partial_publication =
-                result.export_result.partial_publication;
-            out->publication_uncertain =
-                result.export_result.publication_uncertain;
+            out->targets = report->targets_ok;
+            out->files = report->files_written;
+            out->notices = report->notices;
+            out->atlases_ok = report->atlases_ok;
+            out->atlases_fail = report->atlases_failed;
+            out->atlases_skipped = report->atlases_skipped;
+            out->partial_publication = report->partial_publication;
+            out->publication_uncertain = report->publication_uncertain;
             (void)snprintf(out->err, sizeof out->err, "%s",
-                           result.export_result.first_error);
+                           report->first_error);
+            summarize_export_report(report, out);
         }
         if (rejected_failure) {
             if (out) {
@@ -351,18 +409,17 @@ gui_pack_done gui_pack_consume_completion(
         } else if (cancelled) {
             done = GUI_PACK_DONE_EXPORT_CANCELLED;
         } else if (result.state == TP_SESSION_JOB_FAILED ||
-                   result.export_result.atlases_failed > 0) {
+                   report->atlases_failed > 0) {
             done = GUI_PACK_DONE_EXPORT_FAIL;
         } else {
             done = GUI_PACK_DONE_EXPORT_OK;
         }
         nt_log_info("gui_pack(async): export %d target(s), %d ok, %d fail, %d notice(s) in %.1f ms%s%s",
-                    result.export_result.targets,
-                    result.export_result.atlases_ok,
-                    result.export_result.atlases_failed,
-                    result.export_result.notices, result.elapsed_ms,
-                    result.export_result.first_error[0] ? ": " : "",
-                    result.export_result.first_error);
+                    report->targets_ok, report->atlases_ok,
+                    report->atlases_failed, report->notices,
+                    result.elapsed_ms,
+                    report->first_error[0] ? ": " : "",
+                    report->first_error);
     } else {
         NT_ASSERT(result.kind == TP_SESSION_JOB_REFRESH);
         if (out) {
@@ -424,13 +481,7 @@ static gui_pack_done drive_host_to_completion(
             }
             return step.job_completion.kind;
         }
-        if (!gui_project_job_busy()) {
-            if (out) {
-                (void)snprintf(out->err, sizeof out->err,
-                               "host job ended without a classified result");
-            }
-            return GUI_PACK_DONE_PACK_FAIL;
-        }
+        NT_ASSERT(gui_project_job_busy());
         nt_time_sleep(0.001);
     }
 }

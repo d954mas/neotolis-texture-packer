@@ -22,11 +22,14 @@
 #include "tp_pack_read.h"
 #include "tp_core/tp_project.h"
 #include "tp_fs_internal.h"
+#include "tp_format_catalog_internal.h"
+#include "tp_export_command_report_internal.h"
 #include "tp_job_owner_internal.h"
 #include "tp_job_worker_process_internal.h"
 #include "tp_pack_hash_priv.h"
 #include "tp_project_internal.h"
 #include "tp_session_snapshot_internal.h"
+#include "tp_session_internal.h"
 
 /* Bytes the host lifts out of the worker's artifact file per pump call. The pump
  * runs on the UI thread, so a 256 MiB multi-page atlas is spread over ~16 frames
@@ -61,9 +64,14 @@ typedef struct tp_live_job {
 
     char *project_json;
     size_t project_json_len;
+    uint8_t *format_bindings;
+    size_t format_bindings_len;
     char *project_dir;
     char *work_dir;
     char *preview_exporter_id;
+    char *target_exporter_id;
+    char *out_dir;
+    bool dry_run;
     tp_id128 atlas_id;
     tp_session_input_token input_token_at_start;
 
@@ -73,6 +81,7 @@ typedef struct tp_live_job {
 
     tp_arena *arena;
     tp_result *pack_result;
+    tp_export_command_report *preseed_export_report;
     tp_session_job_result terminal_result;
 
     /* Chunked adoption of the worker's Pack artifact (job_adopt_artifact). The
@@ -304,10 +313,23 @@ static void job_destroy_owned(tp_session_owned_job *owned) {
     tp_job_worker_process_destroy(job->process);
     job_discard_artifact(job);
     tp_arena_destroy(job->arena);
+    if (job->terminal_result.kind == TP_SESSION_JOB_EXPORT &&
+        job->terminal_result.export_result.report) {
+        tp_export_command_report_destroy(
+            job->terminal_result.export_result.report);
+        free(job->terminal_result.export_result.report);
+    }
+    if (job->preseed_export_report) {
+        tp_export_command_report_destroy(job->preseed_export_report);
+        free(job->preseed_export_report);
+    }
     free(job->project_json);
+    free(job->format_bindings);
     free(job->project_dir);
     free(job->work_dir);
     free(job->preview_exporter_id);
+    free(job->target_exporter_id);
+    free(job->out_dir);
     free(job->observation_targets);
     free(job);
 }
@@ -683,7 +705,9 @@ static void job_copy_pack_metadata(
 }
 
 static void job_publish_response(
-    tp_live_job *job, const tp_job_worker_proto_response *response) {
+    tp_live_job *job, const tp_job_worker_proto_response *response,
+    tp_export_command_report *export_report,
+    bool export_publication_pending) {
     tp_session_job_result *result = &job->terminal_result;
     memset(result, 0, sizeof *result);
     result->kind = job->kind;
@@ -691,8 +715,8 @@ static void job_publish_response(
                                   : job_now_ms() - job->started_ms;
 
     const bool cancelled = job_claim_terminal(job);
-    if (response && job->kind == TP_SESSION_JOB_EXPORT) {
-        result->export_result = response->export_result;
+    if (job->kind == TP_SESSION_JOB_EXPORT) {
+        result->export_result.report = export_report;
     }
     if (cancelled) {
         /* The single cancel decision point: an accepted host cancellation
@@ -707,28 +731,19 @@ static void job_publish_response(
         result->status = tp_error_set(
             &result->error, TP_STATUS_CANCELLED, "%s cancelled",
             job->kind == TP_SESSION_JOB_PACK ? "Pack" : "Export");
-        if (job->kind == TP_SESSION_JOB_EXPORT) {
-            result->export_result.partial_publication =
-                result->export_result.targets > 0;
-        }
-        job->elapsed_ms = result->elapsed_ms;
-        atomic_store_explicit(&job->state, result->state,
-                              memory_order_release);
-        return;
-    }
-
-    if (!response ||
-        response->kind != job->kind ||
-        response->session_instance_generation !=
-            job->owner.observation_descriptor
-                .session_instance_generation ||
-        response->request_id !=
-            job->owner.observation_descriptor.request_id) {
+    } else if (!response ||
+               response->kind != job->kind ||
+               response->session_instance_generation !=
+                   job->owner.observation_descriptor
+                       .session_instance_generation ||
+               response->request_id !=
+                   job->owner.observation_descriptor.request_id) {
         result->state = TP_SESSION_JOB_FAILED;
         result->status = tp_error_set(
             &result->error, TP_STATUS_BUILDER_FAILED,
             "job worker returned mismatched terminal identity");
-    } else {
+    } else if (result->state != TP_SESSION_JOB_FAILED ||
+               result->status == TP_STATUS_OK) {
         result->state = response->state;
         result->status = response->status;
         result->error = response->error;
@@ -749,6 +764,18 @@ static void job_publish_response(
                 }
             }
         }
+    }
+    if (job->kind == TP_SESSION_JOB_EXPORT) {
+        if (!cancelled) {
+            if (response && response->state == TP_SESSION_JOB_FAILED) {
+                tp_export_command_report_apply_terminal_failure(
+                    result->export_result.report, response->status,
+                    &response->error);
+            }
+        }
+        tp_export_command_report_finalize(
+            result->export_result.report, result->state,
+            export_publication_pending);
     }
     job->elapsed_ms = result->elapsed_ms;
     if (result->state == TP_SESSION_JOB_SUCCEEDED) {
@@ -808,7 +835,14 @@ static void job_pump_owned(tp_session_owned_job *owned) {
                                        memory_order_release);
             return;
         }
-        job_publish_response(job, response);
+        bool export_publication_pending = false;
+        tp_export_command_report *export_report =
+            job->kind == TP_SESSION_JOB_EXPORT
+                ? tp_job_worker_process_take_export_report(
+                      job->process, &export_publication_pending)
+                : NULL;
+        job_publish_response(job, response, export_report,
+                             export_publication_pending);
     }
     atomic_flag_clear_explicit(&job->pump_gate, memory_order_release);
 }
@@ -837,6 +871,135 @@ static tp_status job_prepare_snapshot_request(
     return TP_STATUS_OK;
 }
 
+static tp_status job_capture_format_bindings(
+    const tp_session_snapshot *snapshot, const char *preview_format_id,
+    const tp_format_binding_capture_target *targets, size_t target_count,
+    tp_live_job *job, tp_error *err) {
+    return tp_format_catalog_encode_bindings_internal(
+        tp_session_snapshot_format_catalog(snapshot), preview_format_id,
+        targets, target_count, &job->format_bindings,
+        &job->format_bindings_len, err);
+}
+
+static bool job_export_target_selected(
+    const tp_export_command_request *request,
+    const tp_snapshot_target *target) {
+    return target && target->enabled &&
+           (!request->target_exporter_id ||
+            request->target_exporter_id[0] == '\0' ||
+            strcmp(target->exporter_id,
+                   request->target_exporter_id) == 0);
+}
+
+static tp_status job_preseed_export_report(
+    const tp_session_snapshot *snapshot,
+    const tp_export_command_request *request, int selected_atlas_count,
+    tp_live_job *job, tp_error *err) {
+    tp_export_command_report *report = calloc(1U, sizeof *report);
+    if (!report) {
+        return tp_error_set(err, TP_STATUS_OOM,
+                            "Export admission report allocation failed");
+    }
+    tp_status status = tp_export_command_report_allocate(
+        report, selected_atlas_count, request->dry_run, err);
+    if (status != TP_STATUS_OK) {
+        free(report);
+        return status;
+    }
+    int report_atlas = 0;
+    const int atlas_count = tp_session_snapshot_atlas_count(snapshot);
+    for (int i = 0; i < atlas_count; ++i) {
+        const tp_snapshot_atlas *atlas =
+            tp_session_snapshot_atlas_at(snapshot, i);
+        if (!atlas ||
+            (!tp_id128_is_nil(request->atlas_id) &&
+             !tp_id128_eq(request->atlas_id, atlas->id))) {
+            continue;
+        }
+        tp_export_command_atlas_report *atlas_report =
+            &report->atlases[report_atlas++];
+        atlas_report->id = atlas->id;
+        atlas_report->name = job_strdup(atlas->name ? atlas->name : "");
+        if (!atlas_report->name) {
+            status = tp_error_set(
+                err, TP_STATUS_OOM,
+                "Export admission atlas identity allocation failed");
+            break;
+        }
+        int selected_targets = 0;
+        for (int t = 0; t < atlas->target_count; ++t) {
+            const tp_snapshot_target *target =
+                tp_session_snapshot_target_at(snapshot, atlas->id, t);
+            selected_targets +=
+                job_export_target_selected(request, target) ? 1 : 0;
+        }
+        if (selected_targets == 0) {
+            atlas_report->skip_notice_id = job_strdup("no_enabled_targets");
+            atlas_report->note = job_strdup("no enabled targets (skipped)");
+            if (!atlas_report->skip_notice_id || !atlas_report->note) {
+                status = tp_error_set(
+                    err, TP_STATUS_OOM,
+                    "Export admission skip report allocation failed");
+                break;
+            }
+            continue;
+        }
+        atlas_report->status = TP_STATUS_BUILDER_FAILED;
+        (void)tp_error_set(&atlas_report->error, TP_STATUS_BUILDER_FAILED,
+                           "job worker failed before target completion");
+        atlas_report->note =
+            job_strdup("job worker failed before target completion");
+        atlas_report->report_present = true;
+        atlas_report->report.dry_run = request->dry_run;
+        atlas_report->report.input_outcome =
+            TP_EXPORT_INPUT_NOT_EVALUATED;
+        atlas_report->report.target_count = selected_targets;
+        atlas_report->report.targets = calloc(
+            (size_t)selected_targets, sizeof *atlas_report->report.targets);
+        if (!atlas_report->note || !atlas_report->report.targets) {
+            status = tp_error_set(
+                err, TP_STATUS_OOM,
+                "Export admission target report allocation failed");
+            break;
+        }
+        int report_target = 0;
+        for (int t = 0; t < atlas->target_count; ++t) {
+            const tp_snapshot_target *target =
+                tp_session_snapshot_target_at(snapshot, atlas->id, t);
+            if (!job_export_target_selected(request, target)) {
+                continue;
+            }
+            tp_export_report_target *target_report =
+                &atlas_report->report.targets[report_target++];
+            target_report->id = target->id;
+            target_report->exporter_id = job_strdup(target->exporter_id);
+            target_report->out_path = job_strdup(target->out_path);
+            target_report->error =
+                job_strdup("not_attempted_worker_failed");
+            target_report->pack_run = -1;
+            target_report->writer_outcome =
+                TP_EXPORT_WRITER_NOT_ATTEMPTED;
+            if (!target_report->exporter_id || !target_report->out_path ||
+                !target_report->error) {
+                status = tp_error_set(
+                    err, TP_STATUS_OOM,
+                    "Export admission target identity allocation failed");
+                break;
+            }
+        }
+        if (status != TP_STATUS_OK) {
+            break;
+        }
+    }
+    if (status != TP_STATUS_OK) {
+        tp_export_command_report_destroy(report);
+        free(report);
+        return status;
+    }
+    job->preseed_export_report = report;
+    return TP_STATUS_OK;
+}
+
 static tp_status job_start_process(void *context, tp_error *err) {
     tp_live_job *job = context;
     const tp_session_job_descriptor *descriptor =
@@ -853,14 +1016,22 @@ static tp_status job_start_process(void *context, tp_error *err) {
         .host_pid = job_host_pid(),
         .project_json = (const uint8_t *)job->project_json,
         .project_json_len = job->project_json_len,
+        .format_bindings = job->format_bindings,
+        .format_bindings_len = job->format_bindings_len,
         .atlas_id = job->atlas_id,
         .project_dir = job->project_dir,
         .work_dir = job->work_dir,
         .preview_exporter_id = job->preview_exporter_id,
+        .target_exporter_id = job->target_exporter_id,
+        .out_dir = job->out_dir,
+        .dry_run = job->dry_run,
         .input_token = job->input_token_at_start,
     };
     const tp_status status = tp_job_worker_process_start(
-        &request, &job->process, err);
+        &request, job->preseed_export_report, &job->process, err);
+    if (status == TP_STATUS_OK) {
+        job->preseed_export_report = NULL;
+    }
     if (status == TP_STATUS_OK) {
         job->started_ms = job_now_ms();
     }
@@ -899,12 +1070,6 @@ tp_status tp_session_pack_job_start(tp_session *session,
                                 "unknown preview exporter '%s'",
                                 request->preview_exporter_id);
         }
-        if (resolution.implementation == TP_FORMAT_IMPLEMENTATION_LUA) {
-            return tp_error_set(
-                err, TP_STATUS_UNIMPLEMENTED,
-                "runtime preview bindings are not implemented for '%s'",
-                request->preview_exporter_id);
-        }
     }
 
     tp_session_snapshot *snapshot = NULL;
@@ -933,10 +1098,17 @@ tp_status tp_session_pack_job_start(tp_session *session,
         request->preview_exporter_id
             ? request->preview_exporter_id
             : "");
+    job->target_exporter_id = job_strdup("");
+    job->out_dir = job_strdup("");
     status = job_prepare_snapshot_request(
         snapshot, request->work_dir, job, err);
+    if (status == TP_STATUS_OK) {
+        status = job_capture_format_bindings(
+            snapshot, request->preview_exporter_id, NULL, 0U, job, err);
+    }
     tp_session_snapshot_destroy(snapshot);
-    if (status != TP_STATUS_OK || !job->preview_exporter_id) {
+    if (status != TP_STATUS_OK || !job->preview_exporter_id ||
+        !job->target_exporter_id || !job->out_dir) {
         if (status == TP_STATUS_OK) {
             status = tp_error_set(
                 err, TP_STATUS_OOM,
@@ -991,11 +1163,16 @@ tp_status tp_session_export_start(tp_session *session,
     job->input_token_at_start =
         tp_session_snapshot_input_token(snapshot);
     job->preview_exporter_id = job_strdup("");
+    job->target_exporter_id = job_strdup(
+        request->target_exporter_id ? request->target_exporter_id : "");
+    job->out_dir = job_strdup(request->out_dir ? request->out_dir : "");
+    job->dry_run = request->dry_run;
 
     const int atlas_count =
         tp_session_snapshot_atlas_count(snapshot);
     size_t target_count = 0U;
     int eligible_atlases = 0;
+    int selected_atlases = 0;
     for (int i = 0; i < atlas_count; ++i) {
         const tp_snapshot_atlas *atlas =
             tp_session_snapshot_atlas_at(snapshot, i);
@@ -1004,42 +1181,33 @@ tp_status tp_session_export_start(tp_session *session,
              !tp_id128_eq(request->atlas_id, atlas->id))) {
             continue;
         }
+        selected_atlases++;
         bool eligible = false;
         for (int t = 0; t < atlas->target_count; ++t) {
             const tp_snapshot_target *target =
                 tp_session_snapshot_target_at(
                     snapshot, atlas->id, t);
-            if (target && target->enabled) {
-                tp_format_resolution resolution = {0};
-                status = tp_format_catalog_resolve(
-                    tp_session_snapshot_format_catalog(snapshot),
-                    target->exporter_id, &resolution, err);
-                if (status != TP_STATUS_OK) {
-                    tp_session_snapshot_destroy(snapshot);
-                    tp_session_job_release_internal(&job->owner);
-                    return status;
-                }
-                if (resolution.state == TP_FORMAT_RESOLUTION_AVAILABLE &&
-                    resolution.implementation ==
-                        TP_FORMAT_IMPLEMENTATION_LUA) {
-                    tp_session_snapshot_destroy(snapshot);
-                    tp_session_job_release_internal(&job->owner);
-                    return tp_error_set(
-                        err, TP_STATUS_UNIMPLEMENTED,
-                        "runtime Export bindings are not implemented for '%s'",
-                        target->exporter_id);
-                }
+            if (job_export_target_selected(request, target)) {
                 target_count++;
                 eligible = true;
             }
         }
         eligible_atlases += eligible ? 1 : 0;
     }
+    if (!tp_id128_is_nil(request->atlas_id) && selected_atlases == 0) {
+        tp_session_snapshot_destroy(snapshot);
+        tp_session_job_release_internal(&job->owner);
+        return tp_error_set(err, TP_STATUS_NOT_FOUND,
+                            "Export atlas was not found");
+    }
+    tp_format_binding_capture_target *capture_targets = NULL;
     if (target_count > 0U) {
         job->observation_targets =
             job_observation_target_calloc(
                 target_count, sizeof *job->observation_targets);
-        if (!job->observation_targets) {
+        capture_targets = calloc(target_count, sizeof *capture_targets);
+        if (!job->observation_targets || !capture_targets) {
+            free(capture_targets);
             tp_session_snapshot_destroy(snapshot);
             tp_session_job_release_internal(&job->owner);
             return tp_error_set(
@@ -1059,7 +1227,7 @@ tp_status tp_session_export_start(tp_session *session,
             const tp_snapshot_target *target =
                 tp_session_snapshot_target_at(
                     snapshot, atlas->id, t);
-            if (!target || !target->enabled) {
+            if (!job_export_target_selected(request, target)) {
                 continue;
             }
             job->observation_targets[
@@ -1070,18 +1238,28 @@ tp_status tp_session_export_start(tp_session *session,
                     .atlas_id = atlas->id,
                     .id = target->id,
                 };
+            capture_targets[job->observation_target_count - 1U] =
+                (tp_format_binding_capture_target){
+                    .atlas_id = atlas->id,
+                    .target_id = target->id,
+                    .format_id = target->exporter_id,
+                };
         }
-    }
-    if (eligible_atlases == 0) {
-        tp_session_snapshot_destroy(snapshot);
-        tp_session_job_release_internal(&job->owner);
-        return tp_error_set(err, TP_STATUS_NOT_FOUND,
-                            "nothing to export");
     }
     status = job_prepare_snapshot_request(
         snapshot, request->work_dir, job, err);
+    if (status == TP_STATUS_OK) {
+        status = job_capture_format_bindings(
+            snapshot, NULL, capture_targets, target_count, job, err);
+    }
+    if (status == TP_STATUS_OK) {
+        status = job_preseed_export_report(
+            snapshot, request, selected_atlases, job, err);
+    }
+    free(capture_targets);
     tp_session_snapshot_destroy(snapshot);
-    if (status != TP_STATUS_OK || !job->preview_exporter_id) {
+    if (status != TP_STATUS_OK || !job->preview_exporter_id ||
+        !job->target_exporter_id || !job->out_dir) {
         if (status == TP_STATUS_OK) {
             status = tp_error_set(
                 err, TP_STATUS_OOM,
@@ -1107,6 +1285,65 @@ tp_status tp_session_export_start(tp_session *session,
     atomic_store_explicit(&job->total, eligible_atlases,
                           memory_order_relaxed);
     return job_start(session, job, err);
+}
+
+tp_status tp_export_command_run_snapshot(
+    const tp_session_snapshot *snapshot,
+    const tp_export_command_request *request,
+    tp_session_job_result *out, tp_error *err) {
+    if (!snapshot || !request || !out) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "saved-file Export requires snapshot, request, and output");
+    }
+    memset(out, 0, sizeof *out);
+    tp_project *project = tp_project_clone(snapshot->project);
+    if (!project) {
+        return tp_error_set(err, TP_STATUS_OOM,
+                            "saved-file Export project clone failed");
+    }
+    char *project_dir = snapshot->project->project_dir
+                            ? job_strdup(snapshot->project->project_dir)
+                            : NULL;
+    char *source_base_dir = snapshot->project->source_base_dir
+                                ? job_strdup(snapshot->project->source_base_dir)
+                                : NULL;
+    if ((snapshot->project->project_dir && !project_dir) ||
+        (snapshot->project->source_base_dir && !source_base_dir)) {
+        free(project_dir);
+        free(source_base_dir);
+        tp_project_destroy(project);
+        return tp_error_set(
+            err, TP_STATUS_OOM,
+            "saved-file Export project location clone failed");
+    }
+    free(project->project_dir);
+    free(project->source_base_dir);
+    project->project_dir = project_dir;
+    project->source_base_dir = source_base_dir;
+    tp_rng rng = tp_rng_os();
+    tp_session *session = NULL;
+    tp_status status = tp_session_adopt_owned_with_catalog(
+        project, tp_session_snapshot_format_catalog(snapshot), &rng, &session,
+        err);
+    if (status != TP_STATUS_OK) {
+        return status;
+    }
+    status = tp_session_export_start(session, request, err);
+    while (status == TP_STATUS_OK && tp_session_job_active(session)) {
+        status = tp_session_update(session, out, err);
+        if (status == TP_STATUS_OK && tp_session_job_active(session)) {
+#ifdef _WIN32
+            Sleep(1U);
+#else
+            const struct timespec delay = {.tv_nsec = 1000000L};
+            (void)nanosleep(&delay, NULL);
+#endif
+        }
+    }
+    NT_ASSERT(status != TP_STATUS_OK ||
+              out->kind == TP_SESSION_JOB_EXPORT);
+    tp_session_destroy(session);
+    return status;
 }
 
 bool tp_session_job_active(const tp_session *session) {
@@ -1164,12 +1401,19 @@ static void job_compact_owned(tp_session_owned_job *owned) {
     free(job->project_json);
     job->project_json = NULL;
     job->project_json_len = 0U;
+    free(job->format_bindings);
+    job->format_bindings = NULL;
+    job->format_bindings_len = 0U;
     free(job->project_dir);
     job->project_dir = NULL;
     free(job->work_dir);
     job->work_dir = NULL;
     free(job->preview_exporter_id);
     job->preview_exporter_id = NULL;
+    free(job->target_exporter_id);
+    job->target_exporter_id = NULL;
+    free(job->out_dir);
+    job->out_dir = NULL;
     /* The arena, terminal_result, and the observation descriptor (which the
      * observed job state still borrows) stay untouched: job_destroy_owned
      * remains the exactly-once release for them, and every pointer freed above

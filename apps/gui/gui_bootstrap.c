@@ -48,6 +48,7 @@ static void ensure_ids(void) {
     s_id_canvas = nt_ui_id("ntpacker/canvas");
     s_id_modal = nt_ui_id("ntpacker/confirm_modal");
     s_id_about = nt_ui_id("ntpacker/about_modal");
+    s_id_formats = nt_ui_id("ntpacker/formats_modal");
     s_id_rename = nt_ui_id("ntpacker/rename_input");
     s_id_right_panel = nt_ui_id("ntpacker/right_panel");
     s_id_left_panel = nt_ui_id("ntpacker/left_panel");
