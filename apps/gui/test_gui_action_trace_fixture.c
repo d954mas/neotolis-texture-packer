@@ -181,6 +181,7 @@ void apply_foreign_operation(tp_operation *operation,
 void reset_public_action_state(void) {
     s_actions.pending_lifecycle_request =
         GUI_LIFECYCLE_REQUEST_NONE;
+    s_actions.format_reload_requested = false;
     gui_actions__clear_pending();
     gui_actions__discard_deferred_edits();
     s_actions.lifecycle =

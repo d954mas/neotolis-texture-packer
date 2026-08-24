@@ -386,7 +386,6 @@ void test_gui_bundled_defold_runs_through_workers(void) {
     TEST_ASSERT_EQUAL_INT(2, lua_result.notices);
     TEST_ASSERT_EQUAL_INT(3, lua_result.files);
     TEST_ASSERT_EQUAL_INT(0, lua_result.format_errors);
-
     const gui_test_file lua_tpinfo = read_gui_test_file(tpinfo_path);
     const gui_test_file lua_tpatlas = read_gui_test_file(tpatlas_path);
     TEST_ASSERT_NOT_NULL(strstr((const char *)lua_tpinfo.bytes, "version: \"2.0\""));
@@ -457,6 +456,276 @@ void test_gui_live_export_uses_injected_compiled_lua_catalog(void) {
     TEST_ASSERT_EQUAL_INT(1, result.targets);
     TEST_ASSERT_EQUAL_INT(3, result.files);
     TEST_ASSERT_EQUAL_INT(0, result.format_errors);
+}
+
+void test_reload_formats_mirrors_disk_without_authored_change(void) {
+    install_bundled_catalog_and_start_new_project();
+    const tp_session_snapshot *before = gui_project_snapshot();
+    const tp_snapshot_atlas *atlas =
+        tp_session_snapshot_atlas_at(before, 0);
+    TEST_ASSERT_NOT_NULL(atlas);
+    const tp_id128 atlas_id = atlas->id;
+    const int64_t revision = tp_session_snapshot_revision(before);
+    const bool dirty = tp_session_snapshot_dirty(before);
+    const int history_count =
+        tp_session_history_count(gui_project__test_session());
+    const uint64_t event_sequence =
+        tp_session_snapshot_event_sequence(before);
+    const tp_format_catalog *active =
+        gui_project_format_catalog();
+    TEST_ASSERT_NOT_NULL(tp_format_catalog_find_available(
+        active, "defold-tpinfo-2"));
+
+    char missing_root[TP_IDENTITY_PATH_MAX];
+    TEST_ASSERT_TRUE(snprintf(
+        missing_root, sizeof missing_root,
+        "%s/missing-formats", TP_GUI_TRACE_TEST_DIR) > 0);
+    gui_project__test_set_format_reload_root(missing_root);
+    gui_request_reload_formats();
+    gui_request_reload_formats();
+    publish_project_frame();
+
+    const tp_format_catalog *reloaded =
+        gui_project_format_catalog();
+    TEST_ASSERT_TRUE(active != reloaded);
+    TEST_ASSERT_EQUAL_PTR(
+        reloaded,
+        tp_session_format_catalog(gui_project__test_session()));
+    TEST_ASSERT_NULL(tp_format_catalog_find_available(
+        reloaded, "defold-tpinfo-2"));
+    TEST_ASSERT_FALSE(gui_actions_format_reload_active());
+    TEST_ASSERT_EQUAL_INT(STATUS_SUCCESS, s_status_sev);
+    TEST_ASSERT_NOT_NULL(strstr(s_status, "Reloaded formats"));
+
+    const tp_session_snapshot *after = gui_project_snapshot();
+    TEST_ASSERT_EQUAL_INT64(
+        revision, tp_session_snapshot_revision(after));
+    TEST_ASSERT_EQUAL_INT(dirty, tp_session_snapshot_dirty(after));
+    TEST_ASSERT_EQUAL_INT(
+        history_count,
+        tp_session_history_count(gui_project__test_session()));
+    TEST_ASSERT_EQUAL_UINT64(
+        event_sequence,
+        tp_session_snapshot_event_sequence(after));
+    TEST_ASSERT_EQUAL_STRING(
+        "json-neotolis",
+        tp_session_snapshot_target_at(after, atlas_id, 0)->exporter_id);
+
+    /* The duplicate request was coalesced into the completed generation. */
+    publish_project_frame();
+    TEST_ASSERT_EQUAL_PTR(reloaded, gui_project_format_catalog());
+}
+
+void test_reload_formats_failure_preserves_active_generation(void) {
+    install_bundled_catalog_and_start_new_project();
+    const tp_format_catalog *active = gui_project_format_catalog();
+    FILE *root_file = fopen(s_save_path, "wb");
+    TEST_ASSERT_NOT_NULL(root_file);
+    TEST_ASSERT_EQUAL_size_t(
+        1U, fwrite("x", 1U, 1U, root_file));
+    TEST_ASSERT_EQUAL_INT(0, fclose(root_file));
+
+    gui_project__test_set_format_reload_root(s_save_path);
+    gui_request_reload_formats();
+    publish_project_frame();
+
+    TEST_ASSERT_EQUAL_PTR(active, gui_project_format_catalog());
+    TEST_ASSERT_EQUAL_PTR(
+        active,
+        tp_session_format_catalog(gui_project__test_session()));
+    TEST_ASSERT_FALSE(gui_actions_format_reload_active());
+    TEST_ASSERT_EQUAL_INT(STATUS_ERROR, s_status_sev);
+    TEST_ASSERT_NOT_NULL(strstr(s_status, "Reload formats failed"));
+    TEST_ASSERT_EQUAL_INT(0, remove(s_save_path));
+}
+
+void test_reload_formats_drains_export_before_swapping_catalog(void) {
+    install_bundled_catalog_and_start_new_project();
+    TEST_ASSERT_TRUE(gui_pack_init(TP_GUI_TRACE_TEST_DIR));
+    set_job_worker_env(
+        "TP_TEST_JOB_WORKER_BLOCK_AFTER_EXPORT_PROGRESS_MS",
+        "500");
+    gui_request_export();
+    gui_actions_step_result start = {0};
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        gui_actions_step(&start, &error), error.msg);
+    set_job_worker_env(
+        "TP_TEST_JOB_WORKER_BLOCK_AFTER_EXPORT_PROGRESS_MS",
+        "");
+    TEST_ASSERT_EQUAL_INT(1, start.job_receipt_count);
+    TEST_ASSERT_TRUE(start.job_receipts[0].admitted);
+    TEST_ASSERT_TRUE(gui_project_job_busy());
+
+    char missing_root[TP_IDENTITY_PATH_MAX];
+    TEST_ASSERT_TRUE(snprintf(
+        missing_root, sizeof missing_root,
+        "%s/drain-missing-formats", TP_GUI_TRACE_TEST_DIR) > 0);
+    gui_project__test_set_format_reload_root(missing_root);
+    gui_request_reload_formats();
+    gui_request_reload_formats();
+    gui_request_pack();
+
+    bool terminal_seen = false;
+    for (int attempt = 0;
+         attempt < 5000 &&
+         gui_actions_format_reload_active();
+         ++attempt) {
+        gui_actions_step_result step = {0};
+        TEST_ASSERT_EQUAL_INT_MESSAGE(
+            TP_STATUS_OK,
+            gui_actions_step(&step, &error), error.msg);
+        terminal_seen |= step.job_completion_present;
+        if (gui_actions_format_reload_active()) {
+            TEST_ASSERT_TRUE(gui_actions__intent_queued(
+                GUI_INTENT_PACK));
+            nt_time_sleep(0.001);
+        }
+    }
+
+    TEST_ASSERT_TRUE(terminal_seen);
+    TEST_ASSERT_FALSE(gui_actions_format_reload_active());
+    TEST_ASSERT_FALSE(gui_project_job_busy());
+    TEST_ASSERT_TRUE(gui_actions__intent_queued(GUI_INTENT_PACK));
+    TEST_ASSERT_NULL(tp_format_catalog_find_available(
+        gui_project_format_catalog(), "defold-tpinfo-2"));
+    TEST_ASSERT_EQUAL_INT(STATUS_SUCCESS, s_status_sev);
+    TEST_ASSERT_NOT_NULL(strstr(s_status, "Reloaded formats"));
+}
+
+void test_reload_formats_joins_an_already_requested_cancel(void) {
+    install_bundled_catalog_and_start_new_project();
+    TEST_ASSERT_TRUE(gui_pack_init(TP_GUI_TRACE_TEST_DIR));
+    set_job_worker_env(
+        "TP_TEST_JOB_WORKER_BLOCK_AFTER_EXPORT_PROGRESS_MS",
+        "500");
+    gui_request_export();
+    gui_actions_step_result start = {0};
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        gui_actions_step(&start, &error), error.msg);
+    set_job_worker_env(
+        "TP_TEST_JOB_WORKER_BLOCK_AFTER_EXPORT_PROGRESS_MS",
+        "");
+    TEST_ASSERT_TRUE(gui_project_job_busy());
+    gui_request_cancel();
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        gui_actions_step(NULL, &error), error.msg);
+    TEST_ASSERT_TRUE(gui_project_job_busy());
+
+    char missing_root[TP_IDENTITY_PATH_MAX];
+    TEST_ASSERT_TRUE(snprintf(
+        missing_root, sizeof missing_root,
+        "%s/pre-cancel-missing-formats",
+        TP_GUI_TRACE_TEST_DIR) > 0);
+    gui_project__test_set_format_reload_root(missing_root);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        gui_project_format_reload_begin(&error), error.msg);
+    TEST_ASSERT_TRUE(gui_project_format_reload_active());
+
+    for (int attempt = 0;
+         attempt < 5000 &&
+         gui_project_format_reload_active();
+         ++attempt) {
+        gui_project_step_result step = {0};
+        TEST_ASSERT_EQUAL_INT_MESSAGE(
+            TP_STATUS_OK,
+            gui_project_step(&step, &error), error.msg);
+        tp_session_job_result_destroy(&step.completion);
+        if (gui_project_format_reload_active()) {
+            nt_time_sleep(0.001);
+        }
+    }
+    TEST_ASSERT_FALSE(gui_project_format_reload_active());
+    TEST_ASSERT_NULL(tp_format_catalog_find_available(
+        gui_project_format_catalog(), "defold-tpinfo-2"));
+}
+
+void test_host_shutdown_pumps_active_reload_before_lifecycle(void) {
+    install_bundled_catalog_and_start_new_project();
+    TEST_ASSERT_TRUE(gui_pack_init(TP_GUI_TRACE_TEST_DIR));
+    set_job_worker_env(
+        "TP_TEST_JOB_WORKER_BLOCK_AFTER_EXPORT_PROGRESS_MS",
+        "500");
+    gui_request_export();
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        gui_actions_step(NULL, &error), error.msg);
+    set_job_worker_env(
+        "TP_TEST_JOB_WORKER_BLOCK_AFTER_EXPORT_PROGRESS_MS",
+        "");
+    TEST_ASSERT_TRUE(gui_project_job_busy());
+
+    gui_request_reload_formats();
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        gui_actions_step(NULL, &error), error.msg);
+    TEST_ASSERT_TRUE(gui_project_format_reload_active());
+
+    bool closed = false;
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        gui_actions_host_shutdown_step(
+            &closed, &error),
+        error.msg);
+    TEST_ASSERT_FALSE(closed);
+    TEST_ASSERT_EQUAL_INT(
+        GUI_PROJECT_LIFECYCLE_ACTIVE,
+        gui_project_lifecycle_state_query());
+
+    for (int attempt = 0;
+         attempt < 5000 &&
+         gui_project_format_reload_active();
+         ++attempt) {
+        TEST_ASSERT_EQUAL_INT_MESSAGE(
+            TP_STATUS_OK,
+            gui_actions_step(NULL, &error),
+            error.msg);
+        if (gui_project_format_reload_active()) {
+            nt_time_sleep(0.001);
+        }
+    }
+    TEST_ASSERT_FALSE(gui_project_format_reload_active());
+    TEST_ASSERT_EQUAL_INT(
+        GUI_PROJECT_LIFECYCLE_ACTIVE,
+        gui_project_lifecycle_state_query());
+}
+
+void test_reload_formats_blocks_direct_pack_and_export_admission(void) {
+    const tp_session_snapshot *snapshot = gui_project_snapshot();
+    const tp_snapshot_atlas *atlas =
+        tp_session_snapshot_atlas_at(snapshot, 0);
+    TEST_ASSERT_NOT_NULL(atlas);
+    char missing_root[TP_IDENTITY_PATH_MAX];
+    TEST_ASSERT_TRUE(snprintf(
+        missing_root, sizeof missing_root,
+        "%s/admission-missing-formats", TP_GUI_TRACE_TEST_DIR) > 0);
+    gui_project__test_set_format_reload_root(missing_root);
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        gui_project_format_reload_begin(&error), error.msg);
+    TEST_ASSERT_TRUE(gui_project_format_reload_active());
+
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_BUSY,
+        gui_project_job_enqueue_pack(
+            atlas->id, TP_GUI_TRACE_TEST_DIR,
+            NULL, &error));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_BUSY,
+        gui_project_job_enqueue_export(
+            atlas->id, TP_GUI_TRACE_TEST_DIR,
+            &error));
+    TEST_ASSERT_FALSE(gui_project_job_busy());
+
+    publish_project_frame();
+    TEST_ASSERT_FALSE(gui_project_format_reload_active());
 }
 
 static void admit_and_drain_pending_refresh(
@@ -737,6 +1006,37 @@ void test_lifecycle_requests_are_declaration_only(void) {
     assert_declaration_only_request(
         request_exit,
         GUI_LIFECYCLE_REQUEST_EXIT);
+}
+
+void test_pending_lifecycle_owns_tick_before_reload_formats(void) {
+    const gui_project_create_result created =
+        gui_project_add_atlas();
+    TEST_ASSERT_TRUE(created.committed);
+    publish_project_frame();
+    TEST_ASSERT_TRUE(gui_project_is_dirty());
+    const tp_format_catalog *active =
+        gui_project_format_catalog();
+
+    gui_project__test_set_format_reload_root(
+        TP_FORMAT_FIXTURE_ROOT);
+    gui_request_reload_formats();
+    request_new();
+    gui_actions__test_drain_intents();
+
+    TEST_ASSERT_EQUAL_INT(
+        GUI_LIFECYCLE_RESOLVE_DIRTY,
+        gui_actions_lifecycle_view().phase);
+    TEST_ASSERT_EQUAL_INT(
+        GUI_LIFECYCLE_REQUEST_NEW,
+        gui_actions_lifecycle_view().request);
+    TEST_ASSERT_TRUE(s_actions.format_reload_requested);
+    TEST_ASSERT_FALSE(gui_project_format_reload_active());
+    TEST_ASSERT_EQUAL_PTR(active, gui_project_format_catalog());
+
+    gui_actions_lifecycle_choose(
+        GUI_LIFECYCLE_CHOICE_CANCEL);
+    gui_actions__test_drain_intents();
+    s_actions.format_reload_requested = false;
 }
 
 static void assert_lifecycle_requires_draft_choice(
@@ -2041,6 +2341,8 @@ int main(int argc, char **argv) {
     RUN_TEST(
         test_dev_settle_admits_refresh_queued_behind_active_pack);
     RUN_TEST(test_lifecycle_requests_are_declaration_only);
+    RUN_TEST(
+        test_pending_lifecycle_owns_tick_before_reload_formats);
     RUN_TEST(test_lifecycle_requests_require_explicit_draft_choice);
     RUN_TEST(
         test_lifecycle_request_cannot_replace_an_active_choice);
@@ -2074,6 +2376,14 @@ int main(int argc, char **argv) {
     RUN_TEST(test_gui_export_completion_summarizes_typed_format_diagnostics);
     RUN_TEST(test_gui_bundled_defold_runs_through_workers);
     RUN_TEST(test_gui_live_export_uses_injected_compiled_lua_catalog);
+    RUN_TEST(test_reload_formats_mirrors_disk_without_authored_change);
+    RUN_TEST(test_reload_formats_failure_preserves_active_generation);
+    RUN_TEST(test_reload_formats_drains_export_before_swapping_catalog);
+    RUN_TEST(
+        test_reload_formats_joins_an_already_requested_cancel);
+    RUN_TEST(
+        test_host_shutdown_pumps_active_reload_before_lifecycle);
+    RUN_TEST(test_reload_formats_blocks_direct_pack_and_export_admission);
     RUN_TEST(test_late_export_cancel_keeps_completed_success_outcome);
     RUN_TEST(test_owned_terminal_receipt_survives_session_cutover);
     RUN_TEST(

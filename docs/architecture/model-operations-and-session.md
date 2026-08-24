@@ -108,7 +108,11 @@ most one concrete derived job.
 
 The model/session catalog is an explicit dependency, not mutable process-global
 state. Session creation/open APIs accept a catalog generation, and every owned
-snapshot retains that same generation independently. Target create/set
+snapshot retains its captured generation independently. The session may replace
+its retained runtime generation after catalog-dependent work reaches a terminal;
+an independent Refresh may remain active. Replacement changes no authored
+state, revision, dirty state, History, or event. The next view cut recomputes
+validation and presentation against the new generation. Target create/set
 operations require the referenced exporter to be available in that catalog;
 project-file parsing still admits syntactically valid absent IDs, and project
 validation reports them as `unknown_exporter`. Recovery replay validates the

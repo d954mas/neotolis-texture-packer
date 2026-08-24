@@ -34,6 +34,8 @@ void gui_request_add_files(void);
 void gui_request_add_folder(void);
 void gui_request_add_atlas(void);
 void gui_request_refresh(void);
+void gui_request_reload_formats(void);
+bool gui_actions_format_reload_active(void);
 void gui_request_pack(void);
 void gui_request_export(void);
 void gui_request_cancel(void);

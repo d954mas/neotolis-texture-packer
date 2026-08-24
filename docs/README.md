@@ -17,8 +17,8 @@ Start with the smallest document that owns the question.
   — source identity, Refresh, scanning, and image ingress.
 - [`architecture/engine-and-client-boundaries.md`](architecture/engine-and-client-boundaries.md)
   — engine, exporter, GUI, CLI, and live-headless boundaries.
-- [`spec/format-ecosystem.md`](spec/format-ecosystem.md) — current Lua runtime
-  and bundled Defold/Phaser packages; Reload Formats remains target behavior.
+- [`spec/format-ecosystem.md`](spec/format-ecosystem.md) — current Lua runtime,
+  bundled Defold/Phaser packages, and GUI Reload Formats behavior.
 
 ## Wire and file formats
 

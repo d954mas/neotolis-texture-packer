@@ -4,6 +4,12 @@
 #include "app_format_catalog.h"
 #include "gui_project_driver.h"
 
+typedef enum gui_format_reload_state {
+    GUI_FORMAT_RELOAD_IDLE = 0,
+    GUI_FORMAT_RELOAD_WAIT_TASK,
+    GUI_FORMAT_RELOAD_READY
+} gui_format_reload_state;
+
 /* Small active/candidate host plus presentation-only state. */
 typedef struct gui_project_state {
     /* One process-host owner for the active generation and all startup failure
@@ -28,6 +34,10 @@ typedef struct gui_project_state {
     bool snapshot_published;
     bool observation_valid;
     bool refresh_pending;
+    gui_format_reload_state format_reload_state;
+#ifdef TP_ENABLE_TEST_SEAMS
+    char format_reload_root[TP_IDENTITY_PATH_MAX];
+#endif
     bool discard_retired_session;
     double drain_started_at;
     bool drain_deadline_expired;

@@ -375,6 +375,8 @@ void gui_project__test_set_drain_grace_ms(int grace_ms);
  * to exercise passive projection/reorder behavior without filesystem scan. */
 bool gui_project__test_set_format_catalog(
     tp_format_catalog *catalog);
+void gui_project__test_set_format_reload_root(
+    const char *root);
 #endif
 
 #ifdef __cplusplus

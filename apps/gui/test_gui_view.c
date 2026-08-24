@@ -2239,6 +2239,9 @@ void test_format_projection_install_failure_preserves_active_generation(void) {
     TEST_ASSERT_TRUE(gui_project__test_set_format_catalog(
         tp_format_catalog_native()));
     const tp_format_catalog *active = gui_project_format_catalog();
+    TEST_ASSERT_EQUAL_PTR(
+        active,
+        tp_session_format_catalog(gui_project__test_session()));
     const int active_count = gui_project_format_count();
 
     gui_project__test_set_format_projection_alloc_fail(true);
@@ -2248,6 +2251,9 @@ void test_format_projection_install_failure_preserves_active_generation(void) {
 
     TEST_ASSERT_FALSE(installed);
     TEST_ASSERT_EQUAL_PTR(active, gui_project_format_catalog());
+    TEST_ASSERT_EQUAL_PTR(
+        active,
+        tp_session_format_catalog(gui_project__test_session()));
     TEST_ASSERT_EQUAL_INT(active_count, gui_project_format_count());
     tp_format_catalog_release(candidate);
 }

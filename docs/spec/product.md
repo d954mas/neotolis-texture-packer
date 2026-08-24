@@ -24,16 +24,17 @@ through a shared core rather than separate GUI and automation models.
 - an explicit immutable format catalog with executable-relative strict package
   discovery, isolated Lua compile/runtime activation, deterministic unavailable
   rows, exact admitted-byte job bindings, fingerprints, and bounded owned
-  diagnostics; CLI and GUI share the same startup catalog and outer worker;
+  diagnostics; CLI startup and GUI startup/Reload share the same catalog
+  builder and outer worker;
 - semantic revision, dirty state, Undo/Redo, durable Save, and best-effort
   recovery;
 - worker-process containment for fallible builder work;
 - GUI-owned semantic Pack-result preview caching.
 
 The current product does not provide filesystem watchers, linked foreign-atlas
-sources, Import IR, MCP, or a Dev API transport. Runtime package refresh is
-restart-only; the production manifest ships the bundled Defold and Phaser
-packages.
+sources, Import IR, MCP, or a Dev API transport. The GUI reloads runtime
+packages explicitly; the CLI remains one-shot. The production manifest ships
+the bundled Defold and Phaser packages.
 
 ## Shared behavior
 

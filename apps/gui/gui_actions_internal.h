@@ -238,6 +238,7 @@ typedef struct gui_actions_state {
         bool present;
     } pending_history_reconcile;
     bool pending_view_reconcile;
+    bool format_reload_requested;
     gui_intent *intents;
     int intent_count;
     int intent_cap;

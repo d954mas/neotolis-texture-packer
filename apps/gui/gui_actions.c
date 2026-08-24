@@ -376,6 +376,9 @@ static void gui_actions__drain_intents(void) {
         }
         return;
     }
+    if (gui_project_format_reload_active()) {
+        return;
+    }
     if (s_actions.pending_lifecycle_request !=
         GUI_LIFECYCLE_REQUEST_NONE) {
         if (!gui_project_observation_is_valid()) {
@@ -388,6 +391,25 @@ static void gui_actions__drain_intents(void) {
          * queued beside or after it. The caller does not need to order
          * request_new/open/exit against ordinary semantic ingress. */
         (void)gui_actions__apply_lifecycle_request();
+        return;
+    }
+    if (s_actions.format_reload_requested) {
+        s_actions.format_reload_requested = false;
+        tp_error error = {{0}};
+        const tp_status status =
+            gui_project_format_reload_begin(&error);
+        if (status == TP_STATUS_OK) {
+            set_status_ex(
+                STATUS_INFO,
+                "Reloading formats\xE2\x80\xA6");
+        } else {
+            set_statusf_ex(
+                STATUS_ERROR,
+                "Reload formats failed: %s",
+                error.msg[0]
+                    ? error.msg
+                    : tp_status_str(status));
+        }
         return;
     }
     const bool save_as_requires_preflight =
@@ -489,7 +511,39 @@ void gui_actions_shutdown(void) {
         (gui_lifecycle_flow){0};
     s_actions.pending_lifecycle_request =
         GUI_LIFECYCLE_REQUEST_NONE;
+    s_actions.format_reload_requested = false;
     gui_actions_recovery_dismiss();
+}
+
+static void consume_format_reload(
+    const gui_format_reload_result *reload) {
+    if (!reload ||
+        reload->outcome == GUI_FORMAT_RELOAD_NONE) {
+        return;
+    }
+    if (reload->outcome ==
+        GUI_FORMAT_RELOAD_SUCCEEDED) {
+        gui_pack_preview_clear();
+        if (!gui_preview_target_is_native(
+                &s_preview_target) &&
+            !preview_target_format()) {
+            preview_target_reset();
+        }
+        s_actions.pending_view_reconcile = true;
+        gui_canvas_invalidate(&s_canvas);
+        set_statusf_ex(
+            STATUS_SUCCESS,
+            "Reloaded formats: %d ready, %d unavailable.",
+            reload->ready_count,
+            reload->unavailable_count);
+        return;
+    }
+    set_statusf_ex(
+        STATUS_ERROR,
+        "Reload formats failed: %s",
+        reload->detail[0]
+            ? reload->detail
+            : tp_status_str(reload->status));
 }
 
 void gui_actions__record_job_request(
@@ -536,6 +590,8 @@ tp_status gui_actions_step(
             &result.job_completion);
     result.job_completion_present =
         completion != GUI_PACK_DONE_NONE;
+    consume_format_reload(
+        &project_result.format_reload);
     gui_actions__complete_lifecycle(
         project_result.lifecycle_completed);
     gui_actions__reconcile_observation();
@@ -559,6 +615,11 @@ tp_status gui_actions_host_shutdown_step(
     bool *out_closed, tp_error *err) {
     if (out_closed) {
         *out_closed = false;
+    }
+    if (gui_project_format_reload_active()) {
+        /* Reload owns the current Pack/Export drain. Pump its real terminal
+         * before the shutdown lifecycle claims the same session owner. */
+        return gui_actions_step(NULL, err);
     }
     if (gui_project_lifecycle_state_query() ==
         GUI_PROJECT_LIFECYCLE_ACTIVE) {

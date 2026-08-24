@@ -12,6 +12,10 @@ typedef struct tp_project_generation tp_project_generation;
  * or destruction). Core-only: clients read owned session snapshots. */
 const tp_project *tp_model_project(const tp_model *model);
 struct tp_format_catalog *tp_model_format_catalog(const tp_model *model);
+/* Consumes one retained immutable catalog reference and releases the prior
+ * model-owned generation. */
+void tp_model__adopt_format_catalog(
+    tp_model *model, struct tp_format_catalog *catalog);
 
 /* Lazily installs a shared owner for the current immutable project generation
  * and returns one retained reference. The model remains unchanged on OOM. */

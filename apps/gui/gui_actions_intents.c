@@ -623,6 +623,15 @@ void gui_request_add_files(void) { intent_request(GUI_INTENT_ADD_FILES); }
 void gui_request_add_folder(void) { intent_request(GUI_INTENT_ADD_FOLDER); }
 void gui_request_add_atlas(void) { intent_request(GUI_INTENT_ADD_ATLAS); }
 void gui_request_refresh(void) { intent_request(GUI_INTENT_REFRESH); }
+void gui_request_reload_formats(void) {
+    if (!gui_project_format_reload_active()) {
+        s_actions.format_reload_requested = true;
+    }
+}
+bool gui_actions_format_reload_active(void) {
+    return s_actions.format_reload_requested ||
+           gui_project_format_reload_active();
+}
 void gui_request_cancel(void) { intent_request(GUI_INTENT_CANCEL); }
 void gui_request_pack(void) { intent_request(GUI_INTENT_PACK); }
 void gui_request_export(void) { intent_request(GUI_INTENT_EXPORT); }

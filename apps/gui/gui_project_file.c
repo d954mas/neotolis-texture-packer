@@ -79,6 +79,8 @@ void gui_project__assert_lifecycle_invariants(void) {
     if (state == GUI_PROJECT_LIFECYCLE_CLOSED) {
         NT_ASSERT(s_project.candidate == NULL);
         NT_ASSERT(!s_project.refresh_pending);
+        NT_ASSERT(s_project.format_reload_state ==
+                  GUI_FORMAT_RELOAD_IDLE);
         return;
     }
     if (state == GUI_PROJECT_LIFECYCLE_ACTIVE ||
@@ -113,6 +115,8 @@ static void lifecycle_transition(
 
 static void lifecycle_force_closed(void) {
     s_project.refresh_pending = false;
+    s_project.format_reload_state =
+        GUI_FORMAT_RELOAD_IDLE;
     s_project.drain_started_at = 0.0;
     s_project.drain_deadline_expired = false;
     s_project.lifecycle_state =
@@ -199,6 +203,11 @@ static tp_status require_idle_lifecycle(
         return tp_error_set(
             err, TP_STATUS_INVALID_ARGUMENT,
             "GUI project lifecycle transition is already in progress");
+    }
+    if (gui_project_format_reload_active()) {
+        return tp_error_set(
+            err, TP_STATUS_BUSY,
+            "GUI project lifecycle waits for Reload Formats");
     }
     return TP_STATUS_OK;
 }
@@ -337,6 +346,11 @@ void gui_project_shutdown(void) {
     s_project.save_notice_pending = false;
     s_project.save_notice[0] = '\0';
     s_project.refresh_pending = false;
+    s_project.format_reload_state =
+        GUI_FORMAT_RELOAD_IDLE;
+#ifdef TP_ENABLE_TEST_SEAMS
+    s_project.format_reload_root[0] = '\0';
+#endif
     gui_project__clear_format_projection();
     app_format_catalog_close(&s_project.formats);
 }

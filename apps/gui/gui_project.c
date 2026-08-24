@@ -138,6 +138,16 @@ tp_status gui_project__install_format_catalog(
         return status;
     }
 
+    if (s_project.session) {
+        gui_project__invalidate_observation();
+        status = tp_session_replace_format_catalog(
+            s_project.session, candidate->catalog, error);
+        if (status != TP_STATUS_OK) {
+            format_projection_candidate_destroy(&projection);
+            return status;
+        }
+    }
+
     app_format_catalog previous_formats = s_project.formats;
     tp_format_catalog *previous_projection_catalog =
         s_project.format_projection_catalog;
@@ -478,6 +488,105 @@ static tp_status admit_pending_refresh(tp_error *err) {
     return status;
 }
 
+static void format_reload_count_rows(
+    const tp_format_catalog *catalog,
+    gui_format_reload_result *result) {
+    NT_ASSERT(catalog != NULL);
+    NT_ASSERT(result != NULL);
+    const size_t count = tp_format_catalog_row_count(catalog);
+    for (size_t index = 0U; index < count; ++index) {
+        tp_format_catalog_row row = {0};
+        if (!tp_format_catalog_row_at(catalog, index, &row)) {
+            continue;
+        }
+        if (row.available) {
+            ++result->ready_count;
+        } else {
+            ++result->unavailable_count;
+        }
+    }
+}
+
+static void format_reload_fail(
+    gui_format_reload_result *result, tp_status status,
+    const char *detail) {
+    NT_ASSERT(result != NULL);
+    result->outcome = GUI_FORMAT_RELOAD_FAILED;
+    result->status = status == TP_STATUS_OK
+                         ? TP_STATUS_BUILDER_FAILED
+                         : status;
+    (void)snprintf(
+        result->detail, sizeof result->detail, "%s",
+        detail && detail[0] ? detail : tp_status_str(result->status));
+}
+
+static void advance_format_reload_before_update(
+    gui_format_reload_result *result) {
+    NT_ASSERT(result != NULL);
+    if (s_project.format_reload_state ==
+            GUI_FORMAT_RELOAD_WAIT_TASK &&
+        !tp_session_job_active(s_project.session)) {
+        s_project.format_reload_state =
+            GUI_FORMAT_RELOAD_READY;
+    }
+    if (s_project.format_reload_state !=
+        GUI_FORMAT_RELOAD_READY) {
+        return;
+    }
+
+    app_format_catalog candidate = {0};
+    tp_error error = {{0}};
+#ifdef TP_ENABLE_TEST_SEAMS
+    const tp_status open_status =
+        s_project.format_reload_root[0]
+            ? app_format_catalog_open_startup_at_root(
+                  s_project.format_reload_root,
+                  &candidate, &error)
+            : app_format_catalog_open_startup(
+                  &candidate, &error);
+#else
+    const tp_status open_status =
+        app_format_catalog_open_startup(
+            &candidate, &error);
+#endif
+    if (open_status != TP_STATUS_OK) {
+        format_reload_fail(
+            result, open_status, error.msg);
+        app_format_catalog_close(&candidate);
+        s_project.format_reload_state =
+            GUI_FORMAT_RELOAD_IDLE;
+        return;
+    }
+    NT_ASSERT(candidate.catalog != NULL);
+    if (candidate.state != APP_FORMAT_CATALOG_ACTIVE) {
+        format_reload_fail(
+            result, candidate.reason_status,
+            candidate.reason.msg);
+        app_format_catalog_close(&candidate);
+        s_project.format_reload_state =
+            GUI_FORMAT_RELOAD_IDLE;
+        return;
+    }
+
+    const tp_status install_status =
+        gui_project__install_format_catalog(
+            &candidate, &error);
+    if (install_status != TP_STATUS_OK) {
+        format_reload_fail(
+            result, install_status, error.msg);
+        app_format_catalog_close(&candidate);
+        s_project.format_reload_state =
+            GUI_FORMAT_RELOAD_IDLE;
+        return;
+    }
+    result->outcome = GUI_FORMAT_RELOAD_SUCCEEDED;
+    result->status = TP_STATUS_OK;
+    format_reload_count_rows(
+        s_project.formats.catalog, result);
+    s_project.format_reload_state =
+        GUI_FORMAT_RELOAD_IDLE;
+}
+
 tp_status gui_project_step(
     gui_project_step_result *out, tp_error *err) {
     gui_project_step_result result = {0};
@@ -487,6 +596,8 @@ tp_status gui_project_step(
             err, TP_STATUS_NOT_FOUND,
             "GUI host has no live session");
     }
+    advance_format_reload_before_update(
+        &result.format_reload);
     const tp_status refresh_admission_status =
         admit_pending_refresh(err);
     if (refresh_admission_status != TP_STATUS_OK) {
@@ -573,6 +684,11 @@ tp_status gui_project_job_enqueue_pack(
             err, TP_STATUS_INVALID_ARGUMENT,
             "GUI Pack requires an open unpinned session");
     }
+    if (gui_project_format_reload_active()) {
+        return tp_error_set(
+            err, TP_STATUS_BUSY,
+            "GUI Pack waits for Reload Formats");
+    }
     const tp_pack_job_request request = {
         .atlas_id = atlas_id,
         .work_dir = work_dir,
@@ -593,6 +709,11 @@ tp_status gui_project_job_enqueue_export(
         return tp_error_set(
             err, TP_STATUS_INVALID_ARGUMENT,
             "GUI Export requires an open unpinned session");
+    }
+    if (gui_project_format_reload_active()) {
+        return tp_error_set(
+            err, TP_STATUS_BUSY,
+            "GUI Export waits for Reload Formats");
     }
     const tp_export_command_request request = {
         .work_dir = work_dir,
@@ -635,6 +756,59 @@ tp_status gui_project_job_enqueue_cancel(
     gui_project__invalidate_observation();
     return tp_session_job_cancel(
         s_project.session, err);
+}
+
+tp_status gui_project_format_reload_begin(
+    tp_error *err) {
+    if (s_project.format_reload_state !=
+        GUI_FORMAT_RELOAD_IDLE) {
+        return TP_STATUS_OK;
+    }
+    if (!gui_project__ingress_is_open()) {
+        return tp_error_set(
+            err, TP_STATUS_INVALID_ARGUMENT,
+            "Reload Formats requires an active GUI session");
+    }
+    s_project.format_reload_state =
+        GUI_FORMAT_RELOAD_READY;
+    if (!tp_session_job_active(s_project.session)) {
+        return TP_STATUS_OK;
+    }
+
+    NT_ASSERT(s_project.observation_valid);
+    NT_ASSERT(s_project.view != NULL);
+    NT_ASSERT(s_project.view->task.present);
+    const tp_session_job_kind kind =
+        s_project.view->task.kind;
+    if (kind == TP_SESSION_JOB_REFRESH) {
+        return TP_STATUS_OK;
+    }
+    NT_ASSERT(kind == TP_SESSION_JOB_PACK ||
+              kind == TP_SESSION_JOB_EXPORT);
+    s_project.format_reload_state =
+        GUI_FORMAT_RELOAD_WAIT_TASK;
+    gui_project__invalidate_observation();
+    const tp_status cancel_status =
+        tp_session_job_cancel(
+            s_project.session, err);
+    /* INVALID_ARGUMENT is the typed late boundary: cancellation was already
+     * requested or the worker is terminal but its receipt is not consumed. */
+    if (cancel_status == TP_STATUS_OK ||
+        cancel_status == TP_STATUS_NOT_FOUND ||
+        cancel_status == TP_STATUS_INVALID_ARGUMENT) {
+        if (err) {
+            err->msg[0] = '\0';
+        }
+        return TP_STATUS_OK;
+    }
+    s_project.format_reload_state =
+        GUI_FORMAT_RELOAD_IDLE;
+    return cancel_status;
+}
+
+bool gui_project_format_reload_active(void) {
+    return s_project.format_reload_state !=
+           GUI_FORMAT_RELOAD_IDLE;
 }
 
 bool gui_project_job_busy(void) {
@@ -758,6 +932,14 @@ bool gui_project__test_set_format_catalog(
         &candidate, &error);
     app_format_catalog_close(&candidate);
     return status == TP_STATUS_OK;
+}
+
+void gui_project__test_set_format_reload_root(
+    const char *root) {
+    (void)snprintf(
+        s_project.format_reload_root,
+        sizeof s_project.format_reload_root,
+        "%s", root ? root : "");
 }
 #endif
 

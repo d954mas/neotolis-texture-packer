@@ -690,6 +690,69 @@ void test_user_refresh_returns_async_busy_and_publishes_terminal_once(void) {
     TEST_ASSERT_EQUAL_INT(0, refresh_test_rmdir(folder_path));
 }
 
+void test_reload_formats_does_not_cancel_or_wait_for_refresh(void) {
+    const tp_session_snapshot *snapshot = gui_project_snapshot();
+    const tp_snapshot_atlas *atlas =
+        tp_session_snapshot_atlas_at(snapshot, 0);
+    TEST_ASSERT_NOT_NULL(atlas);
+    char folder_path[1200];
+    char source_path[1280];
+    TEST_ASSERT_TRUE(snprintf(
+        folder_path, sizeof folder_path,
+        "%s/reload-refresh", TP_GUI_TRACE_TEST_DIR) > 0);
+    TEST_ASSERT_TRUE(snprintf(
+        source_path, sizeof source_path,
+        "%s/source.png", folder_path) > 0);
+    tp_mkdirs(folder_path);
+    FILE *source = fopen(source_path, "wb");
+    TEST_ASSERT_NOT_NULL(source);
+    TEST_ASSERT_EQUAL_size_t(
+        1U, fwrite("x", 1U, 1U, source));
+    TEST_ASSERT_EQUAL_INT(0, fclose(source));
+    TEST_ASSERT_EQUAL_INT(
+        GUI_ADD_ADDED,
+        gui_project_add_source_kind(
+            atlas->id,
+            tp_session_snapshot_revision(snapshot),
+            folder_path, TP_SOURCE_KIND_FOLDER));
+    settle_project_job();
+
+    tp_scan__test_arm_walk_gate();
+    gui_request_refresh();
+    pump_action_frame();
+    for (int attempt = 0;
+         attempt < 5000 &&
+         !tp_scan__test_walk_gate_entered();
+         ++attempt) {
+        nt_time_sleep(0.001);
+    }
+    TEST_ASSERT_TRUE(tp_scan__test_walk_gate_entered());
+    TEST_ASSERT_TRUE(gui_project_job_busy());
+    TEST_ASSERT_EQUAL_INT(
+        TP_SESSION_JOB_REFRESH,
+        gui_project_job_active_kind());
+
+    gui_project__test_set_format_reload_root(
+        TP_FORMAT_FIXTURE_ROOT);
+    gui_request_reload_formats();
+    pump_action_frame();
+
+    TEST_ASSERT_FALSE(gui_actions_format_reload_active());
+    TEST_ASSERT_TRUE(gui_project_job_busy());
+    TEST_ASSERT_EQUAL_INT(
+        TP_SESSION_JOB_REFRESH,
+        gui_project_job_active_kind());
+    TEST_ASSERT_NOT_NULL(tp_format_catalog_find_available(
+        gui_project_format_catalog(), "fixture-full"));
+    TEST_ASSERT_EQUAL_INT(STATUS_SUCCESS, s_status_sev);
+    TEST_ASSERT_NOT_NULL(strstr(s_status, "Reloaded formats"));
+
+    tp_scan__test_release_walk_gate();
+    settle_project_job();
+    TEST_ASSERT_EQUAL_INT(0, remove(source_path));
+    TEST_ASSERT_EQUAL_INT(0, refresh_test_rmdir(folder_path));
+}
+
 void test_refresh_lifecycle_cancel_drains_before_session_cutover(void) {
     const tp_session_snapshot *snapshot = gui_project_snapshot();
     const tp_snapshot_atlas *atlas =
@@ -913,6 +976,8 @@ int main(int argc, char **argv) {
         test_refresh_retains_external_change_when_source_is_removed);
     RUN_TEST(
         test_user_refresh_returns_async_busy_and_publishes_terminal_once);
+    RUN_TEST(
+        test_reload_formats_does_not_cancel_or_wait_for_refresh);
     RUN_TEST(
         test_refresh_lifecycle_cancel_drains_before_session_cutover);
     RUN_TEST(

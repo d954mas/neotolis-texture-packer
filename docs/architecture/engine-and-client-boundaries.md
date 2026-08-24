@@ -137,8 +137,9 @@ The CLI is not a back door into an already-open GUI session. A conflicting live
 writer produces `project_live`.
 
 Each CLI invocation owns one catalog derived from
-`<real-executable-directory>/formats/`. The native GUI host likewise owns one
-startup catalog and passes it into every replacement session. Both clients use
+`<real-executable-directory>/formats/`. The native GUI host owns one active
+generation, passes it into every replacement session, and temporarily owns one
+complete candidate during Reload. Both clients use
 the same `apps/common` process-host workflow for executable-path resolution,
 scan admission, isolated compilation, and native fallback. Its owned result
 keeps the active catalog, explicit active/fallback state, and any root-failure
@@ -147,15 +148,15 @@ complete compile batch is installed atomically; a global scan/compile failure
 uses the immortal native baseline. Build staging recreates the
 executable-relative root for both apps from one explicit production package
 manifest; it currently stages the bundled Defold and Phaser packages. Package
-changes require restart.
+changes require explicit GUI Reload or process restart.
 
 Lua source and the Lua C API are reachable only from the re-executed outer
 worker. Admission captures exact descriptor/source bytes plus package identity
 from one immutable catalog generation; execution never reopens the formats root
 or late-resolves a changed package. Native and Lua serializers produce the same
 owned document batch for common validation, dry discard, or rollback-backed
-publication. The GUI exposes a passive read-only Formats modal; the CLI exposes
-the schema-1 `formats` query.
+publication. The GUI Formats modal exposes the active rows and a Reload action;
+the CLI exposes the schema-1 `formats` query.
 
 ## Native GUI
 
@@ -194,6 +195,12 @@ likewise wait for a controller step that both enters and leaves with the task
 slot idle; an automatic Refresh queued behind another task is admitted first,
 and either admission or terminal failure is propagated rather than treated as
 quiescence.
+
+A pending lifecycle request also precedes a pending Reload Formats request. An
+already-active Reload owns its Pack/Export drain to a real terminal; later
+lifecycle requests remain queued. Host shutdown pumps that Reload owner before
+starting the shutdown lifecycle, so it never converts an ordinary drain into a
+forced teardown.
 
 `gui_project_step` is an internal host primitive and the sole live-session
 update driver. The project host owns `tp_session_update`, task completion, and

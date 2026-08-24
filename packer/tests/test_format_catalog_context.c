@@ -16,10 +16,55 @@
 #include "tp_format_binding_proto_internal.h"
 #include "tp_format_catalog_internal.h"
 #include "tp_format_diagnostic_internal.h"
+#include "tp_job_owner_internal.h"
 
 typedef struct deterministic_rng_state {
     uint8_t next;
 } deterministic_rng_state;
+
+typedef struct catalog_context_job {
+    tp_session_owned_job owner;
+    bool destroyed;
+} catalog_context_job;
+
+static void catalog_context_job_cancel(
+    tp_session_owned_job *owner) {
+    (void)owner;
+}
+
+static bool catalog_context_job_request_cancel(
+    tp_session_owned_job *owner) {
+    (void)owner;
+    return true;
+}
+
+static void catalog_context_job_compact(
+    tp_session_owned_job *owner) {
+    (void)owner;
+}
+
+static void catalog_context_job_destroy(
+    tp_session_owned_job *owner) {
+    catalog_context_job *job =
+        (catalog_context_job *)owner;
+    job->destroyed = true;
+}
+
+static bool catalog_context_job_observe(
+    tp_session_owned_job *owner,
+    tp_session_job_sample *out) {
+    (void)owner;
+    memset(out, 0, sizeof *out);
+    out->state = TP_SESSION_JOB_RUNNING;
+    return true;
+}
+
+static tp_status catalog_context_job_start(
+    void *context, tp_error *error) {
+    (void)context;
+    (void)error;
+    return TP_STATUS_OK;
+}
 
 static int deterministic_fill(void *context, uint8_t *out, size_t length) {
     deterministic_rng_state *state =
@@ -417,11 +462,179 @@ void test_catalog_generation_is_threaded_through_sessions_and_snapshots(void) {
         tp_format_catalog_native(), k_format_b.id));
 }
 
+void test_session_catalog_replace_revalidates_without_authored_change(void) {
+    const tp_exporter *const exporters_a[] = {&k_exporter_a};
+    const tp_exporter *const exporters_b[] = {&k_exporter_b};
+    tp_format_catalog *catalog_a = NULL;
+    tp_format_catalog *catalog_b = NULL;
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_format_catalog__test_create(exporters_a, 1U, &catalog_a, &error),
+        error.msg);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_format_catalog__test_create(exporters_b, 1U, &catalog_b, &error),
+        error.msg);
+
+    deterministic_rng_state state = {.next = 1U};
+    const tp_rng rng = {.fill = deterministic_fill, .ctx = &state};
+    tp_session *session = NULL;
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_session_create_with_catalog(catalog_a, &rng, &session, &error),
+        error.msg);
+    const tp_id128 atlas_id = only_atlas_id(session);
+    const tp_id128 target_id = id_with_byte(0xa5U);
+    tp_txn_result result = {0};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        create_target(session, atlas_id, target_id, k_format_a.id,
+                      "out/reload", "55555555555555555555555555555555",
+                      &result, &error),
+        error.msg);
+    TEST_ASSERT_TRUE(result.committed);
+    tp_txn_result_free(&result);
+
+    tp_session_snapshot *before = NULL;
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_session_snapshot_create(session, &before, &error), error.msg);
+    const int64_t revision = tp_session_snapshot_revision(before);
+    const bool dirty = tp_session_snapshot_dirty(before);
+    const uint64_t model_generation =
+        tp_session_snapshot_model_generation(before);
+    const uint64_t event_sequence =
+        tp_session_snapshot_event_sequence(before);
+    const int history_count = tp_session_history_count(session);
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_session_replace_format_catalog(session, catalog_b, &error),
+        error.msg);
+    TEST_ASSERT_EQUAL_PTR(catalog_b, tp_session_format_catalog(session));
+    TEST_ASSERT_EQUAL_INT64(revision, tp_session_revision(session));
+    TEST_ASSERT_EQUAL_INT(history_count, tp_session_history_count(session));
+    TEST_ASSERT_EQUAL_UINT64(event_sequence,
+                             tp_session_event_sequence(session));
+
+    tp_session_snapshot *after = NULL;
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_session_snapshot_create(session, &after, &error), error.msg);
+    TEST_ASSERT_EQUAL_PTR(catalog_b,
+                          tp_session_snapshot_format_catalog(after));
+    TEST_ASSERT_EQUAL_INT64(revision,
+                            tp_session_snapshot_revision(after));
+    TEST_ASSERT_EQUAL_INT(dirty, tp_session_snapshot_dirty(after));
+    TEST_ASSERT_EQUAL_UINT64(
+        model_generation,
+        tp_session_snapshot_model_generation(after));
+
+    tp_validation_report validation = {0};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_validate_session_snapshot(after, &validation, &error), error.msg);
+    TEST_ASSERT_TRUE(validation_has_code(
+        &validation, TP_VALIDATION_CODE_UNKNOWN_EXPORTER));
+    tp_validation_report_free(&validation);
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_session_replace_format_catalog(session, catalog_a, &error),
+        error.msg);
+    tp_session_snapshot *restored = NULL;
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_session_snapshot_create(session, &restored, &error), error.msg);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_validate_session_snapshot(restored, &validation, &error),
+        error.msg);
+    TEST_ASSERT_FALSE(validation_has_code(
+        &validation, TP_VALIDATION_CODE_UNKNOWN_EXPORTER));
+    tp_validation_report_free(&validation);
+
+    /* Previously published cuts retain their exact generation. */
+    TEST_ASSERT_EQUAL_PTR(catalog_a,
+                          tp_session_snapshot_format_catalog(before));
+    TEST_ASSERT_EQUAL_PTR(catalog_b,
+                          tp_session_snapshot_format_catalog(after));
+
+    tp_session_snapshot_destroy(restored);
+    tp_session_snapshot_destroy(after);
+    tp_session_snapshot_destroy(before);
+    tp_session_destroy(session);
+    tp_format_catalog_release(catalog_b);
+    tp_format_catalog_release(catalog_a);
+}
+
+void test_session_catalog_replace_rejects_active_pack(void) {
+    const tp_exporter *const exporters_a[] = {&k_exporter_a};
+    const tp_exporter *const exporters_b[] = {&k_exporter_b};
+    tp_format_catalog *catalog_a = NULL;
+    tp_format_catalog *catalog_b = NULL;
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_format_catalog__test_create(
+            exporters_a, 1U, &catalog_a, &error),
+        error.msg);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_format_catalog__test_create(
+            exporters_b, 1U, &catalog_b, &error),
+        error.msg);
+
+    deterministic_rng_state state = {.next = 1U};
+    const tp_rng rng = {.fill = deterministic_fill, .ctx = &state};
+    tp_session *session = NULL;
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_session_create_with_catalog(
+            catalog_a, &rng, &session, &error),
+        error.msg);
+
+    catalog_context_job job = {0};
+    tp_session_owned_job_init(
+        &job.owner, catalog_context_job_cancel,
+        catalog_context_job_destroy);
+    const tp_session_job_descriptor descriptor = {
+        .kind = TP_SESSION_JOB_PACK,
+        .request_cancel = catalog_context_job_request_cancel,
+        .compact = catalog_context_job_compact,
+    };
+    tp_session_owned_job_configure_observation(
+        &job.owner, &descriptor,
+        catalog_context_job_observe);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_session_job_start_internal(
+            session, &job.owner,
+            catalog_context_job_start, NULL, &error),
+        error.msg);
+
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_BUSY,
+        tp_session_replace_format_catalog(
+            session, catalog_b, &error));
+    TEST_ASSERT_EQUAL_PTR(
+        catalog_a, tp_session_format_catalog(session));
+
+    tp_session_destroy(session);
+    TEST_ASSERT_TRUE(job.destroyed);
+    tp_format_catalog_release(catalog_b);
+    tp_format_catalog_release(catalog_a);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_descriptor_id_wins_over_another_package_key);
     RUN_TEST(test_unavailable_package_binding_keeps_no_binding_sentinel);
     RUN_TEST(
         test_catalog_generation_is_threaded_through_sessions_and_snapshots);
+    RUN_TEST(
+        test_session_catalog_replace_revalidates_without_authored_change);
+    RUN_TEST(test_session_catalog_replace_rejects_active_pack);
     return UNITY_END();
 }
