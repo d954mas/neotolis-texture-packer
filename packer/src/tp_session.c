@@ -500,6 +500,41 @@ tp_format_catalog *tp_session_format_catalog(const tp_session *session) {
     return session ? tp_model_format_catalog(session->model) : NULL;
 }
 
+tp_status tp_session_replace_format_catalog(
+    tp_session *session, tp_format_catalog *catalog, tp_error *err) {
+    if (!session || !catalog) {
+        return tp_error_set(
+            err, TP_STATUS_INVALID_ARGUMENT,
+            "session format replacement requires session and catalog");
+    }
+    tp_session__assert_owner_thread(session);
+    if (session->discarded) {
+        return tp_error_set(
+            err, TP_STATUS_INVALID_ARGUMENT,
+            "session was discarded");
+    }
+    if (tp_model_format_catalog(session->model) == catalog) {
+        return TP_STATUS_OK;
+    }
+    if (session->active_job &&
+        session->active_job->observation_descriptor.kind !=
+            TP_SESSION_JOB_REFRESH) {
+        return tp_error_set(
+            err, TP_STATUS_BUSY,
+            "format catalog replacement requires Pack or Export to finish");
+    }
+    tp_format_catalog *retained =
+        tp_format_catalog_retain(catalog);
+    if (!retained) {
+        return tp_error_set(
+            err, TP_STATUS_OOM,
+            "session format catalog retain failed");
+    }
+    tp_model__adopt_format_catalog(
+        session->model, retained);
+    return TP_STATUS_OK;
+}
+
 void tp_session_destroy(tp_session *session) {
     if (!session) {
         return;

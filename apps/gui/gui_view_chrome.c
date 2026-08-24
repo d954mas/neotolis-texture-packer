@@ -306,7 +306,7 @@ void declare_formats_modal(nt_ui_context_t *ctx) {
         nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), "Export Formats",
                     &g_body);
         nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT),
-                    "Read-only startup catalog; restart to refresh packages.",
+                    "Runtime catalog shared by the live session and export jobs.",
                     &g_caption);
         const tp_format_catalog *catalog = gui_project_format_catalog();
         tp_status fallback_status = TP_STATUS_OK;
@@ -399,7 +399,15 @@ void declare_formats_modal(nt_ui_context_t *ctx) {
             }
         }
         nt_ui_scroll_end(ctx);
-        if (ui_btn(ctx, nt_ui_id("ntpacker/formats_ok"), "OK",
+        const bool reloading =
+            gui_actions_format_reload_active();
+        if (ui_btn(ctx, nt_ui_id("ntpacker/formats_reload"),
+                   reloading ? "Reloading..." : "Reload Formats",
+                   &g_btn, !reloading, 140.0F, 34.0F,
+                   &g_body)) {
+            gui_request_reload_formats();
+        }
+        if (ui_btn(ctx, nt_ui_id("ntpacker/formats_ok"), "Close",
                    &g_btn_primary, true, 100.0F, 34.0F, &g_onaccent)) {
             s_formats_open = false;
         }

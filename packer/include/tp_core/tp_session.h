@@ -233,6 +233,12 @@ tp_status tp_session_open_with_catalog(const char *path,
 
 /* Borrowed immutable generation retained by the session. */
 tp_format_catalog *tp_session_format_catalog(const tp_session *session);
+/* Replaces only the session's immutable runtime format generation. Authored
+ * project state, revision, dirty state, history, and events do not change.
+ * Catalog-dependent Pack/Export work must reach a terminal first; an
+ * independent Refresh may remain active. */
+tp_status tp_session_replace_format_catalog(
+    tp_session *session, tp_format_catalog *catalog, tp_error *err);
 
 void tp_session_destroy(tp_session *session);
 

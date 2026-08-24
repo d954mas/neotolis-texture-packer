@@ -89,9 +89,10 @@ executable-relative `formats/` root, validates Lua candidates in an isolated
 compiler, and atomically installs the complete eligible generation or the
 native fallback. Admission captures exact package bytes for the outer worker;
 only that worker reaches the Lua 5.5 kernel. There is no production runtime C
-registration surface or Reload Formats operation. Package changes therefore
-require restart. Import and linked-atlas ingestion remain outside this slice.
-The current runtime and target bundled-format contract is documented in
+registration surface. GUI Reload Formats builds a complete candidate through
+the same scanner/compiler, drains catalog-dependent work, and atomically swaps
+only an eligible generation. Import and linked-atlas ingestion remain outside
+this slice. The current runtime and bundled-format contract is documented in
 [`../spec/format-ecosystem.md`](../spec/format-ecosystem.md).
 
 ## Primary durable contracts

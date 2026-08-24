@@ -1,7 +1,6 @@
 # Sandboxed Lua export formats
 
-**Status:** Mixed contract. The sandboxed Lua runtime and bundled Defold and
-Phaser packages are current; Reload Formats remains target behavior.
+**Status:** Current contract.
 
 The current product runs strict API-v1 Lua packages through the native Export
 IR, capability projection, artifact planner, PNG writer, and rollback-backed
@@ -79,11 +78,11 @@ notices, and handler diagnostics as a wet run up to publication.
 
 ## Catalog and ownership
 
-The target replaces the fixed process-global format lookup with an opaque,
-owned, immutable catalog. One CLI invocation owns one catalog. The GUI owns one
-active generation and a temporary candidate during Reload. Sessions retain the
-generation used for validation and admission. There is no mutable global active
-catalog.
+The runtime uses an opaque, owned, immutable catalog instead of a fixed
+process-global format lookup. One CLI invocation owns one catalog. The GUI owns
+one active generation and a temporary candidate during Reload. Sessions retain
+the generation used for validation and admission. There is no mutable global
+active catalog.
 
 Catalog creation is two-phase:
 
@@ -154,8 +153,8 @@ catalog rows; runtime failures affect only that target invocation.
 
 `ntpacker formats` and `ntpacker formats --json` are the detailed catalog
 authority. The JSON payload uses schema 1; Pack/Export reports use schema 2.
-The planned GUI Formats surface and Reload action must consume the same core
-rows and reports without duplicating parsing or policy.
+The GUI Formats surface and Reload action consume the same core rows and
+reports without duplicating parsing or policy.
 
 ## First formats and proof
 

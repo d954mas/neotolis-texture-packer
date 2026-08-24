@@ -5,6 +5,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 
+#include "core/nt_assert.h"
 #include "tp_diff_internal.h"
 #include "tp_journal_internal.h"
 #include "tp_project_generation_internal.h"
@@ -103,6 +104,14 @@ const tp_project *tp_model_project(const tp_model *m) {
 }
 tp_format_catalog *tp_model_format_catalog(const tp_model *m) {
     return m ? m->format_catalog : NULL;
+}
+void tp_model__adopt_format_catalog(
+    tp_model *m, tp_format_catalog *catalog) {
+    NT_ASSERT(m != NULL);
+    NT_ASSERT(catalog != NULL);
+    tp_format_catalog *previous = m->format_catalog;
+    m->format_catalog = catalog;
+    tp_format_catalog_release(previous);
 }
 tp_journal *tp_model_journal(tp_model *m) { return m ? m->journal : NULL; }
 int64_t tp_model_revision(const tp_model *m) { return m ? m->revision : 0; }
