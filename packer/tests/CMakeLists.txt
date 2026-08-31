@@ -35,6 +35,8 @@ tp_add_test(NAME sprite_index LIBS tp_core unity PRIVATE_SRC
 # range/reference each -> the right structured status).
 tp_add_test(NAME operation LIBS tp_core unity PRIVATE_SRC)
 
+tp_add_test(NAME op_schema LIBS tp_core unity cjson PRIVATE_SRC)
+
 tp_add_test(NAME pack_constraints LIBS tp_core unity PRIVATE_SRC)
 
 # F2-01: id-only apply (forward + error per op kind), stage-then-commit allocator-

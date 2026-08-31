@@ -24,6 +24,8 @@ Start with the smallest document that owns the question.
 
 - [`formats/project-v5.md`](formats/project-v5.md)
 - [`formats/cli-report.md`](formats/cli-report.md)
+- [`formats/agent-v1.md`](formats/agent-v1.md) — implemented first-packet agent
+  wire contract, with later capabilities explicitly separated.
 - [`formats/json-neotolis.md`](formats/json-neotolis.md)
 - [`formats/defold-tpinfo.md`](formats/defold-tpinfo.md)
 - [`formats/ntpack-binary.md`](formats/ntpack-binary.md)
@@ -34,10 +36,12 @@ Start with the smallest document that owns the question.
 
 ## Approved target contracts
 
-These describe intended future behavior and are not claims about current
-availability:
+These describe the approved direction. The first agent packet is implemented;
+the remaining automation and workspace behavior is future work:
 
-- [`spec/automation.md`](spec/automation.md) — Dev API and MCP.
+- [`spec/automation.md`](spec/automation.md) — agent mode and local Dev API.
+- [`spec/agent-mode-v1.md`](spec/agent-mode-v1.md) — approved lifecycle,
+  ownership, consent, and release acceptance; the first packet is a subset.
 - [`spec/ux.md`](spec/ux.md) — two-level canvas and future workspace model.
 
 Repository-wide working rules remain in [`../AGENTS.md`](../AGENTS.md).

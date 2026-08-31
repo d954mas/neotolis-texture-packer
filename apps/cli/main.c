@@ -13,6 +13,7 @@
 #include "cli_exit.h"
 #include "cli_out.h"
 #include "app_format_catalog.h"
+#include "agent.h"
 #include "ntpacker_version.h"
 #if defined(_WIN32)
 #include "nt_utf8_argv.h"
@@ -31,7 +32,7 @@ enum {
 
 static const char *const HELP_COMMANDS[] = {
     "pack", "export", "formats", "inspect", "validate", "new", "add", "remove",
-    "set", "sprite", "anim", "target", "atlas", "version", "help",
+    "set", "sprite", "anim", "target", "atlas", "agent", "version", "help",
 };
 
 static const char *const HELP_GLOBAL_OPTIONS[] = {
@@ -97,6 +98,9 @@ static void build_manifest(tp_sb *sb, const tp_format_catalog *catalog) {
     tp_sb_str(sb, ": ");
     tp_sb_int(sb, TP_PROJECT_SCHEMA_VERSION);
     tp_sb_str(sb, ",\n");
+    indent(sb, 1);
+    tp_sb_json_string(sb, "agent_schema");
+    tp_sb_str(sb, ": 1,\n");
 
     /* verbs: each verb that emits a --json payload -> its payload schema version.
      * inspect/validate landed in B2; grows as pack lands. */
@@ -628,6 +632,7 @@ static void print_usage(FILE *out) {
                   "  inspect <project>  Dump project state (--json is the contract; text is a summary)\n"
                   "  validate <project> Report every project problem in one pass\n"
                   "  new <path>         Create a new project (seeded default target); refuses to overwrite\n"
+                  "  agent [--new]      Live JSON-lines session; agent --help describes available commands\n"
                   "  version            Print the version; --json emits the schema manifest\n"
                   "  help               Show this help\n"
                   "\n"
@@ -856,7 +861,9 @@ static int ntpacker_main_utf8(int argc, char **argv) {
         app_format_catalog_open_startup(&formats, &error);
     NT_ASSERT(format_status == TP_STATUS_OK);
     NT_ASSERT(formats.catalog != NULL);
-    const int result = ntpacker_dispatch_utf8(argc, argv, &formats);
+    const int result = argc > 1 && strcmp(argv[1], "agent") == 0
+        ? ntpacker_agent_main(argc, argv, formats.catalog)
+        : ntpacker_dispatch_utf8(argc, argv, &formats);
     app_format_catalog_close(&formats);
     return result;
 }

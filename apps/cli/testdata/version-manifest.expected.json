@@ -2,6 +2,7 @@
   "schema": 2,
   "app_version": "0.2.0",
   "project_schema": 5,
+  "agent_schema": 1,
   "verbs": {
     "inspect": 4,
     "validate": 2,

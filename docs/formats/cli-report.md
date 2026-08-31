@@ -61,6 +61,11 @@ families advertise separate variants:
 `help --json` and `--help --json` return the same schema-1 command catalog,
 global options, and exit-code mapping.
 
+The manifest also advertises `agent_schema: 1`, and the command catalog includes
+`agent`. `ntpacker agent --help` returns the implemented agent command schemas.
+The persistent JSON-lines mode has its own [wire contract](agent-v1.md); it does
+not change ordinary saved-file command payloads or turn them into live requests.
+
 Each exporter `caps` object includes the exact numeric `transform_mask`
 (`1..255`, bit `i` permits stored D4 transform value `i`). The derived
 `rotate90` and `flips` booleans remain presentation conveniences and do not

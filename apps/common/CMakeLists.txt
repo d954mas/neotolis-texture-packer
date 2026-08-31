@@ -23,6 +23,30 @@ tp_add_test(NAME app_scratch
     SANITIZE
     TIMEOUT 30)
 
+set(_app_paths_sources test_app_paths.c app_paths.c)
+set(_app_paths_libs tp_core unity)
+if(WIN32)
+    list(APPEND _app_paths_sources nt_utf8_argv.c)
+    list(APPEND _app_paths_libs shell32)
+endif()
+tp_add_test(NAME app_paths
+    SOURCES ${_app_paths_sources}
+    LIBS ${_app_paths_libs}
+    INCLUDE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}"
+    DEFINES _CRT_SECURE_NO_WARNINGS
+    SANITIZE
+    TIMEOUT 30)
+
+tp_add_test(NAME app_automation_policy
+    SOURCES test_app_automation_policy.c app_automation_policy.c app_json.c nt_utf8_fs.c
+    LIBS tp_core cjson unity
+    INCLUDE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}"
+    DEFINES
+        APP_AUTOMATION_TEST_ROOT="${CMAKE_CURRENT_BINARY_DIR}/automation-policy-test"
+        _CRT_SECURE_NO_WARNINGS
+    SANITIZE
+    TIMEOUT 30)
+
 set(_app_format_catalog_test_root
     "${CMAKE_CURRENT_BINARY_DIR}/app_format_catalog_test")
 set(_app_format_catalog_empty_root

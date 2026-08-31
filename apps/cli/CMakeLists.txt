@@ -6,6 +6,8 @@
 set(CLI_OUTPUT_DIR "${CMAKE_SOURCE_DIR}/build/apps/cli/${NT_PRESET_NAME}")
 
 set(_ntpacker_sources main.c cli_exit.c cli_out.c cli_project.c cli_inspect.c cli_validate.c cli_pack.c
+    ../agent/agent.c ../agent/agent_commands.c
+    ../common/app_json.c ../common/app_paths.c ../common/app_automation_policy.c
     cli_mutate.c cli_mutate_source.c cli_mutate_atlas.c cli_mutate_sprite.c
     cli_mutate_anim.c cli_mutate_target.c
     # Shared app scratch root (<user cache dir>/ntpacker/work) + the CRT-local
@@ -17,11 +19,12 @@ if(WIN32)
     list(APPEND _ntpacker_sources "${CMAKE_SOURCE_DIR}/apps/common/nt_utf8_argv.c")
 endif()
 function(ntpacker_configure_target target)
-    target_link_libraries(${target} PRIVATE tp_build)
+    target_link_libraries(${target} PRIVATE tp_build cjson)
     if(WIN32)
         target_link_libraries(${target} PRIVATE shell32)
     endif()
     target_include_directories(${target} PRIVATE "${CMAKE_SOURCE_DIR}/apps/common")
+    target_include_directories(${target} PRIVATE "${CMAKE_SOURCE_DIR}/apps/agent")
     target_compile_definitions(${target} PRIVATE _CRT_SECURE_NO_WARNINGS)
     target_compile_options(${target} PRIVATE -U_DLL)
     nt_set_warning_flags(${target})
@@ -32,6 +35,12 @@ add_executable(ntpacker ${_ntpacker_sources})
 ntpacker_configure_target(ntpacker)
 set_target_properties(ntpacker PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CLI_OUTPUT_DIR}")
 tp_stage_format_packages(ntpacker)
+
+find_package(Python3 3.8 REQUIRED COMPONENTS Interpreter)
+add_test(NAME agent_process_contract COMMAND ${Python3_EXECUTABLE}
+    "${CMAKE_SOURCE_DIR}/apps/agent/test_agent.py" $<TARGET_FILE:ntpacker>
+    $<TARGET_FILE:agent_test_recover>)
+set_tests_properties(agent_process_contract PROPERTIES TIMEOUT 120)
 
 # Test-only binary with one deterministic fault seam. Production ntpacker has
 # no environment-controlled behavior; this variant proves inspect propagates a

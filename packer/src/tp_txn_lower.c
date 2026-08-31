@@ -25,6 +25,13 @@ static tp_status lower_frame_ref(const cJSON *value, tp_op_sprite_ref *out,
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
                             "frame must be a {source_id, src_key} object");
     }
+    for (const cJSON *field = value->child; field; field = field->next) {
+        if (strcmp(field->string, "source_id") != 0 &&
+            strcmp(field->string, "src_key") != 0) {
+            return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                                "unknown frame field '%s'", field->string);
+        }
+    }
     tp_status status = j_opt_shape_id(value, "source_id", TP_ID_KIND_SOURCE,
                                       &out->source_id, err);
     if (status != TP_STATUS_OK) {

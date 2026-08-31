@@ -4,21 +4,13 @@
 #include <string.h>
 #include <time.h>
 
+#include "app_paths.h"
 #include "core/nt_assert.h"
 #include "tp_core/tp_id.h"
 #include "tp_core/tp_recovery.h"
 #include "tp_core/tp_session.h"
 static int64_t recovery_now(void) {
     return (int64_t)time(NULL);
-}
-
-/* Stable application key for recovery sidecars. Bump when the journal contract
- * changes incompatibly so old slots cannot be misapplied. */
-static tp_id128 recovery_key(void) {
-    tp_id128 k;
-    static const uint8_t b[16] = {'n', 't', 'p', 'k', '_', 'r', 'e', 'c', 'o', 'v', 'e', 'r', 'y', '_', '0', '1'};
-    memcpy(k.bytes, b, sizeof b);
-    return k;
 }
 
 /* Publish a persistent recovery-health projection. It is deliberately separate
@@ -129,7 +121,7 @@ static void attach_recovery_with_snapshot(
     const tp_status status =
         tp_recovery_session_attach(
             s_project.recovery_root,
-            recovery_key(), &rng, session,
+            app_recovery_key(), &rng, session,
             &metadata, &err);
     if (status != TP_STATUS_OK &&
         !tp_session_recovery_available(session)) {
@@ -211,7 +203,7 @@ void gui_project_enable_recovery(const char *root) {
     }
     tp_error err = {0};
     const tp_status status = tp_recovery_root_validate(
-        root, recovery_key(), &err);
+        root, app_recovery_key(), &err);
     if (status == TP_STATUS_OK) {
         (void)snprintf(s_project.recovery_root, sizeof s_project.recovery_root, "%s", root);
     }
@@ -259,7 +251,7 @@ int gui_recovery_collect(gui_recovery_list *out) {
     }
     tp_error err = {0};
     tp_status status = tp_recovery_scan_root(
-        s_project.recovery_root, recovery_key(), gui_project__borrow_active_session(), out, &err);
+        s_project.recovery_root, app_recovery_key(), gui_project__borrow_active_session(), out, &err);
     if (status != TP_STATUS_OK) {
         gui_project_note_recovery_setup_failure("the recovery directory could not be scanned");
         return 0;
@@ -316,7 +308,7 @@ gui_recovery_resolve(const char *journal_path, gui_recovery_action action,
     tp_rng rng = tp_rng_os();
     tp_recovery_resolve_result result;
     const tp_status status = tp_recovery_resolve_journal(
-        s_project.recovery_root, recovery_key(), journal_path, gui_project__borrow_active_session(), core_action,
+        s_project.recovery_root, app_recovery_key(), journal_path, gui_project__borrow_active_session(), core_action,
         target_path, &rng, &result, &err);
     if (status != TP_STATUS_OK) {
         recovery_copy_error(err_out, err_cap, status, &err);

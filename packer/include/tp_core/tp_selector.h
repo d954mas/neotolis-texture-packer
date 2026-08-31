@@ -4,7 +4,7 @@
 /*
  * Canonical selector resolver (docs/architecture/model-operations-and-session.md).
  * Canonical operations,
- * history entries, and persistent references target IDs; a frontend (CLI/MCP) may
+ * history entries, and persistent references target IDs; a frontend (CLI/agent) may
  * accept a human-friendly selector for convenience, but it MUST resolve to exactly
  * one id before it is used. This resolver is that single seam -- it lives in core so
  * every frontend selects the same entity without guessing.

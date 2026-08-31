@@ -121,7 +121,9 @@ The core names product client shapes independently of transport:
 | Async validate job | not applicable | not implemented | not implemented |
 
 The table describes the typed core capability matrix, not deployed transports.
-There is no current MCP or Dev API server.
+The first agent-mode packet exposes only a subset of the live-headless shape:
+new-session binding, snapshots, transactions, history, and recovery preservation.
+There is no Dev API server or GUI attachment yet.
 
 ## File CLI
 
@@ -223,9 +225,33 @@ by the project schema.
 ## Live headless shape
 
 The in-process live-headless shape uses the same session, events, history,
-recovery, pack, and export APIs as the GUI. It exists so future transports can
-adapt those contracts without moving business rules into RPC handlers.
+recovery, pack, and export APIs as the GUI. The first `apps/agent` frontend
+adapts its new-session, transaction, snapshot, history, and close contracts.
+The remaining core capabilities are not yet exposed as agent commands.
 
-Transport discovery, authentication, ownership transfer, consent, method
-schemas, and MCP resources are target work described in
-[`../spec/automation.md`](../spec/automation.md).
+The agent host alone drives its session on the process thread. It validates
+the request and host generation, checks current global consent, and submits
+typed operations through `tp_session_apply`; dry run uses the existing snapshot
+preview API. It assigns controller authorship, owns each response until delivery,
+and keeps no second mutable model or response replay cache. Operation metadata
+comes from the same core catalog used by transaction decoding.
+
+GUI and agent hosts share the application-data resolver and recovery journal
+key. Agent mode requires the user-data location and never takes the GUI's
+executable-directory fallback. It attaches the existing recovery owner; EOF or
+broken output destroys the session without implicit Save/discard. The core
+destructor preserves an attached dirty journal; degraded recovery is reported
+as a notice and unconfirmed preservation affects the process exit status.
+The current agent loop has no jobs or GUI connection to pump while idle.
+
+`apps/common` owns strict JSON syntax admission and the read-only permission
+file reader. Each bound project command rereads policy; missing means Ask,
+while malformed or inaccessible policy refuses admission. There is no policy
+cache, watcher, writer, settings UI, or second recovery store in this packet.
+Status and preserve-close remain usable after policy refusal.
+
+The implemented 11-command surface is [agent wire v1](../formats/agent-v1.md).
+Saved-project operations, IPC discovery/authentication, GUI consent and
+attachment, and clean ownership transfer remain target work described in
+[automation](../spec/automation.md) and
+[agent-mode-v1](../spec/agent-mode-v1.md).

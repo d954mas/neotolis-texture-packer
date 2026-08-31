@@ -278,6 +278,13 @@ tp_status tp_txn_request_decode(const char *json, tp_txn_request **out, tp_error
  * same limits and delegates here. */
 tp_status tp_txn_request_decode_n(const char *json, size_t json_len, tp_txn_request **out, tp_error *err);
 
+/* JSON Schema 2020-12 for the current core transaction request envelope.
+ * Operation-specific schemas come from tp_op_catalog_encode. Owned malloc
+ * string, caller frees; NULL on OOM. Core permits optional author; transports
+ * that assign authorship must add their own restriction without copying this
+ * envelope's field vocabulary. */
+char *tp_txn_request_schema_encode(void);
+
 /* Canonical byte-stable encode of a typed request. Returns a heap NUL-terminated
  * string (caller frees), or NULL on OOM / an INVALID-kind op. */
 char *tp_txn_request_encode(const tp_txn_request *req);

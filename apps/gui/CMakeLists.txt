@@ -34,6 +34,7 @@ endif()
 
 add_executable(ntpacker-gui main.c gui_state.c gui_widgets.c gui_actions.c gui_actions_dialogs.c gui_actions_edits.c gui_actions_intents.c gui_actions_pack.c gui_actions_preview.c gui_actions_recovery.c gui_rows.c gui_selftest.c gui_startup.c gui_paths.c gui_log_file.c gui_crash.c gui_bootstrap.c gui_project.c gui_project_file.c gui_project_mutations.c gui_project_recovery.c gui_project_operations.c gui_edit_state.c gui_canvas.c gui_canvas_resources.c gui_pack.c gui_pack_jobs.c gui_pack_preview.c gui_view_settings.c gui_view_lists.c gui_view_canvas.c gui_view_chrome.c
     "${CMAKE_SOURCE_DIR}/apps/common/app_format_catalog.c"
+    "${CMAKE_SOURCE_DIR}/apps/common/app_paths.c"
     "${CMAKE_SOURCE_DIR}/apps/common/nt_utf8_fs.c"
     "${CMAKE_SOURCE_DIR}/apps/common/app_scratch.c")
 if(WIN32)
@@ -160,7 +161,8 @@ tp_add_gui_test(NAME gui_edit_state
 
 # Windows resolves argv through the shared UTF-8 process ingress, which the path
 # helpers under test read back.
-set(_tp_gui_paths_sources test_gui_paths.c gui_paths.c)
+set(_tp_gui_paths_sources test_gui_paths.c gui_paths.c
+    "${CMAKE_SOURCE_DIR}/apps/common/app_paths.c")
 set(_tp_gui_paths_libs tp_core unity)
 if(WIN32)
     list(APPEND _tp_gui_paths_sources
@@ -181,6 +183,7 @@ tp_add_gui_test(NAME gui_shell_quote LIBS unity)
 
 set(_tp_gui_headless_sources
     "${CMAKE_SOURCE_DIR}/apps/common/app_format_catalog.c"
+    "${CMAKE_SOURCE_DIR}/apps/common/app_paths.c"
     gui_state.c
     gui_actions.c
     gui_actions_dialogs.c

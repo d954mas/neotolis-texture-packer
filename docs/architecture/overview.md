@@ -8,7 +8,7 @@ clients:
 ```text
 saved project / live operator
               |
-      CLI or native GUI
+   file CLI / agent / native GUI
               |
      typed operations + session
               |
@@ -30,9 +30,14 @@ saved project / live operator
   packing, parse-back, and export orchestration.
 - `apps/cli` parses saved-file commands and renders human or versioned JSON
   responses. It does not own live-session policy.
+- `apps/agent` owns JSON-lines framing, request correlation, and one new
+  headless session. It adapts the shared operation, observation, history, and
+  recovery APIs; it owns no second mutable project.
 - `apps/gui` owns native presentation, drafts, intent scheduling, and the
   process host around one shared session. It does not implement a second project
   mutation engine.
+- `apps/common` owns shared application-data paths, recovery key, and catalog
+  startup, plus JSON syntax and policy-file admission used by agent mode.
 - `external/neotolis-engine` is a read-only dependency. The packer uses public
   engine APIs and shared format headers.
 
@@ -77,10 +82,14 @@ project step, and resumes them on a later tick; callers still use only
 
 ## Current and target boundaries
 
-The current product has a file-oriented CLI, a native live GUI, and an
-in-process live-headless session capability shape. MCP and Dev API transports
-are not implemented. Their target contract is in
-[`../spec/automation.md`](../spec/automation.md).
+The current product has a file-oriented CLI, a native live GUI, and the first
+agent-mode packet over the in-process live-headless session shape. The agent
+can create a new unsaved session, inspect its snapshot/history, transact,
+Undo/Redo, and close with recovery preservation. It has no saved-project
+binding, Save/job commands, GUI attachment, IPC, or handoff yet. The supported
+wire is [agent v1](../formats/agent-v1.md); the full target is in
+[automation](../spec/automation.md) and
+[the approved v1 design](../spec/agent-mode-v1.md).
 
 Current format execution combines the fixed built-in native exporters with
 strict API-v1 Lua packages over Export IR v1 and one common artifact
