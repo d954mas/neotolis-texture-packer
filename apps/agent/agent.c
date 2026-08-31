@@ -92,6 +92,11 @@ static tp_status recovery_problem(const agent_host *host) {
     return TP_STATUS_OK;
 }
 
+static bool dirty_recovery_failed(const agent_host *host) {
+    return host->session && tp_session_dirty(host->session) &&
+        recovery_problem(host) != TP_STATUS_OK;
+}
+
 static void notices(tp_sb *out, const agent_host *host) {
     tp_sb_str(out, ",\"notices\":[");
     if (host->session) {
@@ -447,7 +452,7 @@ static void dispatch(agent_host *host, const char *line, size_t length, tp_sb *o
                 host->discarded = true;
             }
             host->closing = true;
-            host->exit_code = recovery_problem(host) != TP_STATUS_OK && !discard ? 1 : 0;
+            host->exit_code = !discard && dirty_recovery_failed(host) ? 1 : 0;
             begin_response(out, id, true);
             tp_sb_str(out, discard || host->exit_code ? "{\"closed\":true,\"preserved\":false}" : "{\"closed\":true,\"preserved\":true}");
             notices(out, host); break;
@@ -562,7 +567,7 @@ int ntpacker_agent_main(int argc, char **argv, tp_format_catalog *catalog) {
         host.exit_code = 1;
         if (!host.quiet) (void)fputs("ntpacker agent: output delivery failed; command outcome is unknown\n", stderr);
     }
-    if (!host.discarded && recovery_problem(&host) != TP_STATUS_OK) host.exit_code = 1;
+    if (!host.discarded && dirty_recovery_failed(&host)) host.exit_code = 1;
     tp_session_destroy(host.session);
     return host.exit_code;
 }

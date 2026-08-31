@@ -261,22 +261,37 @@ class AgentContract(unittest.TestCase):
         self.assertEqual(partial.finish(), 1)
         self.assertEqual(list(self.root.rglob("*.ntpjournal")), [])
 
-    def test_recovery_failure_is_visible_and_exit_is_not_success(self):
+    def test_recovery_failure_only_fails_close_when_dirty(self):
         folder = self.root / "ntpacker"
         folder.mkdir()
         (folder / "recovery").write_text("not a directory")
-        client = self.start("--new")
-        initial = client.read()["session"]
-        self.assertTrue(initial["status"]["recovery"]["degraded"])
-        generation = initial["status"]["host_generation"]
-        atlas = initial["project"]["atlases"][0]["id"]
-        transaction = {"schema": 1, "transaction": {
-            "id": "5" * 32, "expected_revision": 0,
-            "operations": [{"op": "atlas.rename", "atlas_id": atlas, "name": "unsaved"}]}}
-        response = client.call("project.apply", {"transaction": transaction}, generation)
-        self.assertTrue(response["ok"], response)
-        self.assertIn("recovery_degraded", [n["code"] for n in response["notices"]])
-        self.assertEqual(client.finish(), 1)
+        for state in ("clean", "dirty", "undone"):
+            for explicit_close in (False, True):
+                with self.subTest(state=state, explicit_close=explicit_close):
+                    client = self.start("--new")
+                    initial = client.read()["session"]
+                    self.assertFalse(initial["status"]["dirty"])
+                    self.assertTrue(initial["status"]["recovery"]["degraded"])
+                    generation = initial["status"]["host_generation"]
+                    atlas = initial["project"]["atlases"][0]["id"]
+                    if state != "clean":
+                        transaction = {"schema": 1, "transaction": {
+                            "id": "5" * 32, "expected_revision": 0,
+                            "operations": [{"op": "atlas.rename", "atlas_id": atlas, "name": "unsaved"}]}}
+                        response = client.call("project.apply", {"transaction": transaction}, generation)
+                        self.assertTrue(response["ok"], response)
+                        self.assertIn("recovery_degraded", [n["code"] for n in response["notices"]])
+                    if state == "undone":
+                        response = client.call("history.undo", {"expected_revision": 1}, generation)
+                        self.assertTrue(response["ok"], response)
+                    # No extra status/snapshot request before EOF: the host must
+                    # use current dirty state even immediately after apply.
+                    if explicit_close:
+                        response = client.call("session.close", {"decision": "preserve"})
+                        self.assertTrue(response["ok"], response)
+                        self.assertEqual(response["result"], {"closed": True, "preserved": state != "dirty"})
+                        self.assertIn("recovery_degraded", [n["code"] for n in response["notices"]])
+                    self.assertEqual(client.finish(), 1 if state == "dirty" else 0)
 
     def test_reserved_operations_are_rejected_before_preview_or_apply(self):
         client = self.start("--new")

@@ -259,6 +259,9 @@ tp_status tp_session_discard(tp_session *session, tp_error *err);
  * recovery is unavailable. */
 tp_status tp_session_require_recovery(tp_session *session, tp_error *err);
 int64_t tp_session_revision(const tp_session *session);
+/* Current semantic dirty state, without refreshing/allocating a snapshot.
+ * Requires a non-NULL session on its owner thread. */
+bool tp_session_dirty(const tp_session *session);
 bool tp_session_recovery_available(const tp_session *session);
 tp_session_recovery_health tp_session_recovery_health_query(
     const tp_session *session);
