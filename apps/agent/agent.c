@@ -393,7 +393,8 @@ static void dispatch(agent_host *host, const char *line, size_t length, tp_sb *o
         error_response(out, host, id, "not_bound", "Bind a project first");
         cJSON_Delete(root); return;
     }
-    if ((command->generation || discard) && !text_equal(member(root, "host_generation"), host->generation)) {
+    const cJSON *generation = member(root, "host_generation");
+    if ((generation || command->generation || discard) && !text_equal(generation, host->generation)) {
         error_response(out, host, id, "host_changed", "Observe the current host generation");
         cJSON_Delete(root); return;
     }

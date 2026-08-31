@@ -104,6 +104,25 @@ class AgentContract(unittest.TestCase):
         self.assertEqual(client.finish(), 0)
         self.assertEqual(list(self.root.rglob("*.ntpacker_project")), [])
 
+    def test_optional_generation_is_checked_before_preserve_close(self):
+        client = self.start("--new")
+        initial = client.read()["session"]
+        generation = initial["status"]["host_generation"]
+        stale = ("1" if generation[0] == "0" else "0") + generation[1:]
+        for command, params in [("help", {}), ("capabilities", {}),
+                                ("operations.list", {}), ("session.status", {}),
+                                ("session.close", {"decision": "preserve"})]:
+            with self.subTest(command=command):
+                response = client.call(command, params, stale)
+                self.assertFalse(response["ok"], response)
+                self.assertEqual(response["error"]["code"], "host_changed")
+        snapshot = client.call("project.snapshot", generation=generation)
+        self.assertEqual(snapshot["result"], initial)
+        closed = client.call("session.close", {"decision": "preserve"}, generation)
+        self.assertTrue(closed["ok"], closed)
+        self.assertEqual(closed["result"], {"closed": True, "preserved": True})
+        self.assertEqual(client.finish(), 0)
+
     def test_transaction_preview_history_undo_redo_and_retries(self):
         client = self.start("--new")
         initial = client.read()["session"]
