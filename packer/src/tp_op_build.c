@@ -1,5 +1,5 @@
 /*
- * Shared selector -> operation builders (the CLI/MCP convenience
+ * Shared selector -> operation builders (the CLI/agent convenience
  * layer). A human selector + already-typed args -> a typed, ID-only operation, or a
  * structured ambiguity/not-found. The target is resolved through the production
  * tp_selector so every frontend selects the same entity without guessing --

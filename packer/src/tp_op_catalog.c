@@ -13,10 +13,13 @@
 #include "tp_op_internal.h"
 
 #include <float.h>
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "tp_core/tp_pack.h" /* the packing-knob bounds the schema REFERENCES */
+#include "tp_core/tp_sb.h"
+#include "core/nt_assert.h"
 
 /* OP(...) keeps the label columns aligned with the wire columns; a new op cannot
  * be added without giving it a palette label + history template (§6). */
@@ -476,56 +479,88 @@ const char *tp_op_class_name(tp_op_class cls) {
  * the clear `fields` list) are JSON arrays. Sprite ops address by the canonical
  * {source_id, src_key} identity (from which sprite_id derives) -- see
  * docs/architecture/model-operations-and-session.md. */
-static const char *const f_atlas_create[] = {"atlas_id", "name"};
-static const char *const f_atlas_only[] = {"atlas_id"};
-static const char *const f_atlas_rename[] = {"atlas_id", "name"};
-static const char *const f_source_add[] = {"atlas_id", "source_id", "key", "kind"};
-static const char *const f_source_remove[] = {"atlas_id", "source_id"};
-static const char *const f_source_replace[] = {"atlas_id", "source_id", "key"};
-static const char *const f_sprite_addr[] = {"atlas_id", "source_id", "src_key"};
-static const char *const f_sprite_ov_clear[] = {"atlas_id", "source_id", "src_key", "fields"};
-static const char *const f_sprite_name[] = {"atlas_id", "source_id", "src_key", "name"};
-static const char *const f_anim_create[] = {"atlas_id", "anim_id", "name",   "fps",
-                                            "playback", "flip_h",  "flip_v", "frames"};
-static const char *const f_anim_addr[] = {"atlas_id", "anim_id"};
-static const char *const f_anim_frames_set[] = {"atlas_id", "anim_id", "frames"};
-static const char *const f_anim_frame_add[] = {"atlas_id", "anim_id", "frame", "index"};
-static const char *const f_anim_frame_remove[] = {"atlas_id", "anim_id", "index"};
-static const char *const f_anim_frame_move[] = {"atlas_id", "anim_id", "from_index", "to_index"};
-static const char *const f_target_create[] = {"atlas_id", "target_id", "exporter_id", "out_path", "enabled"};
-static const char *const f_target_addr[] = {"atlas_id", "target_id"};
-static const char *const f_anim_rename[] = {"atlas_id", "anim_id", "name"};
+typedef enum tp_arg_type {
+    ARG_ID, ARG_STRING, ARG_INT, ARG_SOURCE_KIND, ARG_FRAME, ARG_FRAMES,
+    ARG_CLEAR_FIELDS
+} tp_arg_type;
+
+/* These are the existing closed-key rows with static shape metadata. CREATE
+ * knobs reuse the SET family's rows below; vocabulary is never copied into a
+ * transport-specific schema registry. */
+typedef struct tp_arg_row {
+    const char *key;
+    tp_arg_type type;
+    bool required;
+    bool nonempty;
+    tp_id_kind id_kind;
+    int minimum;
+} tp_arg_row;
+
+#define ID(KEY, KIND) {#KEY, ARG_ID, true, false, TP_ID_KIND_##KIND, 0}
+#define STR(KEY, NONEMPTY) {#KEY, ARG_STRING, true, NONEMPTY, TP_ID_KIND_INVALID, 0}
+#define INDEX(KEY, REQUIRED, MINIMUM) {#KEY, ARG_INT, REQUIRED, false, TP_ID_KIND_INVALID, MINIMUM}
+#define ARG(KEY, TYPE, REQUIRED) {#KEY, TYPE, REQUIRED, false, TP_ID_KIND_INVALID, 0}
+#define ATLAS ID(atlas_id, ATLAS)
+#define SOURCE ID(source_id, SOURCE)
+#define ANIM ID(anim_id, ANIM)
+static const tp_arg_row f_atlas_name[] = {ATLAS, STR(name, true)};
+static const tp_arg_row f_atlas_only[] = {ATLAS};
+static const tp_arg_row f_source_add[] = {ATLAS, SOURCE, STR(key, true), ARG(kind, ARG_SOURCE_KIND, false)};
+static const tp_arg_row f_source_remove[] = {ATLAS, SOURCE};
+static const tp_arg_row f_source_replace[] = {ATLAS, SOURCE, STR(key, true)};
+static const tp_arg_row f_sprite_addr[] = {ATLAS, SOURCE, STR(src_key, true)};
+static const tp_arg_row f_sprite_ov_clear[] = {ATLAS, SOURCE, STR(src_key, true), ARG(fields, ARG_CLEAR_FIELDS, true)};
+static const tp_arg_row f_sprite_name[] = {ATLAS, SOURCE, STR(src_key, true), STR(name, false)};
+static const tp_arg_row f_anim_create[] = {ATLAS, ANIM, STR(name, true), ARG(frames, ARG_FRAMES, false)};
+static const tp_arg_row f_anim_addr[] = {ATLAS, ANIM};
+static const tp_arg_row f_anim_frames_set[] = {ATLAS, ANIM, ARG(frames, ARG_FRAMES, true)};
+static const tp_arg_row f_anim_frame_add[] = {ATLAS, ANIM, ARG(frame, ARG_FRAME, true), INDEX(index, false, -1)};
+static const tp_arg_row f_anim_frame_remove[] = {ATLAS, ANIM, INDEX(index, true, 0)};
+static const tp_arg_row f_anim_frame_move[] = {ATLAS, ANIM, INDEX(from_index, true, 0), INDEX(to_index, true, INT_MIN)};
+static const tp_arg_row f_target_addr[] = {ATLAS, ID(target_id, TARGET)};
+static const tp_arg_row f_anim_rename[] = {ATLAS, ANIM, STR(name, true)};
+/* Nested frame objects use exactly the same address metadata. */
+static const tp_arg_row f_frame[] = {SOURCE, STR(src_key, true)};
+#undef ANIM
+#undef SOURCE
+#undef ATLAS
+#undef ARG
+#undef INDEX
+#undef STR
+#undef ID
 
 #define NO_FAMILY (-1) /* the op carries no field-presence mask */
 #define FV(arr) (arr), (int)(sizeof(arr) / sizeof((arr)[0]))
 static const struct {
     tp_op_kind kind;
-    const char *const *keys;
+    const tp_arg_row *args;
     int count;
-    int family; /* tp_field_family, or NO_FAMILY */
+    int family; /* shared knob rows, or NO_FAMILY */
+    bool presence_mask; /* CREATE knobs have defaults, not a presence mask */
+    uint32_t required_fields; /* CREATE required knobs; zero for SET */
 } k_fields[TP_OP_KIND_COUNT] = {
-    {TP_OP_INVALID, NULL, 0, NO_FAMILY},
-    {TP_OP_ATLAS_CREATE, FV(f_atlas_create), NO_FAMILY},
-    {TP_OP_ATLAS_REMOVE, FV(f_atlas_only), NO_FAMILY},
-    {TP_OP_ATLAS_RENAME, FV(f_atlas_rename), NO_FAMILY},
-    {TP_OP_ATLAS_SETTINGS_SET, FV(f_atlas_only), TP_FIELD_FAMILY_ATLAS},
-    {TP_OP_SOURCE_ADD, FV(f_source_add), NO_FAMILY},
-    {TP_OP_SOURCE_REMOVE, FV(f_source_remove), NO_FAMILY},
-    {TP_OP_SOURCE_REPLACE, FV(f_source_replace), NO_FAMILY},
-    {TP_OP_SPRITE_OVERRIDE_SET, FV(f_sprite_addr), TP_FIELD_FAMILY_SPRITE},
-    {TP_OP_SPRITE_OVERRIDE_CLEAR, FV(f_sprite_ov_clear), NO_FAMILY},
-    {TP_OP_SPRITE_NAME_SET, FV(f_sprite_name), NO_FAMILY},
-    {TP_OP_ANIMATION_CREATE, FV(f_anim_create), NO_FAMILY},
-    {TP_OP_ANIMATION_REMOVE, FV(f_anim_addr), NO_FAMILY},
-    {TP_OP_ANIMATION_SETTINGS_SET, FV(f_anim_addr), TP_FIELD_FAMILY_ANIM},
-    {TP_OP_ANIMATION_FRAMES_SET, FV(f_anim_frames_set), NO_FAMILY},
-    {TP_OP_ANIMATION_FRAME_ADD, FV(f_anim_frame_add), NO_FAMILY},
-    {TP_OP_ANIMATION_FRAME_REMOVE, FV(f_anim_frame_remove), NO_FAMILY},
-    {TP_OP_ANIMATION_FRAME_MOVE, FV(f_anim_frame_move), NO_FAMILY},
-    {TP_OP_TARGET_CREATE, FV(f_target_create), NO_FAMILY},
-    {TP_OP_TARGET_REMOVE, FV(f_target_addr), NO_FAMILY},
-    {TP_OP_TARGET_SET, FV(f_target_addr), TP_FIELD_FAMILY_TARGET},
-    {TP_OP_ANIMATION_RENAME, FV(f_anim_rename), NO_FAMILY},
+    {TP_OP_INVALID, NULL, 0, NO_FAMILY, false, 0},
+    {TP_OP_ATLAS_CREATE, FV(f_atlas_name), NO_FAMILY, false, 0},
+    {TP_OP_ATLAS_REMOVE, FV(f_atlas_only), NO_FAMILY, false, 0},
+    {TP_OP_ATLAS_RENAME, FV(f_atlas_name), NO_FAMILY, false, 0},
+    {TP_OP_ATLAS_SETTINGS_SET, FV(f_atlas_only), TP_FIELD_FAMILY_ATLAS, true, 0},
+    {TP_OP_SOURCE_ADD, FV(f_source_add), NO_FAMILY, false, 0},
+    {TP_OP_SOURCE_REMOVE, FV(f_source_remove), NO_FAMILY, false, 0},
+    {TP_OP_SOURCE_REPLACE, FV(f_source_replace), NO_FAMILY, false, 0},
+    {TP_OP_SPRITE_OVERRIDE_SET, FV(f_sprite_addr), TP_FIELD_FAMILY_SPRITE, true, 0},
+    {TP_OP_SPRITE_OVERRIDE_CLEAR, FV(f_sprite_ov_clear), NO_FAMILY, false, 0},
+    {TP_OP_SPRITE_NAME_SET, FV(f_sprite_name), NO_FAMILY, false, 0},
+    {TP_OP_ANIMATION_CREATE, FV(f_anim_create), TP_FIELD_FAMILY_ANIM, false, 0},
+    {TP_OP_ANIMATION_REMOVE, FV(f_anim_addr), NO_FAMILY, false, 0},
+    {TP_OP_ANIMATION_SETTINGS_SET, FV(f_anim_addr), TP_FIELD_FAMILY_ANIM, true, 0},
+    {TP_OP_ANIMATION_FRAMES_SET, FV(f_anim_frames_set), NO_FAMILY, false, 0},
+    {TP_OP_ANIMATION_FRAME_ADD, FV(f_anim_frame_add), NO_FAMILY, false, 0},
+    {TP_OP_ANIMATION_FRAME_REMOVE, FV(f_anim_frame_remove), NO_FAMILY, false, 0},
+    {TP_OP_ANIMATION_FRAME_MOVE, FV(f_anim_frame_move), NO_FAMILY, false, 0},
+    {TP_OP_TARGET_CREATE, FV(f_target_addr), TP_FIELD_FAMILY_TARGET, false, TP_TF_EXPORTER | TP_TF_OUT_PATH},
+    {TP_OP_TARGET_REMOVE, FV(f_target_addr), NO_FAMILY, false, 0},
+    {TP_OP_TARGET_SET, FV(f_target_addr), TP_FIELD_FAMILY_TARGET, true, 0},
+    {TP_OP_ANIMATION_RENAME, FV(f_anim_rename), NO_FAMILY, false, 0},
 };
 #undef FV
 
@@ -546,20 +581,19 @@ bool tp_op_field_allowed(tp_op_kind kind, const char *key) {
         return true;
     }
     for (int i = 0; i < k_fields[kind].count; i++) {
-        if (strcmp(k_fields[kind].keys[i], key) == 0) {
+        if (strcmp(k_fields[kind].args[i].key, key) == 0) {
             return true;
         }
     }
-    tp_field_family family;
-    if (!tp_op_field_family_of(kind, &family)) {
+    if (k_fields[kind].family == NO_FAMILY) {
         return false;
     }
-    return tp_op_field_row_by_key(family, key) != NULL;
+    return tp_op_field_row_by_key((tp_field_family)k_fields[kind].family, key) != NULL;
 }
 
 bool tp_op_field_family_of(tp_op_kind kind, tp_field_family *out_family) {
     if (kind <= TP_OP_INVALID || kind >= TP_OP_KIND_COUNT ||
-        k_fields[kind].family == NO_FAMILY) {
+        !k_fields[kind].presence_mask) {
         return false;
     }
     if (out_family) {
@@ -577,6 +611,268 @@ const tp_field_row *tp_op_fields(tp_op_kind kind, size_t *count) {
         return NULL;
     }
     return tp_op_field_rows(family, count);
+}
+
+/* ---- complete machine catalog ------------------------------------------- */
+
+static void schema_number(tp_sb *sb, double value) {
+    /* Bounds describe the exact numeric domain, not a float payload rounded to
+     * the canonical operation writer's nine significant digits. */
+    char text[64];
+    (void)snprintf(text, sizeof text, "%.17g", value);
+    tp_sb_str(sb, text);
+}
+
+static void schema_id(tp_sb *sb, tp_id_kind kind) {
+    char nil[TP_ID_TEXT_CAP];
+    const tp_status status = tp_id_format(kind, tp_id128_nil(), nil, sizeof nil, NULL);
+    NT_ASSERT(status == TP_STATUS_OK);
+    /* Reuse the ID formatter's authoritative prefix instead of repeating it. */
+    const size_t prefix_len = strlen(nil) - 32U;
+    char pattern[80];
+    (void)snprintf(pattern, sizeof pattern, "^%.*s[0-9a-fA-F]{32}$", (int)prefix_len, nil);
+    tp_sb_str(sb, "\"type\":\"string\",\"pattern\":");
+    tp_sb_json_string(sb, pattern);
+    tp_sb_str(sb, ",\"not\":{\"const\":");
+    tp_sb_json_string(sb, nil);
+    tp_sb_char(sb, '}');
+}
+
+static void schema_arg(tp_sb *sb, const tp_arg_row *arg);
+
+static void schema_frame(tp_sb *sb) {
+    tp_sb_str(sb, "\"type\":\"object\",\"additionalProperties\":false,\"properties\":{");
+    for (size_t i = 0; i < sizeof f_frame / sizeof f_frame[0]; ++i) {
+        if (i) tp_sb_char(sb, ',');
+        tp_sb_json_string(sb, f_frame[i].key);
+        tp_sb_char(sb, ':');
+        schema_arg(sb, &f_frame[i]);
+    }
+    tp_sb_str(sb, "},\"required\":[");
+    for (size_t i = 0; i < sizeof f_frame / sizeof f_frame[0]; ++i) {
+        if (i) tp_sb_char(sb, ',');
+        tp_sb_json_string(sb, f_frame[i].key);
+    }
+    tp_sb_char(sb, ']');
+}
+
+static void schema_arg(tp_sb *sb, const tp_arg_row *arg) {
+    tp_sb_str(sb, "{\"title\":");
+    tp_sb_json_string(sb, arg->key);
+    tp_sb_char(sb, ',');
+    switch (arg->type) {
+        case ARG_ID: schema_id(sb, arg->id_kind); break;
+        case ARG_STRING:
+            tp_sb_str(sb, "\"type\":\"string\"");
+            if (arg->nonempty) tp_sb_str(sb, ",\"minLength\":1");
+            break;
+        case ARG_INT:
+            tp_sb_str(sb, "\"type\":\"integer\",\"minimum\":");
+            tp_sb_int(sb, arg->minimum);
+            tp_sb_str(sb, ",\"maximum\":");
+            tp_sb_int(sb, INT_MAX);
+            break;
+        case ARG_SOURCE_KIND:
+            tp_sb_str(sb, "\"type\":\"string\",\"enum\":[\"file\",\"folder\"],\"default\":\"folder\"");
+            break;
+        case ARG_FRAME: schema_frame(sb); break;
+        case ARG_FRAMES:
+            tp_sb_str(sb, "\"type\":\"array\",\"items\":{");
+            schema_frame(sb);
+            tp_sb_char(sb, '}');
+            break;
+        case ARG_CLEAR_FIELDS: {
+            tp_sb_str(sb, "\"type\":\"array\",\"minItems\":1,\"items\":{\"type\":\"string\",\"enum\":[");
+            bool first = true;
+            for (size_t i = 0; i < sizeof k_sprite_field_rows / sizeof k_sprite_field_rows[0]; ++i) {
+                const char *token = k_sprite_field_rows[i].clear_token;
+                if (!token) continue;
+                if (!first) tp_sb_char(sb, ',');
+                first = false;
+                tp_sb_json_string(sb, token);
+            }
+            tp_sb_str(sb, "]}");
+            break;
+        }
+    }
+    tp_sb_char(sb, '}');
+}
+
+static void schema_field_domain(tp_sb *sb, const tp_field_row *row) {
+    tp_sb_str(sb, "\"type\":");
+    switch (row->type) {
+        case TP_FIELD_INT:
+        case TP_FIELD_INT_I16:
+        case TP_FIELD_INT_U16: tp_sb_json_string(sb, "integer"); break;
+        case TP_FIELD_FLOAT: tp_sb_json_string(sb, "number"); break;
+        case TP_FIELD_BOOL: tp_sb_json_string(sb, "boolean"); break;
+        case TP_FIELD_STR: tp_sb_json_string(sb, "string"); break;
+    }
+    if (row->nonempty) tp_sb_str(sb, ",\"minLength\":1");
+    switch (row->domain) {
+        case TP_FIELD_DOMAIN_RANGE:
+            tp_sb_str(sb, row->min_exclusive ? ",\"exclusiveMinimum\":" : ",\"minimum\":");
+            schema_number(sb, row->range_min);
+            tp_sb_str(sb, ",\"maximum\":");
+            schema_number(sb, row->range_max);
+            break;
+        case TP_FIELD_DOMAIN_ENUM:
+            tp_sb_str(sb, ",\"enum\":[");
+            for (uint8_t i = 0; i < row->value_count; ++i) {
+                if (i) tp_sb_char(sb, ',');
+                tp_sb_int(sb, row->values[i].value);
+            }
+            tp_sb_char(sb, ']');
+            break;
+        case TP_FIELD_DOMAIN_ANY:
+        case TP_FIELD_DOMAIN_EXPORTER_ID: break; /* catalog availability is contextual */
+    }
+}
+
+static void schema_field(tp_sb *sb, const tp_field_row *row) {
+    tp_sb_str(sb, "{\"title\":");
+    tp_sb_json_string(sb, row->label);
+    tp_sb_char(sb, ',');
+    if (row->has_unset) {
+        tp_sb_str(sb, "\"anyOf\":[{\"const\":");
+        schema_number(sb, row->reset);
+        tp_sb_str(sb, "},{");
+    }
+    schema_field_domain(sb, row);
+    if (row->has_unset) {
+        tp_sb_str(sb, "}],\"x-inherit\":");
+        schema_number(sb, row->reset);
+    }
+    if (row->group) {
+        tp_sb_str(sb, ",\"x-group\":");
+        tp_sb_json_string(sb, row->group);
+    }
+    if (row->clear_token) {
+        tp_sb_str(sb, ",\"x-clear\":");
+        tp_sb_json_string(sb, row->clear_token);
+    }
+    if (row->cap_key) {
+        tp_sb_str(sb, ",\"x-cap-key\":");
+        tp_sb_json_string(sb, row->cap_key);
+    }
+    if (row->domain == TP_FIELD_DOMAIN_ENUM) {
+        tp_sb_str(sb, ",\"x-enum-tokens\":[");
+        for (uint8_t i = 0; i < row->value_count; ++i) {
+            if (i) tp_sb_char(sb, ',');
+            tp_sb_str(sb, "{\"value\":");
+            tp_sb_int(sb, row->values[i].value);
+            tp_sb_str(sb, ",\"token\":");
+            tp_sb_json_string(sb, row->values[i].token);
+            tp_sb_str(sb, ",\"label\":");
+            tp_sb_json_string(sb, row->values[i].label);
+            tp_sb_char(sb, '}');
+        }
+        tp_sb_char(sb, ']');
+    }
+    tp_sb_char(sb, '}');
+}
+
+static void schema_groups(tp_sb *sb, const tp_field_row *rows, size_t count) {
+    bool first = true;
+    for (size_t i = 0; i < count; ++i) {
+        if (!rows[i].group) continue;
+        tp_sb_str(sb, first ? ",\"dependentRequired\":{" : ",");
+        first = false;
+        tp_sb_json_string(sb, rows[i].key);
+        tp_sb_str(sb, ":[");
+        bool first_peer = true;
+        for (size_t j = 0; j < count; ++j) {
+            if (i == j || rows[i].bit != rows[j].bit) continue;
+            if (!first_peer) tp_sb_char(sb, ',');
+            first_peer = false;
+            tp_sb_json_string(sb, rows[j].key);
+        }
+        tp_sb_char(sb, ']');
+    }
+    if (!first) tp_sb_char(sb, '}');
+}
+
+static void schema_operation(tp_sb *sb, tp_op_kind kind) {
+    const tp_arg_row *args = k_fields[kind].args;
+    const int arg_count = k_fields[kind].count;
+    size_t field_count = 0;
+    const tp_field_row *fields = k_fields[kind].family == NO_FAMILY ? NULL :
+        tp_op_field_rows((tp_field_family)k_fields[kind].family, &field_count);
+    tp_sb_str(sb, "{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\","
+                  "\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"op\":{\"const\":");
+    tp_sb_json_string(sb, k_ops[kind].wire);
+    tp_sb_char(sb, '}');
+    for (int i = 0; i < arg_count; ++i) {
+        tp_sb_char(sb, ',');
+        tp_sb_json_string(sb, args[i].key);
+        tp_sb_char(sb, ':');
+        schema_arg(sb, &args[i]);
+    }
+    for (size_t i = 0; i < field_count; ++i) {
+        tp_sb_char(sb, ',');
+        tp_sb_json_string(sb, fields[i].key);
+        tp_sb_char(sb, ':');
+        schema_field(sb, &fields[i]);
+    }
+    tp_sb_str(sb, "},\"required\":[\"op\"");
+    for (int i = 0; i < arg_count; ++i) {
+        if (!args[i].required) continue;
+        tp_sb_char(sb, ',');
+        tp_sb_json_string(sb, args[i].key);
+    }
+    for (size_t i = 0; i < field_count; ++i) {
+        if ((k_fields[kind].required_fields & fields[i].bit) == 0) continue;
+        tp_sb_char(sb, ',');
+        tp_sb_json_string(sb, fields[i].key);
+    }
+    tp_sb_char(sb, ']');
+    if (k_fields[kind].presence_mask) {
+        /* Every addressing key is required; at least one SET key must follow. */
+        tp_sb_str(sb, ",\"minProperties\":");
+        tp_sb_int(sb, arg_count + 2);
+    }
+    schema_groups(sb, fields, field_count);
+    tp_sb_char(sb, '}');
+}
+
+static const char *schema_target_kind(tp_id_kind kind) {
+    switch (kind) {
+        case TP_ID_KIND_ATLAS: return "atlas";
+        case TP_ID_KIND_SOURCE: return "source";
+        case TP_ID_KIND_ANIM: return "animation";
+        case TP_ID_KIND_TARGET: return "target";
+        case TP_ID_KIND_INVALID: break;
+    }
+    NT_ASSERT(false);
+    return "";
+}
+
+char *tp_op_catalog_encode(void) {
+    tp_sb sb = {0};
+    tp_sb_str(&sb, "{\"schema\":1,\"operations\":[");
+    bool first = true;
+    for (int kind = TP_OP_INVALID + 1; kind < TP_OP_KIND_COUNT; ++kind) {
+        const tp_op_info *op = &k_ops[kind];
+        if (!op->cli_verb) continue; /* reserved operations are not capabilities */
+        if (!first) tp_sb_char(&sb, ',');
+        first = false;
+        tp_sb_str(&sb, "{\"op\":");
+        tp_sb_json_string(&sb, op->wire);
+        tp_sb_str(&sb, ",\"effect\":");
+        tp_sb_json_string(&sb, tp_op_class_name(op->effect));
+        tp_sb_str(&sb, ",\"target_kind\":");
+        tp_sb_json_string(&sb, schema_target_kind(op->target_kind));
+        tp_sb_str(&sb, ",\"label\":");
+        tp_sb_json_string(&sb, op->label);
+        tp_sb_str(&sb, ",\"label_template\":");
+        tp_sb_json_string(&sb, op->label_template);
+        tp_sb_str(&sb, ",\"input_schema\":");
+        schema_operation(&sb, op->kind);
+        tp_sb_char(&sb, '}');
+    }
+    tp_sb_str(&sb, "]}\n");
+    if (sb.oom) { tp_sb_free(&sb); return NULL; }
+    return sb.buf;
 }
 
 /* tp_operation_free: release the active arm's malloc-owned strings/arrays. Freeing

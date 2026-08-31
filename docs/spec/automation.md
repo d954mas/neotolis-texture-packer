@@ -1,17 +1,27 @@
-# Live automation and AI
+# Agent mode and local Dev API
 
-**Status:** Target contract; not currently implemented as a transport.
+**Status:** Target contract; the first headless agent packet is implemented.
+Local Dev API and the rest of the release remain future work.
 
-The current core already exposes an in-process live-headless client shape.
-This contract defines future local Dev API and MCP adapters over that same
-session. It does not describe an available command today.
+The current `ntpacker agent` command exposes a subset of the in-process
+live-headless session shape: new unsaved sessions, discovery, snapshots, typed
+transactions, history, Undo/Redo, and recovery preservation. It cannot yet
+open saved projects, Save, run jobs, attach to GUI, or transfer ownership.
+
+The approved v1 design is [agent-mode-v1.md](agent-mode-v1.md). The
+[wire contract](../formats/agent-v1.md) identifies the 11 implemented commands
+and the separate prerequisites for later packets. The remainder of this
+document describes the full target, not current capability parity.
 
 ## Product boundary
 
 - Ordinary CLI remains one-shot and saved-file-oriented.
-- MCP is long-lived and session-oriented.
-- The Dev API is the local transport used by MCP and other compatible tools.
-- GUI, MCP, and Dev API never implement project rules independently.
+- Agent mode is long-lived and session-oriented, in the same `ntpacker`
+  executable as the ordinary CLI.
+- The Dev API is the local transport used by agent mode and other compatible
+  tools to reach the authoritative session in another process.
+- GUI, file CLI, agent mode, and Dev API never implement project rules
+  independently.
 - An agent must not edit a second hidden project copy while a GUI session is
   authoritative.
 - A read-only ordinary CLI may inspect the saved file while a live session
@@ -27,6 +37,23 @@ Equal capability does not require identical endpoint catalogs. A compact
 transaction endpoint may expose the same internal operation vocabulary that the
 CLI presents as many human-friendly verbs.
 
+## Agent-facing interface
+
+An external agent is instructed to use the ordinary CLI for saved-file work or
+agent mode for live work. It launches and drives the executable through ordinary
+process input/output tooling. No agent-platform protocol, specialized integration
+client, or vendor SDK is required. The packer does not run an AI model itself.
+
+Agent mode exposes the packer's own versioned structured commands, responses,
+and events. Removing an external protocol dependency does not remove any live
+capability, change session ownership, or turn agent mode into one-shot file
+commands. Command discovery and argument metadata come from the shared core
+catalogs; clients do not maintain a second operation vocabulary.
+
+The first packet's input/output framing and command schemas are defined and
+tested in [agent wire v1](../formats/agent-v1.md). Later commands retain their
+explicit prerequisites before implementation.
+
 ## Local transport
 
 The default Dev API is local IPC:
@@ -41,15 +68,15 @@ golden tests before shipping.
 
 ## Session binding
 
-One MCP process binds to exactly one project session. After binding, normal
-tools do not require a session ID.
+One agent-mode process binds to exactly one project session. After binding,
+normal project commands do not require a session ID.
 
 Supported target startup shapes are:
 
 ```text
-ntpacker mcp
-ntpacker mcp --project <path>
-ntpacker mcp --new
+ntpacker agent
+ntpacker agent --project <path>
+ntpacker agent --new
 ```
 
 Plain startup is unbound and exposes only discovery, capability/version, and
@@ -57,7 +84,7 @@ project binding. Selection must be explicit or unambiguous; focus history,
 registry order, and installation order are never hidden authority. A bound
 process never silently switches projects.
 
-For a saved path, the adapter attaches to the existing cooperating live session
+For a saved path, agent mode attaches to the existing cooperating live session
 or opens one headlessly. It never creates another authoritative writable copy.
 Unsaved sessions use runtime identity only; no persistent project ID is added
 to the project file.
@@ -65,7 +92,7 @@ to the project file.
 ## Ownership and controllers
 
 A canonical saved project identity has one cooperating writable live session.
-At most one external MCP controller owns the controller slot in the first
+At most one external controller owns the controller slot in the first
 release, while human GUI edits may continue through the same session.
 
 A second controller receives a structured busy result. Replacement is explicit:
@@ -81,9 +108,9 @@ Takeover requires proof that the old authority is stale.
 
 ## Host handoff
 
-The GUI normally hosts the live session. MCP may host it headlessly while no GUI
-owns it. Opening the project in the GUI transfers authority rather than merging
-two copies.
+The GUI normally hosts the live session. The agent-mode process may host it
+headlessly while no GUI owns it. Opening the project in the GUI transfers
+authority rather than merging two copies.
 
 Handoff preserves committed project state, revision, semantic history,
 dirty/saved baseline, and enough source/recovery/cache state to resynchronize.
@@ -96,7 +123,7 @@ mutations or publish derived results.
 
 ## Required capability classes
 
-The transport must cover:
+Agent mode and the Dev API must cover:
 
 - discovery and handshake;
 - attach/open/new;
@@ -108,7 +135,7 @@ The transport must cover:
 - Undo and Redo;
 - ordered events and history;
 - GUI focus/reveal where a GUI view exists;
-- typed capability/version resources.
+- typed capability/version queries.
 
 Inspect/validate may initially remain synchronous snapshot operations; the
 current capability matrix explicitly marks asynchronous inspect/validate jobs

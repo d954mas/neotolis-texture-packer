@@ -22,7 +22,7 @@ typedef struct tp_journal tp_journal;
 typedef struct tp_format_catalog tp_format_catalog;
 
 /* ---- shared visible History (docs/architecture/model-operations-and-session.md) *
- * One session-owned enumerable History surface shared by every view (GUI/MCP/Dev
+ * One session-owned enumerable History surface shared by every view (GUI/agent/Dev
  * API). It is a pull model: a client counts rows and copies each out; there are no
  * push callbacks, so the F3-01 "subscriber disconnect / callback reentrancy" faults
  * are N/A here (see the event API note below).
@@ -65,7 +65,7 @@ typedef struct tp_session_history_entry {
      * the marker (a marker never advances revision, so it equals the row below). */
     int64_t revision;
     /* EDIT rows only; markers leave these empty. `author` is A6-ready -- it passes
-     * through exactly what the transaction carried (a future MCP writes its own). */
+     * through exactly what the transaction carried (the agent host assigns its own). */
     char label[TP_SESSION_HISTORY_LABEL_MAX];
     char author[TP_SESSION_HISTORY_AUTHOR_MAX];
     char transaction_id[33];
@@ -259,6 +259,9 @@ tp_status tp_session_discard(tp_session *session, tp_error *err);
  * recovery is unavailable. */
 tp_status tp_session_require_recovery(tp_session *session, tp_error *err);
 int64_t tp_session_revision(const tp_session *session);
+/* Current semantic dirty state, without refreshing/allocating a snapshot.
+ * Requires a non-NULL session on its owner thread. */
+bool tp_session_dirty(const tp_session *session);
 bool tp_session_recovery_available(const tp_session *session);
 tp_session_recovery_health tp_session_recovery_health_query(
     const tp_session *session);

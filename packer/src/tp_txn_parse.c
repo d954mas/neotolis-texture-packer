@@ -30,6 +30,7 @@
 
 #include "cJSON.h"
 #include "tp_core/tp_id.h"
+#include "tp_core/tp_sb.h"
 #include "tp_json_internal.h"
 #include "tp_op_internal.h"
 #include "tp_txn_internal.h"
@@ -329,6 +330,90 @@ static tp_id_kind addr_kind(const char *key) {
     return TP_ID_KIND_INVALID;
 }
 
+/* The closed envelope vocabulary also owns its discovery schema. Keep decoding
+ * and semantic admission in their existing order; this metadata replaces only
+ * the name-only unknown-key lists. */
+typedef enum txn_field_type {
+    TXN_VERSION, TXN_BODY, TXN_ID, TXN_REVISION, TXN_TEXT, TXN_OPERATIONS
+} txn_field_type;
+
+typedef struct txn_field {
+    const char *name;
+    txn_field_type type;
+    bool required;
+} txn_field;
+
+static const txn_field envelope_fields[] = {
+    {"schema", TXN_VERSION, true}, {"transaction", TXN_BODY, true}
+};
+static const txn_field transaction_fields[] = {
+    {"id", TXN_ID, true}, {"expected_revision", TXN_REVISION, true},
+    {"label", TXN_TEXT, false}, {"author", TXN_TEXT, false},
+    {"operations", TXN_OPERATIONS, true}
+};
+
+static bool txn_field_known(const txn_field *fields, size_t count,
+                             const char *key) {
+    if (!key) return false;
+    for (size_t i = 0; i < count; ++i) {
+        if (strcmp(fields[i].name, key) == 0) return true;
+    }
+    return false;
+}
+
+static void txn_schema_object(tp_sb *out, const txn_field *fields,
+                               size_t count) {
+    tp_sb_str(out, "\"type\":\"object\",\"additionalProperties\":false,\"properties\":{");
+    for (size_t i = 0; i < count; ++i) {
+        if (i) tp_sb_char(out, ',');
+        tp_sb_json_string(out, fields[i].name);
+        tp_sb_str(out, ":{");
+        switch (fields[i].type) {
+            case TXN_VERSION:
+                tp_sb_str(out, "\"const\":"); tp_sb_int(out, TP_TXN_SCHEMA);
+                break;
+            case TXN_BODY:
+                txn_schema_object(out, transaction_fields,
+                    sizeof transaction_fields / sizeof transaction_fields[0]);
+                break;
+            case TXN_ID:
+                tp_sb_str(out, "\"type\":\"string\",\"pattern\":\"^[0-9a-f]{32}$\"");
+                break;
+            case TXN_REVISION:
+                tp_sb_str(out, "\"type\":\"integer\",\"minimum\":0,\"maximum\":");
+                tp_sb_i64(out, (int64_t)TP_TXN_INT_SAFE);
+                break;
+            case TXN_TEXT: tp_sb_str(out, "\"type\":\"string\""); break;
+            case TXN_OPERATIONS:
+                tp_sb_str(out, "\"type\":\"array\",\"maxItems\":");
+                tp_sb_int(out, TP_TXN_MAX_OPS);
+                tp_sb_str(out, ",\"items\":{\"type\":\"object\",\"properties\":{\"op\":{\"type\":\"string\"}},"
+                    "\"required\":[\"op\"],\"description\":\"Typed operation; use the operation catalog for its complete input_schema.\"}");
+                break;
+        }
+        tp_sb_char(out, '}');
+    }
+    tp_sb_str(out, "},\"required\":[");
+    bool first = true;
+    for (size_t i = 0; i < count; ++i) {
+        if (!fields[i].required) continue;
+        if (!first) tp_sb_char(out, ',');
+        first = false;
+        tp_sb_json_string(out, fields[i].name);
+    }
+    tp_sb_char(out, ']');
+}
+
+char *tp_txn_request_schema_encode(void) {
+    tp_sb out = {0};
+    tp_sb_str(&out, "{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",");
+    txn_schema_object(&out, envelope_fields,
+        sizeof envelope_fields / sizeof envelope_fields[0]);
+    tp_sb_char(&out, '}');
+    if (out.oom) { tp_sb_free(&out); return NULL; }
+    return out.buf;
+}
+
 /* Structural decode of the envelope. Fills `req` (schema/id/expected_revision/
  * label/author) and returns the operations array via *out_ops. Fail-fast: on any
  * envelope fault returns non-OK + `err`, and *out_ops is left NULL. */
@@ -359,7 +444,8 @@ static tp_status parse_envelope(const cJSON *root, tp_txn_request *req, const cJ
     req->schema = TP_TXN_SCHEMA;
 
     for (const cJSON *c = root->child; c; c = c->next) { /* envelope unknown-field REJECT */
-        if (c->string && strcmp(c->string, "schema") != 0 && strcmp(c->string, "transaction") != 0) {
+        if (c->string && !txn_field_known(envelope_fields,
+                sizeof envelope_fields / sizeof envelope_fields[0], c->string)) {
             return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "unknown envelope key \"%s\"", c->string);
         }
     }
@@ -396,16 +482,9 @@ static tp_status parse_envelope(const cJSON *root, tp_txn_request *req, const cJ
         return as;
     }
 
-    static const char *const tx_keys[] = {"id", "expected_revision", "label", "author", "operations"};
     for (const cJSON *c = tx->child; c; c = c->next) { /* transaction unknown-field REJECT */
-        bool ok = false;
-        for (int i = 0; i < 5; i++) {
-            if (c->string && strcmp(c->string, tx_keys[i]) == 0) {
-                ok = true;
-                break;
-            }
-        }
-        if (!ok) {
+        if (!txn_field_known(transaction_fields,
+                sizeof transaction_fields / sizeof transaction_fields[0], c->string)) {
             return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "unknown transaction key \"%s\"", c->string);
         }
     }

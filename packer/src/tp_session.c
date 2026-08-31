@@ -1521,6 +1521,11 @@ int64_t tp_session_revision(const tp_session *session) {
     return tp_model_revision(session->model);
 }
 
+bool tp_session_dirty(const tp_session *session) {
+    tp_session__assert_owner_thread(session);
+    return tp_model_dirty(session->model);
+}
+
 bool tp_session_recovery_available(const tp_session *session) {
     if (!session) {
         return false;

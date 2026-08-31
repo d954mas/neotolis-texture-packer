@@ -8,8 +8,8 @@ extern "C" {
 #endif
 
 /* Product-client shapes, not transports. FILE_CLI is deliberately one-shot;
- * LIVE_HEADLESS is the in-process session surface a later MCP/Dev API transport
- * may adapt without changing session semantics. */
+ * LIVE_HEADLESS is the in-process session surface used by agent mode and future
+ * Dev API transports without changing session semantics. */
 typedef enum tp_client_kind {
     TP_CLIENT_FILE_CLI = 1,
     TP_CLIENT_GUI = 2,

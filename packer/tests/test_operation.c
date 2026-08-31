@@ -1129,7 +1129,7 @@ void test_target_set_mask_skips_unset_field_checks(void) {
 
 /* ---- machine-readable operation schema (spec §6) ------------------------- *
  * §6 requires a palette-ready registry: a label template per operation and an
- * argument schema (name, type, range/enum) per field, so an MCP/palette client
+ * argument schema (name, type, range/enum) per field, so an agent/palette client
  * renders and pre-validates without a client-side switch table. These tests walk
  * EVERY registry row and pin the schema against what validation actually does --
  * a registry bound that drifts from tp_operation_validate is the failure mode

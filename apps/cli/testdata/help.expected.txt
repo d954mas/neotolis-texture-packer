@@ -9,6 +9,7 @@ Commands:
   inspect <project>  Dump project state (--json is the contract; text is a summary)
   validate <project> Report every project problem in one pass
   new <path>         Create a new project (seeded default target); refuses to overwrite
+  agent [--new]      Live JSON-lines session; agent --help describes available commands
   version            Print the version; --json emits the schema manifest
   help               Show this help
 

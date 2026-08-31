@@ -4,14 +4,9 @@
  * pulling <stdio.h> first otherwise leaves snprintf undeclared here (implicit-decl = hard error). */
 #include <stdio.h>
 #include <stdint.h>
-#include <stdlib.h>
 #include <string.h>
 
-#ifdef _WIN32
-#include <windows.h>
-#include "nt_utf8_argv.h"
-#endif
-
+#include "app_paths.h"
 #include "tp_core/tp_format.h"
 #include "tp_core/tp_scan.h" /* tp_mkdirs (shared dir-creation) + tp_scan_is_dir (verify) */
 #include "tp_core/tp_utf8.h"
@@ -109,42 +104,7 @@ void gui_paths_exe_dir(char *out, size_t out_size) {
 }
 
 bool gui_paths_app_data_root(char *out, size_t out_size) {
-    if (out == NULL || out_size == 0) {
-        return false;
-    }
-    int n;
-#ifdef _WIN32
-    char base[GUI_PATHS_MAX];
-    char error[160] = {0};
-    bool found = false;
-    if (!nt_win_environment_utf8(L"LOCALAPPDATA", base, sizeof base, &found,
-                                 error, sizeof error)) {
-        return false;
-    }
-    if (found && base[0] != '\0') {
-        n = snprintf(out, out_size, "%s\\ntpacker", base);
-        return n >= 0 && (size_t)n < out_size;
-    }
-#else
-    const char *xdg = getenv("XDG_STATE_HOME");
-    if (xdg != NULL && xdg[0] != '\0') {
-        n = snprintf(out, out_size, "%s/ntpacker", xdg);
-        return n >= 0 && (size_t)n < out_size;
-    }
-    const char *home = getenv("HOME");
-    if (home != NULL && home[0] != '\0') {
-        n = snprintf(out, out_size, "%s/.local/state/ntpacker", home);
-        return n >= 0 && (size_t)n < out_size;
-    }
-#endif
-    /* Neither env resolved -> park the data next to the exe so we still have a writable place. */
-    char exe_dir[GUI_PATHS_MAX];
-    gui_paths_exe_dir(exe_dir, sizeof exe_dir);
-    if (exe_dir[0] == '\0') {
-        return false;
-    }
-    n = snprintf(out, out_size, "%s/ntpacker-data", exe_dir);
-    return n >= 0 && (size_t)n < out_size;
+    return app_paths_data_root(out, out_size, true);
 }
 
 bool gui_paths_ensure_dir(const char *path) {

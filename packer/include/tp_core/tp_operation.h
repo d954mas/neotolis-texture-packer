@@ -46,7 +46,7 @@ typedef enum tp_op_kind {
     TP_OP_ANIMATION_CREATE,
     TP_OP_ANIMATION_REMOVE,
     TP_OP_ANIMATION_SETTINGS_SET,
-    TP_OP_ANIMATION_FRAMES_SET, /* reserved: bulk whole-list set (MCP); CLI uses granular frame ops */
+    TP_OP_ANIMATION_FRAMES_SET, /* reserved: bulk whole-list set; clients use granular frame ops */
     TP_OP_ANIMATION_FRAME_ADD,
     TP_OP_ANIMATION_FRAME_REMOVE,
     TP_OP_ANIMATION_FRAME_MOVE,
@@ -104,6 +104,11 @@ bool tp_op_catalog_selfcheck(void);                /* row order == enum; pinned 
  * `*_id` keys + typed payload keys, plus the "op" discriminator). Makes "no raw
  * field patch" (§6.2) executable: a key outside that set is unknown. */
 bool tp_op_field_allowed(tp_op_kind kind, const char *key);
+
+/* Machine catalog schema 1. Includes implemented operations only; each carries
+ * a JSON Schema 2020-12 input_schema for its complete operation object. Static
+ * domains are hints, not model-dependent admission. Caller frees; NULL on OOM. */
+char *tp_op_catalog_encode(void);
 
 /* ---- field presence masks (SET ops apply a SUBSET of fields) ------------- */
 
@@ -186,7 +191,7 @@ typedef enum tp_field_family {
 
 /* ---- the per-field ARGUMENT SCHEMA (spec §6) ----------------------------- *
  * §6 makes a machine-readable argument schema (name, type, range/enum) a hard
- * requirement on the operation engine: a palette / MCP client renders a widget and
+ * requirement on the operation engine: a palette / agent client renders a widget and
  * pre-validates a value from the registry, never from a hand-written per-field
  * table. The WIRE is unchanged -- an enum-domain field still travels as its
  * integer; `token` is the stable machine spelling a client shows and accepts.
@@ -222,7 +227,7 @@ typedef struct tp_field_row {
     const char *group;       /* arity label of a multi-row bit, else NULL */
     double reset;            /* value a clear writes (grouped bits share it) */
 
-    /* -- schema columns: what a palette / MCP client renders and pre-validates -- */
+    /* -- schema columns: what a palette / agent client renders and pre-validates -- */
     const char *label;       /* short human label, e.g. "Padding" */
     tp_field_domain domain;
     double range_min;        /* DOMAIN_RANGE: inclusive unless min_exclusive */
@@ -247,8 +252,8 @@ const tp_field_row *tp_op_field_rows(tp_field_family family, size_t *count);
  * (wire, class, label, label template); tp_op_fields gives its typed arguments. */
 
 /* The op's field-presence family. False (and *out_family untouched) when the op
- * carries no presence mask -- its remaining payload keys are then name-only,
- * admitted through tp_op_field_allowed. */
+ * carries no presence mask. The complete wire shape (including CREATE/default
+ * arguments) is available through tp_op_catalog_encode. */
 bool tp_op_field_family_of(tp_op_kind kind, tp_field_family *out_family);
 
 /* The op's schema fields: its family's rows, or NULL with *count = 0. */
@@ -469,7 +474,7 @@ char *tp_operation_encode(const tp_operation *op);
 char *tp_op_result_encode(const tp_operation *op, const tp_op_reject *rej);
 
 /* ---- selector -> operation builders -------------------------------------- *
- * The CLI/MCP convenience layer: a human selector + already-typed args -> a typed,
+ * The client convenience layer: a human selector + already-typed args -> a typed,
  * ID-only operation, or a structured ambiguity/not-found. The builders resolve the
  * target via the production tp_selector so every frontend selects the same
  * entity without guessing. `cand` (may be NULL) receives the stable candidate list

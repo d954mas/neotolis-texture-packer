@@ -5,10 +5,12 @@
 Standalone native texture/atlas packer built on neotolis-engine. The current
 baseline has one shared packing/export core, typed operation/session ownership,
 stable structural IDs, canonical-v5 tagged sources, semantic history/recovery,
-thin CLI and native GUI clients, and a unified runtime Export format registry
-with bundled Defold and Phaser packages. Approved target work adds
-capability-equivalent MCP and Dev API clients. Import requires its own separately
-approved target contract.
+thin file CLI and native GUI clients, an initial agent mode for new headless
+sessions, and a unified runtime Export format registry with bundled Defold and
+Phaser packages. Agent mode currently covers discovery, transactions, snapshots,
+history, and recovery preservation. Saved-project access, persistence commands,
+jobs, GUI attachment, and Dev API remain target work. Import requires its own
+separately approved target contract.
 
 `docs/spec/product.md` is the current product contract. Approved future behavior
 is explicitly labeled `Target contract` under `docs/spec/`. Current ownership
@@ -38,7 +40,9 @@ handling of invalid input.
 - `packer/` — shared `tp_core`/`tp_build` project, operation, session, packing,
   export, history, recovery, and future format/IR code. No UI or CLI parsing.
 - `apps/cli/` — file-oriented `ntpacker` frontend.
+- `apps/agent/` — JSON-lines agent frontend and headless session host.
 - `apps/gui/` — native GUI frontend over the same core contracts.
+- `apps/common/` — shared application paths, policy admission, and utilities.
 - `apps/smoke/` — minimal builder environment smoke test.
 - `docs/` — current and target product contracts, architecture, and wire formats.
 - `examples/defold-demo/` — executable Defold export integration example.
@@ -50,9 +54,9 @@ handling of invalid input.
   through an engine issue and PR.
 - Keep one typed operation/session layer with capability-equivalent clients.
   Mutation, validation, naming, capability, transaction, and Undo rules live
-  below GUI, CLI, MCP, and Dev API transports.
+  below GUI, file CLI, agent mode, and Dev API transports.
 - Keep ordinary CLI for saved-file workflows. Live headless sessions belong to
-  MCP/Dev API, not to ordinary CLI commands.
+  agent mode/Dev API, not to ordinary CLI commands.
 - Every saved-file capability has machine-readable CLI output. Every CLI command
   supports stable versioned `--json`; exit codes, errors, and notices are
   structured contracts. Destructive/lossy operations provide predictable
@@ -123,7 +127,7 @@ separate expensive merge gate; never launch it after ordinary implementation.
 
 ## Build and Test
 
-Requires CMake 3.25+, Ninja, and Clang.
+Requires CMake 3.25+, Ninja, Clang, and Python 3.8+ for process-contract tests.
 
 ```bash
 cmake --preset native-debug

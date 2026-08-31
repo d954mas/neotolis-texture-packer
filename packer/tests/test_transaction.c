@@ -2117,6 +2117,32 @@ void test_json_mutating_payloads_require_presence(void) {
     }
 }
 
+void test_json_frame_objects_reject_unknown_fields(void) {
+    static const char *const operations[] = {
+        "{\"op\":\"animation.create\","
+        "\"atlas_id\":\"atlas_11111111111111111111111111111111\","
+        "\"anim_id\":\"anim_33333333333333333333333333333333\","
+        "\"name\":\"walk\",\"frames\":[{"
+        "\"source_id\":\"source_22222222222222222222222222222222\","
+        "\"src_key\":\"hero.png\",\"surprise\":true}]}",
+        "{\"op\":\"animation.frames.set\","
+        "\"atlas_id\":\"atlas_11111111111111111111111111111111\","
+        "\"anim_id\":\"anim_33333333333333333333333333333333\","
+        "\"frames\":[{"
+        "\"source_id\":\"source_22222222222222222222222222222222\","
+        "\"src_key\":\"hero.png\",\"surprise\":true}]}",
+        "{\"op\":\"animation.frame.add\","
+        "\"atlas_id\":\"atlas_11111111111111111111111111111111\","
+        "\"anim_id\":\"anim_33333333333333333333333333333333\","
+        "\"frame\":{"
+        "\"source_id\":\"source_22222222222222222222222222222222\","
+        "\"src_key\":\"hero.png\",\"surprise\":true}}",
+    };
+    for (size_t i = 0; i < sizeof operations / sizeof operations[0]; ++i) {
+        assert_single_operation_decode_rejected(operations[i]);
+    }
+}
+
 void test_json_explicit_empty_payloads_are_not_treated_as_absent(void) {
     static const char *const operations[] = {
         "{\"op\":\"sprite.name.set\","
@@ -2587,6 +2613,7 @@ int main(void) {
     RUN_TEST(test_sprite_clear_field_roundtrip);
     RUN_TEST(test_json_sprite_clear_rejects_unknown_field_token);
     RUN_TEST(test_json_mutating_payloads_require_presence);
+    RUN_TEST(test_json_frame_objects_reject_unknown_fields);
     RUN_TEST(test_json_explicit_empty_payloads_are_not_treated_as_absent);
     RUN_TEST(test_json_source_add_kind_absent_and_closed_values_are_accepted);
     RUN_TEST(test_json_duplicate_object_keys_are_rejected_at_every_depth);

@@ -15,6 +15,9 @@ through a shared core rather than separate GUI and automation models.
 - stable structural IDs and explicit animations;
 - native preview-oriented GUI;
 - complete saved-file CLI editing, inspect, validate, Pack, Export, and dry run;
+- initial JSON-lines agent mode over one new headless session, with discovery,
+  snapshots, typed transactions, dry-run preview, history, Undo/Redo, and
+  best-effort recovery preservation;
 - full-fidelity `json-neotolis` export;
 - bundled `defold-tpinfo-2` and `phaser-3-multiatlas` runtime exports;
 - target-capability adaptation with structured loss notices;
@@ -32,9 +35,11 @@ through a shared core rather than separate GUI and automation models.
 - GUI-owned semantic Pack-result preview caching.
 
 The current product does not provide filesystem watchers, linked foreign-atlas
-sources, Import IR, MCP, or a Dev API transport. The GUI reloads runtime
-packages explicitly; the CLI remains one-shot. The production manifest ships
-the bundled Defold and Phaser packages.
+sources, Import IR, or a Dev API transport. Agent mode is the first bounded
+packet: it does not open saved projects, Save, run Pack/Export/Refresh, attach
+to GUI, or transfer session ownership. The GUI reloads runtime packages
+explicitly; ordinary CLI commands remain one-shot. The production manifest
+ships the bundled Defold and Phaser packages.
 
 ## Shared behavior
 
@@ -100,13 +105,19 @@ require a newer schema and an explicit migration contract.
 
 ## Current clients
 
-The native GUI and saved-file CLI are capability-equivalent where their product
-shapes overlap, while using appropriate interfaces:
+Clients use the shared core wherever their implemented product shapes overlap:
 
 - GUI: one live session, one borrowed current view, drafts, history, recovery,
   and one active task.
 - CLI: one-shot queries or mutations over a saved project, with structured
   output and predictable dry runs.
+- Agent mode: one process, one new unsaved session, 11 structured commands
+  documented in [agent wire v1](../formats/agent-v1.md). It uses the shared
+  operation catalog and assigns controller authorship in the host. It checks
+  current global consent before creation and bound project commands; invalid
+  policy refuses access. EOF attempts dirty recovery preservation without Save.
+  Recovery resolution is currently available through GUI, not agent commands.
 
-Future live automation is governed separately by
-[`automation.md`](automation.md).
+The full automation target is governed by [automation.md](automation.md) and
+[agent-mode-v1.md](agent-mode-v1.md). The first packet is not a completed v1
+release or a claim of full GUI/agent capability parity.
