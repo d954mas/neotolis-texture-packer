@@ -155,56 +155,59 @@ function exactPixels(name, expectedBytes, actualBytes) {
 
 async function capture(browser, name, root) {
   const { server, url } = await startServer(root);
-  const failures = [];
-  const page = await browser.newPage({
-    viewport: { width: 256, height: 144 },
-    deviceScaleFactor: 1,
-  });
-  page.on("pageerror", (error) => failures.push(`pageerror: ${error.message}`));
-  page.on("requestfailed", (request) => failures.push(
-    `requestfailed: ${request.url()} ${request.failure()?.errorText ?? ""}`));
-  page.on("response", (response) => {
-    if (response.status() >= 400) failures.push(`http ${response.status()}: ${response.url()}`);
-  });
-  page.on("console", (message) => {
-    const content = message.text();
-    if (message.type() === "error" || /(^|\s)(ERROR|FATAL)(:|\s|$)/i.test(content)) {
-      failures.push(`console.${message.type()}: ${content}`);
-    }
-  });
   try {
-    await page.goto(url, { waitUntil: "networkidle" });
-    await page.waitForFunction(
-      (engine) => window.__NTPACKER_TEST__?.ready === true
-        && window.__NTPACKER_TEST__?.engine === engine,
-      name,
-      { timeout: 30_000 },
-    );
-    await page.evaluate(() => new Promise((done) =>
-      requestAnimationFrame(() => requestAnimationFrame(done))));
-    const canvas = page.locator("canvas");
-    const first = await canvas.screenshot();
-    writeFileSync(join(ARTIFACTS, `${name}-first.png`), first);
-    await page.evaluate(() => new Promise((done) =>
-      requestAnimationFrame(() => requestAnimationFrame(done))));
-    const second = await canvas.screenshot();
-    copyFileSync(join(ROOT, "tests", "expected.png"), join(ARTIFACTS, "expected.png"));
-    writeFileSync(join(ARTIFACTS, `${name}-actual.png`), second);
-    exactPixels(`${name}-stability`, first, second);
-    exactPixels(name, readFileSync(join(ROOT, "tests", "expected.png")), second);
-    assert.deepEqual(failures, [], `${name}: browser failures`);
-  } catch (error) {
-    writeFileSync(join(ARTIFACTS, `${name}-failure.txt`), [
-      error.stack ?? String(error),
-      ...failures,
-    ].join("\n"));
-    const canvas = page.locator("canvas");
-    if (await canvas.count() === 1) {
-      writeFileSync(join(ARTIFACTS, `${name}-failure.png`), await canvas.screenshot());
+    const failures = [];
+    const page = await browser.newPage({
+      viewport: { width: 256, height: 144 },
+      deviceScaleFactor: 1,
+    });
+    try {
+      page.on("pageerror", (error) => failures.push(`pageerror: ${error.message}`));
+      page.on("requestfailed", (request) => failures.push(
+        `requestfailed: ${request.url()} ${request.failure()?.errorText ?? ""}`));
+      page.on("response", (response) => {
+        if (response.status() >= 400) failures.push(`http ${response.status()}: ${response.url()}`);
+      });
+      page.on("console", (message) => {
+        const content = message.text();
+        if (message.type() === "error" || /(^|\s)(ERROR|FATAL)(:|\s|$)/i.test(content)) {
+          failures.push(`console.${message.type()}: ${content}`);
+        }
+      });
+      await page.goto(url, { waitUntil: "networkidle" });
+      await page.waitForFunction(
+        (engine) => window.__NTPACKER_TEST__?.ready === true
+          && window.__NTPACKER_TEST__?.engine === engine,
+        name,
+        { timeout: 30_000 },
+      );
+      await page.evaluate(() => new Promise((done) =>
+        requestAnimationFrame(() => requestAnimationFrame(done))));
+      const canvas = page.locator("canvas");
+      const first = await canvas.screenshot();
+      writeFileSync(join(ARTIFACTS, `${name}-first.png`), first);
+      await page.evaluate(() => new Promise((done) =>
+        requestAnimationFrame(() => requestAnimationFrame(done))));
+      const second = await canvas.screenshot();
+      copyFileSync(join(ROOT, "tests", "expected.png"), join(ARTIFACTS, "expected.png"));
+      writeFileSync(join(ARTIFACTS, `${name}-actual.png`), second);
+      exactPixels(`${name}-stability`, first, second);
+      exactPixels(name, readFileSync(join(ROOT, "tests", "expected.png")), second);
+      assert.deepEqual(failures, [], `${name}: browser failures`);
+    } catch (error) {
+      writeFileSync(join(ARTIFACTS, `${name}-failure.txt`), [
+        error.stack ?? String(error),
+        ...failures,
+      ].join("\n"));
+      const canvas = page.locator("canvas");
+      if (await canvas.count() === 1) {
+        writeFileSync(join(ARTIFACTS, `${name}-failure.png`), await canvas.screenshot());
+      }
+      throw error;
+    } finally {
+      await page.close();
     }
-    throw error;
   } finally {
-    await page.close();
     await new Promise((resolveClose) => server.close(resolveClose));
   }
 }
