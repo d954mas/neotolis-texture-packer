@@ -26,3 +26,10 @@ examples/projects/out/
 # Defold editor artifacts in the demo project
 examples/defold-demo/.internal/
 examples/defold-demo/.editor_settings
+
+# Runtime consumer integration test/install outputs
+examples/runtime-formats/node_modules/
+examples/runtime-formats/dist/
+examples/runtime-formats/.internal/
+examples/runtime-formats/.runtime-consumer-*/
+examples/runtime-formats/golden/**/*.ntpacker-export.lock

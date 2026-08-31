@@ -163,7 +163,8 @@ The owning CTest gates are `tp_phaser_export_contract`,
 ## Example consumer
 
 The public Phaser consumer pins `phaser` to exactly `3.90.0` and one exact small
-development-server dependency in `package.json` plus its lockfile. It loads the
-committed document with `this.load.multiatlas`. `node_modules` and generated
-bundles are not committed. Manual use is `npm ci` followed by the documented run
-command; ordinary CI does not install Node or launch a browser.
+build dependency in `package.json` plus its lockfile. It loads the fresh staged
+document with `this.load.multiatlas`, forces WEBGL, and renders a fixed 256x144
+nearest-filtered scene. `node_modules` and generated bundles are not committed.
+Manual use and the shared real-engine proof are documented in
+[`examples/runtime-formats`](../../examples/runtime-formats/).

@@ -6,8 +6,8 @@ description: "Exported using neotolis-texture-packer"
 pages {
   name: "atlas-0.png"
   size {
-    width: 6
-    height: 3
+    width: 16
+    height: 32
   }
   sprites {
     name: "coin"
@@ -21,26 +21,26 @@ pages {
     source_rect {
       x: 0
       y: 0
-      width: 1
-      height: 1
+      width: 5
+      height: 7
     }
     pivot {
-      x: 0.5
-      y: 0.5
+      x: 2.5
+      y: 3.5
     }
     frame_rect {
       x: 1
-      y: 1
-      width: 1
-      height: 1
+      y: 9
+      width: 5
+      height: 7
     }
     untrimmed_size {
-      width: 1
-      height: 1
+      width: 5
+      height: 7
     }
     indices: [1, 2, 3, 0, 1, 3]
     vertices {
-      x: 1
+      x: 5
       y: 0
     }
     vertices {
@@ -49,11 +49,11 @@ pages {
     }
     vertices {
       x: 0
-      y: 1
+      y: 7
     }
     vertices {
-      x: 1
-      y: 1
+      x: 5
+      y: 7
     }
   }
   sprites {
@@ -68,26 +68,26 @@ pages {
     source_rect {
       x: 0
       y: 0
-      width: 1
-      height: 1
+      width: 8
+      height: 6
     }
     pivot {
-      x: 0.25
-      y: 0.75
+      x: 2
+      y: 4.5
     }
     frame_rect {
-      x: 4
+      x: 1
       y: 1
-      width: 1
-      height: 1
+      width: 8
+      height: 6
     }
     untrimmed_size {
-      width: 1
-      height: 1
+      width: 8
+      height: 6
     }
     indices: [1, 2, 3, 0, 1, 3]
     vertices {
-      x: 1
+      x: 8
       y: 0
     }
     vertices {
@@ -96,11 +96,11 @@ pages {
     }
     vertices {
       x: 0
-      y: 1
+      y: 6
     }
     vertices {
-      x: 1
-      y: 1
+      x: 8
+      y: 6
     }
   }
 }

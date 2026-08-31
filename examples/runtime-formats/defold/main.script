@@ -1,0 +1,10 @@
+function init(self)
+    self.frames = 0
+end
+
+function update(self, dt)
+    self.frames = self.frames + 1
+    if self.frames == 3 then
+        html5.run("window.__NTPACKER_TEST__ = { engine: 'defold', ready: true }")
+    end
+end

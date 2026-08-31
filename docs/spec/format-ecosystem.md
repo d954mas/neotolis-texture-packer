@@ -170,8 +170,15 @@ are visibly diagnosed rather than emulated.
 
 [`examples/runtime-formats`](../../examples/runtime-formats/) produces committed PNG and metadata goldens for
 native, Defold, and Phaser consumers using the same art and scenario. Ordinary
-CI validates exporters, bytes, paths, and consumer structure without launching
-Defold, Bob, Node, a browser, or a graphical viewer.
+cross-platform CI validates exporters, bytes, paths, and consumer structure
+without launching an engine or browser. The separate Linux
+`Runtime consumers` gate reruns one clean staged export, builds the pinned
+Phaser WEBGL and Defold HTML5 consumers, starts both in pinned Chromium, and
+requires two stable 256x144 frames to match one independent exact-RGBA oracle.
+It also fails on readiness timeout, page, console, request, and HTTP errors.
+The narrow visual scenario intentionally excludes transforms, trim, polygons,
+multipage, animation, text, alpha blending, and scaling tolerance; the existing
+wire and capability CTests remain authoritative for that wider matrix.
 
 ## Acceptance
 

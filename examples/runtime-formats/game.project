@@ -1,0 +1,21 @@
+[bootstrap]
+main_collection = /defold/main.collectionc
+
+[display]
+width = 256
+height = 144
+high_dpi = 0
+samples = 0
+
+[project]
+title = ntpacker runtime formats
+dependencies#0 = https://github.com/defold/extension-texturepacker/archive/f15c7343efca064665ad608c76b80fa58841f96c.zip
+
+[graphics]
+default_texture_min_filter = nearest
+default_texture_mag_filter = nearest
+
+[html5]
+scale_mode = no_scale
+show_fullscreen_button = 0
+show_made_with_defold = 0

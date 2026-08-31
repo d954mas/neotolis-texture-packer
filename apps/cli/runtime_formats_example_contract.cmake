@@ -3,10 +3,20 @@ if(NOT DEFINED EXE OR NOT DEFINED EXAMPLE OR NOT DEFINED WORK)
 endif()
 
 file(REMOVE_RECURSE "${WORK}")
+file(MAKE_DIRECTORY "${WORK}")
+file(COPY
+    "${EXAMPLE}/runtime-formats.ntpacker_project"
+    "${EXAMPLE}/game.project"
+    DESTINATION "${WORK}")
+file(MAKE_DIRECTORY "${WORK}/sprites")
+file(COPY
+    "${EXAMPLE}/sprites/coin.png"
+    "${EXAMPLE}/sprites/hero.png"
+    DESTINATION "${WORK}/sprites")
 execute_process(
     COMMAND "${EXE}" pack
-        "${EXAMPLE}/runtime-formats.ntpacker_project"
-        --json --out-dir "${WORK}"
+        "${WORK}/runtime-formats.ntpacker_project"
+        --json
     RESULT_VARIABLE _status
     OUTPUT_VARIABLE _stdout
     ERROR_VARIABLE _stderr)
